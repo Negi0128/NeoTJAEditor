@@ -3,3 +3,4 @@ NeoTJAEditor/build/
 NeoTJAEditor/dist/
 __pycache__/
 *.pyc
+NeoTJAEditor/.venv/

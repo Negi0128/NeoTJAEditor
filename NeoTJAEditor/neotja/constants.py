@@ -1,0 +1,29 @@
+from decimal import getcontext
+
+APP_NAME = "NeoTJAEditor"
+VERSION = "4.0.0"
+
+getcontext().prec = 50
+
+NEW_FILE_TEMPLATE = """\
+TITLE:
+SUBTITLE:--
+BPM:
+WAVE:
+OFFSET:0.00
+SONGVOL:100
+SEVOL:100
+DEMOSTART:0.00
+
+COURSE:oni
+LEVEL:
+BALLOON:
+SCOREINIT:
+SCOREDIFF:
+
+#START
+
+#END
+"""
+
+VALID_MEASURE_COUNTS = {1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256}

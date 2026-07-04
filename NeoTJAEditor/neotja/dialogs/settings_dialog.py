@@ -1,0 +1,157 @@
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTabWidget,
+    QVBoxLayout, QWidget,
+)
+
+from neotja import settings as settings_mod
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent or main_window)
+        self.main_window = main_window
+        self.setWindowTitle("環境設定")
+        self.resize(640, 760)
+
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        tabs.addTab(self._build_run_tab(), "シミュレータ起動")
+        tabs.addTab(self._build_shortcuts_tab(), "ショートカット")
+        tabs.addTab(self._build_editor_tab(), "エディタ・ツール")
+
+        btn_row = QHBoxLayout()
+        btn_reset = QPushButton("初期化")
+        btn_reset.setObjectName("dangerButton")
+        btn_reset.clicked.connect(self._reset)
+        btn_save = QPushButton("保存して適用")
+        btn_save.setObjectName("accentButton")
+        btn_save.clicked.connect(self._save)
+        btn_row.addWidget(btn_reset)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_save)
+        layout.addLayout(btn_row)
+
+    def _build_run_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.addRow(QLabel("F1〜F3キーで起動するシミュレータの名前とexeパスを設定します。"))
+
+        cfg = self.main_window.config_data["run_config"]
+        self.run_entries = {}
+        for key in ("F1", "F2", "F3"):
+            name_edit = QLineEdit(cfg[key]["name"])
+            path_edit = QLineEdit(cfg[key]["path"])
+            browse_btn = QPushButton("参照")
+
+            def browse(edit=path_edit):
+                p, _ = QFileDialog.getOpenFileName(self, "実行ファイルを選択")
+                if p:
+                    edit.setText(p)
+            browse_btn.clicked.connect(browse)
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(QLabel("パス"))
+            row_layout.addWidget(path_edit, 1)
+            row_layout.addWidget(browse_btn)
+
+            form.addRow(f"{key} 名前", name_edit)
+            form.addRow(row)
+            self.run_entries[key] = (name_edit, path_edit)
+        return w
+
+    def _build_shortcuts_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.addRow(QLabel("Alt + 数字キーを押した際に即座に入力されるカスタムコマンドや文字列を設定します。"))
+
+        self.sc_entries = {}
+        shortcuts = self.main_window.config_data["custom_shortcuts"]
+        for i in range(10):
+            ent = QLineEdit(shortcuts.get(str(i), ""))
+            form.addRow(f"Alt + {i}", ent)
+            self.sc_entries[str(i)] = ent
+        return w
+
+    def _build_editor_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        cfg = self.main_window.config_data
+
+        self.font_family_combo = QComboBox()
+        self.font_family_combo.addItems(QFontDatabase.families())
+        self.font_family_combo.setCurrentText(cfg.get("font_family", "Consolas"))
+        form.addRow("フォント", self.font_family_combo)
+        form.addRow(QLabel("エディタの表示に使用するフォントです。"))
+
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(6, 72)
+        self.font_size_spin.setValue(cfg.get("font_size", 12))
+        form.addRow("基本フォントサイズ", self.font_size_spin)
+        form.addRow(QLabel("起動時の文字サイズです。（エディタ上でCtrl+ホイールでも一時変更可能）"))
+
+        self.resize_ext_check = QCheckBox("リサイズ時に256分以上の分解能をデフォルトで表示")
+        self.resize_ext_check.setChecked(cfg.get("resize_ext", False))
+        form.addRow(self.resize_ext_check)
+        form.addRow(QLabel("リサイズ機能のダイアログを開いた際、256分以上の細かい分解能を最初からリストに表示します。"))
+
+        self.wrap16_combo = QComboBox()
+        self.wrap16_combo.addItems(["16", "32", "改行なし"])
+        self.wrap16_combo.setCurrentText(str(cfg.get("resize_wrap_16", 16)))
+        form.addRow("リサイズ折り返し(16の倍数)", self.wrap16_combo)
+        form.addRow(QLabel("16分や32分音符などにリサイズした際、指定文字数で自動改行して視認性を保ちます。"))
+
+        self.wrap12_combo = QComboBox()
+        self.wrap12_combo.addItems(["12", "24", "48", "改行なし"])
+        self.wrap12_combo.setCurrentText(str(cfg.get("resize_wrap_12", 24)))
+        form.addRow("リサイズ折り返し(12の倍数)", self.wrap12_combo)
+        form.addRow(QLabel("12分や24分音符などにリサイズした際、指定文字数で自動改行して視認性を保ちます。"))
+
+        self.comp_combo = QComboBox()
+        self.comp_combo.addItems(["通常計算", "段階的補正 (60fps理論値)", "段階的補正 (理論値-1)"])
+        self.comp_combo.setCurrentText(cfg.get("short_roll_comp", "段階的補正 (60fps理論値)"))
+        form.addRow("0.1秒未満の連打処理", self.comp_combo)
+
+        desc = (
+            "極端に短い連打に対するシミュレータの仕様を再現する補正モードです。\n"
+            "・通常計算 : 常に (秒数 × 左パネルの連打秒速) で計算します。\n"
+            "・60fps理論値 : 0.1秒以下=秒速60、0.15秒以下=秒速55 で計算します。\n"
+            "・理論値-1 : 0.1秒以下=秒速55、0.15秒以下=秒速50 で計算します。\n"
+            "※設定した「連打秒速」が上記の補正値を上回る場合は、設定値（高い方）が優先されます。"
+        )
+        lbl = QLabel(desc)
+        form.addRow(lbl)
+        return w
+
+    def _save(self):
+        cfg = self.main_window.config_data
+        for k, (name_edit, path_edit) in self.run_entries.items():
+            cfg["run_config"][k]["name"] = name_edit.text()
+            cfg["run_config"][k]["path"] = path_edit.text()
+        for k, ent in self.sc_entries.items():
+            cfg["custom_shortcuts"][k] = ent.text()
+
+        cfg["font_family"] = self.font_family_combo.currentText()
+        cfg["font_size"] = self.font_size_spin.value()
+        cfg["resize_ext"] = self.resize_ext_check.isChecked()
+
+        w16 = self.wrap16_combo.currentText()
+        cfg["resize_wrap_16"] = int(w16) if w16.isdigit() else "改行なし"
+        w12 = self.wrap12_combo.currentText()
+        cfg["resize_wrap_12"] = int(w12) if w12.isdigit() else "改行なし"
+
+        cfg["short_roll_comp"] = self.comp_combo.currentText()
+        self.accept()
+
+    def _reset(self):
+        ans = QMessageBox.question(self, "確認", "すべての環境設定を初期化しますか？")
+        if ans != QMessageBox.Yes:
+            return
+        self.main_window.config_data.clear()
+        self.main_window.config_data.update(settings_mod.default_settings())
+        self.accept()
