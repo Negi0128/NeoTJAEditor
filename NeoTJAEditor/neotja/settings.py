@@ -5,6 +5,7 @@ from pathlib import Path
 _SETTINGS_KEYS = (
     "run_config", "custom_shortcuts", "theme", "font_family", "font_size",
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
+    "preview_volume",
 )
 
 
@@ -20,6 +21,7 @@ def default_settings() -> dict:
         "resize_wrap_12": 24,
         "roll_speed": 45,
         "short_roll_comp": "段階的補正 (60fps理論値)",
+        "preview_volume": 0.8,
     }
 
 

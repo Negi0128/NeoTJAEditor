@@ -15,6 +15,7 @@ from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
 from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
+from neotja.preview_dock import PreviewDock
 from neotja.ruler_widget import RulerWidget
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
         self._build_toolbars()
         self._build_sidebar()
         self._build_central_layout()
+        self._build_preview_dock()
         self._build_statusbar()
         self._build_menu()
         self._bind_shortcuts()
@@ -189,6 +191,7 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_bottom, "リサイズ", self.open_measure_converter)
         self._toolbar_button(self.toolbar_bottom, "反転", self.reverse_don_ka)
         self._toolbar_button(self.toolbar_bottom, "ストロボ生成", self.open_strobe_tool)
+        self._toolbar_button(self.toolbar_bottom, "プレビュー", lambda: self.preview_dock.setVisible(not self.preview_dock.isVisible()))
 
     def _build_sidebar(self):
         self.sb_outer = QWidget()
@@ -231,6 +234,27 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
 
+    def _build_preview_dock(self):
+        self.preview_dock = PreviewDock(
+            lambda v: self.replace_header_line("BPM", v),
+            lambda v: self.replace_header_line("OFFSET", v),
+            self,
+        )
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
+        self.preview_dock.audio.set_volume(self.config_data.get("preview_volume", 0.8))
+
+    def replace_header_line(self, key: str, value: str) -> bool:
+        prefix = f"{key}:"
+        block = self.editor.document().firstBlock()
+        while block.isValid():
+            if block.text().startswith(prefix):
+                cursor = QTextCursor(block)
+                cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+                cursor.insertText(f"{prefix}{value}")
+                return True
+            block = block.next()
+        return False
+
     def _build_statusbar(self):
         self.btn_theme = QPushButton("テーマ切替")
         self.btn_theme.clicked.connect(self.toggle_theme)
@@ -256,6 +280,10 @@ class MainWindow(QMainWindow):
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
+        tm.addSeparator()
+        toggle_preview = self.preview_dock.toggleViewAction()
+        toggle_preview.setText("音源プレビュー")
+        tm.addAction(toggle_preview)
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
@@ -360,6 +388,7 @@ class MainWindow(QMainWindow):
         self.highlighter.rehighlight()
         self.editor.gutter.update()
         self._update_status()
+        self.preview_dock.refresh_from_content(content, self.current_file)
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')

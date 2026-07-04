@@ -1,0 +1,138 @@
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QWidget
+
+from neotja.theme import COLORS
+
+
+class WaveformWidget(QWidget):
+    """Draws a waveform envelope with a playhead and a BPM/OFFSET-derived
+    beat grid overlay, for visually lining up OFFSET against the audio."""
+
+    seekRequested = Signal(float)  # seconds
+
+    MIN_ZOOM = 1.0
+    MAX_ZOOM = 200.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setMouseTracking(True)
+
+        self.peaks: list = []
+        self.duration = 0.0
+        self.bpm = None
+        self.offset = 0.0
+        self.position_sec = 0.0
+        self.zoom = 1.0
+        self.view_start = 0.0
+        self._dragging = False
+
+    # ------------------------------------------------------------------
+    # Data in
+    # ------------------------------------------------------------------
+    def set_peaks(self, peaks: list, duration: float):
+        self.peaks = peaks
+        self.duration = max(0.0, duration)
+        self.view_start = 0.0
+        self.zoom = 1.0
+        self.update()
+
+    def set_beat_grid(self, bpm, offset: float):
+        self.bpm = bpm
+        self.offset = offset
+        self.update()
+
+    def set_position(self, seconds: float):
+        self.position_sec = seconds
+        span = self._visible_span()
+        if seconds < self.view_start or seconds > self.view_start + span:
+            self.view_start = max(0.0, seconds - span * 0.1)
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Coordinate mapping
+    # ------------------------------------------------------------------
+    def _visible_span(self) -> float:
+        if self.duration <= 0:
+            return 1.0
+        return self.duration / max(self.zoom, 0.0001)
+
+    def _sec_to_x(self, sec: float) -> int:
+        span = self._visible_span()
+        if span <= 0:
+            return 0
+        return int((sec - self.view_start) / span * self.width())
+
+    def _x_to_sec(self, x: float) -> float:
+        span = self._visible_span()
+        w = max(1, self.width())
+        return self.view_start + (x / w) * span
+
+    # ------------------------------------------------------------------
+    # Interaction
+    # ------------------------------------------------------------------
+    def wheelEvent(self, event):
+        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
+        old_span = self._visible_span()
+        mouse_sec = self._x_to_sec(event.position().x())
+        self.zoom = max(self.MIN_ZOOM, min(self.zoom * factor, self.MAX_ZOOM))
+        new_span = self._visible_span()
+        self.view_start = mouse_sec - (mouse_sec - self.view_start) * (new_span / old_span if old_span else 1)
+        self.view_start = max(0.0, min(self.view_start, max(0.0, self.duration - new_span)))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self.seekRequested.emit(max(0.0, self._x_to_sec(event.position().x())))
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and (event.buttons() & Qt.LeftButton):
+            self.seekRequested.emit(max(0.0, self._x_to_sec(event.position().x())))
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+
+    # ------------------------------------------------------------------
+    # Painting
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        w = self.width()
+        h = self.height()
+        mid = h / 2
+        painter.fillRect(self.rect(), QColor(COLORS["bg2"]))
+
+        if self.peaks and self.duration > 0:
+            n = len(self.peaks)
+            col_dur = self.duration / n
+            painter.setPen(QColor(COLORS["accent"]))
+            for x in range(w):
+                sec = self._x_to_sec(x)
+                idx = int(sec / col_dur) if col_dur > 0 else -1
+                if 0 <= idx < n:
+                    mn, mx = self.peaks[idx]
+                    y1 = mid - mx * mid * 0.9
+                    y2 = mid - mn * mid * 0.9
+                    painter.drawLine(x, int(y1), x, int(y2))
+
+        if self.bpm and self.bpm > 0 and self.duration > 0:
+            beat_interval = 60.0 / self.bpm
+            visible_start = self.view_start
+            visible_end = self.view_start + self._visible_span()
+            n = int((visible_start - self.offset) / beat_interval) - 1
+            while True:
+                t = self.offset + n * beat_interval
+                if t > visible_end:
+                    break
+                if t >= visible_start - beat_interval and t >= 0:
+                    x = self._sec_to_x(t)
+                    is_measure = (n % 4 == 0)
+                    painter.setPen(QColor(COLORS["checkpoint"] if is_measure else COLORS["border"]))
+                    painter.drawLine(x, 0, x, h)
+                n += 1
+
+        painter.setPen(QColor(COLORS["err"]))
+        x = self._sec_to_x(self.position_sec)
+        painter.drawLine(x, 0, x, h)
