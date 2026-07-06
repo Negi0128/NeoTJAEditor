@@ -1,3 +1,4 @@
+import bisect
 import os
 import re
 
@@ -44,6 +45,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
     `courses` is the output of TJACourseAnalyzer.parse_courses(content).
     """
     sprites = sprites or {}
+    ROW_BEATS = 16.0       # 1行に入る最大拍数 (4/4小節が4つ分 = 16拍)
     target_course = next((c for c in courses if c["label"] == selected_label), None)
     if target_course is None:
         raise ValueError("コースが見つかりません。")
@@ -136,6 +138,47 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
         parsed_measures.append(m_data)
 
     # -------------------------------------------------------------
+    # 1b. 小節ごとの行(row)割り当て
+    #     4/4(=4拍)以下の長さの小節は行の途中で分割しない(収まらなければ
+    #     丸ごと次の行へ送る)。5/4以上の長い小節はこれまで通り複数行に
+    #     またがって改行してよい。
+    # -------------------------------------------------------------
+    PROTECT_MAX_BEATS = 4.0
+    _EPS = 1e-6
+    _row, _row_used = 0, 0.0
+    for m in parsed_measures:
+        length = m['length_beats']
+        if _row_used >= ROW_BEATS - _EPS:
+            _row += 1
+            _row_used = 0.0
+        elif length <= PROTECT_MAX_BEATS + _EPS and _row_used > _EPS and _row_used + length > ROW_BEATS + _EPS:
+            _row += 1
+            _row_used = 0.0
+        m['row'] = _row
+        m['row_offset'] = _row_used
+        _row_used += length
+        while _row_used > ROW_BEATS + _EPS:
+            _row_used -= ROW_BEATS
+            _row += 1
+
+    measure_starts = [m['start_beat'] for m in parsed_measures]
+    total_row_units = (
+        parsed_measures[-1]['row'] * ROW_BEATS + parsed_measures[-1]['row_offset'] + parsed_measures[-1]['length_beats']
+        if parsed_measures else 0.0
+    )
+
+    def row_units(beat):
+        """Maps an absolute beat position to the equivalent continuous
+        position under the packed-row layout, so it can be fed straight into
+        get_row_x()/draw_band() unchanged."""
+        if not parsed_measures:
+            return beat
+        i = bisect.bisect_right(measure_starts, beat) - 1
+        i = max(0, min(i, len(parsed_measures) - 1))
+        m = parsed_measures[i]
+        return m['row'] * ROW_BEATS + m['row_offset'] + (beat - m['start_beat'])
+
+    # -------------------------------------------------------------
     # 2. イベントの絶対座標(beat)化
     # -------------------------------------------------------------
     events_cmd = []
@@ -195,14 +238,13 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
     # 3. 描画設定と画像生成
     # -------------------------------------------------------------
     BEAT_WIDTH = 340 / 4   # 4分音符1つあたりのピクセル幅 (デフォルト340pxの4/4小節を基準)
-    ROW_BEATS = 16.0       # 1行に入る最大拍数 (4/4小節が4つ分 = 16拍)
     LANE_HEIGHT = 46
     ROW_SPACING = 130
     MARGIN_X = 60
     MARGIN_Y = 170
     GOGO_BAND_HEIGHT = 20
 
-    total_rows = int((total_beats - 1e-6) // ROW_BEATS) + 1 if total_beats > 0 else 1
+    total_rows = int((total_row_units - 1e-6) // ROW_BEATS) + 1 if total_row_units > 0 else 1
     img_width = MARGIN_X * 2 + int(ROW_BEATS * BEAT_WIDTH)
     img_height = MARGIN_Y + total_rows * ROW_SPACING
 
@@ -259,7 +301,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
         draw.rectangle([sx, ly - GOGO_BAND_HEIGHT, ex, ly], fill="#ffc2c2")
 
     for gb_start, gb_end in gogo_regions:
-        draw_band(gb_start, gb_end, draw_gogo)
+        draw_band(row_units(gb_start), row_units(gb_end), draw_gogo)
 
     # --- C. グリッド線 ---
     for m in parsed_measures:
@@ -268,7 +310,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
         step = m['length_beats'] / div
         for i in range(1, div):
             b = m['start_beat'] + i * step
-            r, x = get_row_x(b)
+            r, x = get_row_x(row_units(b))
             ly = MARGIN_Y + r * ROW_SPACING
             color = "#aaaaaa" if (den % 4 == 0 and i % 2 != 0) else "#888888"
             draw.line([x, ly, x, ly + LANE_HEIGHT], fill=color, width=1)
@@ -276,7 +318,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
     # --- D. コマンド線とテキスト (階段状) ---
     row_cmds = {r: [] for r in range(total_rows + 1)}
     for cmd in events_cmd:
-        r, x = get_row_x(cmd['beat'])
+        r, x = get_row_x(row_units(cmd['beat']))
         row_cmds[r].append((x, cmd['text'], cmd['color']))
 
     for r in range(total_rows):
@@ -303,26 +345,26 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
 
     # --- E. 小節線（白太線） ---
     for m in parsed_measures:
-        b = m['start_beat']
-        r, x = get_row_x(b)
+        ru = m['row'] * ROW_BEATS + m['row_offset']
+        r, x = get_row_x(ru)
         ly = MARGIN_Y + r * ROW_SPACING
 
         draw.line([x, ly, x, ly + LANE_HEIGHT], fill="#ffffff", width=3)
         draw.text((x + 4, ly - 18), str(m['idx'] + 1), fill="#000000", font=font_num)
 
         # 行の右端にぴったり小節線が重なる場合の描画
-        end_b = m['start_beat'] + m['length_beats']
-        if end_b > 0 and end_b < total_beats and abs(end_b % ROW_BEATS) < 1e-6:
-            r_end = int((end_b - 1e-6) // ROW_BEATS)
+        end_ru = ru + m['length_beats']
+        if end_ru > 0 and end_ru < total_row_units and abs(end_ru % ROW_BEATS) < 1e-6:
+            r_end = int((end_ru - 1e-6) // ROW_BEATS)
             x_end = MARGIN_X + ROW_BEATS * BEAT_WIDTH
             ly_end = MARGIN_Y + r_end * ROW_SPACING
             draw.line([x_end, ly_end, x_end, ly_end + LANE_HEIGHT], fill="#ffffff", width=3)
 
     # 曲の最後の小節線
-    if total_beats > 0:
-        r, x = get_row_x(total_beats)
-        if abs(total_beats % ROW_BEATS) < 1e-6:
-            r = int((total_beats - 1e-6) // ROW_BEATS)
+    if total_row_units > 0:
+        r, x = get_row_x(total_row_units)
+        if abs(total_row_units % ROW_BEATS) < 1e-6:
+            r = int((total_row_units - 1e-6) // ROW_BEATS)
             x = MARGIN_X + ROW_BEATS * BEAT_WIDTH
         ly = MARGIN_Y + r * ROW_SPACING
         draw.line([x, ly, x, ly + LANE_HEIGHT], fill="#ffffff", width=3)
@@ -341,11 +383,11 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
     for roll in events_roll:
         color = "#fcdb38" if roll['r_type'] in '56' else "#ffb74d"
         thick = 34 if roll['r_type'] == '6' else 24
-        draw_band(roll['start_beat'], roll['end_beat'], lambda r, sx, ex, ly, first, last: draw_roll(r, sx, ex, ly, first, last, color, thick))
+        draw_band(row_units(roll['start_beat']), row_units(roll['end_beat']), lambda r, sx, ex, ly, first, last: draw_roll(r, sx, ex, ly, first, last, color, thick))
 
     # --- G. ノーツ（左から重なる） ---
     for n in events_note:
-        r, x = get_row_x(n['beat'])
+        r, x = get_row_x(row_units(n['beat']))
         y = MARGIN_Y + r * ROW_SPACING + LANE_HEIGHT / 2
         nt = n['note']
         r_sm, r_bg = 12, 17

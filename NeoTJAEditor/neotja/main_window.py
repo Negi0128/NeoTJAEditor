@@ -1,13 +1,14 @@
 import os
 import re
+import shutil
 import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar, QVBoxLayout, QWidget,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressDialog,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar, QVBoxLayout, QWidget,
 )
 
 from neotja import settings as settings_mod
@@ -119,6 +120,10 @@ class MainWindow(QMainWindow):
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
 
+        self._metronome_timer = QTimer(self)
+        self._metronome_timer.setSingleShot(True)
+        self._metronome_timer.timeout.connect(self._update_metronome_schedule)
+
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         self.resize(1280, 820)
 
@@ -133,9 +138,13 @@ class MainWindow(QMainWindow):
 
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.cursorPositionChanged.connect(self._update_status)
+        self.editor.cursorPositionChanged.connect(lambda: self._metronome_timer.start(150))
         self.editor.checkpointsChanged.connect(self._update_status)
 
         self.new_file(confirm=False)
+
+        if self.config_data.get("check_updates_on_startup", True):
+            QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
 
     # ------------------------------------------------------------------
     # Construction
@@ -167,7 +176,7 @@ class MainWindow(QMainWindow):
         self.toolbar_top.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar_top)
 
-        self._toolbar_button(self.toolbar_top, "新規", self.new_file)
+        self._toolbar_button(self.toolbar_top, "新規", self.new_file_dialog)
         self._toolbar_button(self.toolbar_top, "開く", self.open_file)
         self._toolbar_button(self.toolbar_top, "フォルダを開く", self.open_folder)
         self._toolbar_button(self.toolbar_top, "保存", self.save_file, accent=True)
@@ -191,7 +200,6 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_bottom, "リサイズ", self.open_measure_converter)
         self._toolbar_button(self.toolbar_bottom, "反転", self.reverse_don_ka)
         self._toolbar_button(self.toolbar_bottom, "ストロボ生成", self.open_strobe_tool)
-        self._toolbar_button(self.toolbar_bottom, "プレビュー", lambda: self.preview_dock.setVisible(not self.preview_dock.isVisible()))
 
     def _build_sidebar(self):
         self.sb_outer = QWidget()
@@ -239,9 +247,35 @@ class MainWindow(QMainWindow):
             lambda v: self.replace_header_line("BPM", v),
             lambda v: self.replace_header_line("OFFSET", v),
             self,
+            seek_cursor_cb=self._cursor_preview_seconds,
+            volume_cb=self._save_preview_volume,
+            duration_ready_cb=self._update_metronome_schedule,
+            expanded_changed_cb=self._on_preview_expanded_changed,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
-        self.preview_dock.audio.set_volume(self.config_data.get("preview_volume", 0.8))
+        self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
+        # No close/float/move features: the dock itself always stays docked
+        # and visible. Its collapse/expand toggle lives in the status bar
+        # (next to the theme switcher), so there's never a state where it
+        # vanishes with no obvious way back.
+        self.preview_dock.setFeatures(self.preview_dock.DockWidgetFeature(0))
+
+    def _save_preview_volume(self, volume: float):
+        self.config_data["preview_volume"] = volume
+        settings_mod.save_settings(self.config_data)
+
+    def _cursor_preview_seconds(self):
+        """Returns the audio-file seek position (seconds) for the measure
+        under the editor cursor, or None if the cursor isn't inside a
+        course's #START..#END body."""
+        line_no = self.editor.textCursor().blockNumber() + 1
+        content = self.editor.toPlainText()
+        chart_time = self.analyzer.time_at_cursor(content, line_no)
+        if chart_time is None:
+            return None
+        # OFFSET convention: chart_time = audio_time + OFFSET -> audio_time = chart_time - OFFSET.
+        offset = self.preview_dock.spin_offset.value()
+        return max(0.0, chart_time - offset)
 
     def replace_header_line(self, key: str, value: str) -> bool:
         prefix = f"{key}:"
@@ -259,14 +293,28 @@ class MainWindow(QMainWindow):
         self.btn_theme = QPushButton("テーマ切替")
         self.btn_theme.clicked.connect(self.toggle_theme)
         self.statusBar().addPermanentWidget(self.btn_theme)
+
+        self.btn_preview_toggle = QPushButton("▼ プレビュー")
+        self.btn_preview_toggle.setCheckable(True)
+        self.btn_preview_toggle.setChecked(True)
+        self.btn_preview_toggle.toggled.connect(self._on_preview_toggle_clicked)
+        self.statusBar().addPermanentWidget(self.btn_preview_toggle)
+
         self.status_label = QLabel("")
         self.statusBar().addWidget(self.status_label, 1)
+
+    def _on_preview_toggle_clicked(self, checked):
+        self.preview_dock.set_expanded(checked)
+        self.btn_preview_toggle.setText("▼ プレビュー" if checked else "▲ プレビュー")
+
+    def _on_preview_expanded_changed(self, expanded):
+        self.btn_preview_toggle.setChecked(expanded)
 
     def _build_menu(self):
         mb = self.menuBar()
 
         fm = mb.addMenu("ファイル")
-        fm.addAction("新規作成", self.new_file)
+        fm.addAction("新規作成", self.new_file_dialog)
         fm.addAction("開く", self.open_file)
         fm.addAction("別ウィンドウで開く", self.open_new_window)
         fm.addSeparator()
@@ -280,10 +328,6 @@ class MainWindow(QMainWindow):
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
-        tm.addSeparator()
-        toggle_preview = self.preview_dock.toggleViewAction()
-        toggle_preview.setText("音源プレビュー")
-        tm.addAction(toggle_preview)
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
@@ -296,6 +340,7 @@ class MainWindow(QMainWindow):
 
         hm = mb.addMenu("ヘルプ")
         hm.addAction("ヘルプを表示", self.open_help)
+        hm.addAction("更新を確認", lambda: self.check_for_updates(manual=True))
         hm.addAction("バージョン情報", self._show_about)
 
     def _bind_shortcuts(self):
@@ -370,7 +415,10 @@ class MainWindow(QMainWindow):
     # Debounced analysis pass (mirrors the original's after(400, ...) pattern)
     # ------------------------------------------------------------------
     def _on_text_changed(self):
-        self._heavy_timer.start(400)
+        # On large real-world charts, one heavy pass (full re-highlight +
+        # course analysis) can take 100ms+, so a longer debounce keeps it
+        # from re-triggering on every short pause while actively typing.
+        self._heavy_timer.start(600)
 
     def _force_update(self):
         self._heavy_timer.stop()
@@ -384,11 +432,22 @@ class MainWindow(QMainWindow):
         self.editor.highlight_data = data
         self.editor.invalid_lines = data.invalid_lines
         self._global_warnings = data.global_warnings
-        self.highlighter.data = data
-        self.highlighter.rehighlight()
+        self.highlighter.apply_data(data)
         self.editor.gutter.update()
         self._update_status()
-        self.preview_dock.refresh_from_content(content, self.current_file)
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        metronome_clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
+        self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks)
+
+    def _update_metronome_schedule(self):
+        # Lighter-weight than _heavy_tasks: just re-picks which course's
+        # #MEASURE/#BPMCHANGE the metronome should follow when the cursor
+        # moves into a different course, without re-running the expensive
+        # syntax highlighter over the whole document.
+        content = self.editor.toPlainText()
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
+        self.preview_dock.set_metronome_clicks(clicks)
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')
@@ -402,25 +461,33 @@ class MainWindow(QMainWindow):
         header = f"  {title}" if title else "  (無題)"
         self.sb_title.setText(f"{header}\n  {subtitle}" if subtitle else header)
 
-        visible_keys = [c["key"] for c in self.courses_info]
-        for course in self.courses_info:
+        ordered_courses = sorted(
+            self.courses_info, key=lambda c: -TJACourseAnalyzer.DIFF_RANK.get(c["key"], -1)
+        )
+        visible_keys = [c["key"] for c in ordered_courses]
+        for course in ordered_courses:
             k = course["key"]
             if k in self._course_cards:
                 self._course_cards[k].update_course(course)
             else:
-                card = CourseCard(course)
-                self.sb_cards_layout.insertWidget(self.sb_cards_layout.count() - 1, card)
-                self._course_cards[k] = card
+                self._course_cards[k] = CourseCard(course)
 
         for k in [k for k in self._course_cards if k not in visible_keys]:
             self._course_cards[k].deleteLater()
             del self._course_cards[k]
 
+        # Explicitly reposition every card (new or reused) each time, since a
+        # card kept from a previous refresh (e.g. the blank template's single
+        # "oni" course loaded at startup) would otherwise stay pinned at
+        # whatever index it was first inserted at.
+        for i, course in enumerate(ordered_courses):
+            self.sb_cards_layout.insertWidget(i, self._course_cards[course["key"]])
+
     def _update_status(self):
         cursor = self.editor.textCursor()
         line = cursor.blockNumber() + 1
-        col = cursor.positionInBlock() + 1
-        msg = f"  行 {line}  列 {col}  │  ANSI (CP932)"
+        col = cursor.positionInBlock()
+        msg = f"  行 {line}  文字数 {col}  │  ANSI (CP932)"
         invalid_lines = getattr(self.editor, "invalid_lines", {})
         if line in invalid_lines:
             msg += f"  │  ⚠ 不正文字数 ({invalid_lines[line]})"
@@ -453,6 +520,47 @@ class MainWindow(QMainWindow):
         self.editor.checkpoints.clear()
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         self._force_update()
+
+    def new_file_dialog(self):
+        if not self._unsaved_check():
+            return
+        from neotja.dialogs.new_project_dialog import NewProjectDialog
+        dlg = NewProjectDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if dlg.mode == "blank":
+            self.new_file(confirm=False)
+            return
+        self._apply_youtube_project(dlg.result_title, dlg.result_subtitle, dlg.result_wave_path, dlg.result_folder)
+
+    def _apply_youtube_project(self, title, subtitle, wave_path, folder):
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', title).strip() or "untitled"
+
+        # Give every new song its own <TITLE>/ folder, with the .tja and the
+        # .ogg both named to match TITLE (rather than the raw video title
+        # yt-dlp downloaded it as).
+        song_folder = os.path.join(folder, safe_name)
+        os.makedirs(song_folder, exist_ok=True)
+        wave_name = f"{safe_name}.ogg"
+        new_wave_path = os.path.join(song_folder, wave_name)
+        if os.path.abspath(wave_path) != os.path.abspath(new_wave_path):
+            shutil.move(wave_path, new_wave_path)
+
+        content = NEW_FILE_TEMPLATE.replace("TITLE:\n", f"TITLE:{title}\n", 1)
+        content = content.replace("SUBTITLE:--\n", f"SUBTITLE:{subtitle}\n" if subtitle else "SUBTITLE:--\n", 1)
+        content = content.replace("WAVE:\n", f"WAVE:{wave_name}\n", 1)
+
+        tja_path = os.path.join(song_folder, f"{safe_name}.tja")
+
+        self.editor.setPlainText(content)
+        self.current_file = tja_path
+        self.editor.modified_lines.clear()
+        self.editor.checkpoints.clear()
+        self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(tja_path)}")
+        self.save_file()
+        self._force_update()
+
+        self.preview_dock.expand()
 
     def open_file(self):
         if not self._unsaved_check():
@@ -569,6 +677,75 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.information(self, "バージョン情報", f"{APP_NAME}\nVersion: {VERSION}\n\nRedesigned & Optimized Edition (PySide6)")
+
+    # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+    def check_for_updates(self, manual=False):
+        from neotja.updater import UpdateCheckWorker
+
+        worker = UpdateCheckWorker(self)
+        worker.update_available.connect(lambda tag, notes, url: self._prompt_update(tag, notes, url))
+        if manual:
+            worker.up_to_date.connect(lambda: QMessageBox.information(self, "更新の確認", f"現在のバージョン v{VERSION} は最新です。"))
+            worker.failed.connect(lambda msg: QMessageBox.warning(self, "更新の確認", f"更新の確認に失敗しました:\n{msg}"))
+        self._update_check_worker = worker
+        worker.start()
+
+    def _prompt_update(self, tag, notes, asset_url):
+        box = QMessageBox(self)
+        box.setWindowTitle("新しいバージョンがあります")
+        box.setText(f"新しいバージョン {tag} が利用可能です。(現在: v{VERSION})\n\n更新しますか？")
+        if notes:
+            box.setDetailedText(notes)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        if box.exec() != QMessageBox.Yes:
+            return
+
+        if not getattr(sys, "frozen", False):
+            import webbrowser
+            from neotja.updater import RELEASES_PAGE_URL
+            QMessageBox.information(self, "更新", "ソースから実行中のため自動更新はできません。リリースページを開きます。")
+            webbrowser.open(RELEASES_PAGE_URL)
+            return
+
+        if not asset_url:
+            QMessageBox.warning(self, "更新エラー", "ダウンロード用のファイルが見つかりませんでした。")
+            return
+        self._run_update_download(asset_url)
+
+    def _run_update_download(self, asset_url):
+        from neotja.updater import UpdateDownloadWorker, apply_update
+
+        progress = QProgressDialog("更新をダウンロード中...", "キャンセル", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        worker = UpdateDownloadWorker(asset_url, self)
+
+        def on_progress(pct):
+            if pct >= 0:
+                progress.setRange(0, 100)
+                progress.setValue(pct)
+            else:
+                progress.setRange(0, 0)
+
+        def on_ok(path):
+            progress.close()
+            apply_update(path)
+            self.close()
+
+        def on_failed(msg):
+            progress.close()
+            QMessageBox.warning(self, "更新エラー", f"ダウンロードに失敗しました:\n{msg}")
+
+        worker.progress.connect(on_progress)
+        worker.finished_ok.connect(on_ok)
+        worker.failed.connect(on_failed)
+        progress.canceled.connect(worker.terminate)
+        self._update_download_worker = worker
+        worker.start()
+        progress.exec()
 
     # ------------------------------------------------------------------
     # Dialogs wired up in a later pass (Phase 1 dialog port)

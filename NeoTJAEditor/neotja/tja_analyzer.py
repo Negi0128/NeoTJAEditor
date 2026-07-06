@@ -8,7 +8,10 @@ class TJACourseAnalyzer:
     DIFF = {"0": "Easy", "Easy": "Easy", "1": "Normal", "Normal": "Normal",
             "2": "Hard", "Hard": "Hard", "3": "Oni", "Oni": "Oni", "4": "Edit", "Edit": "Edit"}
     DIFF_LABEL = {"Easy": "かんたん", "Normal": "ふつう", "Hard": "むずかしい", "Oni": "おに", "Edit": "おに(裏)"}
-    DIFF_COLOR = {"Easy": "#55efc4", "Normal": "#74b9ff", "Hard": "#ffeaa7", "Oni": "#ff7675", "Edit": "#a29bfe"}
+    # かんたん=赤, ふつう=黄緑, むずかしい=水色, おに=ピンク, おに(裏)=紫
+    DIFF_COLOR = {"Easy": "#F44336", "Normal": "#9ACD32", "Hard": "#4FC3F7", "Oni": "#FF80AB", "Edit": "#9C27B0"}
+    # サイドバーの表示順: 裏(4) > おに(3) > むずかしい(2) > ふつう(1) > かんたん(0)
+    DIFF_RANK = {"Edit": 4, "Oni": 3, "Hard": 2, "Normal": 1, "Easy": 0}
 
     def __init__(self, config_data: dict):
         self.config_data = config_data
@@ -189,3 +192,187 @@ class TJACourseAnalyzer:
             "rolls_info": rolls_info,
             "balloons_info": balloons_info,
         }
+
+    def time_at_cursor(self, content: str, line_no: int):
+        """Returns the chart-time (seconds, float) at the start of the measure
+        that contains `line_no` (1-indexed), or None if the line isn't inside
+        any course's #START..#END body. Reuses the same BPM/#MEASURE/#DELAY
+        timeline math as _analyze(), but walks the original lines (instead of
+        a pre-stripped course buffer) so it can pinpoint which line lands in
+        which measure."""
+        lines = content.split('\n')
+
+        course_bounds = []
+        start = None
+        for idx, raw in enumerate(lines, start=1):
+            s = raw.split("//")[0].strip()
+            if s.startswith("#START"):
+                start = idx
+            elif s.startswith("#END") and start is not None:
+                course_bounds.append((start, idx))
+                start = None
+
+        target = next(((a, b) for a, b in course_bounds if a <= line_no <= b), None)
+        if target is None:
+            return None
+        a, b = target
+
+        bpm = Decimal("120")
+        for l in lines:
+            if l.startswith("BPM:"):
+                try:
+                    bpm = Decimal(l[4:].strip())
+                except Exception:
+                    pass
+                break
+
+        total_time = Decimal("0")
+        curr_bpm = bpm
+        measure_val = Decimal("1")
+        cur_events = []
+        found = None
+
+        def flush():
+            nonlocal total_time, curr_bpm, measure_val
+            n_len = sum(1 for t, _ in cur_events if t == "NOTE")
+            for t, v in cur_events:
+                if t == "#BPMCHANGE":
+                    curr_bpm = v
+                elif t == "#MEASURE":
+                    measure_val = v
+                elif t == "#DELAY":
+                    total_time += v
+                elif t == "NOTE":
+                    total_time += (Decimal("240") * measure_val / curr_bpm) / n_len if n_len > 0 else Decimal("0")
+
+        for idx in range(a, b + 1):
+            if idx == a or idx == b:
+                continue
+            s = lines[idx - 1].split("//")[0].strip()
+            if not s:
+                continue
+
+            if found is None and idx >= line_no:
+                found = total_time
+
+            if s.startswith("#"):
+                if s.startswith("#BPMCHANGE"):
+                    try:
+                        cur_events.append(("#BPMCHANGE", Decimal(s.split()[1])))
+                    except Exception:
+                        pass
+                elif s.startswith("#MEASURE"):
+                    m = re.search(r"(\d+)/(\d+)", s)
+                    if m:
+                        cur_events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
+                elif s.startswith("#DELAY"):
+                    try:
+                        cur_events.append(("#DELAY", Decimal(s.split()[1])))
+                    except Exception:
+                        pass
+                continue
+
+            for c in s:
+                if c in "0123456789":
+                    cur_events.append(("NOTE", c))
+                elif c == ",":
+                    flush()
+                    cur_events = []
+
+        if found is None:
+            found = total_time
+        return float(found)
+
+    def build_metronome_clicks(self, content: str, cursor_line: int = None, min_duration_seconds: float = 0.0) -> list:
+        """Returns a list of (chart_time_seconds, is_measure_start) at
+        1/4-note resolution, honoring #MEASURE (defaults to 4/4 where
+        unspecified), #BPMCHANGE and #DELAY. A measure's leftover fractional
+        beat (e.g. the trailing .5 beat in a 7/8 measure) is not clicked.
+
+        TJA files commonly have several COURSE blocks (Easy/Normal/.../Oni)
+        that can each declare their own #MEASURE/#BPMCHANGE, so this uses
+        whichever course the cursor is currently in (falling back to the
+        first course) rather than always the first one - otherwise editing
+        e.g. Oni's #MEASURE would have no effect if Easy comes first.
+
+        Once the actual chart data (or the whole file, if there's none yet)
+        runs out, quarter-note clicks keep going at the last known tempo
+        until `min_duration_seconds` (typically the loaded song's duration),
+        so the metronome/beat-grid still work over an un-charted intro,
+        outro, or a brand new file with no measures written yet."""
+        lines = content.split('\n')
+
+        course_bounds = []
+        start = None
+        for idx, raw in enumerate(lines, start=1):
+            s = raw.split("//")[0].strip()
+            if s.startswith("#START"):
+                start = idx
+            elif s.startswith("#END") and start is not None:
+                course_bounds.append((start, idx))
+                start = None
+
+        bpm = Decimal("120")
+        for l in lines:
+            if l.startswith("BPM:"):
+                try:
+                    bpm = Decimal(l[4:].strip())
+                except Exception:
+                    pass
+                break
+
+        total_time = Decimal("0")
+        curr_bpm = bpm
+        measure_val = Decimal("1")
+        clicks = []
+
+        def flush():
+            nonlocal total_time
+            if curr_bpm <= 0:
+                return
+            quarter_sec = Decimal(60) / curr_bpm
+            n_quarters = int(Decimal(4) * measure_val)  # truncates toward 0 == floor (measure_val > 0)
+            for k in range(max(0, n_quarters)):
+                clicks.append((total_time + k * quarter_sec, k == 0))
+            total_time += Decimal(240) * measure_val / curr_bpm
+
+        if course_bounds:
+            target = None
+            if cursor_line is not None:
+                target = next((cb for cb in course_bounds if cb[0] <= cursor_line <= cb[1]), None)
+            a, b = target if target is not None else course_bounds[0]
+
+            for idx in range(a + 1, b):
+                s = lines[idx - 1].split("//")[0].strip()
+                if not s:
+                    continue
+                if s.startswith("#"):
+                    if s.startswith("#BPMCHANGE"):
+                        try:
+                            curr_bpm = Decimal(s.split()[1])
+                        except Exception:
+                            pass
+                    elif s.startswith("#MEASURE"):
+                        m = re.search(r"(\d+)/(\d+)", s)
+                        if m:
+                            measure_val = Decimal(m.group(1)) / Decimal(m.group(2))
+                    elif s.startswith("#DELAY"):
+                        try:
+                            total_time += Decimal(s.split()[1])
+                        except Exception:
+                            pass
+                    continue
+                for c in s:
+                    if c == ",":
+                        flush()
+
+        min_dur = Decimal(str(min_duration_seconds))
+        if curr_bpm > 0:
+            quarter_sec = Decimal(60) / curr_bpm
+            beat_i = 0
+            while total_time < min_dur:
+                clicks.append((total_time, beat_i % 4 == 0))
+                total_time += quarter_sec
+                beat_i += 1
+
+        return [(float(t), is_measure) for t, is_measure in clicks]

@@ -1,3 +1,6 @@
+import bisect
+import time
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
@@ -23,10 +26,12 @@ class WaveformWidget(QWidget):
         self.duration = 0.0
         self.bpm = None
         self.offset = 0.0
+        self._click_audio_times = None  # sorted [(audio_time, is_measure_start), ...] or None
         self.position_sec = 0.0
         self.zoom = 1.0
         self.view_start = 0.0
         self._dragging = False
+        self._last_repaint = 0.0
 
     # ------------------------------------------------------------------
     # Data in
@@ -38,9 +43,19 @@ class WaveformWidget(QWidget):
         self.zoom = 1.0
         self.update()
 
-    def set_beat_grid(self, bpm, offset: float):
+    def set_beat_grid(self, bpm, offset: float, clicks=None):
+        """`clicks`, when given (non-empty), is [(chart_time, is_measure_start), ...]
+        as returned by TJACourseAnalyzer.build_metronome_clicks - drawn as-is
+        so the grid tracks #MEASURE/#BPMCHANGE instead of assuming a single
+        constant tempo for the whole song. Falls back to a plain bpm/offset
+        grid when there's no chart data yet (e.g. a brand new file)."""
         self.bpm = bpm
         self.offset = offset
+        if clicks:
+            # OFFSET convention: chart_time = audio_time + OFFSET.
+            self._click_audio_times = sorted((t - offset, is_measure) for t, is_measure in clicks)
+        else:
+            self._click_audio_times = None
         self.update()
 
     def set_position(self, seconds: float):
@@ -48,6 +63,14 @@ class WaveformWidget(QWidget):
         span = self._visible_span()
         if seconds < self.view_start or seconds > self.view_start + span:
             self.view_start = max(0.0, seconds - span * 0.1)
+
+        # QMediaPlayer can emit positionChanged far more often than a screen
+        # refreshes; a full waveform+grid repaint on every tick pegs the GUI
+        # thread. 30fps is visually indistinguishable for a playhead line.
+        now = time.monotonic()
+        if now - self._last_repaint < (1 / 30):
+            return
+        self._last_repaint = now
         self.update()
 
     # ------------------------------------------------------------------
@@ -117,13 +140,27 @@ class WaveformWidget(QWidget):
                     y2 = mid - mn * mid * 0.9
                     painter.drawLine(x, int(y1), x, int(y2))
 
-        if self.bpm and self.bpm > 0 and self.duration > 0:
+        if self.duration > 0 and self._click_audio_times:
+            visible_start = self.view_start
+            visible_end = self.view_start + self._visible_span()
+            times = [t for t, _ in self._click_audio_times]
+            lo = bisect.bisect_left(times, visible_start)
+            hi = bisect.bisect_right(times, visible_end)
+            for t, is_measure in self._click_audio_times[max(0, lo - 1):hi + 1]:
+                if t < 0:
+                    continue
+                x = self._sec_to_x(t)
+                painter.setPen(QColor(COLORS["checkpoint"] if is_measure else COLORS["border"]))
+                painter.drawLine(x, 0, x, h)
+        elif self.bpm and self.bpm > 0 and self.duration > 0:
             beat_interval = 60.0 / self.bpm
             visible_start = self.view_start
             visible_end = self.view_start + self._visible_span()
-            n = int((visible_start - self.offset) / beat_interval) - 1
+            n = int((visible_start + self.offset) / beat_interval) - 1
             while True:
-                t = self.offset + n * beat_interval
+                # OFFSET convention: chart_time = audio_time + OFFSET, so beat 0
+                # (measure 0 / first beat) sits at audio_time = -OFFSET.
+                t = -self.offset + n * beat_interval
                 if t > visible_end:
                     break
                 if t >= visible_start - beat_interval and t >= 0:

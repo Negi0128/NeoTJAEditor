@@ -108,7 +108,16 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
             spans = []
             for ci, ch in enumerate(code):
                 if ch in "1234" or ch in "09":
-                    spans.append((ci, ci + 1, f"num_{ch}"))
+                    tag = f"num_{ch}"
+                    # Merge with the previous span when it's an adjacent run of
+                    # the same note digit (e.g. "0000"), instead of emitting
+                    # one span per character - highlightBlock() below turns
+                    # each span into a QSyntaxHighlighter.setFormat() call,
+                    # and those add up fast on long charts.
+                    if spans and spans[-1][2] == tag and spans[-1][1] == ci:
+                        spans[-1] = (spans[-1][0], ci + 1, tag)
+                    else:
+                        spans.append((ci, ci + 1, tag))
                 if ch == ",":
                     if m_count > 0 and m_count not in VALID_MEASURE_COUNTS:
                         for ml in m_lines:
@@ -182,6 +191,53 @@ class TJAHighlighter(QSyntaxHighlighter):
         self.data: HighlightData = HighlightData()
         self.formats: dict = {}
         self.rebuild_formats()
+
+    @staticmethod
+    def _line_signature(data: "HighlightData", line: int):
+        return (
+            line in data.cmd_lines,
+            line in data.warn_lines,
+            data.comment_ranges.get(line),
+            data.header_ranges.get(line),
+            tuple(data.digit_spans.get(line, ())),
+            tuple(data.color_band_spans.get(line, ())),
+        )
+
+    def apply_data(self, new_data: "HighlightData"):
+        """Swaps in a freshly computed HighlightData, but only re-runs
+        highlightBlock() for the lines whose formatting actually changed
+        instead of the whole document. On a large real chart (tens of
+        thousands of lines), rehighlight() alone can take over a second;
+        a single edit usually only changes a handful of lines."""
+        old_data = self.data
+        self.data = new_data
+
+        touched = set()
+        for d in (old_data, new_data):
+            touched.update(d.cmd_lines)
+            touched.update(d.warn_lines)
+            touched.update(d.comment_ranges.keys())
+            touched.update(d.header_ranges.keys())
+            touched.update(d.digit_spans.keys())
+            touched.update(d.color_band_spans.keys())
+
+        doc = self.document()
+        total_blocks = max(1, doc.blockCount())
+
+        # Individually rehighlighting many blocks can end up costing more
+        # than one bulk pass; fall back to a full rehighlight when most of
+        # the document is affected (e.g. loading a new file).
+        if not touched:
+            return
+        changed = [ln for ln in touched if self._line_signature(old_data, ln) != self._line_signature(new_data, ln)]
+        if len(changed) > max(50, total_blocks // 4):
+            self.rehighlight()
+            return
+
+        for ln in changed:
+            block = doc.findBlockByNumber(ln - 1)
+            if block.isValid():
+                self.rehighlightBlock(block)
 
     def rebuild_formats(self):
         def fmt(color_key, bold=False):

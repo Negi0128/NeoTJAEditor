@@ -32,5 +32,8 @@
   "resize_wrap_16": 16,
   "resize_wrap_12": 24,
   "roll_speed": 40,
-  "short_roll_comp": "段階的補正 (理論値-1)"
+  "short_roll_comp": "段階的補正 (理論値-1)",
+  "preview_volume": 0.8,
+  "last_project_folder": "",
+  "check_updates_on_startup": true
 }

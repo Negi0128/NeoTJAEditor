@@ -112,6 +112,10 @@ class SettingsDialog(QDialog):
         form.addRow("リサイズ折り返し(12の倍数)", self.wrap12_combo)
         form.addRow(QLabel("12分や24分音符などにリサイズした際、指定文字数で自動改行して視認性を保ちます。"))
 
+        self.check_updates_check = QCheckBox("起動時に自動で更新を確認する")
+        self.check_updates_check.setChecked(cfg.get("check_updates_on_startup", True))
+        form.addRow(self.check_updates_check)
+
         self.comp_combo = QComboBox()
         self.comp_combo.addItems(["通常計算", "段階的補正 (60fps理論値)", "段階的補正 (理論値-1)"])
         self.comp_combo.setCurrentText(cfg.get("short_roll_comp", "段階的補正 (60fps理論値)"))
@@ -146,6 +150,7 @@ class SettingsDialog(QDialog):
         cfg["resize_wrap_12"] = int(w12) if w12.isdigit() else "改行なし"
 
         cfg["short_roll_comp"] = self.comp_combo.currentText()
+        cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
         self.accept()
 
     def _reset(self):

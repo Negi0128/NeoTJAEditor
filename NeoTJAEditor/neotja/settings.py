@@ -5,7 +5,7 @@ from pathlib import Path
 _SETTINGS_KEYS = (
     "run_config", "custom_shortcuts", "theme", "font_family", "font_size",
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
-    "preview_volume",
+    "preview_volume", "last_project_folder", "check_updates_on_startup",
 )
 
 
@@ -22,6 +22,8 @@ def default_settings() -> dict:
         "roll_speed": 45,
         "short_roll_comp": "段階的補正 (60fps理論値)",
         "preview_volume": 0.8,
+        "last_project_folder": "",
+        "check_updates_on_startup": True,
     }
 
 
@@ -68,3 +70,11 @@ def notes_png_path() -> Path:
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "notes.png"
+
+
+def icon_path() -> Path:
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "app_icon.ico"
