@@ -116,6 +116,11 @@ class SettingsDialog(QDialog):
         self.check_updates_check.setChecked(cfg.get("check_updates_on_startup", True))
         form.addRow(self.check_updates_check)
 
+        self.auto_save_check = QCheckBox("自動保存を有効にする")
+        self.auto_save_check.setChecked(cfg.get("auto_save_enabled", False))
+        form.addRow(self.auto_save_check)
+        form.addRow(QLabel("保存先(ファイル)が決まっている場合、変更を一定間隔で自動保存します。"))
+
         self.comp_combo = QComboBox()
         self.comp_combo.addItems(["通常計算", "段階的補正 (60fps理論値)", "段階的補正 (理論値-1)"])
         self.comp_combo.setCurrentText(cfg.get("short_roll_comp", "段階的補正 (60fps理論値)"))
@@ -151,6 +156,7 @@ class SettingsDialog(QDialog):
 
         cfg["short_roll_comp"] = self.comp_combo.currentText()
         cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
+        cfg["auto_save_enabled"] = self.auto_save_check.isChecked()
         self.accept()
 
     def _reset(self):

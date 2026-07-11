@@ -150,6 +150,9 @@ def build_qss(p: dict) -> str:
         border-radius: 4px;
         padding: 4px;
     }}
+    QPlainTextEdit:focus, QTextEdit:focus {{
+        border: 2px solid {p['accent']};
+    }}
     QComboBox QAbstractItemView {{
         background-color: {p['surface']};
         color: {p['fg']};

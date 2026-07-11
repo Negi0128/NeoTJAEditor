@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
@@ -16,7 +17,9 @@ from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
 from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
-from neotja.preview_dock import PreviewDock
+from neotja.ai_chart_gen import build_ai_variant_content
+from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
+from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
@@ -116,6 +119,8 @@ class MainWindow(QMainWindow):
         self.analyzer = TJACourseAnalyzer(self.config_data)
         self.current_file = None
         self.courses_info = []
+        self._preview_course_override = None
+        self._preview_branch_level = "M"
         self._heavy_timer = QTimer(self)
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
@@ -180,9 +185,16 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_top, "開く", self.open_file)
         self._toolbar_button(self.toolbar_top, "フォルダを開く", self.open_folder)
         self._toolbar_button(self.toolbar_top, "保存", self.save_file, accent=True)
+        self.btn_auto_save = QPushButton()
+        self.btn_auto_save.setCheckable(True)
+        self.btn_auto_save.setToolTip("構文の色付けが更新されるたびに自動保存します。")
+        self.btn_auto_save.toggled.connect(self._on_auto_save_toggled)
+        self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))
+        self._sync_auto_save_button(self.btn_auto_save.isChecked())
+        self.toolbar_top.addWidget(self.btn_auto_save)
         self._toolbar_button(self.toolbar_top, "元に戻す", self.editor.undo)
         self._toolbar_button(self.toolbar_top, "やり直す", self.editor.redo)
-        self._toolbar_button(self.toolbar_top, "譜面画像生成(試験的)", self.open_image_exporter)
+        self._toolbar_button(self.toolbar_top, "譜面画像生成", self.open_image_exporter)
         self._toolbar_button(self.toolbar_top, "ヘルプ", self.open_help)
 
         spacer = QWidget()
@@ -244,16 +256,22 @@ class MainWindow(QMainWindow):
 
     def _build_preview_dock(self):
         self.preview_dock = PreviewDock(
-            lambda v: self.replace_header_line("BPM", v),
             lambda v: self.replace_header_line("OFFSET", v),
             self,
             seek_cursor_cb=self._cursor_preview_seconds,
             volume_cb=self._save_preview_volume,
             duration_ready_cb=self._update_metronome_schedule,
             expanded_changed_cb=self._on_preview_expanded_changed,
+            refresh_preview_cb=self._update_metronome_schedule,
+            course_select_cb=self._on_preview_course_selected,
+            game_preview_changed_cb=self._on_game_preview_visibility_changed,
+            branch_select_cb=self._on_preview_branch_selected,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
+        self.preview_dock.set_hit_sound_files(
+            self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
+        )
         # No close/float/move features: the dock itself always stays docked
         # and visible. Its collapse/expand toggle lives in the status bar
         # (next to the theme switcher), so there's never a state where it
@@ -263,6 +281,19 @@ class MainWindow(QMainWindow):
     def _save_preview_volume(self, volume: float):
         self.config_data["preview_volume"] = volume
         settings_mod.save_settings(self.config_data)
+
+    def _on_preview_course_selected(self, course_key):
+        # course_key is None for "follow the editor cursor" (the default
+        # behavior); otherwise it pins the game-style preview to that course
+        # regardless of where the cursor is, until picked again.
+        self._preview_course_override = course_key
+        self._update_metronome_schedule()
+
+    def _on_preview_branch_selected(self, level):
+        # Static branch choice for the whole course - see build_preview_timeline's
+        # docstring for why this preview doesn't simulate dynamic switching.
+        self._preview_branch_level = level
+        self._update_metronome_schedule()
 
     def _cursor_preview_seconds(self):
         """Returns the audio-file seek position (seconds) for the measure
@@ -300,6 +331,11 @@ class MainWindow(QMainWindow):
         self.btn_preview_toggle.toggled.connect(self._on_preview_toggle_clicked)
         self.statusBar().addPermanentWidget(self.btn_preview_toggle)
 
+        self.btn_game_preview_toggle = QPushButton("譜面プレビュー")
+        self.btn_game_preview_toggle.setCheckable(True)
+        self.btn_game_preview_toggle.toggled.connect(self._on_game_preview_toggle_clicked)
+        self.statusBar().addPermanentWidget(self.btn_game_preview_toggle)
+
         self.status_label = QLabel("")
         self.statusBar().addWidget(self.status_label, 1)
 
@@ -309,6 +345,12 @@ class MainWindow(QMainWindow):
 
     def _on_preview_expanded_changed(self, expanded):
         self.btn_preview_toggle.setChecked(expanded)
+
+    def _on_game_preview_toggle_clicked(self, checked):
+        self.preview_dock.set_game_preview_visible(checked)
+
+    def _on_game_preview_visibility_changed(self, visible):
+        self.btn_game_preview_toggle.setChecked(visible)
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -328,6 +370,9 @@ class MainWindow(QMainWindow):
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
+        tm.addSeparator()
+        tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
+        tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
@@ -437,17 +482,29 @@ class MainWindow(QMainWindow):
         self._update_status()
         cursor_line = self.editor.textCursor().blockNumber() + 1
         metronome_clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
-        self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks)
+        preview_data = self.analyzer.build_preview_timeline(
+            content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
+        )
+        course_stats = self._find_course_stats(preview_data.get("course_key"))
+        self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
+        self._auto_save_tick()
+
+    def _find_course_stats(self, course_key):
+        return next((c for c in self.courses_info if c["key"] == course_key), None)
 
     def _update_metronome_schedule(self):
         # Lighter-weight than _heavy_tasks: just re-picks which course's
-        # #MEASURE/#BPMCHANGE the metronome should follow when the cursor
-        # moves into a different course, without re-running the expensive
-        # syntax highlighter over the whole document.
+        # #MEASURE/#BPMCHANGE the metronome/preview should follow when the
+        # cursor moves into a different course, without re-running the
+        # expensive syntax highlighter over the whole document.
         content = self.editor.toPlainText()
         cursor_line = self.editor.textCursor().blockNumber() + 1
         clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         self.preview_dock.set_metronome_clicks(clicks)
+        preview_data = self.analyzer.build_preview_timeline(
+            content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
+        )
+        self.preview_dock.set_preview_data(preview_data, self._find_course_stats(preview_data.get("course_key")))
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')
@@ -531,9 +588,32 @@ class MainWindow(QMainWindow):
         if dlg.mode == "blank":
             self.new_file(confirm=False)
             return
-        self._apply_youtube_project(dlg.result_title, dlg.result_subtitle, dlg.result_wave_path, dlg.result_folder)
+        self._apply_youtube_project(
+            dlg.result_title, dlg.result_subtitle, dlg.result_wave_path, dlg.result_folder,
+            dlg.result_bpm, dlg.result_offset, dlg.enable_ai_gen,
+        )
 
-    def _apply_youtube_project(self, title, subtitle, wave_path, folder):
+    @staticmethod
+    def _relocate_wave_file(src: str, dst: str):
+        """Copies src to dst, then best-effort removes src - not
+        shutil.move(), because on Windows a just-finished QAudioDecoder (see
+        BpmOffsetDetectWorker, which analyzes this exact file for BPM/OFFSET
+        auto-detect right before this runs) can still hold src's file handle
+        open for a moment, and move()'s internal rename/unlink step raises
+        PermissionError ("WinError 32: the process cannot access the file")
+        in that case - which used to abort project creation entirely before
+        the .tja ever got written. Copying first means a lingering lock only
+        costs a leftover duplicate .ogg (removed on a later retry, or left
+        as harmless clutter) instead of losing the whole new project."""
+        shutil.copy2(src, dst)
+        for _ in range(5):
+            try:
+                os.remove(src)
+                return
+            except OSError:
+                time.sleep(0.3)
+
+    def _apply_youtube_project(self, title, subtitle, wave_path, folder, bpm=None, offset=None, enable_ai_gen=False):
         safe_name = re.sub(r'[\\/:*?"<>|]', '_', title).strip() or "untitled"
 
         # Give every new song its own <TITLE>/ folder, with the .tja and the
@@ -544,11 +624,28 @@ class MainWindow(QMainWindow):
         wave_name = f"{safe_name}.ogg"
         new_wave_path = os.path.join(song_folder, wave_name)
         if os.path.abspath(wave_path) != os.path.abspath(new_wave_path):
-            shutil.move(wave_path, new_wave_path)
+            self._relocate_wave_file(wave_path, new_wave_path)
 
         content = NEW_FILE_TEMPLATE.replace("TITLE:\n", f"TITLE:{title}\n", 1)
-        content = content.replace("SUBTITLE:--\n", f"SUBTITLE:{subtitle}\n" if subtitle else "SUBTITLE:--\n", 1)
+        # SUBTITLE always carries a leading "--" marker (see
+        # parse_preview_headers's matching read-side convention) - the
+        # actual text, if any, goes right after it, never replacing it.
+        content = content.replace("SUBTITLE:--\n", f"SUBTITLE:--{subtitle}\n" if subtitle else "SUBTITLE:--\n", 1)
         content = content.replace("WAVE:\n", f"WAVE:{wave_name}\n", 1)
+        # BPM/OFFSET auto-detection (experimental) already ran once in the
+        # new-project dialog against the downloaded audio - pre-fill the
+        # headers with its result rather than leaving them blank/0.00. Best-
+        # effort: a formatting hiccup on this experimental value must not
+        # abort file creation before editor.setPlainText(content) below runs
+        # (which would otherwise silently leave the editor on its previous,
+        # untitled content).
+        try:
+            if bpm:
+                content = content.replace("BPM:\n", f"BPM:{bpm:g}\n", 1)
+            if offset is not None:
+                content = content.replace("OFFSET:0.00\n", f"OFFSET:{offset:.3f}\n", 1)
+        except (TypeError, ValueError):
+            pass
 
         tja_path = os.path.join(song_folder, f"{safe_name}.tja")
 
@@ -561,6 +658,39 @@ class MainWindow(QMainWindow):
         self._force_update()
 
         self.preview_dock.expand()
+
+        # Opt-in (see new_project_dialog.py's 実験的機能を使用する section) -
+        # runs in the background against the template's only course (Oni)
+        # and writes a separate <basename>(AI).tja next to the file just
+        # created above, without touching it or the editor.
+        if enable_ai_gen:
+            headers = parse_preview_headers(content)
+            gen_bpm = headers["bpm"] or 120.0
+            gen_offset = headers["offset"] or 0.0
+            self.status_label.setText("AI譜面生成を実行中(実験的)...")
+            worker = ChartGenWorker(new_wave_path, gen_bpm, gen_offset, subdivision=16, density=0.5, parent=self)
+            self._new_project_chart_gen_worker = worker
+
+            def on_generated(body, _content=content, _path=tja_path):
+                # Silent write, not _save_ai_chart_variant - this runs
+                # unattended after project creation, so it must not pop a
+                # modal QMessageBox the user never asked to dismiss.
+                try:
+                    new_path = self._write_ai_variant_file(_content, "Oni", body, _path)
+                except OSError as e:
+                    self.status_label.setText(f"AI譜面生成の保存に失敗しました(実験的): {e}")
+                    return
+                if new_path is None:
+                    self.status_label.setText("AI譜面生成: 対象コースが見つかりませんでした(実験的)。")
+                    return
+                self.status_label.setText(f"AI譜面生成(実験的)による追加ファイルを作成しました: {os.path.basename(new_path)}")
+
+            def on_failed(msg):
+                self.status_label.setText(f"AI譜面生成に失敗しました(実験的): {msg}")
+
+            worker.generated.connect(on_generated)
+            worker.failed.connect(on_failed)
+            worker.start()
 
     def open_file(self):
         if not self._unsaved_check():
@@ -608,6 +738,25 @@ class MainWindow(QMainWindow):
             self.editor.gutter.update()
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", str(e))
+
+    def _auto_save_tick(self):
+        if not self.config_data.get("auto_save_enabled", False):
+            return
+        if not self.current_file or not self.editor.modified_lines:
+            return
+        self.save_file()
+        self.statusBar().showMessage("自動保存しました", 2000)
+
+    def _on_auto_save_toggled(self, checked):
+        self.config_data["auto_save_enabled"] = checked
+        settings_mod.save_settings(self.config_data)
+        self._sync_auto_save_button(checked)
+
+    def _sync_auto_save_button(self, checked):
+        self.btn_auto_save.setText("自動保存: ON" if checked else "自動保存: OFF")
+        self.btn_auto_save.setObjectName("accentButton" if checked else "")
+        self.btn_auto_save.style().unpolish(self.btn_auto_save)
+        self.btn_auto_save.style().polish(self.btn_auto_save)
 
     def save_file_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", "", "TJA Files (*.tja);;All Files (*.*)")
@@ -661,6 +810,107 @@ class MainWindow(QMainWindow):
         new = txt.translate(str.maketrans("1234", "2143"))
         cursor.insertText(new)
         self._force_update()
+
+    # ------------------------------------------------------------------
+    # BPM/OFFSET auto-detect (experimental)
+    # ------------------------------------------------------------------
+    def auto_detect_bpm_offset(self):
+        if not self.current_file:
+            QMessageBox.information(self, "確認", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
+            return
+        headers = parse_preview_headers(self.editor.toPlainText())
+        wave = headers["wave"]
+        if not wave:
+            QMessageBox.information(self, "確認", "WAVE:に音源ファイルが指定されていません。")
+            return
+        wave_path = os.path.join(os.path.dirname(self.current_file), wave)
+        if not os.path.exists(wave_path):
+            QMessageBox.warning(self, "確認", f"音源ファイルが見つかりません: {wave}")
+            return
+        self.status_label.setText("BPM/OFFSETを自動検出中(実験的)...")
+        self._bpm_detect_worker = BpmOffsetDetectWorker(wave_path, self)
+        self._bpm_detect_worker.detected.connect(self._on_auto_detect_bpm_offset_ok)
+        self._bpm_detect_worker.failed.connect(self._on_auto_detect_bpm_offset_failed)
+        self._bpm_detect_worker.start()
+
+    def _on_auto_detect_bpm_offset_ok(self, bpm, offset):
+        self.replace_header_line("BPM", f"{bpm:g}")
+        self.replace_header_line("OFFSET", f"{offset:.3f}")
+        self.status_label.setText(f"BPM/OFFSETを自動検出しました(実験的): BPM {bpm:g} / OFFSET {offset:.3f}")
+        self._force_update()
+
+    def _on_auto_detect_bpm_offset_failed(self, msg):
+        self.status_label.setText(f"BPM/OFFSET自動検出に失敗しました(実験的): {msg}")
+
+    # ------------------------------------------------------------------
+    # AI譜面生成 (experimental) - always writes a separate <basename>(AI).tja
+    # rather than touching the currently open file/editor, so a rough or
+    # outright bad generation result can never clobber real work.
+    # ------------------------------------------------------------------
+    def open_auto_chart_generator(self):
+        if not self.current_file:
+            QMessageBox.information(self, "確認", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
+            return
+        content = self.editor.toPlainText()
+        headers = parse_preview_headers(content)
+        wave = headers["wave"]
+        if not wave:
+            QMessageBox.information(self, "確認", "WAVE:に音源ファイルが指定されていません。")
+            return
+        wave_path = os.path.join(os.path.dirname(self.current_file), wave)
+        if not os.path.exists(wave_path):
+            QMessageBox.warning(self, "確認", f"音源ファイルが見つかりません: {wave}")
+            return
+
+        from neotja.dialogs.auto_chart_dialog import AutoChartDialog
+
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+
+        def apply(course_key, generated_body):
+            self._save_ai_chart_variant(content, course_key, generated_body)
+
+        AutoChartDialog(self, content, wave_path, cursor_line, apply).exec()
+
+    def _write_ai_variant_file(self, content: str, course_key: str, generated_body: str, base_path: str):
+        """Builds and writes the `<basename>(AI).tja` variant - no dialogs,
+        no interaction with the live editor. Returns the path written, or
+        None if `course_key` doesn't exist in `content`. Shared by both the
+        interactive toolbar dialog (_save_ai_chart_variant, below) and the
+        silent post-creation step in _apply_youtube_project - the latter
+        runs unattended in the background, so it must never pop a modal
+        dialog to report its result."""
+        course_range = self.analyzer.course_line_range(content, course_key)
+        if course_range is None:
+            return None
+        new_content = build_ai_variant_content(content, course_range, generated_body)
+        base, ext = os.path.splitext(base_path)
+        new_path = f"{base}(AI){ext}"
+        with open(new_path, "w", encoding="cp932", errors="replace") as f:
+            f.write(new_content)
+        return new_path
+
+    def _save_ai_chart_variant(self, content: str, course_key: str, generated_body: str, base_path: str = None):
+        """Interactive save used by the toolbar's AI譜面生成 dialog - confirms
+        overwrite and reports success/failure via QMessageBox."""
+        base_path = base_path or self.current_file
+        base, ext = os.path.splitext(base_path)
+        prospective_path = f"{base}(AI){ext}"
+        if os.path.exists(prospective_path):
+            ans = QMessageBox.question(
+                self, "確認", f"既にファイルが存在します。上書きしますか?\n{prospective_path}",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if ans != QMessageBox.Yes:
+                return
+        try:
+            new_path = self._write_ai_variant_file(content, course_key, generated_body, base_path)
+        except OSError as e:
+            QMessageBox.critical(self, "保存エラー", str(e))
+            return
+        if new_path is None:
+            QMessageBox.warning(self, "エラー", "対象コースが見つかりませんでした。")
+            return
+        QMessageBox.information(self, "AI譜面生成(実験的)", f"生成しました:\n{new_path}\n\n現在開いているファイルは変更されていません。")
 
     # ------------------------------------------------------------------
     # Theme
@@ -822,6 +1072,10 @@ class MainWindow(QMainWindow):
             self.highlighter.rehighlight()
             self.editor.set_mono_font(self.config_data.get("font_family", "Consolas"), self.config_data.get("font_size", 12))
             self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
+            self.btn_auto_save.blockSignals(True)
+            self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))
+            self.btn_auto_save.blockSignals(False)
+            self._sync_auto_save_button(self.btn_auto_save.isChecked())
             for k, action in self._run_actions.items():
                 action.setText(f"{k}: {self.config_data['run_config'][k]['name']}")
             self.editor.gutter.update()

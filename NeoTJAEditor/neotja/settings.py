@@ -5,13 +5,17 @@ from pathlib import Path
 _SETTINGS_KEYS = (
     "run_config", "custom_shortcuts", "theme", "font_family", "font_size",
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
-    "preview_volume", "last_project_folder", "check_updates_on_startup",
+    "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
+    "hit_sound_don_path", "hit_sound_ka_path",
 )
 
 
 def default_settings() -> dict:
     return {
-        "run_config": {k: {"name": f"シミュレータ{k}", "path": ""} for k in ("F1", "F2", "F3")},
+        "run_config": {
+            "F1": {"name": "えぬいーさん次郎", "path": ""},
+            **{k: {"name": f"シミュレータ{k}", "path": ""} for k in ("F2", "F3")},
+        },
         "custom_shortcuts": {str(i): "" for i in range(10)},
         "theme": "dark",
         "font_family": "Consolas",
@@ -24,6 +28,9 @@ def default_settings() -> dict:
         "preview_volume": 0.8,
         "last_project_folder": "",
         "check_updates_on_startup": True,
+        "auto_save_enabled": False,
+        "hit_sound_don_path": "",
+        "hit_sound_ka_path": "",
     }
 
 

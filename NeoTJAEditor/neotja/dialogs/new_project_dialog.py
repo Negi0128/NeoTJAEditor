@@ -3,10 +3,11 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from neotja.audio_engine import BpmOffsetDetectWorker
 from neotja.theme import COLORS
 from neotja.ytdlp_worker import ThumbnailFetchWorker, YtDlpDownloadWorker
 
@@ -30,8 +31,13 @@ class NewProjectDialog(QDialog):
         self.result_subtitle = ""
         self.result_wave_path = None
         self.result_folder = None
+        self.result_bpm = None
+        self.result_offset = None
+        self.enable_auto_detect = False
+        self.enable_ai_gen = False
         self._worker = None
         self._thumb_worker = None
+        self._detect_worker = None
 
         layout = QVBoxLayout(self)
 
@@ -113,6 +119,11 @@ class NewProjectDialog(QDialog):
         self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         v.addWidget(self.status_label)
 
+        self.lbl_detect_status = QLabel("")
+        self.lbl_detect_status.setStyleSheet(f"color: {COLORS['fg_dim']};")
+        self.lbl_detect_status.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        v.addWidget(self.lbl_detect_status)
+
         preview_frame = QFrame()
         preview_frame.setStyleSheet(
             f"QFrame {{ background-color: {COLORS['surface']}; "
@@ -160,8 +171,34 @@ class NewProjectDialog(QDialog):
         subtitle_row.addWidget(self.ed_subtitle, 1)
         v.addLayout(subtitle_row)
 
+        # Both the BPM/OFFSET auto-detect and AI chart generation are opt-in
+        # here, off by default, and collapsed out of sight unless the user
+        # explicitly wants to try them - keeping the normal/reliable
+        # creation flow completely separate from the experimental one
+        # (a past unconditional-auto-detect regression is what prompted
+        # gating it behind this toggle instead of running it by default).
+        self.chk_experimental = QCheckBox("実験的機能を使用する")
+        self.chk_experimental.toggled.connect(self._on_experimental_toggled)
+        v.addWidget(self.chk_experimental)
+
+        self.experimental_panel = QWidget()
+        exp_layout = QVBoxLayout(self.experimental_panel)
+        exp_layout.setContentsMargins(20, 4, 0, 0)
+        self.chk_auto_detect = QCheckBox("自動OFFSET/BPM検出を使用")
+        self.chk_ai_gen = QCheckBox("AI譜面生成を使用(実験的)")
+        exp_layout.addWidget(self.chk_auto_detect)
+        exp_layout.addWidget(self.chk_ai_gen)
+        self.experimental_panel.setVisible(False)
+        v.addWidget(self.experimental_panel)
+
         v.addStretch()
         return w
+
+    def _on_experimental_toggled(self, checked):
+        self.experimental_panel.setVisible(checked)
+        if not checked:
+            self.chk_auto_detect.setChecked(False)
+            self.chk_ai_gen.setChecked(False)
 
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.ed_folder.text())
@@ -229,6 +266,32 @@ class NewProjectDialog(QDialog):
             self._thumb_worker.fetched.connect(self._on_thumbnail_fetched)
             self._thumb_worker.start()
 
+        # Runs once, right after the download, so BPM:/OFFSET: come
+        # pre-filled by the time the file is created - btn_ok stays disabled
+        # meanwhile so the result can't be accepted with a half-finished
+        # analysis. The button's own text changes to "読み込み中..." (not
+        # just the small status label below) since that's what the user is
+        # actually looking at/clicking - a merely-grayed-out "作成" button
+        # with no other obvious feedback reads as broken/stuck rather than
+        # "please wait". BpmOffsetDetectWorker also carries its own timeout
+        # so this can never get stuck disabled forever.
+        #
+        # Opt-in only (see the 実験的機能を使用する section above) - this
+        # used to run unconditionally, which is what caused the file-lock
+        # crash a past project creation hit.
+        self.result_bpm = None
+        self.result_offset = None
+        if not self.chk_auto_detect.isChecked():
+            self.lbl_detect_status.setText("")
+            return
+        self.btn_ok.setEnabled(False)
+        self.btn_ok.setText("読み込み中...")
+        self.lbl_detect_status.setText("BPM/OFFSETを自動検出中(実験的)...")
+        self._detect_worker = BpmOffsetDetectWorker(ogg_path, self)
+        self._detect_worker.detected.connect(self._on_detect_ok)
+        self._detect_worker.failed.connect(self._on_detect_failed)
+        self._detect_worker.start()
+
     def _on_thumbnail_fetched(self, data: bytes):
         pixmap = QPixmap()
         if pixmap.loadFromData(data):
@@ -239,6 +302,18 @@ class NewProjectDialog(QDialog):
     def _on_download_failed(self, msg):
         self._reset_download_ui()
         self.status_label.setText(f"失敗: {msg}")
+
+    def _on_detect_ok(self, bpm, offset):
+        self.result_bpm = bpm
+        self.result_offset = offset
+        self.lbl_detect_status.setText(f"BPM/OFFSET自動検出(実験的): BPM {bpm:g} / OFFSET {offset:.3f}")
+        self.btn_ok.setText("作成")
+        self.btn_ok.setEnabled(True)
+
+    def _on_detect_failed(self, msg):
+        self.lbl_detect_status.setText(f"BPM/OFFSET自動検出に失敗しました(実験的): {msg}")
+        self.btn_ok.setText("作成")
+        self.btn_ok.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Confirm / cancel
@@ -257,6 +332,8 @@ class NewProjectDialog(QDialog):
             return
         self.result_title = title
         self.result_subtitle = self.ed_subtitle.text().strip()
+        self.enable_auto_detect = self.chk_auto_detect.isChecked()
+        self.enable_ai_gen = self.chk_ai_gen.isChecked()
         self.main_window.config_data["last_project_folder"] = self.result_folder
         self.accept()
 

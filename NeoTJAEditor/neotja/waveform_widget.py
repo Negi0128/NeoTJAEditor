@@ -17,10 +17,12 @@ class WaveformWidget(QWidget):
     MIN_ZOOM = 1.0
     MAX_ZOOM = 200.0
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, toggle_play_cb=None):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._toggle_play_cb = toggle_play_cb
 
         self.peaks: list = []
         self.duration = 0.0
@@ -106,6 +108,7 @@ class WaveformWidget(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self.seekRequested.emit(max(0.0, self._x_to_sec(event.position().x())))
@@ -116,6 +119,13 @@ class WaveformWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._dragging = False
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if self._toggle_play_cb:
+                self._toggle_play_cb()
+            return
+        super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     # Painting
