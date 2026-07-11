@@ -81,7 +81,13 @@ class UpdateDownloadWorker(QThread):
             dest = os.path.join(tempfile.gettempdir(), "NeoTJAEditor_update.exe")
             req = urllib.request.Request(self.asset_url, headers={"User-Agent": _USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
-                total = resp.length or 0
+                # Prefer the Content-Length header (resp.length decreases as we
+                # read, so capture the expected total up front for validation).
+                try:
+                    expected = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    expected = 0
+                total = expected or (resp.length or 0)
                 read = 0
                 while True:
                     chunk = resp.read(64 * 1024)
@@ -90,6 +96,22 @@ class UpdateDownloadWorker(QThread):
                     f.write(chunk)
                     read += len(chunk)
                     self.progress.emit(int(read * 100 / total) if total else -1)
+
+            # A truncated download (dropped connection) would otherwise be
+            # copied over the running exe and brick it - a onefile PyInstaller
+            # build stores its archive at the tail, so a short file fails at
+            # startup with e.g. "No module named 'PySide6.QtGui'". Validate the
+            # size against Content-Length and sanity-check the PE header before
+            # letting the caller apply it.
+            if expected and read != expected:
+                raise IOError(
+                    f"ダウンロードが不完全です ({read}/{expected} バイト)。"
+                    "通信状況を確認してもう一度お試しください。"
+                )
+            with open(dest, "rb") as f:
+                if f.read(2) != b"MZ":
+                    raise IOError("ダウンロードしたファイルが壊れています。もう一度お試しください。")
+
             self.finished_ok.emit(dest)
         except Exception as e:
             self.failed.emit(str(e))
