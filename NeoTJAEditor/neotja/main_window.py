@@ -352,6 +352,16 @@ class MainWindow(QMainWindow):
     def _on_game_preview_visibility_changed(self, visible):
         self.btn_game_preview_toggle.setChecked(visible)
 
+    def _on_f1(self):
+        """F1: launch the built-in game-style preview (えぬいーさん次郎)
+        if it's not open yet; while it's open, F1 instead toggles hit
+        sounds so the key never relaunches/duplicates the preview."""
+        if not self.preview_dock.is_game_preview_visible():
+            self.preview_dock.set_game_preview_visible(True)
+            self.btn_game_preview_toggle.setChecked(True)
+        else:
+            self.preview_dock.toggle_hit_sounds()
+
     def _build_menu(self):
         mb = self.menuBar()
 
@@ -376,7 +386,13 @@ class MainWindow(QMainWindow):
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
-        for k in ("F1", "F2", "F3"):
+        # F1 is reserved for the built-in preview (see _bind_shortcuts /
+        # _on_f1), not an external simulator, so its label is fixed rather
+        # than sourced from run_config and it isn't refreshed in
+        # open_settings() below.
+        f1_action = rm.addAction("F1: えぬいーさん次郎(内蔵プレビュー)", self._on_f1)
+        self._run_actions["F1"] = f1_action
+        for k in ("F2", "F3"):
             action = rm.addAction(f"{k}: {self.config_data['run_config'][k]['name']}", lambda key=k: self.run_simulator(key))
             self._run_actions[k] = action
 
@@ -442,9 +458,17 @@ class MainWindow(QMainWindow):
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda key=k: self._insert_custom(key))
 
-        for i, k in enumerate(("F1", "F2", "F3"), start=0):
+        for k in ("F2", "F3"):
             sc = QShortcut(QKeySequence(k), self)
             sc.activated.connect(lambda key=k: self.run_simulator(key))
+
+        # F1 is reserved for the built-in game-style preview: first press
+        # launches it, subsequent presses (while it's open) toggle hit
+        # sounds instead of relaunching. ApplicationShortcut so it fires
+        # whether focus is in the editor or the (separate) preview window.
+        sc_f1 = QShortcut(QKeySequence("F1"), self)
+        sc_f1.setContext(Qt.ApplicationShortcut)
+        sc_f1.activated.connect(self._on_f1)
 
     def _insert_custom(self, key):
         text = self.config_data["custom_shortcuts"].get(key, "")
@@ -1071,12 +1095,17 @@ class MainWindow(QMainWindow):
             self.highlighter.rebuild_formats()
             self.highlighter.rehighlight()
             self.editor.set_mono_font(self.config_data.get("font_family", "Consolas"), self.config_data.get("font_size", 12))
+            self.preview_dock.set_hit_sound_files(
+                self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
+            )
             self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
             self.btn_auto_save.blockSignals(True)
             self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))
             self.btn_auto_save.blockSignals(False)
             self._sync_auto_save_button(self.btn_auto_save.isChecked())
             for k, action in self._run_actions.items():
+                if k == "F1":
+                    continue  # fixed label - not sourced from run_config
                 action.setText(f"{k}: {self.config_data['run_config'][k]['name']}")
             self.editor.gutter.update()
             self.ruler.update()

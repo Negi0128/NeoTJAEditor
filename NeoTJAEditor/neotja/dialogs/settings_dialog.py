@@ -135,6 +135,48 @@ class SettingsDialog(QDialog):
         )
         lbl = QLabel(desc)
         form.addRow(lbl)
+
+        self.hit_don_edit = QLineEdit(cfg.get("hit_sound_don_path", ""))
+        self.hit_don_edit.setReadOnly(True)
+        don_browse_btn = QPushButton("参照...")
+        don_clear_btn = QPushButton("クリア")
+
+        def browse_don():
+            p, _ = QFileDialog.getOpenFileName(self, "ドン音源を選択", "", "音声ファイル (*.wav);;すべて (*)")
+            if p:
+                self.hit_don_edit.setText(p)
+        don_browse_btn.clicked.connect(browse_don)
+        don_clear_btn.clicked.connect(lambda: self.hit_don_edit.setText(""))
+
+        don_row = QWidget()
+        don_row_layout = QHBoxLayout(don_row)
+        don_row_layout.setContentsMargins(0, 0, 0, 0)
+        don_row_layout.addWidget(self.hit_don_edit, 1)
+        don_row_layout.addWidget(don_browse_btn)
+        don_row_layout.addWidget(don_clear_btn)
+        form.addRow("ドン音源(WAV)", don_row)
+
+        self.hit_ka_edit = QLineEdit(cfg.get("hit_sound_ka_path", ""))
+        self.hit_ka_edit.setReadOnly(True)
+        ka_browse_btn = QPushButton("参照...")
+        ka_clear_btn = QPushButton("クリア")
+
+        def browse_ka():
+            p, _ = QFileDialog.getOpenFileName(self, "カツ音源を選択", "", "音声ファイル (*.wav);;すべて (*)")
+            if p:
+                self.hit_ka_edit.setText(p)
+        ka_browse_btn.clicked.connect(browse_ka)
+        ka_clear_btn.clicked.connect(lambda: self.hit_ka_edit.setText(""))
+
+        ka_row = QWidget()
+        ka_row_layout = QHBoxLayout(ka_row)
+        ka_row_layout.setContentsMargins(0, 0, 0, 0)
+        ka_row_layout.addWidget(self.hit_ka_edit, 1)
+        ka_row_layout.addWidget(ka_browse_btn)
+        ka_row_layout.addWidget(ka_clear_btn)
+        form.addRow("カツ音源(WAV)", ka_row)
+
+        form.addRow(QLabel("未指定なら内蔵の合成音が鳴ります。"))
         return w
 
     def _save(self):
@@ -157,6 +199,9 @@ class SettingsDialog(QDialog):
         cfg["short_roll_comp"] = self.comp_combo.currentText()
         cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
         cfg["auto_save_enabled"] = self.auto_save_check.isChecked()
+
+        cfg["hit_sound_don_path"] = self.hit_don_edit.text()
+        cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         self.accept()
 
     def _reset(self):

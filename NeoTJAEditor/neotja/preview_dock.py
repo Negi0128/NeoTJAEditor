@@ -4,7 +4,7 @@ import os
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QVBoxLayout, QWidget,
+    QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, WaveformDecodeWorker
@@ -27,7 +27,7 @@ class ChartInfoBar(QWidget):
 
     BRANCH_LABELS = {"N": "普通", "E": "玄人", "M": "達人"}
 
-    def __init__(self, parent=None, toggle_play_cb=None, seek_cursor_cb=None,
+    def __init__(self, parent=None, toggle_play_cb=None, return_anchor_cb=None,
                  seek_prev_cb=None, seek_next_cb=None, cycle_course_cb=None, cycle_branch_cb=None):
         super().__init__(parent)
         self.setFixedHeight(300)
@@ -37,7 +37,9 @@ class ChartInfoBar(QWidget):
 
         button_row = QHBoxLayout()
         btn_play = QPushButton("再生/一時停止 (Space)")
-        btn_cursor = QPushButton("カーソル位置へ (Q)")
+        # Q now returns to the アンカー (the measure the current play started
+        # from), not the editor cursor - see ChartPreviewWidget.return_to_anchor.
+        btn_cursor = QPushButton("アンカーへ (Q)")
         btn_prev = QPushButton("◀ 前の小節 (PgDn)")
         btn_next = QPushButton("次の小節 ▶ (PgUp)")
         self.btn_course = QPushButton("コース: -")
@@ -45,8 +47,8 @@ class ChartInfoBar(QWidget):
         self.btn_branch.setVisible(False)  # only shown for courses that actually have #BRANCHSTART
         if toggle_play_cb:
             btn_play.clicked.connect(toggle_play_cb)
-        if seek_cursor_cb:
-            btn_cursor.clicked.connect(seek_cursor_cb)
+        if return_anchor_cb:
+            btn_cursor.clicked.connect(return_anchor_cb)
         if seek_prev_cb:
             btn_prev.clicked.connect(lambda: seek_prev_cb(-1))
         if seek_next_cb:
@@ -209,7 +211,7 @@ class GamePreviewWindow(QWidget):
 
     closed = Signal()
 
-    def __init__(self, chart_preview: ChartPreviewWidget, info_bar: ChartInfoBar, parent=None, pause_cb=None):
+    def __init__(self, chart_preview: ChartPreviewWidget, bottom_widget: QWidget, parent=None, pause_cb=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("えぬいーさん次郎")
         self._pause_cb = pause_cb
@@ -218,8 +220,15 @@ class GamePreviewWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(chart_preview)
-        layout.addWidget(info_bar)
-        self.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), ChartPreviewWidget.WIDGET_HEIGHT + info_bar.height())
+        layout.addWidget(bottom_widget)
+        # bottom_widget は3モードの QStackedWidget。ページごとに高さが違うと
+        # モード切替のたびに窓がガタつくので、呼び出し側でスタックを最も高い
+        # ページ高さに固定済み。その固定高さ(=minimumHeight)を使って窓サイズも
+        # 一定に保つ。
+        self.setFixedSize(
+            int(ChartPreviewWidget.LANE_WIDTH),
+            ChartPreviewWidget.WIDGET_HEIGHT + bottom_widget.minimumHeight(),
+        )
 
     def closeEvent(self, event):
         self.closed.emit()
@@ -353,25 +362,60 @@ class PreviewDock(QDockWidget):
 
         self.chart_preview = ChartPreviewWidget(
             course_select_cb=self.course_select_cb,
-            toggle_play_cb=self.audio.toggle_play_pause,
-            seek_cursor_cb=self._on_seek_cursor,
             seek_seconds_cb=lambda sec: self.audio.seek(max(0, int(sec * 1000))),
+            # Explicit play/pause (not just toggle) so the widget's own player
+            # model can drive precise start-from-anchor / pause-in-place
+            # transitions (机能1).
+            play_cb=self.audio.play,
+            pause_cb=self.audio.pause,
             hit_sound_engine=self.hit_sounds,
             branch_select_cb=self.branch_select_cb,
+            # フェーズ3: Tab で下部パネルのモード循環、[ ] で再生速度微調整。
+            cycle_bottom_mode_cb=self.cycle_bottom_mode,
+            set_speed_cb=self._on_speed_from_key,
         )
+        # Info-bar transport buttons mirror the lane's Space/Q shortcuts, so
+        # route them through the widget's player model rather than the raw
+        # audio engine.
         self.info_bar = ChartInfoBar(
-            toggle_play_cb=self.audio.toggle_play_pause,
-            seek_cursor_cb=self._on_seek_cursor,
+            toggle_play_cb=self.chart_preview.toggle_play,
+            return_anchor_cb=self.chart_preview.return_to_anchor,
             seek_prev_cb=self.chart_preview.seek_relative_measure,
             seek_next_cb=self.chart_preview.seek_relative_measure,
             cycle_course_cb=self.chart_preview.cycle_course,
             cycle_branch_cb=self.chart_preview.cycle_branch,
         )
         self.chart_preview.set_info_update_cb(self.info_bar.set_realtime_info)
+
+        # 下部パネルを3モードの QStackedWidget に(フェーズ3):
+        #   index 0 = 情報モード(既存 ChartInfoBar)
+        #   index 1 = 作譜モード(波形 + 再生速度スライダー)
+        #   index 2 = 非表示モード(空白 = レーンのみ見える)
+        self._sakufu_page = self._build_sakufu_page()
+        self.bottom_stack = QStackedWidget()
+        self.bottom_stack.addWidget(self.info_bar)      # 0 情報
+        self.bottom_stack.addWidget(self._sakufu_page)  # 1 作譜
+        self.bottom_stack.addWidget(QWidget())          # 2 非表示(空白)
+        # ページ高さが異なるとモード切替で窓がガタつくので、最も高いページに
+        # スタックの高さを固定する(info_bar は setFixedHeight(300) 済み)。
+        bottom_h = max(self.info_bar.minimumHeight(), self._sakufu_page.sizeHint().height())
+        self.bottom_stack.setFixedHeight(bottom_h)
+
         self.game_preview_window = GamePreviewWindow(
-            self.chart_preview, self.info_bar, parent=self, pause_cb=self.audio.pause,
+            self.chart_preview, self.bottom_stack, parent=self, pause_cb=self.audio.pause,
         )
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
+
+        # モード切替トグルボタン(キーと併用)。レーン右上隅に浮かせ、どのモード
+        # でも常に見えるようにする。現在モード名を短く表示。フォーカスは奪わない
+        # (Space/Tab/PgUp/PgDn はレーンに保持)。
+        self._mode_names = ["情報", "作譜", "非表示"]
+        self.mode_button = QPushButton(self._mode_names[0], self.chart_preview)
+        self.mode_button.setFocusPolicy(Qt.NoFocus)
+        self.mode_button.setToolTip("下部パネルの表示切替(Tab)")
+        self.mode_button.resize(96, 26)
+        self.mode_button.move(int(ChartPreviewWidget.LANE_WIDTH) - 96 - 8, 6)
+        self.mode_button.clicked.connect(self.cycle_bottom_mode)
 
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -461,6 +505,10 @@ class PreviewDock(QDockWidget):
 
     def set_game_preview_visible(self, visible: bool):
         if visible:
+            # Opening the window parks カレント/アンカー at the song head and
+            # rewinds the audio to 0 (机能1), so it always starts from a known
+            # stopped state regardless of where the audio was left.
+            self.chart_preview.reset_to_start()
             self.game_preview_window.show()
             self.game_preview_window.raise_()
             self.game_preview_window.activateWindow()
@@ -480,6 +528,60 @@ class PreviewDock(QDockWidget):
         # status-bar toggle button know so its checked state stays in sync.
         if self.game_preview_changed_cb:
             self.game_preview_changed_cb(False)
+
+    # ------------------------------------------------------------------
+    # Bottom-panel mode switching + playback speed (フェーズ3)
+    # ------------------------------------------------------------------
+    def _build_sakufu_page(self) -> QWidget:
+        """作譜モードのページ: 波形表示(ドック側 self.waveform と同じ配線の
+        もう1つの WaveformWidget)と再生速度スライダー(0.25〜1.0)。"""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(8)
+
+        # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
+        # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
+        self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause)
+        self.game_waveform.seekRequested.connect(self._on_seek_requested)
+        self.game_waveform.setFixedHeight(150)
+        v.addWidget(self.game_waveform)
+
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("再生速度:"))
+        self.speed_slider = QSlider(Qt.Horizontal)
+        # 25〜100 の整数レンジ → /100 で 0.25〜1.00 倍。
+        self.speed_slider.setRange(25, 100)
+        self.speed_slider.setValue(100)
+        # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
+        self.speed_slider.setFocusPolicy(Qt.NoFocus)
+        self.speed_slider.valueChanged.connect(self._on_speed_slider_changed)
+        speed_row.addWidget(self.speed_slider, 1)
+        self.lbl_speed = QLabel("×1.00")
+        speed_row.addWidget(self.lbl_speed)
+        v.addLayout(speed_row)
+        v.addStretch()
+        return page
+
+    def cycle_bottom_mode(self):
+        """情報(0)→作譜(1)→非表示(2)→情報… と循環。Tab キー(chart_preview)と
+        モードトグルボタンの両方から呼ばれる。"""
+        idx = (self.bottom_stack.currentIndex() + 1) % 3
+        self.bottom_stack.setCurrentIndex(idx)
+        self.mode_button.setText(self._mode_names[idx])
+
+    def _on_speed_slider_changed(self, value: int):
+        # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の
+        # レートを更新する。
+        rate = value / 100.0
+        self.lbl_speed.setText(f"×{rate:.2f}")
+        self.audio.set_playback_rate(rate)
+        self.chart_preview.set_playback_rate(rate)
+
+    def _on_speed_from_key(self, rate: float):
+        # chart_preview の [ ] キーから来る目標倍率。スライダー値を動かすと
+        # valueChanged 経由で audio/chart_preview に反映される(スライダーと同期)。
+        self.speed_slider.setValue(int(round(rate * 100)))
 
     def set_expanded(self, expanded: bool):
         self._content_widget.setVisible(expanded)
@@ -510,6 +612,7 @@ class PreviewDock(QDockWidget):
             self._editor_notes += _roll_tick_notes(preview_data.get("balloons", []), bpm_index=2)
 
         self.waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
+        self.game_waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
@@ -537,6 +640,7 @@ class PreviewDock(QDockWidget):
         self.spin_offset.setValue(headers["offset"])
         self.spin_offset.blockSignals(False)
         self.waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
+        self.game_waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
         self.metronome.set_schedule(self._editor_metronome_clicks, headers["offset"])
         self.hit_sounds.set_schedule(self._editor_notes, headers["offset"])
         self.chart_preview.set_offset(headers["offset"])
@@ -563,6 +667,7 @@ class PreviewDock(QDockWidget):
         if path != self._current_wave_path:
             return
         self.waveform.set_peaks(peaks, duration)
+        self.game_waveform.set_peaks(peaks, duration)
         self.status_label.setText("")
 
     def _on_decode_failed(self, path, msg):
@@ -575,6 +680,7 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     def _on_position_changed(self, ms):
         self.waveform.set_position(ms / 1000.0)
+        self.game_waveform.set_position(ms / 1000.0)
         self.chart_preview.set_playback(ms / 1000.0, self.audio.is_playing())
         self.time_label.setText(f"{_fmt_time(ms)} / {_fmt_time(self._duration_ms)}")
         if not self.seek_slider.isSliderDown():
@@ -647,10 +753,17 @@ class PreviewDock(QDockWidget):
         self.btn_hit_sounds.style().unpolish(self.btn_hit_sounds)
         self.btn_hit_sounds.style().polish(self.btn_hit_sounds)
 
+    def toggle_hit_sounds(self):
+        """Flips the 打音(hit sounds) button; routed through toggled so the
+        existing _on_hit_sounds_toggled handler updates enabled state and
+        appearance in one place. Used by MainWindow's F1 shortcut."""
+        self.btn_hit_sounds.setChecked(not self.btn_hit_sounds.isChecked())
+
     def set_metronome_clicks(self, clicks):
         self._editor_metronome_clicks = clicks or []
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.waveform.set_beat_grid(self._editor_bpm, self.spin_offset.value(), self._editor_metronome_clicks)
+        self.game_waveform.set_beat_grid(self._editor_bpm, self.spin_offset.value(), self._editor_metronome_clicks)
 
     def set_preview_data(self, data, course_stats=None):
         data = data or {}
@@ -697,6 +810,7 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     def _on_offset_value_changed(self, value):
         self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self.game_waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
         self.metronome.set_schedule(self._editor_metronome_clicks, value)
         self.hit_sounds.set_schedule(self._editor_notes, value)
         self.chart_preview.set_offset(value)

@@ -377,6 +377,10 @@ class AudioEngine(QObject):
     def seek(self, ms: int):
         self.player.setPosition(ms)
 
+    def set_playback_rate(self, rate: float):
+        # 作譜モードの速度スライダー/[ ] キー用。ピッチは変わる仕様(確定)。
+        self.player.setPlaybackRate(rate)
+
     def set_volume(self, volume: float):
         self.audio_output.setVolume(max(0.0, min(1.0, volume)))
 
@@ -449,14 +453,54 @@ def _synth_wav(filename: str, duration: float, freq: float, decay: float, amplit
     return path
 
 
+def _write_mono_wav(path: str, samples, sample_rate: int = 44100) -> str:
+    """Write a float sample array (nominally in [-1, 1]) to a 16-bit mono WAV."""
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+    with wave.open(path, "w") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sample_rate)
+        f.writeframes(pcm.tobytes())
+    return path
+
+
 def ensure_don_wav() -> str:
-    """Low-pitched drum-center hit sound for the game preview's don (1/3) notes."""
-    return _synth_wav("neotja_hit_don_v1.wav", duration=0.09, freq=110.0, decay=28.0, amplitude=0.9, noise_mix=0.15)
+    """Taiko-style center hit (ドン) for the preview's don (1/3) notes.
+
+    A plain decaying sine reads as a beep; a real struck drum head has a
+    fast downward pitch glide plus a broadband attack transient, so this
+    models both - a ~190->85 Hz glide with a light 2nd harmonic for the
+    body 'boom', a short noise 'thwack' at the very start, and a soft-clip
+    for punch. The _v2 suffix forces a regenerate over any cached _v1 file."""
+    path = os.path.join(tempfile.gettempdir(), "neotja_hit_don_v2.wav")
+    if os.path.exists(path):
+        return path
+    sr = 44100
+    t = np.arange(int(sr * 0.22)) / sr
+    inst_freq = 85.0 + (190.0 - 85.0) * np.exp(-t * 45.0)
+    phase = 2 * np.pi * np.cumsum(inst_freq) / sr
+    body = (np.sin(phase) + 0.35 * np.sin(2 * phase)) * np.exp(-t * 20.0)
+    attack = np.random.uniform(-1.0, 1.0, t.shape) * np.exp(-t * 500.0)
+    sig = np.tanh((0.9 * body + 0.45 * attack) * 1.3)
+    return _write_mono_wav(path, sig * 0.85, sr)
 
 
 def ensure_ka_wav() -> str:
-    """Higher-pitched rim hit sound for the game preview's ka (2/4) notes."""
-    return _synth_wav("neotja_hit_ka_v1.wav", duration=0.06, freq=520.0, decay=45.0, amplitude=0.8, noise_mix=0.35)
+    """Taiko-style rim hit (カッ) for the preview's ka (2/4) notes.
+
+    A short, dry, high 'clack': mostly high-passed noise (first-difference
+    filter) with a very fast decay, plus a faint ~950 Hz tonal ping so it
+    still cuts through. _v2 suffix forces a regenerate over cached _v1."""
+    path = os.path.join(tempfile.gettempdir(), "neotja_hit_ka_v2.wav")
+    if os.path.exists(path):
+        return path
+    sr = 44100
+    t = np.arange(int(sr * 0.05)) / sr
+    noise = np.random.uniform(-1.0, 1.0, t.shape)
+    hp = np.diff(noise, prepend=noise[0])
+    tone = 0.25 * np.sin(2 * np.pi * 950.0 * t)
+    sig = np.tanh(((0.9 * hp + tone) * np.exp(-t * 85.0)) * 1.2)
+    return _write_mono_wav(path, sig * 0.8, sr)
 
 
 class HitSoundEngine(QObject):
