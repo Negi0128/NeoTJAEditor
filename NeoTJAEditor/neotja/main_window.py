@@ -153,6 +153,10 @@ class MainWindow(QMainWindow):
 
         self.new_file(confirm=False)
 
+        # A failed update can only be reported now: the batch that applies it
+        # runs after the previous process is gone.
+        QTimer.singleShot(300, self._report_failed_update)
+
         if self.config_data.get("check_updates_on_startup", True):
             QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
 
@@ -938,6 +942,41 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Auto-update
     # ------------------------------------------------------------------
+    def _report_failed_update(self):
+        """Tell the user when the previous run's update didn't actually get
+        applied. Without this the app just relaunched on the old version with
+        no explanation, which read as "the updater does nothing"."""
+        from neotja.updater import pop_update_error
+
+        info = pop_update_error()
+        if not info:
+            return
+        update_exe = ""
+        for line in info.splitlines():
+            if line.startswith("update_exe="):
+                update_exe = line.split("=", 1)[1].strip()
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("更新に失敗しました")
+        box.setText(
+            f"更新ファイルの適用に失敗したため、v{VERSION} のままです。\n\n"
+            "NeoTJAEditor.exe を上書きできませんでした。\n"
+            "以下が原因として考えられます:\n"
+            "・ウイルス対策ソフトが更新ファイルをブロックしている\n"
+            "・exeが Program Files など書き込み権限のない場所にある\n\n"
+            "ダウンロード済みの更新ファイルは残してあるので、"
+            "手動で上書きすれば更新できます。"
+        )
+        box.setDetailedText(info)
+        if update_exe and os.path.exists(update_exe):
+            box.addButton("更新ファイルの場所を開く", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked and clicked.text().startswith("更新ファイル"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(update_exe)])
+
     def check_for_updates(self, manual=False):
         from neotja.updater import UpdateCheckWorker
 
