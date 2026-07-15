@@ -132,6 +132,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         self.resize(1280, 820)
 
+        # Set once the update batch has been armed and the exit is already
+        # agreed to, so closeEvent doesn't re-ask and veto the shutdown the
+        # updater is waiting on (see _run_update_download).
+        self._updating = False
+
         self._build_editor()
         self._build_toolbars()
         self._build_sidebar()
@@ -774,7 +779,9 @@ class MainWindow(QMainWindow):
             subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
 
     def closeEvent(self, event):
-        if self._unsaved_check():
+        # _updating means the unsaved check already ran and the updater batch is
+        # armed and waiting on this process to exit - vetoing here would hang it.
+        if self._updating or self._unsaved_check():
             event.accept()
         else:
             event.ignore()
@@ -982,6 +989,19 @@ class MainWindow(QMainWindow):
 
         def on_ok(path):
             progress.close()
+            # Settle the unsaved-changes question BEFORE arming the batch:
+            # apply_update() starts a script that busy-waits for this PID to
+            # exit. If closeEvent then vetoed the exit (Cancel is the default
+            # button in _unsaved_check), that script would spin forever and
+            # later overwrite+relaunch the app the next time it was closed -
+            # which looked exactly like "the update silently does nothing".
+            if not self._unsaved_check():
+                QMessageBox.information(
+                    self, "更新",
+                    "更新を中止しました。\n次回起動時に再度お知らせします。",
+                )
+                return
+            self._updating = True
             apply_update(path)
             self.close()
 
