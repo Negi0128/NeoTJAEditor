@@ -6,6 +6,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
+from neotja import theme
 from neotja.theme import COLORS
 
 NOTE_COLOR = {"1": "don", "2": "ka", "3": "don", "4": "ka"}
@@ -149,6 +150,13 @@ class ChartPreviewWidget(QWidget):
         self._anim_start_sec = 0.0
         self._anim_target_sec = 0.0
         self._anim_start_wall = _time.monotonic()
+        # Transient badge drawn in the lane's top-left (show_toast). Used for
+        # the F1 hit-sound ON/OFF feedback, which otherwise has no visible
+        # effect at all on a silent passage.
+        self._toast_text = ""
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._clear_toast)
         # Precomputed change-time columns so per-frame lookups (_push_realtime_info)
         # bisect a ready-made list instead of rebuilding [c[0] for c in changes]
         # every tick. Rebuilt only in set_preview_data.
@@ -163,6 +171,7 @@ class ChartPreviewWidget(QWidget):
         # rather than reconstructed from theme strings/font family on every
         # frame, which matters a lot at 120 fps.
         self._qcolor_cache = {k: QColor(v) for k, v in COLORS.items()}
+        self._theme_gen = theme.GENERATION
         self._font_cache = {}
 
         self._timer = QTimer(self)
@@ -197,6 +206,14 @@ class ChartPreviewWidget(QWidget):
         self._timer.setInterval(max(1, int(1000.0 / hz)))
 
     def _color(self, key: str) -> QColor:
+        # Parsing hex strings into QColor every paint is what this cache
+        # avoids, but COLORS is mutated in place by apply_theme, so the cache
+        # has to be dropped when the theme generation moves - otherwise the
+        # lane keeps painting the old palette while the rest of the app
+        # restyles (dark editor, light lane).
+        if self._theme_gen != theme.GENERATION:
+            self._qcolor_cache = {k: QColor(v) for k, v in COLORS.items()}
+            self._theme_gen = theme.GENERATION
         c = self._qcolor_cache.get(key)
         if c is None:
             c = QColor(COLORS.get(key, "#ffffff"))
@@ -360,6 +377,14 @@ class ChartPreviewWidget(QWidget):
         if key == Qt.Key_PageDown:
             self.seek_relative_measure(-1)
             return
+        # Home/End: 0小節目(曲頭)/最終小節へ一気に移動。PgUp/PgDn と同じく
+        # 再生中は無効。
+        if key == Qt.Key_Home:
+            self.seek_to_first_measure()
+            return
+        if key == Qt.Key_End:
+            self.seek_to_last_measure()
+            return
         # 再生速度の微調整(作譜モード。0.05刻み、0.25〜1.0でクランプ)。実際の
         # レート適用はスライダー経由(set_speed_cb → スライダー値変更 → audio /
         # chart_preview 双方に反映)なので、ここでは目標倍率を算出して通知する。
@@ -382,6 +407,16 @@ class ChartPreviewWidget(QWidget):
     def set_playback_rate(self, rate: float):
         """再生速度倍率(0.25〜1.0)を設定。再生中の時間外挿に使う。"""
         self._playback_rate = max(0.25, min(1.0, rate))
+
+    def show_toast(self, text: str, seconds: float = 3.0):
+        """レーン左上に text を seconds 秒だけ表示する。"""
+        self._toast_text = text
+        self._toast_timer.start(int(seconds * 1000))
+        self.update()
+
+    def _clear_toast(self):
+        self._toast_text = ""
+        self.update()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -523,11 +558,22 @@ class ChartPreviewWidget(QWidget):
     def seek_relative_measure(self, direction: int):
         # PgUp/PgDn/wheel: step カレント one nav point, but only while
         # stopped/paused - navigation is deliberately inert during playback.
+        self._seek_to_nav_idx(self._current_idx + direction)
+
+    def seek_to_first_measure(self):
+        """Home: jump カレント to 0小節目(曲頭)."""
+        self._seek_to_nav_idx(0)
+
+    def seek_to_last_measure(self):
+        """End: jump カレント to the last measure."""
+        self._seek_to_nav_idx(len(self._nav_points) - 1)
+
+    def _seek_to_nav_idx(self, idx: int):
         if self._state == "playing":
             return
         if not self._nav_points or not self._seek_seconds_cb:
             return
-        new_idx = max(0, min(self._current_idx + direction, len(self._nav_points) - 1))
+        new_idx = max(0, min(idx, len(self._nav_points) - 1))
         self._current_idx = new_idx
         # Moving while paused re-pins the anchor (so Q comes back here); moving
         # while stopped leaves the not-yet-set anchor alone (see toggle_play).
@@ -763,6 +809,23 @@ class ChartPreviewWidget(QWidget):
             Qt.AlignLeft | Qt.AlignVCenter,
             f"現在: {self._current_idx}小節 / アンカー: {self._anchor_idx}小節  [{state_label}]",
         )
+
+        # Transient toast badge, lane top-left. Drawn as a filled box so it
+        # stays legible over whatever notes happen to be scrolling under it,
+        # and before the lane clip so it isn't cut off.
+        if self._toast_text:
+            painter.setFont(self._font(15, True))
+            tw = painter.fontMetrics().horizontalAdvance(self._toast_text) + 24
+            th = 32
+            tx, ty = self.PANEL_INSET, band_top + 8
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._color("bg2"))
+            painter.drawRoundedRect(tx, ty, tw, th, 6, 6)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(self._color("accent"))
+            painter.drawRoundedRect(tx, ty, tw, th, 6, 6)
+            painter.setPen(self._color("fg_bright"))
+            painter.drawText(tx, ty, tw, th, Qt.AlignCenter, self._toast_text)
 
         # Notes/rolls/bars are positioned by real formulas that can compute
         # an x past lane_w (the bisect window is deliberately sized

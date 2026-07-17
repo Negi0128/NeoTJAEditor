@@ -231,7 +231,18 @@ def build_qss(p: dict) -> str:
     """
 
 
+# Bumped on every apply_theme. COLORS is mutated in place (so importers see
+# live updates), which means anything caching values derived from it - QColor
+# objects, pens, baked stylesheet strings - has no way to notice the change on
+# its own. Such caches should compare against this and rebuild when it moves.
+# Read it as `theme.GENERATION`, never `from theme import GENERATION` - the
+# latter binds the int at import time and never sees a bump.
+GENERATION = 0
+
+
 def apply_theme(app, name: str) -> None:
+    global GENERATION
     palette = THEMES.get(name, THEMES["dark"])
     COLORS.update(palette)
+    GENERATION += 1
     app.setStyleSheet(build_qss(COLORS))

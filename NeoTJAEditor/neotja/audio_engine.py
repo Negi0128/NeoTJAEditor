@@ -503,6 +503,95 @@ def ensure_ka_wav() -> str:
     return _write_mono_wav(path, sig * 0.8, sr)
 
 
+def find_taikojiro_sounds(max_dirs: int = 40000):
+    """Look for a local 太鼓さん次郎 install and return its (dong, ka) wav
+    paths, or None if we can't find one.
+
+    We point at the user's own copy rather than shipping the files: 太鼓さん
+    次郎's readme grants no redistribution right for them ("著作者の許可なく
+    データの配布・転載をする際は自己責任"), and its don/ka may carry upstream
+    rights besides. Nearly everyone writing TJA charts already has it
+    installed, so detecting it gets the same result as bundling would, without
+    us redistributing anything.
+
+    The search is breadth-first and bounded (depth + visited-directory cap) -
+    an unbounded walk of a real drive takes minutes, and this runs at startup.
+    """
+    home = os.path.expanduser("~")
+    # (root, max_depth). User folders are where this actually lives, so they
+    # get the deep budget; drive roots stay shallow to keep the walk cheap.
+    roots = []
+    for sub in ("Desktop", "Documents", "Downloads", "Games",
+                os.path.join("OneDrive", "Desktop"),
+                os.path.join("OneDrive", "ドキュメント")):
+        p = os.path.join(home, sub)
+        if os.path.isdir(p):
+            roots.append((p, 5))
+    for letter in "CDEFGH":
+        p = letter + ":\\"
+        if os.path.isdir(p):
+            roots.append((p, 3))
+
+    # Big, deep, and never the install location - pruning these is most of
+    # what keeps the drive-root pass affordable.
+    skip = {"windows", "$recycle.bin", "system volume information",
+            "appdata", "node_modules", ".git", "program files",
+            "program files (x86)", "programdata"}
+
+    seen_dirs = set()
+    visited = 0
+    for root, max_depth in roots:
+        queue = [(root, 0)]
+        while queue:
+            cur, depth = queue.pop(0)
+            real = os.path.normcase(os.path.realpath(cur))
+            if real in seen_dirs:
+                continue
+            seen_dirs.add(real)
+            visited += 1
+            if visited > max_dirs:
+                return None
+            try:
+                entries = list(os.scandir(cur))
+            except (PermissionError, OSError):
+                continue
+            for e in entries:
+                try:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                name = e.name
+                low = name.lower()
+                if low in skip or low.startswith("$"):
+                    continue
+                # A 太鼓さん次郎 folder is only a match if it actually has the
+                # sounds - the app is often unpacked next to unrelated dirs.
+                if "taikojiro" in low or "太鼓さん次郎" in name:
+                    don = os.path.join(e.path, "snd", "dong.wav")
+                    ka = os.path.join(e.path, "snd", "ka.wav")
+                    if os.path.exists(don) and os.path.exists(ka):
+                        return don, ka
+                if depth + 1 <= max_depth:
+                    queue.append((e.path, depth + 1))
+    return None
+
+
+class TaikojiroScanWorker(QThread):
+    """Runs find_taikojiro_sounds() off the GUI thread - the bounded walk is
+    still up to a couple of seconds, which is too long to block startup."""
+
+    found = Signal(str, str)
+
+    def run(self):
+        try:
+            hit = find_taikojiro_sounds()
+        except Exception:
+            return
+        if hit:
+            self.found.emit(hit[0], hit[1])
+
+
 class HitSoundEngine(QObject):
     """Plays a don/ka hit sound exactly when a note crosses the judgment line
     during game-preview playback - same bisect + jitter-tolerance pattern as
@@ -556,6 +645,11 @@ class HitSoundEngine(QObject):
         self._note_is_don = []  # parallel bool list
         self._last_idx = None
         self._last_audio_time = None
+        # Kept so the schedule can be rebuilt when the playback rate changes
+        # (the compensation baked into _note_times depends on it).
+        self._raw_notes = []
+        self._offset = 0.0
+        self._playback_rate = 1.0
 
         self.sound_don = QSoundEffect(self)
         self.sound_ka = QSoundEffect(self)
@@ -581,9 +675,32 @@ class HitSoundEngine(QObject):
         "notes" (bpm carried along per-note so the compensation can vary with
         it - see _compensation_for_bpm). OFFSET convention:
         audio_time = chart_time - OFFSET."""
+        self._raw_notes = list(notes or [])
+        self._offset = offset
+        self._rebuild_schedule()
+
+    def set_playback_rate(self, rate: float):
+        """Slowing playback down stretches audio time against the wall clock,
+        so the compensation - which is a real-world output-latency lead - has
+        to be re-expressed in the new units (see _rebuild_schedule)."""
+        rate = max(0.25, min(1.0, rate))
+        if rate == self._playback_rate:
+            return
+        self._playback_rate = rate
+        self._rebuild_schedule()
+
+    def _rebuild_schedule(self):
+        # The compensation is scaled by the playback rate because it stands
+        # for a fixed *wall-clock* lead (the delay between play() and the
+        # sound reaching the speakers), while _note_times is in audio-time
+        # seconds. At rate r, one audio-second lasts 1/r wall-seconds, so a
+        # lead of L wall-seconds is L*r audio-seconds. Without this, playing
+        # at 0.5x left the hit sounds leading the notes by twice as much as
+        # they should.
+        r = self._playback_rate
         pairs = sorted(
-            (t - offset + self._compensation_for_bpm(bpm), c in "13")
-            for t, c, bpm in (notes or [])
+            (t - self._offset + self._compensation_for_bpm(bpm) * r, c in "13")
+            for t, c, bpm in self._raw_notes
         )
         self._note_times = [p[0] for p in pairs]
         self._note_is_don = [p[1] for p in pairs]
@@ -652,6 +769,10 @@ class MetronomeEngine(QObject):
         self.enabled = False
         self._click_times = []  # audio-time seconds, sorted, offset+latency already applied
         self._last_click_idx = None
+        # Kept so the schedule can be rebuilt when the playback rate changes.
+        self._raw_clicks = []
+        self._offset = 0.0
+        self._playback_rate = 1.0
 
         self.sound = QSoundEffect(self)
         self.sound.setSource(QUrl.fromLocalFile(ensure_click_wav()))
@@ -662,8 +783,23 @@ class MetronomeEngine(QObject):
         from measure-0 start, as returned by build_metronome_clicks. OFFSET
         convention: chart_time = audio_time + OFFSET, so
         audio_time = chart_time - OFFSET."""
+        self._raw_clicks = list(chart_clicks or [])
+        self._offset = offset
+        self._rebuild_schedule()
+
+    def set_playback_rate(self, rate: float):
+        rate = max(0.25, min(1.0, rate))
+        if rate == self._playback_rate:
+            return
+        self._playback_rate = rate
+        self._rebuild_schedule()
+
+    def _rebuild_schedule(self):
+        # Scaled by the playback rate for the same reason as HitSoundEngine's
+        # compensation - see _rebuild_schedule there.
         self._click_times = sorted(
-            t - offset + self.LATENCY_COMPENSATION_SEC for t, _is_measure in (chart_clicks or [])
+            t - self._offset + self.LATENCY_COMPENSATION_SEC * self._playback_rate
+            for t, _is_measure in self._raw_clicks
         )
         self._last_click_idx = None
 

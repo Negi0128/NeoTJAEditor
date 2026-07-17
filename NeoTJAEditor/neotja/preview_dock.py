@@ -31,6 +31,8 @@ class ChartInfoBar(QWidget):
                  seek_prev_cb=None, seek_next_cb=None, cycle_course_cb=None, cycle_branch_cb=None):
         super().__init__(parent)
         self.setFixedHeight(300)
+        # (frame, header, value, color_key) per card, for refresh_theme().
+        self._cards = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
@@ -89,47 +91,64 @@ class ChartInfoBar(QWidget):
         # time in neutral white, and note-count/men/fuchi in neutral/don-red/
         # ka-blue respectively (don=men, ka=fuchi - the same red/blue used
         # for don/ka notes in the lane itself).
-        self.card_bpm, self.lbl_bpm = self._make_card("BPM", COLORS["ok"])
-        self.card_scroll, self.lbl_scroll = self._make_card("SCROLL", COLORS["ok"])
-        self.card_measure, self.lbl_measure = self._make_card("MEASURE", COLORS["ok"])
+        self.card_bpm, self.lbl_bpm = self._make_card("BPM", "ok")
+        self.card_scroll, self.lbl_scroll = self._make_card("SCROLL", "ok")
+        self.card_measure, self.lbl_measure = self._make_card("MEASURE", "ok")
         layout.addLayout(self._row(self.card_bpm, self.card_scroll, self.card_measure))
 
-        self.card_roll, self.lbl_roll = self._make_card("連打(風船個数)", COLORS["roll"])
-        self.card_roll_est, self.lbl_roll_est = self._make_card("推定連打数(風船打数)", COLORS["roll"])
-        self.card_time, self.lbl_time = self._make_card("総時間", COLORS["fg_bright"])
+        self.card_roll, self.lbl_roll = self._make_card("連打(風船個数)", "roll")
+        self.card_roll_est, self.lbl_roll_est = self._make_card("推定連打数(風船打数)", "roll")
+        self.card_time, self.lbl_time = self._make_card("総時間", "fg_bright")
         layout.addLayout(self._row(self.card_roll, self.card_roll_est, self.card_time))
 
-        self.card_notes, self.lbl_notes = self._make_card("ノーツ数", COLORS["fg_bright"])
-        self.card_men, self.lbl_men = self._make_card("面", COLORS["don"])
-        self.card_fuchi, self.lbl_fuchi = self._make_card("縁", COLORS["ka"])
+        self.card_notes, self.lbl_notes = self._make_card("ノーツ数", "fg_bright")
+        self.card_men, self.lbl_men = self._make_card("面", "don")
+        self.card_fuchi, self.lbl_fuchi = self._make_card("縁", "ka")
         layout.addLayout(self._row(self.card_notes, self.card_men, self.card_fuchi))
         layout.addStretch()
 
-    @staticmethod
-    def _make_card(label_text: str, color: str = None):
-        border_color = color or COLORS["border"]
-        value_color = color or COLORS["fg_bright"]
+    def _make_card(self, label_text: str, color_key: str = None):
+        """`color_key` is a COLORS *key*, not a resolved value: the palette is
+        mutated in place on theme change, so keeping the key is what lets
+        refresh_theme() re-resolve it."""
         frame = QFrame()
-        frame.setStyleSheet(
-            f"QFrame {{ background-color: {COLORS['surface']}; border: 1px solid {border_color};"
-            f" border-radius: 6px; }}"
-        )
         v = QVBoxLayout(frame)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(2)
         lbl_header = QLabel(label_text)
         lbl_header.setAlignment(Qt.AlignCenter)
-        lbl_header.setStyleSheet(f"color: {COLORS['fg_dim']}; font-size: 10px; border: none;")
         lbl_value = QLabel("-")
         lbl_value.setAlignment(Qt.AlignCenter)
-        lbl_value.setStyleSheet(f"border: none; color: {value_color};")
         value_font = lbl_value.font()
         value_font.setBold(True)
         value_font.setPointSize(18)
         lbl_value.setFont(value_font)
         v.addWidget(lbl_header)
         v.addWidget(lbl_value)
+        self._cards.append((frame, lbl_header, lbl_value, color_key))
+        self._style_card(frame, lbl_header, lbl_value, color_key)
         return frame, lbl_value
+
+    @staticmethod
+    def _style_card(frame, lbl_header, lbl_value, color_key):
+        color = COLORS[color_key] if color_key else None
+        border_color = color or COLORS["border"]
+        value_color = color or COLORS["fg_bright"]
+        frame.setStyleSheet(
+            f"QFrame {{ background-color: {COLORS['surface']}; border: 1px solid {border_color};"
+            f" border-radius: 6px; }}"
+        )
+        lbl_header.setStyleSheet(f"color: {COLORS['fg_dim']}; font-size: 10px; border: none;")
+        lbl_value.setStyleSheet(f"border: none; color: {value_color};")
+
+    def refresh_theme(self):
+        """Re-resolve the colors baked into per-widget stylesheets. The
+        app-level QSS that apply_theme() installs can't reach these - a
+        widget's own stylesheet wins - so without this the cards keep the
+        palette they were built with while the rest of the app restyles."""
+        for frame, lbl_header, lbl_value, color_key in self._cards:
+            self._style_card(frame, lbl_header, lbl_value, color_key)
+        self.lbl_subtitle.setStyleSheet(f"color: {COLORS['fg_dim']};")
 
     @staticmethod
     def _row(*cards):
@@ -221,10 +240,9 @@ class GamePreviewWindow(QWidget):
         layout.setSpacing(0)
         layout.addWidget(chart_preview)
         layout.addWidget(bottom_widget)
-        # bottom_widget は3モードの QStackedWidget。ページごとに高さが違うと
-        # モード切替のたびに窓がガタつくので、呼び出し側でスタックを最も高い
-        # ページ高さに固定済み。その固定高さ(=minimumHeight)を使って窓サイズも
-        # 一定に保つ。
+        # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
+        # モード切替のたびに窓がガタつくので、呼び出し側で最も高いページに合わせて
+        # 固定済み。その固定高さ(=minimumHeight)を使って窓サイズも一定に保つ。
         self.setFixedSize(
             int(ChartPreviewWidget.LANE_WIDTH),
             ChartPreviewWidget.WIDGET_HEIGHT + bottom_widget.minimumHeight(),
@@ -396,13 +414,22 @@ class PreviewDock(QDockWidget):
         self.bottom_stack.addWidget(self.info_bar)      # 0 情報
         self.bottom_stack.addWidget(self._sakufu_page)  # 1 作譜
         self.bottom_stack.addWidget(QWidget())          # 2 非表示(空白)
-        # ページ高さが異なるとモード切替で窓がガタつくので、最も高いページに
-        # スタックの高さを固定する(info_bar は setFixedHeight(300) 済み)。
+
+        # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
+        # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
+        # ページに合わせてスタックの高さを固定する。
         bottom_h = max(self.info_bar.minimumHeight(), self._sakufu_page.sizeHint().height())
         self.bottom_stack.setFixedHeight(bottom_h)
+        self._bottom_panel = QWidget()
+        bp = QVBoxLayout(self._bottom_panel)
+        bp.setContentsMargins(0, 0, 0, 0)
+        bp.setSpacing(0)
+        bp.addWidget(self.bottom_stack)
+        bp.addWidget(self._build_speed_row())
+        self._bottom_panel.setFixedHeight(self._bottom_panel.sizeHint().height())
 
         self.game_preview_window = GamePreviewWindow(
-            self.chart_preview, self.bottom_stack, parent=self, pause_cb=self.audio.pause,
+            self.chart_preview, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
         )
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
@@ -534,7 +561,8 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     def _build_sakufu_page(self) -> QWidget:
         """作譜モードのページ: 波形表示(ドック側 self.waveform と同じ配線の
-        もう1つの WaveformWidget)と再生速度スライダー(0.25〜1.0)。"""
+        もう1つの WaveformWidget)。速度スライダーは全モード共通なので
+        _build_speed_row 側にある。"""
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(10, 8, 10, 8)
@@ -546,9 +574,16 @@ class PreviewDock(QDockWidget):
         self.game_waveform.seekRequested.connect(self._on_seek_requested)
         self.game_waveform.setFixedHeight(150)
         v.addWidget(self.game_waveform)
+        v.addStretch()
+        return page
 
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("再生速度:"))
+    def _build_speed_row(self) -> QWidget:
+        """再生速度スライダー(0.25〜1.0)。作譜モード専用ではなく、下部パネルの
+        どのモードでも常に見えるよう、モードスタックの外に置く。"""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 4, 10, 8)
+        h.addWidget(QLabel("再生速度:"))
         self.speed_slider = QSlider(Qt.Horizontal)
         # 25〜100 の整数レンジ → /100 で 0.25〜1.00 倍。
         self.speed_slider.setRange(25, 100)
@@ -556,12 +591,16 @@ class PreviewDock(QDockWidget):
         # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
         self.speed_slider.setFocusPolicy(Qt.NoFocus)
         self.speed_slider.valueChanged.connect(self._on_speed_slider_changed)
-        speed_row.addWidget(self.speed_slider, 1)
+        h.addWidget(self.speed_slider, 1)
         self.lbl_speed = QLabel("×1.00")
-        speed_row.addWidget(self.lbl_speed)
-        v.addLayout(speed_row)
-        v.addStretch()
-        return page
+        h.addWidget(self.lbl_speed)
+        return row
+
+    def refresh_theme(self):
+        """Called after apply_theme(): repaints the parts that don't restyle
+        themselves from the app-level QSS."""
+        self.info_bar.refresh_theme()
+        self.chart_preview.update()
 
     def cycle_bottom_mode(self):
         """情報(0)→作譜(1)→非表示(2)→情報… と循環。Tab キー(chart_preview)と
@@ -577,6 +616,10 @@ class PreviewDock(QDockWidget):
         self.lbl_speed.setText(f"×{rate:.2f}")
         self.audio.set_playback_rate(rate)
         self.chart_preview.set_playback_rate(rate)
+        # 打音/メトロノームのレイテンシ補正は実時間basisなので、音声時間で
+        # 組まれたスケジュールを新しい倍率で組み直す必要がある。
+        self.hit_sounds.set_playback_rate(rate)
+        self.metronome.set_playback_rate(rate)
 
     def _on_speed_from_key(self, rate: float):
         # chart_preview の [ ] キーから来る目標倍率。スライダー値を動かすと
@@ -757,7 +800,11 @@ class PreviewDock(QDockWidget):
         """Flips the 打音(hit sounds) button; routed through toggled so the
         existing _on_hit_sounds_toggled handler updates enabled state and
         appearance in one place. Used by MainWindow's F1 shortcut."""
-        self.btn_hit_sounds.setChecked(not self.btn_hit_sounds.isChecked())
+        on = not self.btn_hit_sounds.isChecked()
+        self.btn_hit_sounds.setChecked(on)
+        # F1 は再生中でも窓の外からでも効くので、レーンを見たまま結果が分かるよう
+        # プレビュー上に出す(音のない箇所では切り替わったか分からないため)。
+        self.chart_preview.show_toast(f"打音 : {'ON' if on else 'OFF'}")
 
     def set_metronome_clicks(self, clicks):
         self._editor_metronome_clicks = clicks or []

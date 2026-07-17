@@ -18,7 +18,7 @@ from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
 from neotja.ai_chart_gen import build_ai_variant_content
-from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
+from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker, TaikojiroScanWorker
 from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
 from neotja.theme import apply_theme
@@ -281,11 +281,38 @@ class MainWindow(QMainWindow):
         self.preview_dock.set_hit_sound_files(
             self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
         )
+        self._maybe_autodetect_hit_sounds()
         # No close/float/move features: the dock itself always stays docked
         # and visible. Its collapse/expand toggle lives in the status bar
         # (next to the theme switcher), so there's never a state where it
         # vanishes with no obvious way back.
         self.preview_dock.setFeatures(self.preview_dock.DockWidgetFeature(0))
+
+    def _maybe_autodetect_hit_sounds(self):
+        """Point the hit sounds at the user's own 太鼓さん次郎 install if they
+        have one and haven't chosen files themselves.
+
+        The built-in synth is a fallback, not a match for the real thing, and
+        we can't ship 太鼓さん次郎's wavs (no redistribution grant - see
+        find_taikojiro_sounds). Detecting the local copy gets the good sound
+        without redistributing it. A path the user set by hand always wins;
+        a stale one that no longer exists doesn't (it'd silently mean synth).
+        """
+        for key in ("hit_sound_don_path", "hit_sound_ka_path"):
+            p = self.config_data.get(key, "")
+            if p and os.path.exists(p):
+                return
+
+        def on_found(don, ka):
+            self.config_data["hit_sound_don_path"] = don
+            self.config_data["hit_sound_ka_path"] = ka
+            settings_mod.save_settings(self.config_data)
+            self.preview_dock.set_hit_sound_files(don, ka)
+            self.statusBar().showMessage("太鼓さん次郎の打音を検出して設定しました", 5000)
+
+        self._taikojiro_scan = TaikojiroScanWorker(self)
+        self._taikojiro_scan.found.connect(on_found)
+        self._taikojiro_scan.start()
 
     def _save_preview_volume(self, volume: float):
         self.config_data["preview_volume"] = volume
@@ -959,6 +986,7 @@ class MainWindow(QMainWindow):
         self.highlighter.rehighlight()
         self.editor.gutter.update()
         self.ruler.update()
+        self.preview_dock.refresh_theme()
 
     def _show_about(self):
         QMessageBox.information(self, "バージョン情報", f"{APP_NAME}\nVersion: {VERSION}\n\nRedesigned & Optimized Edition (PySide6)")
@@ -1157,6 +1185,7 @@ class MainWindow(QMainWindow):
             self.preview_dock.set_hit_sound_files(
                 self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
             )
+            self.preview_dock.refresh_theme()
             self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
             self.btn_auto_save.blockSignals(True)
             self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))
