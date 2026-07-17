@@ -117,25 +117,77 @@ class UpdateDownloadWorker(QThread):
             self.failed.emit(str(e))
 
 
+ERROR_MARKER_PATH = os.path.join(tempfile.gettempdir(), "neotja_update_error.txt")
+
+
+def pop_update_error():
+    """Return the failure info left behind by a previous update attempt (and
+    clear it), or None. The batch that applies the update runs after this
+    process is gone, so a failure there can only be reported on the next
+    launch."""
+    try:
+        if not os.path.exists(ERROR_MARKER_PATH):
+            return None
+        with open(ERROR_MARKER_PATH, "r", encoding="utf-8", errors="replace") as f:
+            info = f.read().strip()
+        os.remove(ERROR_MARKER_PATH)
+        return info or "(詳細不明)"
+    except OSError:
+        return None
+
+
 def apply_update(new_exe_path: str):
     """Self-replace pattern for a single-file PyInstaller exe: it can't
     overwrite itself while running, so a tiny batch script waits for this
     process to exit, copies the new exe over it, then relaunches it. Only
-    meaningful when frozen; callers should check sys.frozen first."""
+    meaningful when frozen; callers should check sys.frozen first.
+
+    The copy is the fragile step - the exe can be locked (antivirus scanning
+    the freshly downloaded file, a handle not yet released after exit) or sit
+    somewhere unwritable (Program Files). It used to be fired once with its
+    output discarded and its exit code ignored, so a failure silently relaunched
+    the OLD exe and deleted the download: the update simply never happened and
+    said nothing. Now it retries, and on give-up it keeps the download and
+    leaves a marker that the relaunched app reports via pop_update_error()."""
     current_exe = sys.executable
     bat_path = os.path.join(tempfile.gettempdir(), "neotja_update.bat")
+    marker = ERROR_MARKER_PATH
     bat_contents = (
         "@echo off\r\n"
         ":wait\r\n"
         f'tasklist /FI "PID eq {os.getpid()}" | find "{os.getpid()}" >nul\r\n'
         "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >nul\r\n"
+        "  timeout /t 1 /nobreak >nul 2>&1\r\n"
         "  goto wait\r\n"
         ")\r\n"
-        f'copy /y "{new_exe_path}" "{current_exe}" >nul\r\n'
+        # The handle on the exe can linger a moment past process exit, and AV
+        # tends to hold the new file briefly - so don't give up on one attempt.
+        "set NEOTJA_TRIES=0\r\n"
+        ":copyloop\r\n"
+        "set /a NEOTJA_TRIES+=1\r\n"
+        f'copy /y "{new_exe_path}" "{current_exe}" >nul 2>&1\r\n'
+        "if not errorlevel 1 goto copyok\r\n"
+        "if %NEOTJA_TRIES% GEQ 10 goto copyfail\r\n"
+        "timeout /t 1 /nobreak >nul 2>&1\r\n"
+        "goto copyloop\r\n"
+        "\r\n"
+        ":copyok\r\n"
+        f'del "{new_exe_path}" >nul 2>&1\r\n'
+        f'del "{marker}" >nul 2>&1\r\n'
         f'start "" "{current_exe}"\r\n'
-        f'del "{new_exe_path}"\r\n'
         'del "%~f0"\r\n'
+        "exit /b\r\n"
+        "\r\n"
+        # ASCII-only marker: the batch's codepage is unpredictable, so let the
+        # app do the Japanese wording. The download is deliberately kept so the
+        # user can apply it by hand.
+        ":copyfail\r\n"
+        f'echo copy_failed>"{marker}"\r\n'
+        f'echo update_exe={new_exe_path}>>"{marker}"\r\n'
+        f'echo target_exe={current_exe}>>"{marker}"\r\n'
+        f'start "" "{current_exe}"\r\n'
+        'del "%~f0"\r\n'
+        "exit /b\r\n"
     )
     with open(bat_path, "w", encoding="cp932") as f:
         f.write(bat_contents)

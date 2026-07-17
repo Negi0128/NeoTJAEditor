@@ -132,6 +132,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         self.resize(1280, 820)
 
+        # Set once the update batch has been armed and the exit is already
+        # agreed to, so closeEvent doesn't re-ask and veto the shutdown the
+        # updater is waiting on (see _run_update_download).
+        self._updating = False
+
         self._build_editor()
         self._build_toolbars()
         self._build_sidebar()
@@ -147,6 +152,10 @@ class MainWindow(QMainWindow):
         self.editor.checkpointsChanged.connect(self._update_status)
 
         self.new_file(confirm=False)
+
+        # A failed update can only be reported now: the batch that applies it
+        # runs after the previous process is gone.
+        QTimer.singleShot(300, self._report_failed_update)
 
         if self.config_data.get("check_updates_on_startup", True):
             QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
@@ -798,7 +807,9 @@ class MainWindow(QMainWindow):
             subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
 
     def closeEvent(self, event):
-        if self._unsaved_check():
+        # _updating means the unsaved check already ran and the updater batch is
+        # armed and waiting on this process to exit - vetoing here would hang it.
+        if self._updating or self._unsaved_check():
             event.accept()
         else:
             event.ignore()
@@ -955,6 +966,41 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Auto-update
     # ------------------------------------------------------------------
+    def _report_failed_update(self):
+        """Tell the user when the previous run's update didn't actually get
+        applied. Without this the app just relaunched on the old version with
+        no explanation, which read as "the updater does nothing"."""
+        from neotja.updater import pop_update_error
+
+        info = pop_update_error()
+        if not info:
+            return
+        update_exe = ""
+        for line in info.splitlines():
+            if line.startswith("update_exe="):
+                update_exe = line.split("=", 1)[1].strip()
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("更新に失敗しました")
+        box.setText(
+            f"更新ファイルの適用に失敗したため、v{VERSION} のままです。\n\n"
+            "NeoTJAEditor.exe を上書きできませんでした。\n"
+            "以下が原因として考えられます:\n"
+            "・ウイルス対策ソフトが更新ファイルをブロックしている\n"
+            "・exeが Program Files など書き込み権限のない場所にある\n\n"
+            "ダウンロード済みの更新ファイルは残してあるので、"
+            "手動で上書きすれば更新できます。"
+        )
+        box.setDetailedText(info)
+        if update_exe and os.path.exists(update_exe):
+            box.addButton("更新ファイルの場所を開く", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked and clicked.text().startswith("更新ファイル"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(update_exe)])
+
     def check_for_updates(self, manual=False):
         from neotja.updater import UpdateCheckWorker
 
@@ -1006,6 +1052,19 @@ class MainWindow(QMainWindow):
 
         def on_ok(path):
             progress.close()
+            # Settle the unsaved-changes question BEFORE arming the batch:
+            # apply_update() starts a script that busy-waits for this PID to
+            # exit. If closeEvent then vetoed the exit (Cancel is the default
+            # button in _unsaved_check), that script would spin forever and
+            # later overwrite+relaunch the app the next time it was closed -
+            # which looked exactly like "the update silently does nothing".
+            if not self._unsaved_check():
+                QMessageBox.information(
+                    self, "更新",
+                    "更新を中止しました。\n次回起動時に再度お知らせします。",
+                )
+                return
+            self._updating = True
             apply_update(path)
             self.close()
 

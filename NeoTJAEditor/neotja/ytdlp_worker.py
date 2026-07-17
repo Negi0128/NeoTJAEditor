@@ -3,6 +3,25 @@ import os
 from PySide6.QtCore import QThread, Signal
 
 
+def _strip_pyinstaller_env():
+    """Remove PyInstaller's onefile bootloader environment variables from the
+    current process environment so any child process we (or yt-dlp) spawn does
+    NOT inherit them.
+
+    In a onefile build the app is unpacked into a temp dir named ``_MEIxxxxxx``.
+    The bootloader passes markers like ``_MEIPASS2`` / ``_PYI_ARCHIVE_FILE`` /
+    ``_PYI_APPLICATION_HOME_DIR`` to children via the environment. If a child
+    that is itself a PyInstaller onefile exe inherits these, it latches onto the
+    parent's ``_MEI`` dir and, on exit, tries to delete it — producing the
+    "Failed to remove temporary directory: ..._MEIxxxxxx" warning box the user
+    sees during a YouTube download. These markers are only read by the
+    bootloader at startup, so clearing them now is safe and is the practice
+    PyInstaller documents for launching external programs."""
+    for key in list(os.environ):
+        if key == "_MEIPASS2" or key.startswith("_PYI_"):
+            os.environ.pop(key, None)
+
+
 class DownloadCancelled(Exception):
     pass
 
@@ -13,6 +32,7 @@ class YtDlpDownloadWorker(QThread):
     dialog stays responsive while it runs."""
 
     progress = Signal(str)                    # status text
+    progress_pct = Signal(float)              # 0-100, or -1 when indeterminate
     finished_ok = Signal(str, str, str, str)  # ogg_path, video_title, uploader, thumbnail_url
     failed = Signal(str)
 
@@ -34,6 +54,8 @@ class YtDlpDownloadWorker(QThread):
     PLAYER_CLIENTS = [None, "android", "tv", "ios"]
 
     def run(self):
+        _strip_pyinstaller_env()
+
         import imageio_ffmpeg
         import yt_dlp
 
@@ -68,10 +90,26 @@ class YtDlpDownloadWorker(QThread):
         def hook(d):
             if self._cancelled:
                 raise DownloadCancelled("cancelled")
-            if d.get('status') == 'downloading':
-                pct = (d.get('_percent_str') or '').strip()
-                self.progress.emit(f"ダウンロード中... {pct}")
-            elif d.get('status') == 'finished':
+            status = d.get('status')
+            if status == 'downloading':
+                downloaded = d.get('downloaded_bytes') or 0
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                pct_val = -1.0
+                if total > 0:
+                    pct_val = max(0.0, min(100.0, downloaded * 100.0 / total))
+                    pct_text = f"{pct_val:.1f}%"
+                else:
+                    pct_text = (d.get('_percent_str') or '').strip()
+                    try:
+                        pct_val = float(pct_text.rstrip('%'))
+                    except (ValueError, AttributeError):
+                        pct_val = -1.0
+                self.progress_pct.emit(pct_val)
+                self.progress.emit(f"ダウンロード中... {pct_text}".rstrip())
+            elif status == 'finished':
+                # Download done; ffmpeg is now converting to OGG. There is no
+                # reliable percentage for this phase, so switch to indeterminate.
+                self.progress_pct.emit(-1.0)
                 self.progress.emit("音声をOGGに変換中...")
 
         ydl_opts = {
@@ -88,6 +126,10 @@ class YtDlpDownloadWorker(QThread):
             'quiet': True,
             'no_warnings': True,
             'windowsfilenames': True,
+            # Bound network stalls so a dead connection raises instead of
+            # hanging forever (which would otherwise only be caught by the
+            # dialog's much slower stall watchdog).
+            'socket_timeout': 30,
         }
         if player_client:
             ydl_opts['extractor_args'] = {'youtube': {'player_client': [player_client]}}

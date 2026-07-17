@@ -1,10 +1,11 @@
 import os
+import time
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja.audio_engine import BpmOffsetDetectWorker
@@ -12,6 +13,31 @@ from neotja.theme import COLORS
 from neotja.ytdlp_worker import ThumbnailFetchWorker, YtDlpDownloadWorker
 
 THUMB_W, THUMB_H = 200, 113
+
+# If the download makes no progress at all for this long we treat it as stuck
+# and surface an error instead of leaving the user staring at a frozen bar.
+# Generous enough to cover slow metadata extraction and OGG conversion, which
+# legitimately report no updates for a while.
+STALL_TIMEOUT_SEC = 90
+
+# Process-level holding pen for worker threads that are still running when the
+# dialog is closed. Keeping a reference here lets them wind down on their own
+# instead of being garbage collected mid-run (which crashes with
+# "QThread: Destroyed while thread is still running").
+_LINGERING_WORKERS = []
+
+
+def _detach_worker(worker):
+    """Detach a possibly-running worker from the dialog so it can outlive it.
+    Finished (or None) workers need nothing."""
+    if worker is None or not worker.isRunning():
+        return
+    if hasattr(worker, "cancel"):
+        worker.cancel()
+    worker.setParent(None)
+    _LINGERING_WORKERS.append(worker)
+    worker.finished.connect(lambda: _LINGERING_WORKERS.remove(worker)
+                            if worker in _LINGERING_WORKERS else None)
 
 
 class NewProjectDialog(QDialog):
@@ -38,6 +64,18 @@ class NewProjectDialog(QDialog):
         self._worker = None
         self._thumb_worker = None
         self._detect_worker = None
+        self._last_activity = 0.0
+        self._download_done = False
+        # Workers kept alive after they've been superseded/cancelled but haven't
+        # finished their thread yet, so a still-running QThread is never garbage
+        # collected out from under itself ("QThread: Destroyed while running").
+        self._retired_workers = []
+
+        # Watchdog that trips if a running download goes silent for too long
+        # (see STALL_TIMEOUT_SEC). Only active while a download is in flight.
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(1000)
+        self._watchdog.timeout.connect(self._check_stall)
 
         layout = QVBoxLayout(self)
 
@@ -114,6 +152,19 @@ class NewProjectDialog(QDialog):
         self.btn_download = QPushButton("ダウンロード開始")
         self.btn_download.clicked.connect(self._start_download)
         v.addWidget(self.btn_download)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet(
+            f"QProgressBar {{ border: 1px solid {COLORS['border']}; border-radius: 5px; "
+            f"background-color: {COLORS['surface']}; height: 18px; text-align: center; "
+            f"color: {COLORS['fg_bright']}; }} "
+            f"QProgressBar::chunk {{ background-color: {COLORS['accent']}; border-radius: 4px; }}"
+        )
+        v.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
         self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -225,6 +276,7 @@ class NewProjectDialog(QDialog):
                 return
 
         self.result_wave_path = None
+        self._download_done = False
         self.btn_download.setText("中止")
         self.btn_download.clicked.disconnect()
         self.btn_download.clicked.connect(self._cancel_download)
@@ -232,8 +284,16 @@ class NewProjectDialog(QDialog):
         self.ed_folder.setEnabled(False)
         self.status_label.setText("ダウンロードを開始しています...")
 
+        # Start indeterminate ("busy") until yt-dlp reports a real percentage,
+        # so the user can tell work is happening even before numbers arrive.
+        self.progress_bar.setVisible(True)
+        self._set_progress_busy()
+        self._last_activity = time.monotonic()
+        self._watchdog.start()
+
         self._worker = YtDlpDownloadWorker(url, folder)
-        self._worker.progress.connect(self.status_label.setText)
+        self._worker.progress.connect(self._on_progress_text)
+        self._worker.progress_pct.connect(self._on_progress_pct)
         self._worker.finished_ok.connect(self._on_download_ok)
         self._worker.failed.connect(self._on_download_failed)
         self._worker.start()
@@ -243,8 +303,54 @@ class NewProjectDialog(QDialog):
             self._worker.cancel()
             self.status_label.setText("キャンセル中...")
 
-    def _reset_download_ui(self):
+    # ------------------------------------------------------------------
+    # Progress bar + stall watchdog
+    # ------------------------------------------------------------------
+    def _set_progress_busy(self):
+        """Indeterminate/marquee mode (range 0..0) for phases without a %."""
+        self.progress_bar.setRange(0, 0)
+
+    def _on_progress_text(self, text):
+        self._last_activity = time.monotonic()
+        self.status_label.setText(text)
+
+    def _on_progress_pct(self, pct):
+        self._last_activity = time.monotonic()
+        if pct < 0:
+            self._set_progress_busy()
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(int(round(pct)))
+
+    def _check_stall(self):
+        if self._worker is None:
+            self._watchdog.stop()
+            return
+        if time.monotonic() - self._last_activity > STALL_TIMEOUT_SEC:
+            # Stuck: stop the worker and report it the same way as a failure.
+            self._worker.cancel()
+            self._on_download_failed(
+                f"{STALL_TIMEOUT_SEC}秒間応答がありませんでした。"
+                "処理が停止した可能性があります。\n\n"
+                "ネットワーク状況を確認するか、時間を置いて再度お試しください。"
+            )
+
+    def _retire_worker(self):
+        """Drop our active reference to the current worker but keep it alive
+        until its thread actually finishes, so it can't be GC'd mid-run."""
+        w = self._worker
         self._worker = None
+        if w is not None:
+            self._retired_workers.append(w)
+            w.finished.connect(lambda: self._retired_workers.remove(w)
+                               if w in self._retired_workers else None)
+
+    def _reset_download_ui(self):
+        self._watchdog.stop()
+        self._retire_worker()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         self.btn_download.setText("ダウンロード開始")
         self.btn_download.clicked.disconnect()
         self.btn_download.clicked.connect(self._start_download)
@@ -252,6 +358,9 @@ class NewProjectDialog(QDialog):
         self.ed_folder.setEnabled(True)
 
     def _on_download_ok(self, ogg_path, title, uploader, thumbnail_url):
+        if self._download_done:
+            return
+        self._download_done = True
         self._reset_download_ui()
         self.result_wave_path = ogg_path
         self.result_folder = self.ed_folder.text().strip()
@@ -300,8 +409,17 @@ class NewProjectDialog(QDialog):
             )
 
     def _on_download_failed(self, msg):
+        if self._download_done:
+            return
+        self._download_done = True
+        cancelled = msg.strip().startswith("キャンセル")
         self._reset_download_ui()
         self.status_label.setText(f"失敗: {msg}")
+        # A user-initiated cancel isn't an error worth a modal; anything else
+        # (network failure, bot-detection, stall) gets an explicit dialog so it
+        # can't be missed.
+        if not cancelled:
+            QMessageBox.critical(self, "ダウンロードエラー", msg)
 
     def _on_detect_ok(self, bpm, offset):
         self.result_bpm = bpm
@@ -338,6 +456,35 @@ class NewProjectDialog(QDialog):
         self.accept()
 
     def _on_cancel_clicked(self):
-        if self._worker is not None:
-            self._worker.cancel()
         self.reject()
+
+    # ------------------------------------------------------------------
+    # Teardown - make sure no worker thread outlives (or is destroyed by) the
+    # dialog while still running.
+    # ------------------------------------------------------------------
+    def _shutdown_workers(self):
+        self._watchdog.stop()
+        for w in [self._worker, self._thumb_worker, self._detect_worker,
+                  *self._retired_workers]:
+            _detach_worker(w)
+        self._worker = None
+        self._thumb_worker = None
+        self._detect_worker = None
+        self._retired_workers.clear()
+
+    def accept(self):
+        # The download worker is already retired by the time OK is reachable;
+        # the thumbnail/detect workers may still be in flight and must not be
+        # destroyed with the dialog while running.
+        self._watchdog.stop()
+        _detach_worker(self._thumb_worker)
+        _detach_worker(self._detect_worker)
+        super().accept()
+
+    def reject(self):
+        self._shutdown_workers()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._shutdown_workers()
+        super().closeEvent(event)
