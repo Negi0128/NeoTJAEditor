@@ -6,7 +6,8 @@ _SETTINGS_KEYS = (
     "run_config", "custom_shortcuts", "theme", "font_family", "font_size",
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
-    "hit_sound_don_path", "hit_sound_ka_path",
+    "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
+    "waveform_stereo",
 )
 
 
@@ -31,6 +32,14 @@ def default_settings() -> dict:
         "auto_save_enabled": False,
         "hit_sound_don_path": "",
         "hit_sound_ka_path": "",
+        # 効果音(打音/メトロノーム共通)の音量。ミキサー経路の SE 音量スライダー。
+        "sfx_volume": 0.9,
+        # 再生バックエンド: "mixer"(既定, sounddevice の単一ミキサー)/"qt"(旧
+        # QMediaPlayer+QSoundEffect 三点セットを強制)。切替 UI は無く settings.json
+        # のみ。"mixer" でもストリームが開けなければ自動的に "qt" 相当へ退避する。
+        "audio_backend": "mixer",
+        # 波形表示: True = L/R を上下2段で個別表示、False = 合成(モノラル)1段。
+        "waveform_stereo": True,
     }
 
 

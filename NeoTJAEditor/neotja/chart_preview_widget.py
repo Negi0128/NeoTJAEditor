@@ -397,7 +397,7 @@ class ChartPreviewWidget(QWidget):
         super().keyPressEvent(event)
 
     def _adjust_speed(self, delta: float):
-        rate = round(max(0.25, min(1.0, self._playback_rate + delta)), 2)
+        rate = round(max(0.25, min(2.0, self._playback_rate + delta)), 2)
         if self._set_speed_cb:
             self._set_speed_cb(rate)
         else:
@@ -405,8 +405,8 @@ class ChartPreviewWidget(QWidget):
             self.set_playback_rate(rate)
 
     def set_playback_rate(self, rate: float):
-        """再生速度倍率(0.25〜1.0)を設定。再生中の時間外挿に使う。"""
-        self._playback_rate = max(0.25, min(1.0, rate))
+        """再生速度倍率(0.25〜2.0)を設定。再生中の時間外挿に使う。"""
+        self._playback_rate = max(0.25, min(2.0, rate))
 
     def show_toast(self, text: str, seconds: float = 3.0):
         """レーン左上に text を seconds 秒だけ表示する。"""
@@ -796,19 +796,9 @@ class ChartPreviewWidget(QWidget):
             box_x = max(0, judge_x - box_w)
             painter.drawText(int(box_x), 2, box_w, band_top - 4, Qt.AlignRight | Qt.AlignVCenter, str(live_count))
 
-        # カレント/アンカー readout in the top margin (机能1), upper-left so it
-        # doesn't collide with the roll/balloon count drawn to the right. Nav
-        # index doubles as the measure number: index 0 is the song head
-        # (0小節目), index N the N-th bar line. Also drawn before the lane clip
-        # below, which would otherwise cut off this top-margin text.
-        state_label = {"stopped": "停止", "playing": "再生", "paused": "一時停止"}.get(self._state, "")
-        painter.setPen(self._color("fg_dim"))
-        painter.setFont(self._font(11, True))
-        painter.drawText(
-            self.PANEL_INSET, 2, max(0, judge_x - self.PANEL_INSET - 4), band_top - 4,
-            Qt.AlignLeft | Qt.AlignVCenter,
-            f"現在: {self._current_idx}小節 / アンカー: {self._anchor_idx}小節  [{state_label}]",
-        )
+        # (The カレント/アンカー readout used to live here in the top margin.
+        # Removed by request - the measure counter under the judgment ring and
+        # the highlighted anchor bar line already convey the same thing.)
 
         # Transient toast badge, lane top-left. Drawn as a filled box so it
         # stays legible over whatever notes happen to be scrolling under it,

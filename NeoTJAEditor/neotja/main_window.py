@@ -275,9 +275,14 @@ class MainWindow(QMainWindow):
             course_select_cb=self._on_preview_course_selected,
             game_preview_changed_cb=self._on_game_preview_visibility_changed,
             branch_select_cb=self._on_preview_branch_selected,
+            audio_backend=self.config_data.get("audio_backend", "mixer"),
+            sfx_volume_cb=self._save_sfx_volume,
+            waveform_stereo=self.config_data.get("waveform_stereo", True),
+            waveform_stereo_cb=self._save_waveform_stereo,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
+        self.preview_dock.set_sfx_volume(self.config_data.get("sfx_volume", 0.9))
         self.preview_dock.set_hit_sound_files(
             self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
         )
@@ -316,6 +321,14 @@ class MainWindow(QMainWindow):
 
     def _save_preview_volume(self, volume: float):
         self.config_data["preview_volume"] = volume
+        settings_mod.save_settings(self.config_data)
+
+    def _save_waveform_stereo(self, stereo: bool):
+        self.config_data["waveform_stereo"] = bool(stereo)
+        settings_mod.save_settings(self.config_data)
+
+    def _save_sfx_volume(self, volume: float):
+        self.config_data["sfx_volume"] = volume
         settings_mod.save_settings(self.config_data)
 
     def _on_preview_course_selected(self, course_key):

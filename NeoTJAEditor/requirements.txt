@@ -4,3 +4,4 @@ pyinstaller>=6.21
 numpy>=2.0
 yt-dlp>=2024.1
 imageio-ffmpeg>=0.5
+sounddevice>=0.5

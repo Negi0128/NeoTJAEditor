@@ -11,12 +11,20 @@ from PyInstaller.utils.hooks import collect_submodules
 # copied into the frozen bundle at that same package-relative path.
 _ffmpeg_bin_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 
+# sounddevice loads the PortAudio DLL at import time via a path relative to the
+# _sounddevice_data package. PyInstaller ships no hook for it, so the data dir
+# has to be copied in explicitly or the mixer backend silently falls back to Qt.
+import _sounddevice_data
+_portaudio_dir = os.path.join(os.path.dirname(_sounddevice_data.__file__),
+                              'portaudio-binaries')
+
 a = Analysis(
     ['neotja/__main__.py'],
     pathex=[],
     binaries=[],
     datas=[
         (_ffmpeg_bin_dir, 'imageio_ffmpeg/binaries'),
+        (_portaudio_dir, '_sounddevice_data/portaudio-binaries'),
     ],
     hiddenimports=[
         'PySide6.QtCore',

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, WaveformDecodeWorker
+from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
 from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import ChartPreviewWidget
 from neotja.theme import COLORS
@@ -325,11 +325,16 @@ class PreviewDock(QDockWidget):
 
     def __init__(self, apply_offset_cb, parent=None, seek_cursor_cb=None, volume_cb=None,
                  duration_ready_cb=None, expanded_changed_cb=None, refresh_preview_cb=None,
-                 course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None):
+                 course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None,
+                 audio_backend="mixer", sfx_volume_cb=None,
+                 waveform_stereo=True, waveform_stereo_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
+        self.waveform_stereo_cb = waveform_stereo_cb
+        self._waveform_stereo = bool(waveform_stereo)
         self.seek_cursor_cb = seek_cursor_cb
         self.volume_cb = volume_cb
+        self.sfx_volume_cb = sfx_volume_cb
         self.expanded_changed_cb = expanded_changed_cb
         self.duration_ready_cb = duration_ready_cb
         self.refresh_preview_cb = refresh_preview_cb
@@ -337,26 +342,46 @@ class PreviewDock(QDockWidget):
         self.branch_select_cb = branch_select_cb
         self.game_preview_changed_cb = game_preview_changed_cb
 
-        self.audio = AudioEngine(self)
+        # 再生バックエンドの選択(settings.json の audio_backend、既定 "mixer")。
+        # "mixer": sounddevice の単一ソフトウェアミキサー(曲+打音+メトロノームを
+        # サンプル単位で1つのクロックにミックス、レイテンシ補正不要)。ストリームが
+        # 開けない/モジュールが無い場合はレガシー三点セット(QMediaPlayer +
+        # QSoundEffect×2)へ透過的に退避する。"qt" は最初からレガシー強制。
+        self._mixer_active = False
+        self._backend_notice = ""
+        if audio_backend != "qt":
+            try:
+                from neotja.mixer_engine import MixerAudioEngine
+                self.audio = MixerAudioEngine(self)
+                self.metronome = self.audio.metronome
+                self.hit_sounds = self.audio.hit_sounds
+                self._mixer_active = True
+            except Exception as e:  # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+                self._backend_notice = "ミキサー音声を初期化できなかったため従来方式に切り替えました。"
+                self.audio = None
+        if not self._mixer_active:
+            self.audio = AudioEngine(self)
+            self.metronome = MetronomeEngine(self)
+            # レガシー経路のみ: ChartPreviewWidget の 16ms tick から
+            # hit_sounds.check_and_play() が呼ばれる(下の _build_ui 参照)。
+            self.hit_sounds = HitSoundEngine(self)
+
         self.audio.positionChanged.connect(self._on_position_changed)
         self.audio.durationChanged.connect(self._on_duration_changed)
         self.audio.playingChanged.connect(self._on_playing_changed)
         self.audio.mediaStatusChanged.connect(self._on_media_status_changed)
-
-        self.metronome = MetronomeEngine(self)
+        # ミキサー経路ではメトロノームは内部でサンプル単位に処理されるので、この
+        # 接続はアダプタの no-op に届くだけ(無害)。レガシーでは従来通り駆動する。
         self.audio.positionChanged.connect(self.metronome.on_position_changed)
-
-        # Not wired to audio.positionChanged: that signal fires irregularly
-        # enough that hit-sound timing driven by it feels bursty/uneven.
-        # Instead ChartPreviewWidget calls hit_sounds.check_and_play() from
-        # its own smoothly-interpolated tick (see _build_ui below).
-        self.hit_sounds = HitSoundEngine(self)
 
         self.tapper = BpmTapper()
 
         self._wave_dir = None
         self._current_wave_path = None
         self._decode_worker = None
+        self._waveform_mips = None
         self._editor_bpm = None
         self._editor_offset = 0.0
         self._editor_subtitle = ""
@@ -375,7 +400,7 @@ class PreviewDock(QDockWidget):
         layout.addWidget(self.title_label)
 
         self.waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause)
-        self.waveform.seekRequested.connect(self._on_seek_requested)
+        self._wire_waveform(self.waveform)
         layout.addWidget(self.waveform, 1)
 
         self.chart_preview = ChartPreviewWidget(
@@ -386,7 +411,10 @@ class PreviewDock(QDockWidget):
             # transitions (机能1).
             play_cb=self.audio.play,
             pause_cb=self.audio.pause,
-            hit_sound_engine=self.hit_sounds,
+            # ミキサー経路では打音はサンプル単位で前もってスケジュールされるので、
+            # 16ms tick からの check_and_play は不要。widget には None を渡して
+            # tick を完全に黙らせる(レガシー経路のみ従来通りエンジンを渡す)。
+            hit_sound_engine=None if self._mixer_active else self.hit_sounds,
             branch_select_cb=self.branch_select_cb,
             # フェーズ3: Tab で下部パネルのモード循環、[ ] で再生速度微調整。
             cycle_bottom_mode_cb=self.cycle_bottom_mode,
@@ -485,6 +513,17 @@ class PreviewDock(QDockWidget):
         volume_row.addWidget(self.volume_slider)
         self.lbl_volume = QLabel("")
         volume_row.addWidget(self.lbl_volume)
+        # 効果音(打音/メトロノーム共通)の音量。ミキサー経路のみ実効。レガシーでは
+        # 各 QSoundEffect の音量は固定なので、この値は保存されるだけになる。
+        volume_row.addSpacing(16)
+        volume_row.addWidget(QLabel("SE音量:"))
+        self.sfx_volume_slider = QSlider(Qt.Horizontal)
+        self.sfx_volume_slider.setRange(0, 100)
+        self.sfx_volume_slider.setFixedWidth(120)
+        self.sfx_volume_slider.valueChanged.connect(self._on_sfx_volume_changed)
+        volume_row.addWidget(self.sfx_volume_slider)
+        self.lbl_sfx_volume = QLabel("")
+        volume_row.addWidget(self.lbl_sfx_volume)
         volume_row.addStretch()
         layout.addLayout(volume_row)
 
@@ -530,6 +569,10 @@ class PreviewDock(QDockWidget):
 
         self.setWidget(content)
 
+        # ミキサー初期化に失敗してレガシーへ退避した場合の非ブロッキング通知。
+        if self._backend_notice:
+            self.status_label.setText(self._backend_notice)
+
     def set_game_preview_visible(self, visible: bool):
         if visible:
             # Opening the window parks カレント/アンカー at the song head and
@@ -571,7 +614,7 @@ class PreviewDock(QDockWidget):
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
         self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause)
-        self.game_waveform.seekRequested.connect(self._on_seek_requested)
+        self._wire_waveform(self.game_waveform)
         self.game_waveform.setFixedHeight(150)
         v.addWidget(self.game_waveform)
         v.addStretch()
@@ -585,8 +628,9 @@ class PreviewDock(QDockWidget):
         h.setContentsMargins(10, 4, 10, 8)
         h.addWidget(QLabel("再生速度:"))
         self.speed_slider = QSlider(Qt.Horizontal)
-        # 25〜100 の整数レンジ → /100 で 0.25〜1.00 倍。
-        self.speed_slider.setRange(25, 100)
+        # 25〜200 の整数レンジ → /100 で 0.25〜2.00 倍。ミキサーは read_pos の
+        # 増分が変わるだけでピッチも変化する(作譜モードの仕様)。
+        self.speed_slider.setRange(25, 200)
         self.speed_slider.setValue(100)
         # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
         self.speed_slider.setFocusPolicy(Qt.NoFocus)
@@ -601,6 +645,8 @@ class PreviewDock(QDockWidget):
         themselves from the app-level QSS."""
         self.info_bar.refresh_theme()
         self.chart_preview.update()
+        for wf in self._waveforms():
+            wf.refresh_theme()
 
     def cycle_bottom_mode(self):
         """情報(0)→作譜(1)→非表示(2)→情報… と循環。Tab キー(chart_preview)と
@@ -699,18 +745,27 @@ class PreviewDock(QDockWidget):
         self._start_waveform_decode(wave_path)
 
     def _start_waveform_decode(self, wave_path):
-        worker = WaveformDecodeWorker(wave_path)
+        # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
+        # (波形表示用)を同時に得る。レガシー経路では PCM を無視してピークだけ使う。
+        worker = SongDecodeWorker(wave_path)
         worker.path = wave_path
-        worker.decoded.connect(lambda peaks, dur, p=wave_path: self._on_decoded(p, peaks, dur))
+        worker.decoded.connect(
+            lambda pcm, sr, peaks, dur, mips, p=wave_path: self._on_decoded(p, pcm, sr, peaks, dur, mips))
         worker.failed.connect(lambda msg, p=wave_path: self._on_decode_failed(p, msg))
         self._decode_worker = worker
         worker.start()
 
-    def _on_decoded(self, path, peaks, duration):
+    def _on_decoded(self, path, pcm, sr, peaks, duration, mips):
         if path != self._current_wave_path:
             return
-        self.waveform.set_peaks(peaks, duration)
-        self.game_waveform.set_peaks(peaks, duration)
+        # ミップチェインは1本だけ作って両方の波形で共有する(コピーしない)。
+        self._waveform_mips = mips
+        self.waveform.set_mips(mips)
+        self.game_waveform.set_mips(mips)
+        # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
+        # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
+        if self._mixer_active:
+            self.audio.set_song_pcm(pcm, sr)
         self.status_label.setText("")
 
     def _on_decode_failed(self, path, msg):
@@ -845,6 +900,24 @@ class PreviewDock(QDockWidget):
         if self.volume_cb:
             self.volume_cb(volume)
 
+    def set_sfx_volume(self, volume: float):
+        """効果音音量(0.0-1.0)を保存コールバックを呼ばずに設定(settings.json の
+        sfx_volume 復元用)。ミキサー経路では打音/メトロノームに実効。"""
+        if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
+            self.audio.set_sfx_volume(volume)
+        self.sfx_volume_slider.blockSignals(True)
+        self.sfx_volume_slider.setValue(round(volume * 100))
+        self.sfx_volume_slider.blockSignals(False)
+        self.lbl_sfx_volume.setText(f"{round(volume * 100)}%")
+
+    def _on_sfx_volume_changed(self, value):
+        volume = value / 100.0
+        if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
+            self.audio.set_sfx_volume(volume)
+        self.lbl_sfx_volume.setText(f"{value}%")
+        if self.sfx_volume_cb:
+            self.sfx_volume_cb(volume)
+
     # ------------------------------------------------------------------
     # BPM tap
     # ------------------------------------------------------------------
@@ -855,6 +928,51 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # OFFSET adjust
     # ------------------------------------------------------------------
+    def _wire_waveform(self, wf: WaveformWidget):
+        """ドック側/ゲーム窓側の2つの WaveformWidget を同じ配線にする。
+        ミップチェインは共有、ステレオ表示の切替も両方に伝播し、OFFSET調整
+        モードの確定値は既存の OFFSET スピンボックスへ流す(ヘッダ書き込みの
+        経路を二重に持たないため)。"""
+        wf.seekRequested.connect(self._on_seek_requested)
+        wf.offsetPreview.connect(self._on_waveform_offset_preview)
+        wf.offsetCommitted.connect(self._on_waveform_offset_committed)
+        wf.stereoToggled.connect(self._on_waveform_stereo_toggled)
+        wf.set_stereo_view(self._waveform_stereo)
+        if self._waveform_mips is not None:
+            wf.set_mips(self._waveform_mips)
+
+    def _waveforms(self):
+        return (self.waveform, self.game_waveform)
+
+    def _on_waveform_stereo_toggled(self, stereo: bool):
+        self._waveform_stereo = bool(stereo)
+        for wf in self._waveforms():
+            wf.set_stereo_view(stereo)
+        if self.waveform_stereo_cb:
+            self.waveform_stereo_cb(self._waveform_stereo)
+
+    def set_waveform_stereo(self, stereo: bool):
+        """settings.json の waveform_stereo を復元するための入口(保存コール
+        バックは呼ばない)。"""
+        self._waveform_stereo = bool(stereo)
+        for wf in self._waveforms():
+            wf.set_stereo_view(self._waveform_stereo)
+
+    def _on_waveform_offset_preview(self, value: float):
+        """ドラッグ中の未確定 OFFSET: グリッド表示だけ両方の波形に反映し、
+        TJA ヘッダには書かない(確定は offsetCommitted 側)。"""
+        for wf in self._waveforms():
+            wf.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self.status_label.setText(f"OFFSET調整中: {value:+.3f} 秒")
+
+    def _on_waveform_offset_committed(self, value: float):
+        # 確定はスピンボックス経由。valueChanged → _on_offset_value_changed →
+        # _on_apply_offset → apply_offset_cb と、既存の OFFSET 書き込み経路を
+        # そのまま使う(元に戻す操作もスピンボックスと同等)。
+        value = max(self.spin_offset.minimum(), min(value, self.spin_offset.maximum()))
+        self.spin_offset.setValue(round(value, 3))
+        self.status_label.setText(f"OFFSET を {self.spin_offset.value():+.3f} 秒に設定しました。")
+
     def _on_offset_value_changed(self, value):
         self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
         self.game_waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)

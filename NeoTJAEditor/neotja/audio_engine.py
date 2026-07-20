@@ -10,6 +10,8 @@ import numpy as np
 from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioDecoder, QAudioFormat, QAudioOutput, QMediaPlayer, QSoundEffect
 
+from neotja.waveform_data import WaveformMips
+
 _DTYPE_BY_SAMPLE_FORMAT = {
     QAudioFormat.SampleFormat.UInt8: np.uint8,
     QAudioFormat.SampleFormat.Int16: np.int16,
@@ -37,6 +39,34 @@ def _to_float_mono(raw: bytes, fmt: QAudioFormat) -> np.ndarray:
         floats = samples.astype(np.float32)
 
     return floats.mean(axis=1)
+
+
+def _to_float_stereo(raw: bytes, fmt: QAudioFormat) -> np.ndarray:
+    """Like _to_float_mono but keeps stereo: returns an (frames, 2) float32
+    array. Mono sources are duplicated to both channels; sources with more
+    than 2 channels keep only the first two. Used by SongDecodeWorker to feed
+    the software mixer while the same decode still produces mono peaks for the
+    waveform."""
+    dtype = _DTYPE_BY_SAMPLE_FORMAT.get(fmt.sampleFormat())
+    if dtype is None:
+        return np.zeros((0, 2), dtype=np.float32)
+    samples = np.frombuffer(raw, dtype=dtype)
+    channels = max(1, fmt.channelCount())
+    frame_count = samples.size // channels
+    samples = samples[: frame_count * channels].reshape(frame_count, channels)
+
+    if dtype == np.uint8:
+        floats = (samples.astype(np.float32) - 128.0) / 128.0
+    elif dtype == np.int16:
+        floats = samples.astype(np.float32) / 32768.0
+    elif dtype == np.int32:
+        floats = samples.astype(np.float32) / 2147483648.0
+    else:
+        floats = samples.astype(np.float32)
+
+    if channels == 1:
+        return np.repeat(floats, 2, axis=1)
+    return np.ascontiguousarray(floats[:, :2], dtype=np.float32)
 
 
 def downsample_peaks(mono: np.ndarray, target_columns: int) -> list:
@@ -335,6 +365,83 @@ class WaveformDecodeWorker(QThread):
         duration = mono.size / float(sample_rate[0])
         peaks = downsample_peaks(mono, self.target_columns)
         self.decoded.emit(peaks, duration)
+
+
+class SongDecodeWorker(QThread):
+    """Decodes an audio file ONCE into stereo float32 PCM (for the software
+    mixer) plus a mono peak envelope + duration (for the waveform widget), so
+    the mixer path never adds a second full decode of the song. Same
+    QAudioDecoder pattern as WaveformDecodeWorker; the legacy (Qt) backend
+    simply ignores the PCM and uses only the peaks/duration.
+
+    波形のミップチェイン(WaveformMips)もここで作る: デコード直後の PCM から
+    このスレッド上で組めるので、GUI スレッドを止めずに済み、曲を2度デコードする
+    こともない。ドック側とゲーム窓側の2つの波形は同じオブジェクトを共有する。"""
+
+    # stereo pcm (N,2), sr, peaks, duration, WaveformMips
+    decoded = Signal(object, int, list, float, object)
+    failed = Signal(str)
+
+    def __init__(self, path: str, target_columns: int = 2000, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.target_columns = target_columns
+
+    def run(self):
+        loop = QEventLoop()
+        decoder = QAudioDecoder()
+        decoder.setSource(QUrl.fromLocalFile(self.path))
+
+        chunks = []
+        sample_rate = [44100]
+        error_holder = []
+
+        def on_buffer_ready():
+            buf = decoder.read()
+            fmt = buf.format()
+            sample_rate[0] = fmt.sampleRate() or sample_rate[0]
+            raw = bytes(buf.constData())
+            chunks.append(_to_float_stereo(raw, fmt))
+
+        def on_finished():
+            loop.quit()
+
+        def on_error(_err):
+            error_holder.append(decoder.errorString())
+            loop.quit()
+
+        decoder.bufferReady.connect(on_buffer_ready)
+        decoder.finished.connect(on_finished)
+        decoder.error.connect(on_error)
+        decoder.start()
+        loop.exec()
+
+        # Explicitly release the decoder / underlying file handle (Windows
+        # Media Foundation), same rationale as _decode_audio_file_sync.
+        try:
+            decoder.stop()
+            decoder.bufferReady.disconnect(on_buffer_ready)
+            decoder.finished.disconnect(on_finished)
+            decoder.error.disconnect(on_error)
+            decoder.setSource(QUrl())
+        except RuntimeError:
+            pass
+        del decoder
+
+        if error_holder:
+            self.failed.emit(error_holder[0])
+            return
+        if not chunks:
+            self.failed.emit("音声データを読み取れませんでした。")
+            return
+
+        stereo = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+        sr = int(sample_rate[0])
+        duration = stereo.shape[0] / float(sr)
+        mono = stereo.mean(axis=1)
+        peaks = downsample_peaks(mono, self.target_columns)
+        mips = WaveformMips.build(stereo, sr)
+        self.decoded.emit(stereo, sr, peaks, duration, mips)
 
 
 class AudioEngine(QObject):
