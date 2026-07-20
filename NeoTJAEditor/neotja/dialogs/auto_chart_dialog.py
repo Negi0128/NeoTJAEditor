@@ -8,6 +8,7 @@ from neotja.audio_engine import ChartGenWorker
 from neotja.preview_dock import parse_preview_headers
 from neotja.tja_analyzer import TJACourseAnalyzer
 from neotja.theme import COLORS
+from neotja.worker_util import detach_worker
 
 
 class AutoChartDialog(QDialog):
@@ -111,6 +112,9 @@ class AutoChartDialog(QDialog):
 
         subdivision = self.cb_subdivision.currentData()
         density = self.slider_density.value() / 10.0
+        # 前回の生成がまだ走っている状態で参照を上書きすると、走行中の
+        # QThread が GC されてクラッシュする。走り終わるまで待機所で保持。
+        detach_worker(self._worker)
         self._worker = ChartGenWorker(self.wave_path, self.bpm, self.offset, subdivision=subdivision, density=density)
         self._worker.generated.connect(self._on_generated)
         self._worker.failed.connect(self._on_generate_failed)
@@ -135,3 +139,22 @@ class AutoChartDialog(QDialog):
         course_key = self.cb_course.currentData()
         self.apply_cb(course_key, self._generated_body)
         self.accept()
+
+    # ------------------------------------------------------------------
+    # Teardown - 生成スレッドがダイアログより長生きしても落ちないようにする。
+    # ------------------------------------------------------------------
+    def _shutdown_workers(self):
+        detach_worker(self._worker)
+        self._worker = None
+
+    def accept(self):
+        self._shutdown_workers()
+        super().accept()
+
+    def reject(self):
+        self._shutdown_workers()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._shutdown_workers()
+        super().closeEvent(event)

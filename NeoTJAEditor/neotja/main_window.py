@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
@@ -23,6 +24,33 @@ from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
+
+
+def find_non_cp932_chars(content: str):
+    """TJA は ANSI (cp932) で保存するのが前提だが、絵文字や拡張漢字など
+    cp932 に無い文字はそのままでは書けない。以前は errors="replace" で
+    無言のうちに置換していて原文が壊れていたため、書く前にここで洗い出す。
+
+    戻り値は [(行番号(1始まり), 文字), ...]。すべて cp932 で表せるなら空リスト。
+    まず全体を1回 encode してみて、成功すればそこで打ち切る(圧倒的多数を
+    占める通常のファイルでは C 実装の encode 1回分のコストしかかからない)。"""
+    try:
+        content.encode("cp932")
+        return []
+    except UnicodeEncodeError:
+        pass
+
+    bad = []
+    for line_no, line in enumerate(content.split("\n"), start=1):
+        try:
+            line.encode("cp932")
+        except UnicodeEncodeError:
+            for ch in line:
+                try:
+                    ch.encode("cp932")
+                except UnicodeEncodeError:
+                    bad.append((line_no, ch))
+    return bad
 
 
 class CourseCard(QFrame):
@@ -124,6 +152,13 @@ class MainWindow(QMainWindow):
         self._heavy_timer = QTimer(self)
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
+        # 直近に報告した解析エラーの種類。デバウンスタイマで何度も同じ例外が
+        # 出るため、同じものはステータスバーに出し直さない(トレースも1回だけ)。
+        self._last_heavy_error = None
+        # cp932 で保存できない文字を自動保存が見つけたときの直近の報告内容。
+        # 自動保存は打鍵のたびに走るので、同じ理由でスキップし続ける間は
+        # 警告を出し直さない(モーダルは絶対に出さない)。
+        self._last_autosave_encode_warning = None
 
         self._metronome_timer = QTimer(self)
         self._metronome_timer.setSingleShot(True)
@@ -150,6 +185,7 @@ class MainWindow(QMainWindow):
         self.editor.cursorPositionChanged.connect(self._update_status)
         self.editor.cursorPositionChanged.connect(lambda: self._metronome_timer.start(150))
         self.editor.checkpointsChanged.connect(self._update_status)
+        self.editor.set_note_typed_cb(self._on_note_typed)
 
         self.new_file(confirm=False)
 
@@ -279,6 +315,7 @@ class MainWindow(QMainWindow):
             sfx_volume_cb=self._save_sfx_volume,
             waveform_stereo=self.config_data.get("waveform_stereo", True),
             waveform_stereo_cb=self._save_waveform_stereo,
+            se_text_enabled=self.config_data.get("se_text_enabled", True),
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
@@ -330,6 +367,35 @@ class MainWindow(QMainWindow):
     def _save_sfx_volume(self, volume: float):
         self.config_data["sfx_volume"] = volume
         settings_mod.save_settings(self.config_data)
+
+    # 機能1(ノーツ入力音): エディタでノーツ文字を打鍵した瞬間に対応する
+    # 打音を即座に鳴らす。1/3=ドン、2/4=カツ。5/6(連打開始)・7(風船開始)・
+    # 9(クスダマ開始)はいずれも本アプリの連打/風船/クスダマ判定音が
+    # 「ドンのみ(交互に鳴らさない)」という既存方針(#94)に合わせてドン
+    # ティックを鳴らす。8(連打/風船の終端マーカー)は打音そのものを表さない
+    # ため無音、0(空白)は _NOTE_SOUND_CHARS の時点で除外済み。
+    _NOTE_INPUT_SOUND_KIND = {
+        "1": "don", "3": "don", "2": "ka", "4": "ka",
+        "5": "don", "6": "don", "7": "don", "9": "don",
+    }
+
+    def _on_note_typed(self, char: str, line_no: int):
+        """TJAEditor.set_note_typed_cb から、ノーツ文字が実際に1回キー入力
+        された直後に呼ばれる(貼り付けやプログラムによる挿入では呼ばれない)。
+        設定・コース範囲・F1トグルをすべて満たしたときだけ、現在のバックエンド
+        (ミキサー優先/レガシー QSoundEffect フォールバック)経由で打音を
+        1回だけ鳴らす。スケジュール済み打音や再生位置には一切触れない。"""
+        if not self.config_data.get("note_input_sound", True):
+            return
+        kind = self._NOTE_INPUT_SOUND_KIND.get(char)
+        if kind is None:
+            return
+        content = self.editor.toPlainText()
+        if not self.analyzer.line_in_course_body(content, line_no):
+            return
+        hit_sounds = getattr(self.preview_dock, "hit_sounds", None)
+        if hit_sounds is not None:
+            hit_sounds.play_once(kind)
 
     def _on_preview_course_selected(self, course_key):
         # course_key is None for "follow the editor cursor" (the default
@@ -544,6 +610,24 @@ class MainWindow(QMainWindow):
 
     def _heavy_tasks(self):
         content = self.editor.toPlainText()
+        # 解析/プレビュー更新のどこかで想定外の例外が出ても、自動保存まで
+        # 道連れにしない。以前は解析が一度でも例外を投げると、この後ろにある
+        # _auto_save_tick() へ到達しなくなり「入力しているのに保存されず、
+        # プレビューも止まったまま、エラー表示も無い」という無言の失敗になった。
+        # 握りつぶさず、標準エラーへトレースを出しステータスバーにも表示する。
+        try:
+            self._heavy_analysis(content)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            sig = f"{type(e).__name__}: {e}"
+            if sig != self._last_heavy_error:
+                self._last_heavy_error = sig
+                self.statusBar().showMessage(f"解析中にエラーが発生しました: {sig}", 8000)
+        else:
+            self._last_heavy_error = None
+        self._auto_save_tick()
+
+    def _heavy_analysis(self, content):
         self.courses_info = self.analyzer.parse_courses(content)
         self._refresh_sidebar(content)
         data = compute_highlight_data(content, self.courses_info)
@@ -560,7 +644,6 @@ class MainWindow(QMainWindow):
         )
         course_stats = self._find_course_stats(preview_data.get("course_key"))
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
-        self._auto_save_tick()
 
     def _find_course_stats(self, course_key):
         return next((c for c in self.courses_info if c["key"] == course_key), None)
@@ -637,8 +720,9 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Cancel,
         )
         if ans == QMessageBox.Yes:
-            self.save_file()
-            return True
+            # 保存が中止された(cp932にできない文字がある等)なら、変更を
+            # 捨てる方向へは進めない。
+            return bool(self.save_file())
         return ans == QMessageBox.No
 
     def new_file(self, confirm=True):
@@ -750,6 +834,11 @@ class MainWindow(QMainWindow):
                 # modal QMessageBox the user never asked to dismiss.
                 try:
                     new_path = self._write_ai_variant_file(_content, "Oni", body, _path)
+                except UnicodeEncodeError:
+                    self.status_label.setText(
+                        "AI譜面生成の保存に失敗しました(実験的): "
+                        "ANSI (cp932) で表せない文字が含まれています。")
+                    return
                 except OSError as e:
                     self.status_label.setText(f"AI譜面生成の保存に失敗しました(実験的): {e}")
                     return
@@ -801,24 +890,108 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "情報", "ファイルがまだ保存されていません。")
 
     def save_file(self):
+        """上書き保存。cp932 で表せない文字が含まれる場合は書き込まず、何が
+        問題かを知らせて利用者に判断してもらう。戻り値は「保存できたか」で、
+        _unsaved_check はこれを見て終了/破棄を中止する。"""
         if not self.current_file:
-            self.save_file_as()
-            return
+            return self.save_file_as()
+        content = self.editor.toPlainText()
+
+        bad = find_non_cp932_chars(content)
+        if bad:
+            # 以前はここで errors="replace" のまま書いていたため、絵文字などが
+            # 無言で「?」に置き換わって原文が失われていた。壊れたテキストは
+            # 絶対に書かない。
+            if not self._confirm_non_cp932_save(bad):
+                return False
+            try:
+                with open(self.current_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "保存エラー", str(e))
+                return False
+            self.editor.modified_lines.clear()
+            self.editor.gutter.update()
+            self.statusBar().showMessage(
+                "UTF-8で保存しました。TJAシミュレータによっては読み込めないことがあります。", 8000)
+            return True
+
         try:
-            with open(self.current_file, "w", encoding="cp932", errors="replace") as f:
-                f.write(self.editor.toPlainText())
+            # ここに来た時点で cp932 で完全に表せることを確認済みなので、
+            # errors は strict のままでよい(想定外は握りつぶさず例外にする)。
+            with open(self.current_file, "w", encoding="cp932") as f:
+                f.write(content)
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", str(e))
+            return False
+        return True
+
+    def _confirm_non_cp932_save(self, bad):
+        """cp932 で保存できない文字を一覧で見せ、どうするか尋ねる。
+        既定は「保存しない」(データを壊さない側)。UTF-8 で保存してよいと
+        明示的に選ばれた場合だけ True を返す。"""
+        chars = []
+        for _line_no, ch in bad:
+            if ch not in chars:
+                chars.append(ch)
+        detail_lines = []
+        for ch in chars[:10]:
+            lines = sorted({ln for ln, c in bad if c == ch})
+            shown = ", ".join(str(ln) for ln in lines[:5])
+            if len(lines) > 5:
+                shown += " ほか"
+            detail_lines.append(f"  「{ch}」 (U+{ord(ch):04X})  {shown} 行目")
+        if len(chars) > 10:
+            detail_lines.append(f"  ...ほか {len(chars) - 10} 種類")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("保存できない文字があります")
+        box.setText(
+            "ANSI (cp932) で表せない文字が含まれているため、このまま保存すると"
+            "その文字が失われます。\n\n" + "\n".join(detail_lines) +
+            "\n\nこれらの文字を消すか別の文字に置き換えてから保存し直してください。\n"
+            "UTF-8で保存することもできますが、TJAシミュレータによっては"
+            "読み込めない場合があります。"
+        )
+        btn_cancel = box.addButton("保存しない", QMessageBox.RejectRole)
+        btn_utf8 = box.addButton("UTF-8で保存する", QMessageBox.DestructiveRole)
+        box.setDefaultButton(btn_cancel)
+        box.setEscapeButton(btn_cancel)
+        box.exec()
+        return box.clickedButton() is btn_utf8
 
     def _auto_save_tick(self):
         if not self.config_data.get("auto_save_enabled", False):
             return
         if not self.current_file or not self.editor.modified_lines:
             return
-        self.save_file()
-        self.statusBar().showMessage("自動保存しました", 2000)
+
+        # 自動保存はデバウンスタイマ上(=入力中)に走るので、モーダルは絶対に
+        # 出さない。cp932 で表せない文字があるときは書き込みを見送り、
+        # ステータスバーで知らせるだけにする。同じ理由でスキップし続ける間は
+        # 毎tick出し直さない。
+        bad = find_non_cp932_chars(self.editor.toPlainText())
+        if bad:
+            chars = []
+            for _ln, ch in bad:
+                if ch not in chars:
+                    chars.append(ch)
+            sig = "".join(chars)
+            if sig != self._last_autosave_encode_warning:
+                self._last_autosave_encode_warning = sig
+                shown = " ".join(f"「{c}」" for c in chars[:5])
+                more = f" ほか{len(chars) - 5}種類" if len(chars) > 5 else ""
+                self.statusBar().showMessage(
+                    f"自動保存を見送りました: ANSI (cp932) で保存できない文字があります: {shown}{more}",
+                    10000)
+            return
+        self._last_autosave_encode_warning = None
+
+        if self.save_file():
+            self.statusBar().showMessage("自動保存しました", 2000)
 
     def _on_auto_save_toggled(self, checked):
         self.config_data["auto_save_enabled"] = checked
@@ -833,12 +1006,13 @@ class MainWindow(QMainWindow):
 
     def save_file_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", "", "TJA Files (*.tja);;All Files (*.*)")
-        if path:
-            if not path.lower().endswith(".tja") and "." not in os.path.basename(path):
-                path += ".tja"
-            self.current_file = path
-            self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
-            self.save_file()
+        if not path:
+            return False
+        if not path.lower().endswith(".tja") and "." not in os.path.basename(path):
+            path += ".tja"
+        self.current_file = path
+        self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
+        return self.save_file()
 
     def open_new_window(self):
         if getattr(sys, "frozen", False):
@@ -850,6 +1024,13 @@ class MainWindow(QMainWindow):
         # _updating means the unsaved check already ran and the updater batch is
         # armed and waiting on this process to exit - vetoing here would hang it.
         if self._updating or self._unsaved_check():
+            # 終了が確定したこの時点で音声デバイスを確定的に閉じる。以前は
+            # MixerAudioEngine.close() を誰も呼んでおらず、PortAudio の
+            # ストリームがプロセス終了任せになっていた。
+            try:
+                self.preview_dock.shutdown_audio()
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
             event.accept()
         else:
             event.ignore()
@@ -960,7 +1141,10 @@ class MainWindow(QMainWindow):
         new_content = build_ai_variant_content(content, course_range, generated_body)
         base, ext = os.path.splitext(base_path)
         new_path = f"{base}(AI){ext}"
-        with open(new_path, "w", encoding="cp932", errors="replace") as f:
+        # errors="replace" だと cp932 に無い文字(元ファイルのTITLE等に含まれる
+        # 絵文字など)が無言で「?」に化けるので strict のまま書き、
+        # 呼び出し側に UnicodeEncodeError として伝える。
+        with open(new_path, "w", encoding="cp932") as f:
             f.write(new_content)
         return new_path
 
@@ -979,6 +1163,12 @@ class MainWindow(QMainWindow):
                 return
         try:
             new_path = self._write_ai_variant_file(content, course_key, generated_body, base_path)
+        except UnicodeEncodeError:
+            QMessageBox.critical(
+                self, "保存エラー",
+                "ANSI (cp932) で表せない文字が含まれているため保存できませんでした。\n"
+                "TITLE などに絵文字や特殊な文字が入っていないか確認してください。")
+            return
         except OSError as e:
             QMessageBox.critical(self, "保存エラー", str(e))
             return
@@ -1199,6 +1389,7 @@ class MainWindow(QMainWindow):
                 self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
             )
             self.preview_dock.refresh_theme()
+            self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))
             self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
             self.btn_auto_save.blockSignals(True)
             self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))

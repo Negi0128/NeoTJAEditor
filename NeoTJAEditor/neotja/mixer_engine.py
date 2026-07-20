@@ -25,6 +25,7 @@ read_pos・イベントのカーソル・発音中ボイスなどの可変状態
 
 import bisect
 import os
+import traceback
 import wave
 from collections import deque
 
@@ -100,11 +101,21 @@ def _resample_linear(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     return np.ascontiguousarray(x[i0] * (1.0 - frac) + x[i1] * frac, dtype=np.float32)
 
 
-def _load_sfx(path: str, device_sr: int) -> np.ndarray:
+def _load_sfx_or_none(path: str, device_sr: int):
+    """読めれば device_sr の (M, 2) float32、壊れていて解釈できなければ None。
+    「読めなかった」ことを呼び出し側が区別できるようにするための版
+    (存在しないファイルと同じく合成音へフォールバックさせたい)。"""
     st, sr = _load_wav_stereo(path)
     if st is None:
-        return np.zeros((1, 2), dtype=np.float32)
+        return None
     return _resample_linear(st, sr, device_sr)
+
+
+def _load_sfx(path: str, device_sr: int) -> np.ndarray:
+    pcm = _load_sfx_or_none(path, device_sr)
+    if pcm is None:
+        return np.zeros((1, 2), dtype=np.float32)
+    return pcm
 
 
 # ----------------------------------------------------------------------
@@ -118,7 +129,7 @@ class MixerCore:
 
     def __init__(self, device_sr: int, max_block: int = _MAX_BLOCK):
         self.device_sr = int(device_sr)
-        self._out = np.zeros((max(1, int(max_block)), 2), dtype=np.float32)
+        self._alloc_scratch(max(1, int(max_block)))
 
         # --- 曲 ---
         self.song = None            # (N, 2) float32 or None
@@ -156,6 +167,30 @@ class MixerCore:
         # --- コマンドキュー(GUI -> render)---
         self._cmds = deque()
 
+    # ---- スクラッチバッファ(render 内で確保しないための事前確保)----
+    def _alloc_scratch(self, cap: int):
+        """render() が使う一時配列を最大ブロック長ぶんまとめて確保する。
+        モジュール冒頭の「render 内では大きな配列確保をしない」という約束を
+        守るため、曲の線形補間に必要な作業領域はすべてここに置き、
+        毎ブロック numpy の out= で使い回す。"""
+        self._cap = cap
+        self._out = np.zeros((cap, 2), dtype=np.float32)
+        # 出力フレーム番号 0..cap-1。inc を掛けるだけなので一度作れば不変。
+        self._k = np.arange(cap, dtype=np.float64)
+        self._pos = np.zeros(cap, dtype=np.float64)      # 曲フレーム位置(小数)
+        self._posf = np.zeros(cap, dtype=np.float64)     # floor(pos)
+        self._i0 = np.zeros(cap, dtype=np.int64)         # 補間の左側インデックス
+        self._i1 = np.zeros(cap, dtype=np.int64)         # 同 右側 (= i0 + 1)
+        self._frac64 = np.zeros(cap, dtype=np.float64)   # pos - i0 (倍精度)
+        self._frac = np.zeros((cap, 1), dtype=np.float32)   # 同 単精度・列ベクトル
+        self._inv_frac = np.zeros((cap, 1), dtype=np.float32)  # 1 - frac
+        self._g0 = np.zeros((cap, 2), dtype=np.float32)   # song[i0]
+        self._g1 = np.zeros((cap, 2), dtype=np.float32)   # song[i1]
+
+    def _ensure_capacity(self, frames: int):
+        if frames > self._cap:
+            self._alloc_scratch(int(frames))
+
     # ---- GUI スレッドから呼ぶ(append のみ)----
     def post(self, cmd):
         self._cmds.append(cmd)
@@ -190,6 +225,15 @@ class MixerCore:
                 self.metro_enabled = bool(cmd[1])
             elif op == "sfx":
                 self.bank[cmd[1]] = cmd[2]
+            elif op == "sfx_now":
+                # 機能1(エディタでのノーツ入力音): hit_times/hit_kinds の
+                # スケジュールには一切触れず、ボイスを直接1つ生やすだけ。
+                # 再生中でも停止中でも動作し、スケジュール済み打音や
+                # read_pos には影響しない。F1トグル(hit_enabled)はここでも
+                # 尊重する - コマンドは順序通り処理されるので、直前に届いた
+                # "hit_enabled" コマンドとの整合も保たれる。
+                if self.hit_enabled:
+                    self._spawn(self.bank.get(cmd[1]), 0, False)
             elif op == "song":
                 self.song = cmd[1]
                 self.song_sr = int(cmd[2])
@@ -237,8 +281,7 @@ class MixerCore:
 
     # ---- 出力1ブロック生成 ----
     def render(self, frames: int) -> np.ndarray:
-        if frames > self._out.shape[0]:
-            self._out = np.zeros((frames, 2), dtype=np.float32)
+        self._ensure_capacity(frames)
         out = self._out[:frames]
         out[:] = 0.0
 
@@ -253,15 +296,46 @@ class MixerCore:
             end_pos = self.read_pos + inc * frames
             block_end_time = end_pos / self.song_sr
 
-            k = np.arange(frames, dtype=np.float64)
-            pos = self.read_pos + inc * k
-            i0 = np.floor(pos).astype(np.int64)
-            valid = (i0 >= 0) & (i0 < n - 1)
-            if valid.any():
-                sel = np.nonzero(valid)[0]
-                iv = i0[valid]
-                fv = (pos[valid] - iv).astype(np.float32)[:, None]
-                out[sel] = song[iv] * (1.0 - fv) + song[iv + 1] * fv
+            # 以下、事前確保したスクラッチだけを out= で使い回す(新規確保なし)。
+            # 計算そのものは
+            #     pos = read_pos + inc*k ; i0 = floor(pos) ; f = pos - i0
+            #     out = song[i0]*(1-f) + song[i0+1]*f
+            # と、演算の順序も型も従来のベクトル式と1対1で同じ。
+            #
+            # inc は必ず正(rate は 0.25..2.0 にクランプ済み、song_sr>0)で
+            # read_pos >= 0 なので pos は単調増加かつ非負。よって従来の
+            # valid = (i0 >= 0) & (i0 < n-1) は必ず先頭からの連続区間になり、
+            # その長さは searchsorted 一発で求まる。
+            k = self._k[:frames]
+            pos = self._pos[:frames]
+            np.multiply(k, inc, out=pos)
+            np.add(pos, self.read_pos, out=pos)
+
+            posf = self._posf[:frames]
+            np.floor(pos, out=posf)
+            i0 = self._i0[:frames]
+            np.copyto(i0, posf, casting="unsafe")
+
+            m = int(np.searchsorted(i0, n - 1, side="left"))
+            if m > 0:
+                iv = i0[:m]
+                i1 = self._i1[:m]
+                np.add(iv, 1, out=i1)
+
+                f64 = self._frac64[:m]
+                np.subtract(pos[:m], iv, out=f64)
+                fv = self._frac[:m]
+                np.copyto(fv[:, 0], f64, casting="unsafe")   # float64 -> float32
+                inv = self._inv_frac[:m]
+                np.subtract(np.float32(1.0), fv, out=inv)
+
+                g0 = self._g0[:m]
+                g1 = self._g1[:m]
+                np.take(song, iv, axis=0, out=g0, mode="clip")
+                np.take(song, i1, axis=0, out=g1, mode="clip")
+                np.multiply(g0, inv, out=g0)
+                np.multiply(g1, fv, out=g1)
+                np.add(g0, g1, out=out[:m])
             out *= (self.vol_song * self.vol_master)
 
             # イベントはカーソルを常に前進させる(無効でも消費)。有効なときだけ
@@ -340,6 +414,18 @@ class _HitSoundAdapter:
     def check_and_play(self, audio_time_sec: float):
         pass
 
+    def play_once(self, kind: str):
+        """指定した SFX ('don'/'ka') を今すぐ1回だけ鳴らす(機能1: エディタで
+        ノーツ文字を打鍵した瞬間のプレビュー音)。hit_times/hit_kinds の
+        スケジュールにもカーソルにも触れないコマンド('sfx_now')を投げるだけ
+        なので、再生中のスケジュール済み打音やサンプル精度のタイミングを
+        一切乱さない。F1トグル(このアダプタの enabled)を尊重する。SE音量は
+        MixerCore.render() 側の vol_sfx がボイス全体に一様にかかるので、
+        ここで別途扱う必要はない。"""
+        if not self.enabled:
+            return
+        self._engine.core.post(("sfx_now", kind))
+
 
 class _MetronomeAdapter:
     def __init__(self, engine: "MixerAudioEngine"):
@@ -376,11 +462,20 @@ class MixerAudioEngine(QObject):
     durationChanged = Signal(int)        # ms
     playingChanged = Signal(bool)
     mediaStatusChanged = Signal(object)  # QMediaPlayer.MediaStatus 互換
+    audioError = Signal(str)             # 音声コールバックが死んだ(1回だけ)
+    sfxLoadFailed = Signal(str)          # 打音WAVを解釈できず合成音に戻した
 
     def __init__(self, parent=None):
         super().__init__(parent)
         import sounddevice as sd  # ここで ImportError ならフォールバックさせる
         self._sd = sd
+
+        # render が例外を投げたときの受け渡し。コールバック側は「例外オブジェクトを
+        # 1つ置いてフラグを立てる」だけ(I/O もフォーマットもしない)。GUI 側の
+        # タイマがそれを拾って一度だけ audioError を出す。
+        self._render_exc = None
+        self._render_failed = False
+        self._render_reported = False
 
         self._stream, self.device_sr, self._latency_ms = self._open_stream(sd)
         self.core = MixerCore(self.device_sr)
@@ -403,6 +498,13 @@ class MixerAudioEngine(QObject):
         self._pos_timer = QTimer(self)
         self._pos_timer.setInterval(16)
         self._pos_timer.timeout.connect(self._on_pos_tick)
+
+        # 音声コールバックの死活監視。_pos_timer は再生中しか回らないので、
+        # 停止中に起きた失敗も拾えるよう常時回す軽いタイマを別に持つ。
+        self._err_timer = QTimer(self)
+        self._err_timer.setInterval(500)
+        self._err_timer.timeout.connect(self._check_render_error)
+        self._err_timer.start()
 
         self._stream.start()
 
@@ -459,16 +561,34 @@ class MixerAudioEngine(QObject):
         try:
             buf = self.core.render(frames)
             outdata[:] = buf
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 無音を出して落ちないようにするのは従来通り。ただし以前は例外を
+            # 完全に握り潰していたため、render のバグが「音量が0になった?」と
+            # しか見えない永久無音になっていた。ここでは例外を1つ置くだけに
+            # 留め(I/O もトレース整形もしない = リアルタイムスレッドを止めない)、
+            # 通知は GUI スレッドのタイマに任せる。2回目以降は上書きしない。
             outdata.fill(0)
+            if not self._render_failed:
+                self._render_exc = e
+                self._render_failed = True
 
     # ---- 効果音バンク差し替え ----
     def _reload_hit_bank(self, don_path: str, ka_path: str):
         # HitSoundEngine.set_sound_files と同じ解決順: 指定 WAV(存在すれば)->合成音。
-        don = don_path if don_path and os.path.exists(don_path) else ensure_don_wav()
-        ka = ka_path if ka_path and os.path.exists(ka_path) else ensure_ka_wav()
-        self.core.post(("sfx", "don", _load_sfx(don, self.device_sr)))
-        self.core.post(("sfx", "ka", _load_sfx(ka, self.device_sr)))
+        self._load_one_sfx("don", don_path, ensure_don_wav)
+        self._load_one_sfx("ka", ka_path, ensure_ka_wav)
+
+    def _load_one_sfx(self, slot: str, path: str, synth_factory):
+        """指定された打音 WAV を読む。ファイルが無いときだけでなく、あっても
+        壊れていて解釈できないときも合成音へフォールバックする。以前は後者が
+        「1サンプルの無音」になっていて、打音だけが理由もわからず消えていた。"""
+        if path and os.path.exists(path):
+            pcm = _load_sfx_or_none(path, self.device_sr)
+            if pcm is not None:
+                self.core.post(("sfx", slot, pcm))
+                return
+            self.sfxLoadFailed.emit(os.path.basename(path))
+        self.core.post(("sfx", slot, _load_sfx(synth_factory(), self.device_sr)))
 
     # ---- AudioEngine 互換 API ----
     def load(self, path: str):
@@ -559,6 +679,20 @@ class MixerAudioEngine(QObject):
     def _emit_position(self):
         self.positionChanged.emit(self.position())
 
+    def _check_render_error(self):
+        """GUI スレッド側。コールバックが立てたフラグを見て、一度だけ通知する。
+        トレースの整形(重い)もここでやる - コールバック内では絶対にしない。"""
+        if not self._render_failed or self._render_reported:
+            return
+        self._render_reported = True
+        self._err_timer.stop()
+        exc = self._render_exc
+        try:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+        except Exception:  # noqa: BLE001
+            pass
+        self.audioError.emit(f"{type(exc).__name__}: {exc}")
+
     def _on_pos_tick(self):
         # 曲末尾に到達したか(render スレッドが立てる ended フラグ)を先に見る。
         if self.core.ended and self._playing:
@@ -573,6 +707,7 @@ class MixerAudioEngine(QObject):
     def close(self):
         try:
             self._pos_timer.stop()
+            self._err_timer.stop()
             self._stream.stop()
             self._stream.close()
         except Exception:  # noqa: BLE001

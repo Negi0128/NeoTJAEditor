@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal
 
+from neotja.se_text import compute_note_se_labels
 from neotja.theme import COLORS
 
 
@@ -107,7 +108,11 @@ class TJACourseAnalyzer:
                         pass
                 elif line.startswith("#MEASURE"):
                     m = re.search(r"(\d+)/(\d+)", line)
-                    if m:
+                    # 分母0 (`#MEASURE 4/0`) は書きかけのタイプミスとして普通に
+                    # 起こりうる。Decimal の既定コンテキストは 0 除算を送出するので、
+                    # 素直に割ると解析全体が例外で落ちる。不正な #MEASURE は無視して
+                    # 直前の拍子を保つ(他のディレクティブの try/except と同じ方針)。
+                    if m and Decimal(m.group(2)) != 0:
                         events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
                 elif line.startswith("#DELAY"):
                     try:
@@ -172,7 +177,10 @@ class TJACourseAnalyzer:
                 elif ev[0] == "#DELAY":
                     total_time += ev[1]
                 elif ev[0] == "NOTE":
-                    time_per_note = (Decimal("240") * measure_val / curr_bpm) / n_len if n_len > 0 else Decimal("0")
+                    # `#BPMCHANGE 0` でも落ちないよう curr_bpm > 0 を見る
+                    # (直下の空小節加算 / build_preview_timeline と同じ防御)。
+                    time_per_note = ((Decimal("240") * measure_val / curr_bpm) / n_len
+                                     if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
                     c = ev[1]
                     if c == "1":
                         don += 1
@@ -247,6 +255,31 @@ class TJACourseAnalyzer:
                 start = None
         return None
 
+    def line_in_course_body(self, content: str, line_no: int) -> bool:
+        """True if `line_no` (1-indexed) falls strictly between some course's
+        `#START` and `#END` lines (exclusive of those two directive lines
+        themselves) - i.e. it's a chart body line, not a header/comment/
+        directive line and not inside a course but outside any #START..#END
+        span. Same COURSE:/#START/#END scanning idiom as course_line_range()/
+        time_at_cursor() above, but course-key agnostic (any course counts)
+        and doesn't need the timing math, since the only caller (機能1's
+        note-input sound) just needs a yes/no "is this a place where typing a
+        note character means anything" check.
+
+        Used to gate the instant note-typing SFX (see main_window._on_note_typed):
+        typing in headers, comments, or outside any course must stay silent."""
+        lines = content.split('\n')
+        start = None
+        for idx, raw in enumerate(lines, start=1):
+            s = raw.split("//")[0].strip()
+            if s.startswith("#START"):
+                start = idx
+            elif s.startswith("#END") and start is not None:
+                if start < line_no < idx:
+                    return True
+                start = None
+        return False
+
     def time_at_cursor(self, content: str, line_no: int):
         """Returns the chart-time (seconds, float) at the start of the measure
         that contains `line_no` (1-indexed), or None if the line isn't inside
@@ -297,7 +330,8 @@ class TJACourseAnalyzer:
                 elif t == "#DELAY":
                     total_time += v
                 elif t == "NOTE":
-                    total_time += (Decimal("240") * measure_val / curr_bpm) / n_len if n_len > 0 else Decimal("0")
+                    total_time += ((Decimal("240") * measure_val / curr_bpm) / n_len
+                                   if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
 
         for idx in range(a, b + 1):
             if idx == a or idx == b:
@@ -317,7 +351,7 @@ class TJACourseAnalyzer:
                         pass
                 elif s.startswith("#MEASURE"):
                     m = re.search(r"(\d+)/(\d+)", s)
-                    if m:
+                    if m and Decimal(m.group(2)) != 0:   # 分母0は無視(_analyze と同じ)
                         cur_events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
                 elif s.startswith("#DELAY"):
                     try:
@@ -408,7 +442,7 @@ class TJACourseAnalyzer:
                             pass
                     elif s.startswith("#MEASURE"):
                         m = re.search(r"(\d+)/(\d+)", s)
-                        if m:
+                        if m and Decimal(m.group(2)) != 0:   # 分母0は無視(_analyze と同じ)
                             measure_val = Decimal(m.group(1)) / Decimal(m.group(2))
                     elif s.startswith("#DELAY"):
                         try:
@@ -438,13 +472,29 @@ class TJACourseAnalyzer:
         otherwise whichever course contains cursor_line; otherwise the first
         course in the file. Uses the same #BPMCHANGE/#MEASURE/#DELAY timing
         math as build_metronome_clicks:
-          - "notes": [(chart_time_seconds, char, bpm, scroll)] for don/ka/big-don/big-ka ('1'-'4')
+          - "notes": [(chart_time_seconds, char, bpm, scroll, se_text)] for
+            don/ka/big-don/big-ka ('1'-'4'). `se_text` is the automatic 打音
+            表記 syllable ("ド"/"ドン"/"コ"/"カ"/"カッ", or None) computed by
+            neotja.se_text.compute_note_se_labels, a port of PeepoDrumKit's
+            RecalculateSENotes - see that module's docstring for the full
+            spec. It is computed once here (not per frame in the preview
+            widget) because classifying a note needs its neighbours' visual
+            spacing, which never changes between repaints.
           - "rolls": [(start_seconds, end_seconds, char, bpm, scroll, hits)] for roll/
             big-roll ('5'/'6') spans closed by a '8' tail (an unclosed roll runs to the
             end of the course)
           - "gogo_regions": [(start_seconds, end_seconds)] from #GOGOSTART/#GOGOEND
-          - "bar_times": [(chart_time_seconds, bpm, scroll), ...] one entry per measure boundary
+          - "bar_times": [(chart_time_seconds, bpm, scroll, visible), ...] one entry per
+            measure boundary. `visible` (bool) reflects #BARLINEOFF/#BARLINEON state at
+            that boundary (see below) - always True if the chart never uses them. This
+            is a rendering hint only: every entry, hidden or not, is still a real measure
+            boundary for navigation purposes (see ChartPreviewWidget._nav_points).
           - "balloons": [(start_seconds, end_seconds, bpm, scroll, hits)] for '7' spans closed by '8'
+          - "kusudamas": [(start_seconds, end_seconds, bpm, scroll, hits)] for '9' spans
+            closed by '8', same shape as "balloons" - kusudama draws like a balloon/roll
+            (a capsule bar) but in its own color, and consumes BALLOON: entries from the
+            same shared counter/order as '7' (whichever of '7'/'9' appears first in the
+            chart claims the first BALLOON: value, and so on)
           - "bpm_changes"/"measure_changes"/"scroll_changes": [(chart_time_seconds, ...)],
             sorted, one entry at time 0 plus one per #BPMCHANGE/#MEASURE/#SCROLL - for
             looking up "what was BPM/MEASURE/SCROLL at time T" (bisect) to drive a
@@ -475,8 +525,16 @@ class TJACourseAnalyzer:
         preview widget can space notes by beat (PeepoDrumKit-style: pixel
         speed scales with tempo) instead of a single fixed real-time scroll
         speed, which would otherwise cram fast sections and over-space slow
-        ones. Kusudama ('9') still consumes timing like any other digit but
-        isn't emitted here yet."""
+        ones.
+        #BARLINEOFF/#BARLINEON: #BARLINEOFF hides subsequently-recorded bar
+        lines (the "visible" flag on each "bar_times" entry), #BARLINEON
+        restores them; the state persists across measures until changed
+        again, and defaults to visible (a chart that never uses either
+        command behaves exactly as before). Like #BPMCHANGE/#SCROLL/
+        #MEASURE, a #BARLINEOFF/#BARLINEON placed before a measure's first
+        note takes effect for that same measure's bar line (see the
+        `bar_recorded` comment below); this is a visual instruction only and
+        never removes a measure boundary from the underlying timeline."""
         lines = content.split('\n')
 
         course_bounds = []  # (start, end, key, level)
@@ -500,7 +558,7 @@ class TJACourseAnalyzer:
                 start = None
 
         empty = {
-            "notes": [], "rolls": [], "balloons": [], "gogo_regions": [], "bar_times": [],
+            "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [], "bar_times": [],
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
             "course_key": None, "course_label": "", "course_color": COLORS["fg_bright"],
             "level": None, "available_courses": [], "has_branches": False, "branch_level": branch_level,
@@ -571,7 +629,7 @@ class TJACourseAnalyzer:
                         pass
                 elif s.startswith("#MEASURE"):
                     m = re.search(r"(\d+)/(\d+)", s)
-                    if m:
+                    if m and Decimal(m.group(2)) != 0:   # 分母0は無視(_analyze と同じ)
                         events.append(("MEASURE", (Decimal(m.group(1)), Decimal(m.group(2)))))
                 elif s.startswith("#DELAY"):
                     try:
@@ -587,6 +645,10 @@ class TJACourseAnalyzer:
                     events.append(("GOGOSTART", None))
                 elif s.startswith("#GOGOEND"):
                     events.append(("GOGOEND", None))
+                elif s.startswith("#BARLINEOFF"):
+                    events.append(("BARLINEOFF", None))
+                elif s.startswith("#BARLINEON"):
+                    events.append(("BARLINEON", None))
                 elif s.startswith("#BRANCHSTART"):
                     has_branches = True
                     branch_active = False  # nothing counts until the first #N/#E/#M
@@ -625,9 +687,11 @@ class TJACourseAnalyzer:
         measure_val = Decimal("1")
         curr_num, curr_den = Decimal(4), Decimal(4)
         curr_scroll = Decimal(1)
+        curr_bar_visible = True
         notes = []
         rolls = []
         balloons = []
+        kusudamas = []
         bar_times = []
         gogo_regions = []
         bpm_changes = [(Decimal(0), bpm)]
@@ -636,6 +700,7 @@ class TJACourseAnalyzer:
         gogo_start = None
         active_roll = None
         active_balloon = None
+        active_kusudama = None
         balloon_idx = 0
 
         for m_events in measures:
@@ -650,12 +715,14 @@ class TJACourseAnalyzer:
             n_len = sum(1 for t, _ in m_events if t == "NOTE")
             for t, v in m_events:
                 if not bar_recorded and t == "NOTE":
-                    bar_times.append((total_time, curr_bpm, curr_scroll))
+                    bar_times.append((total_time, curr_bpm, curr_scroll, curr_bar_visible))
                     bar_recorded = True
                 if t == "BPMCHANGE":
                     curr_bpm = v
                     bpm_changes.append((total_time, curr_bpm))
                 elif t == "MEASURE":
+                    if v[1] == 0:      # 分母0は取り込み側で弾いているが二重に防ぐ
+                        continue
                     curr_num, curr_den = v
                     measure_val = curr_num / curr_den
                     measure_changes.append((total_time, curr_num, curr_den))
@@ -671,6 +738,10 @@ class TJACourseAnalyzer:
                     if gogo_start is not None:
                         gogo_regions.append((gogo_start, total_time))
                         gogo_start = None
+                elif t == "BARLINEOFF":
+                    curr_bar_visible = False
+                elif t == "BARLINEON":
+                    curr_bar_visible = True
                 elif t == "NOTE":
                     time_per_note = Decimal(240) * measure_val / curr_bpm / n_len if (n_len > 0 and curr_bpm > 0) else Decimal("0")
                     if v in "1234":
@@ -681,6 +752,10 @@ class TJACourseAnalyzer:
                         hits = balloon_defs[balloon_idx] if balloon_idx < len(balloon_defs) else 0
                         active_balloon = (total_time, hits, curr_bpm, curr_scroll)
                         balloon_idx += 1
+                    elif v == "9":
+                        hits = balloon_defs[balloon_idx] if balloon_idx < len(balloon_defs) else 0
+                        active_kusudama = (total_time, hits, curr_bpm, curr_scroll)
+                        balloon_idx += 1
                     elif v == "8":
                         if active_roll is not None:
                             dur = float(total_time - active_roll[0])
@@ -690,9 +765,12 @@ class TJACourseAnalyzer:
                         elif active_balloon is not None:
                             balloons.append((active_balloon[0], total_time, active_balloon[2], active_balloon[3], active_balloon[1]))
                             active_balloon = None
+                        elif active_kusudama is not None:
+                            kusudamas.append((active_kusudama[0], total_time, active_kusudama[2], active_kusudama[3], active_kusudama[1]))
+                            active_kusudama = None
                     total_time += time_per_note
             if not bar_recorded:
-                bar_times.append((total_time, curr_bpm, curr_scroll))
+                bar_times.append((total_time, curr_bpm, curr_scroll, curr_bar_visible))
                 # n_len == 0 here (that's exactly when no NOTE event ever ran
                 # to set bar_recorded) - a measure with no notes still
                 # occupies real time, but nothing above advances total_time
@@ -707,15 +785,28 @@ class TJACourseAnalyzer:
             rolls.append((active_roll[0], total_time, active_roll[1], active_roll[2], active_roll[3], self._roll_hits(dur)))
         if active_balloon is not None:
             balloons.append((active_balloon[0], total_time, active_balloon[2], active_balloon[3], active_balloon[1]))
+        if active_kusudama is not None:
+            kusudamas.append((active_kusudama[0], total_time, active_kusudama[2], active_kusudama[3], active_kusudama[1]))
         if gogo_start is not None:
             gogo_regions.append((gogo_start, total_time))
 
+        out_notes = [(float(t), c, float(bpm_), float(sc)) for t, c, bpm_, sc in notes]
+        out_rolls = [(float(s0), float(e0), c, float(bpm_), float(sc), hits) for s0, e0, c, bpm_, sc, hits in rolls]
+        out_balloons = [(float(s0), float(e0), float(bpm_), float(sc), hits) for s0, e0, bpm_, sc, hits in balloons]
+        out_kusudamas = [(float(s0), float(e0), float(bpm_), float(sc), hits) for s0, e0, bpm_, sc, hits in kusudamas]
+        # 打音表記 (SE text) is classified here, once per chart edit, rather
+        # than in ChartPreviewWidget.paintEvent - that repaints at up to
+        # 144 Hz and must not run an O(n) neighbour scan per frame. See
+        # neotja/se_text.py for the ported PeepoDrumKit algorithm.
+        se_labels = compute_note_se_labels(out_notes, out_rolls, out_balloons, out_kusudamas)
+
         return {
-            "notes": [(float(t), c, float(bpm_), float(sc)) for t, c, bpm_, sc in notes],
-            "rolls": [(float(s0), float(e0), c, float(bpm_), float(sc), hits) for s0, e0, c, bpm_, sc, hits in rolls],
-            "balloons": [(float(s0), float(e0), float(bpm_), float(sc), hits) for s0, e0, bpm_, sc, hits in balloons],
+            "notes": [n + (se,) for n, se in zip(out_notes, se_labels)],
+            "rolls": out_rolls,
+            "balloons": out_balloons,
+            "kusudamas": out_kusudamas,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
-            "bar_times": [(float(t), float(bpm_), float(sc)) for t, bpm_, sc in bar_times],
+            "bar_times": [(float(t), float(bpm_), float(sc), bool(vis)) for t, bpm_, sc, vis in bar_times],
             "bpm_changes": [(float(t), float(v)) for t, v in bpm_changes],
             "measure_changes": [(float(t), int(num), int(den)) for t, num, den in measure_changes],
             "scroll_changes": [(float(t), float(v)) for t, v in scroll_changes],

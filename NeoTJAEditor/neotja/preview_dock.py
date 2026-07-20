@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
+from neotja.worker_util import detach_worker
 from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import ChartPreviewWidget
 from neotja.theme import COLORS
@@ -234,19 +235,31 @@ class GamePreviewWindow(QWidget):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("えぬいーさん次郎")
         self._pause_cb = pause_cb
-        chart_preview.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), ChartPreviewWidget.WIDGET_HEIGHT)
+        self._chart_preview = chart_preview
+        self._bottom_widget = bottom_widget
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(chart_preview)
         layout.addWidget(bottom_widget)
+        self._refit()
+        # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
+        # 窓の固定サイズも取り直す。
+        chart_preview.heightChanged.connect(self._on_preview_height_changed)
+
+    def _refit(self):
         # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
         # モード切替のたびに窓がガタつくので、呼び出し側で最も高いページに合わせて
         # 固定済み。その固定高さ(=minimumHeight)を使って窓サイズも一定に保つ。
+        h = self._chart_preview.widget_height()
+        self._chart_preview.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), h)
         self.setFixedSize(
             int(ChartPreviewWidget.LANE_WIDTH),
-            ChartPreviewWidget.WIDGET_HEIGHT + bottom_widget.minimumHeight(),
+            h + self._bottom_widget.minimumHeight(),
         )
+
+    def _on_preview_height_changed(self, _h):
+        self._refit()
 
     def closeEvent(self, event):
         self.closed.emit()
@@ -259,15 +272,20 @@ class GamePreviewWindow(QWidget):
 
 
 def _roll_tick_notes(spans, bpm_index):
-    """Expands roll/balloon spans - (start, end, ..., hits) tuples, as
-    returned in build_preview_timeline()'s "rolls"/"balloons" - into evenly
-    spaced virtual note events across the span, so HitSoundEngine's normal
-    per-note schedule also produces the rapid drumroll sound during a roll/
-    balloon instead of staying silent between its head and tail. Always don
-    ("men") hits, not alternating don/ka - a real taiko roll is struck
-    face-only regardless of hand. `bpm_index` differs between the two span
-    shapes (rolls carry char before bpm, balloons don't), so the caller
-    passes which column holds it."""
+    """Expands roll/balloon/kusudama spans - (start, end, ..., hits) tuples,
+    as returned in build_preview_timeline()'s "rolls"/"balloons"/"kusudamas"
+    - into evenly spaced virtual note events across the span, so
+    HitSoundEngine's normal per-note schedule also produces the rapid
+    drumroll sound during a roll/balloon/kusudama instead of staying silent
+    between its head and tail. Always don ("men") hits, not alternating don/
+    ka - a real taiko roll is struck face-only regardless of hand. This same
+    expansion feeds both audio backends: preview_dock hands the resulting
+    (time, char, bpm) ticks to hit_sounds.set_schedule(), which is either the
+    mixer's _HitSoundAdapter (sample-accurate scheduling) or the legacy
+    HitSoundEngine (16ms-tick polling) - both accept the identical tuple
+    shape, so this expansion doesn't need to know which backend is active.
+    `bpm_index` differs between span shapes (rolls carry char before bpm,
+    balloons/kusudamas don't), so the caller passes which column holds it."""
     ticks = []
     for span in spans:
         start, end, hits = span[0], span[1], span[-1]
@@ -327,11 +345,14 @@ class PreviewDock(QDockWidget):
                  duration_ready_cb=None, expanded_changed_cb=None, refresh_preview_cb=None,
                  course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None,
                  audio_backend="mixer", sfx_volume_cb=None,
-                 waveform_stereo=True, waveform_stereo_cb=None):
+                 waveform_stereo=True, waveform_stereo_cb=None,
+                 se_text_enabled=True):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         self.waveform_stereo_cb = waveform_stereo_cb
         self._waveform_stereo = bool(waveform_stereo)
+        # 打音表記の表示可否(settings.json の se_text_enabled)。
+        self._se_text_enabled = bool(se_text_enabled)
         self.seek_cursor_cb = seek_cursor_cb
         self.volume_cb = volume_cb
         self.sfx_volume_cb = sfx_volume_cb
@@ -375,6 +396,12 @@ class PreviewDock(QDockWidget):
         # ミキサー経路ではメトロノームは内部でサンプル単位に処理されるので、この
         # 接続はアダプタの no-op に届くだけ(無害)。レガシーでは従来通り駆動する。
         self.audio.positionChanged.connect(self.metronome.on_position_changed)
+        # ミキサー経路のみ: 音声コールバックが死んだ / 打音WAVを読めなかった、を
+        # 利用者に見える形で伝える(以前はどちらも無言だった)。
+        if hasattr(self.audio, "audioError"):
+            self.audio.audioError.connect(self._on_audio_error)
+        if hasattr(self.audio, "sfxLoadFailed"):
+            self.audio.sfxLoadFailed.connect(self._on_sfx_load_failed)
 
         self.tapper = BpmTapper()
 
@@ -431,6 +458,7 @@ class PreviewDock(QDockWidget):
             cycle_course_cb=self.chart_preview.cycle_course,
             cycle_branch_cb=self.chart_preview.cycle_branch,
         )
+        self.chart_preview.set_se_text_enabled(self._se_text_enabled)
         self.chart_preview.set_info_update_cb(self.info_bar.set_realtime_info)
 
         # 下部パネルを3モードの QStackedWidget に(フェーズ3):
@@ -696,9 +724,10 @@ class PreviewDock(QDockWidget):
         self.title_label.setText(headers["title"] or "(無題)")
 
         if preview_data is not None:
-            self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc in preview_data.get("notes", [])]
+            self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in preview_data.get("notes", [])]
             self._editor_notes += _roll_tick_notes(preview_data.get("rolls", []), bpm_index=3)
             self._editor_notes += _roll_tick_notes(preview_data.get("balloons", []), bpm_index=2)
+            self._editor_notes += _roll_tick_notes(preview_data.get("kusudamas", []), bpm_index=2)
 
         self.waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
         self.game_waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
@@ -747,6 +776,14 @@ class PreviewDock(QDockWidget):
     def _start_waveform_decode(self, wave_path):
         # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
         # (波形表示用)を同時に得る。レガシー経路では PCM を無視してピークだけ使う。
+        # 直前のデコードがまだ走っている状態で self._decode_worker を上書きすると、
+        # 走行中の QThread への最後の参照が消えて GC され
+        # "QThread: Destroyed while thread is still running" で落ちる
+        # (ファイルAを開いた直後にファイルBを開く、で普通に起きる)。
+        # 走り終わるまでプロセス側の待機所で保持する。
+        detach_worker(self._decode_worker)
+        self._decode_worker = None
+
         worker = SongDecodeWorker(wave_path)
         worker.path = wave_path
         worker.decoded.connect(
@@ -767,6 +804,34 @@ class PreviewDock(QDockWidget):
         if self._mixer_active:
             self.audio.set_song_pcm(pcm, sr)
         self.status_label.setText("")
+
+    def _on_audio_error(self, msg: str):
+        """音声コールバックが例外で止まった(=以後ずっと無音)ことの通知。
+        engine 側で1回しか出ないので、ここでは素直に表示するだけ。"""
+        self.status_label.setText(
+            f"音声の再生が停止しました(内部エラー): {msg} / アプリを再起動してください。")
+
+    def _on_sfx_load_failed(self, name: str):
+        self.status_label.setText(
+            f"打音ファイルを読み込めませんでした: {name} / 既定の音に戻しました。")
+
+    def shutdown_audio(self):
+        """アプリ終了時に音声デバイスを確定的に閉じる。MainWindow.closeEvent
+        から呼ぶ。ミキサー経路(MixerAudioEngine)だけが close() を持つので、
+        レガシー経路(AudioEngine)では何もしない。デコード中のスレッドが
+        あれば、GC で落ちないよう待機所へ逃がしておく。"""
+        try:
+            self.audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        close = getattr(self.audio, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+        detach_worker(self._decode_worker)
+        self._decode_worker = None
 
     def _on_decode_failed(self, path, msg):
         if path != self._current_wave_path:
@@ -869,9 +934,10 @@ class PreviewDock(QDockWidget):
 
     def set_preview_data(self, data, course_stats=None):
         data = data or {}
-        self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc in data.get("notes", [])]
+        self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
         self._editor_notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
         self._editor_notes += _roll_tick_notes(data.get("balloons", []), bpm_index=2)
+        self._editor_notes += _roll_tick_notes(data.get("kusudamas", []), bpm_index=2)
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
@@ -950,6 +1016,12 @@ class PreviewDock(QDockWidget):
             wf.set_stereo_view(stereo)
         if self.waveform_stereo_cb:
             self.waveform_stereo_cb(self._waveform_stereo)
+
+    def set_se_text_enabled(self, enabled: bool):
+        """settings.json / 環境設定ダイアログの se_text_enabled を反映する入口。
+        set_waveform_stereo と同じく、保存はメインウィンドウ側の責務。"""
+        self._se_text_enabled = bool(enabled)
+        self.chart_preview.set_se_text_enabled(self._se_text_enabled)
 
     def set_waveform_stereo(self, stereo: bool):
         """settings.json の waveform_stereo を復元するための入口(保存コール

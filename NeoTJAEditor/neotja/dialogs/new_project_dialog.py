@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 
 from neotja.audio_engine import BpmOffsetDetectWorker
 from neotja.theme import COLORS
+from neotja.worker_util import detach_worker as _detach_worker
 from neotja.ytdlp_worker import ThumbnailFetchWorker, YtDlpDownloadWorker
 
 THUMB_W, THUMB_H = 200, 113
@@ -20,24 +21,11 @@ THUMB_W, THUMB_H = 200, 113
 # legitimately report no updates for a while.
 STALL_TIMEOUT_SEC = 90
 
-# Process-level holding pen for worker threads that are still running when the
-# dialog is closed. Keeping a reference here lets them wind down on their own
-# instead of being garbage collected mid-run (which crashes with
-# "QThread: Destroyed while thread is still running").
-_LINGERING_WORKERS = []
-
-
-def _detach_worker(worker):
-    """Detach a possibly-running worker from the dialog so it can outlive it.
-    Finished (or None) workers need nothing."""
-    if worker is None or not worker.isRunning():
-        return
-    if hasattr(worker, "cancel"):
-        worker.cancel()
-    worker.setParent(None)
-    _LINGERING_WORKERS.append(worker)
-    worker.finished.connect(lambda: _LINGERING_WORKERS.remove(worker)
-                            if worker in _LINGERING_WORKERS else None)
+# The process-level holding pen for still-running worker threads (and the
+# detach helper that moves them into it) now lives in neotja/worker_util.py,
+# since preview_dock and the AI chart dialog hit exactly the same
+# "QThread: Destroyed while thread is still running" hazard. Imported here
+# under the original private name so the rest of this module reads unchanged.
 
 
 class NewProjectDialog(QDialog):

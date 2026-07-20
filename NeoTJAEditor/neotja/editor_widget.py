@@ -4,6 +4,9 @@ from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget, QToolTip
 
 from neotja.theme import COLORS
 
+# 機能1(ノーツ入力音)が反応する文字。0 は常に無音(空白マス)。
+_NOTE_SOUND_CHARS = "123456789"
+
 
 class LineNumberArea(QWidget):
     def __init__(self, editor):
@@ -32,6 +35,13 @@ class TJAEditor(QPlainTextEdit):
         self.highlight_data = None  # set externally to a highlighter.HighlightData
 
         self.gutter = LineNumberArea(self)
+
+        # 機能1(ノーツ入力音): 1文字ぶんの本物のキー入力(text() が単一の
+        # ノーツ文字)だけに反応するコールバック。main_window から
+        # set_note_typed_cb() で配線される。ペーストはこのイベントを経由
+        # せず QPlainTextEdit::insertFromMimeData 側で処理されるので、
+        # ブロック貼り付けで連打音が鳴ることはない。
+        self._note_typed_cb = None
 
         self.blockCountChanged.connect(self._update_gutter_width)
         self.updateRequest.connect(self._update_gutter_area)
@@ -142,6 +152,12 @@ class TJAEditor(QPlainTextEdit):
     def insert_at_cursor(self, text: str):
         self.textCursor().insertText(text)
 
+    def set_note_typed_cb(self, cb):
+        """cb(char, line_no) は、ユーザーが単一のノーツ文字(1〜9)を実際に
+        キー入力した直後(挿入前の行番号)に呼ばれる(機能1)。main_window が
+        設定/コース範囲/F1トグルをまとめてチェックしてから発音する。"""
+        self._note_typed_cb = cb
+
     # ------------------------------------------------------------------
     # Dirty-line tracking / font zoom / hover tooltips
     # ------------------------------------------------------------------
@@ -150,6 +166,17 @@ class TJAEditor(QPlainTextEdit):
                                 Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
             li = self.textCursor().blockNumber() + 1
             self.modified_lines.add(li)
+        # 機能1(ノーツ入力音): text() が単一のノーツ文字そのものの、正真正銘
+        # 1回ぶんのキー入力にだけ反応する。Ctrl/Alt/Meta 修飾つき(カスタム
+        # ショートカット等)は除外。ペーストは QPlainTextEdit 側で
+        # insertFromMimeData 経由に処理され、この keyPressEvent には来ない
+        # ので、ブロック貼り付けで連打音が鳴ることはない。挿入前の行番号を
+        # 使う(この1文字は改行を跨がないので、挿入前後で行番号は変わらない)。
+        text = event.text()
+        if (self._note_typed_cb is not None and len(text) == 1 and text in _NOTE_SOUND_CHARS
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))):
+            li = self.textCursor().blockNumber() + 1
+            self._note_typed_cb(text, li)
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):

@@ -856,6 +856,16 @@ class HitSoundEngine(QObject):
             self._last_idx = idx
         self._last_audio_time = audio_time_sec
 
+    def play_once(self, kind: str):
+        """指定した SFX ('don'/'ka') を今すぐ1回だけ鳴らす(機能1: エディタで
+        ノーツ文字を打鍵した瞬間のプレビュー音)。_note_times/_last_idx の
+        スケジュール状態には一切触れないので、check_and_play が追っている
+        再生中のスケジュール進行に影響しない。レガシー経路(QSoundEffect)
+        フォールバック用。"""
+        if not self.enabled:
+            return
+        (self.sound_don if kind == "don" else self.sound_ka).play()
+
 
 class MetronomeEngine(QObject):
     """Plays a click on every scheduled beat while audio is playing. The

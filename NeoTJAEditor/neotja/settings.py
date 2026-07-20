@@ -7,7 +7,7 @@ _SETTINGS_KEYS = (
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
-    "waveform_stereo",
+    "waveform_stereo", "se_text_enabled", "note_input_sound",
 )
 
 
@@ -40,6 +40,15 @@ def default_settings() -> dict:
         "audio_backend": "mixer",
         # 波形表示: True = L/R を上下2段で個別表示、False = 合成(モノラル)1段。
         "waveform_stereo": True,
+        # 打音表記(ド/ドン/コ/カ/カッ)をゲーム風プレビューのレーン下段に
+        # 表示するか。PeepoDrumKit の自動判定を移植したもの(neotja/se_text.py)。
+        # 環境設定ダイアログ「エディタ・ツール」タブのチェックボックスで変更。
+        "se_text_enabled": True,
+        # エディタでノーツ文字(1〜9)を打鍵した瞬間にドン/カツ音を鳴らすか。
+        # 譜面本体(#START〜#END内)でのみ発音し、ヘッダ/コメント/コース外や
+        # ペースト操作では鳴らない。環境設定ダイアログ「エディタ・ツール」
+        # タブのチェックボックスで変更。
+        "note_input_sound": True,
     }
 
 

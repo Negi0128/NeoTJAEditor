@@ -116,6 +116,18 @@ class SettingsDialog(QDialog):
         self.check_updates_check.setChecked(cfg.get("check_updates_on_startup", True))
         form.addRow(self.check_updates_check)
 
+        self.se_text_check = QCheckBox("ゲームプレビューに打音表記(ド/カ)を表示する")
+        self.se_text_check.setChecked(cfg.get("se_text_enabled", True))
+        form.addRow(self.se_text_check)
+        form.addRow(QLabel("ゲーム風プレビューのレーン下段に、各音符の打音(ド/ドン/コ/カ/カッ)を"
+                           "自動判定して表示します。判定は PeepoDrumKit と同じアルゴリズムです。"))
+
+        self.note_input_sound_check = QCheckBox("エディタでノーツ文字を入力した際にドン/カツ音を鳴らす")
+        self.note_input_sound_check.setChecked(cfg.get("note_input_sound", True))
+        form.addRow(self.note_input_sound_check)
+        form.addRow(QLabel("譜面本体(#START〜#END)内で1〜9のノーツ文字を打鍵した瞬間に対応する打音を"
+                           "即座に鳴らします。ヘッダ/コメントや貼り付け操作では鳴りません。"))
+
         self.auto_save_check = QCheckBox("自動保存を有効にする")
         self.auto_save_check.setChecked(cfg.get("auto_save_enabled", False))
         form.addRow(self.auto_save_check)
@@ -199,6 +211,8 @@ class SettingsDialog(QDialog):
         cfg["short_roll_comp"] = self.comp_combo.currentText()
         cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
         cfg["auto_save_enabled"] = self.auto_save_check.isChecked()
+        cfg["se_text_enabled"] = self.se_text_check.isChecked()
+        cfg["note_input_sound"] = self.note_input_sound_check.isChecked()
 
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()

@@ -1,8 +1,10 @@
 import bisect
 import time as _time
 
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QStaticText,
+)
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
@@ -13,6 +15,49 @@ NOTE_COLOR = {"1": "don", "2": "ka", "3": "don", "4": "ka"}
 NOTE_BIG = {"3", "4"}
 GOGO_TINT = QColor(255, 90, 90, 55)
 DEFAULT_BPM = 120.0
+
+# --- 叩いた音符の飛び方 (PeepoDrumKit の GameNoteHitPath 移植) -------------
+# chart_editor_widgets_game.cpp:5-38 の `GameNoteHitPath`: 60fps 換算で
+# 0..30 フレーム (= 0.5 秒) の 31 点 2D 経路。ワールド座標 (y は下が正)。
+# 音符は右上へ跳ね上がり、17 フレーム目付近で頂点に達してから落ちていく
+# 放物線状の弧を描く。値はそのままの転記(スケーリングは下の
+# _scaled_hit_path で行う)。
+_HIT_PATH_RAW = (
+    (615, 386), (639, 342), (664, 300), (693, 260), (725, 222),
+    (758, 186), (793, 153), (830, 122), (870, 93), (912, 66),
+    (954, 43), (1001, 27), (1046, 11), (1094, -2), (1142, -14),
+    (1192, -18), (1240, -22), (1292, -23), (1336, -22), (1385, -16),
+    (1435, -8), (1479, 3), (1526, 16), (1570, 36), (1612, 56),
+    (1658, 83), (1696, 115), (1734, 144), (1770, 176), (1803, 210),
+    (1836, 247),
+)
+_HIT_PATH_FPS = 60.0
+# PeepoDrumKit の縦方向の基準は GameLaneSlice.Content = 195 world units
+# (chart_editor_theme.h:30)。素直なレーン高さ比は 106/195 ≈ 0.5436 で、
+# 音符半径比 (28 / GameHitCircle.InnerOutlineRadius 50 = 0.56) ともほぼ一致
+# する。**が、それは採用していない**: 弧の頂点は開始点から 409 world units も
+# 上にあり (17 フレーム目の y = -23 対 開始 386)、0.5436 倍でも 222 px 上へ
+# 飛ぶ。原典はレーン (264) の 4 倍以上あるビューポート全体にクリップしている
+# のでその放物線が丸ごと見えるが、こちらのレーン枠は高さ 106 px 固定で、
+# そこにクリップされる以上 0.5436 倍だと音符は 57 ms で枠外へ消えてしまい、
+# 「放物線」が一度も見えない(直線的な閃光にしか見えない)。
+#
+# そこで **等方スケールのまま**(=曲線の形は原典と完全に同一)、頂点で音符の
+# 中心がちょうどレーン帯の上端に来る倍率を選ぶ:
+#     HIT_PATH_SCALE = (LANE_HEIGHT / 2) / 409 ≈ 0.1296
+# これで弧の全体が固定枠の中に収まり、上がって・被さって・落ちてくる動きが
+# そのまま見える。レーンの比率は一切変えていない。
+_PEEPO_LANE_CONTENT_H = 195.0
+# 弧の頂点の、開始点からの上向き変位 (world units)。テーブルから直接求める。
+_HIT_PATH_APEX_RISE = _HIT_PATH_RAW[0][1] - min(y for _x, y in _HIT_PATH_RAW)  # 409
+
+
+def _scaled_hit_path(scale: float):
+    """`_HIT_PATH_RAW` を「開始点からの相対オフセット」に変換し、`scale` を
+    掛けたタプルを返す(PeepoDrumKit も `SampleBezierFCurve(...) -
+    GameNoteHitPath[0].Value` と開始点を引いている)。"""
+    bx, by = _HIT_PATH_RAW[0]
+    return tuple(((x - bx) * scale, (y - by) * scale) for x, y in _HIT_PATH_RAW)
 
 
 def _pil_to_qpixmap(img) -> QPixmap:
@@ -57,14 +102,58 @@ class ChartPreviewWidget(QWidget):
     NOTE_R_BIG = 38
     LANE_HEIGHT = NOTE_R_BIG * 2 + 30  # fixed box height too, so resizing the window can't stretch it vertically either
     TOP_MARGIN = 56    # room above the lane box for the live roll/balloon count readout
+    # 打音表記 (SE text) strip, directly under the note band and inside the
+    # lane box. PeepoDrumKit draws the syllable horizontally centered on the
+    # note but vertically in a dedicated footer slice below the lane content
+    # (DrawGamePreviewNoteSEText, chart_editor_widgets_game.cpp:241-245,
+    # offsetting by FooterCenterY() - ContentCenterY()); its slice is
+    # Content=195 / Footer=39, i.e. the footer is 20% of the content height.
+    # 20% of LANE_HEIGHT would be 21 px, rounded up to 26 here so 12-14 pt
+    # kana stay legible at this much smaller scale. Putting the text here
+    # (rather than on the note) keeps it off the red/blue note fills, clear
+    # of the roll/balloon count in TOP_MARGIN and of the combo panel, which
+    # only covers the note band.
+    SE_FOOTER_HEIGHT = 26
     BOTTOM_MARGIN = 24
-    WIDGET_HEIGHT = TOP_MARGIN + LANE_HEIGHT + BOTTOM_MARGIN
+    # The SE footer strip only costs height when 打音表記 is actually enabled -
+    # the user explicitly rejected making this window taller, so the strip is
+    # reserved on demand (see widget_height()/set_se_text_enabled) instead of
+    # unconditionally.
+    WIDGET_HEIGHT_NO_SE = TOP_MARGIN + LANE_HEIGHT + BOTTOM_MARGIN            # 186
+    WIDGET_HEIGHT = TOP_MARGIN + LANE_HEIGHT + SE_FOOTER_HEIGHT + BOTTOM_MARGIN  # 212
+    SE_FONT_SIZE_SMALL = 12
+    SE_FONT_SIZE_BIG = 14
     RESYNC_THRESHOLD_SEC = 0.05
-    HIT_ANIM_DURATION = 0.25   # seconds a note spends flying off after crossing the judgment line
-    HIT_FLY_DX = 90.0
-    HIT_FLY_DY = 70.0
+
+    # --- hit fly-off (PeepoDrumKit GameNoteHitPath port) -----------------
+    # Precomputed once at class-definition time: offsets from the judgment
+    # point, already scaled to this lane, so paintEvent only does a table
+    # lookup + one lerp per hit note.
+    # Uniform (shape-preserving) scale chosen so the arc's apex puts the note
+    # centre exactly on the top edge of the lane band - see the long comment
+    # on _HIT_PATH_APEX_RISE for why the plain 106/195 lane-height ratio is
+    # NOT used. ~0.1296.
+    HIT_PATH_SCALE = (LANE_HEIGHT / 2.0) / _HIT_PATH_APEX_RISE
+    HIT_PATH = _scaled_hit_path(HIT_PATH_SCALE)
+    HIT_PATH_FPS = _HIT_PATH_FPS
+    # 0.5 s, exactly PeepoDrumKit's GameNoteHitAnimationDuration
+    # (chart_editor_widgets_game.cpp:51 - the last key's time).
+    HIT_ANIM_DURATION = (len(_HIT_PATH_RAW) - 1) / _HIT_PATH_FPS
+
+    # --- GOGO judgment-ring pulse (PeepoDrumKit getGogoZoomAmount port) --
+    # chart_editor_widgets_game.cpp:120-134. Only the "fire" envelope is
+    # ported; the lane zoom (tAttLane) is deliberately NOT - this lane's
+    # proportions are fixed by design.
+    GOGO_ATT = 0.05
+    GOGO_DEC = 0.20
+    GOGO_REL = 0.10
+
     PANEL_INSET = 14           # left margin so the combo/course block reads as a floating card, not edge-to-edge
     PANEL_GAP = 24             # gap between the panel's right edge and the judgment ring
+
+    # Emitted whenever widget_height() changes (i.e. 打音表記 toggled), so the
+    # fixed-size container window can re-fit itself.
+    heightChanged = Signal(int)
 
     # Duration (seconds) of the ease-out tween that plays when the user steps
     # between measures while stopped/paused, so the lane glides to the target
@@ -83,13 +172,30 @@ class ChartPreviewWidget(QWidget):
         self._note_chars = []
         self._note_bpms = []
         self._note_scrolls = []
+        # 打音表記: one syllable (or None) per note, precomputed by the
+        # analyzer - see neotja/se_text.py. Never derived in paintEvent.
+        self._note_se = []
         self._rolls = []
         self._balloons = []
+        self._kusudamas = []
         self._live_spans = []
         self._bar_times = []
         self._bar_bpms = []
         self._bar_scrolls = []
+        self._bar_visible = []
         self._gogo_regions = []
+        # Start-time column of _gogo_regions, so gogo_pulse() can bisect for
+        # "the last region at or before now" instead of scanning every frame.
+        self._gogo_starts = []
+        # Precomputed draw geometry for span notes (roll/balloon/kusudama):
+        # (start, end, head_speed, tail_speed[, radius]). Head and tail each
+        # carry the on-screen speed implied by the BPM/SCROLL in effect at
+        # THEIR OWN time, so a #SCROLL or #BPMCHANGE landing inside the span
+        # stretches/compresses the bar exactly like the real game. Resolved
+        # once per chart edit (set_preview_data), never in the paint loop.
+        self._roll_draw = []
+        self._balloon_draw = []
+        self._kusudama_draw = []
         self._bpm_changes = [(0.0, DEFAULT_BPM)]
         self._measure_changes = [(0.0, 4, 4)]
         self._scroll_changes = [(0.0, 1.0)]
@@ -173,6 +279,17 @@ class ChartPreviewWidget(QWidget):
         self._qcolor_cache = {k: QColor(v) for k, v in COLORS.items()}
         self._theme_gen = theme.GENERATION
         self._font_cache = {}
+        # 打音表記の表示可否(settings.json の se_text_enabled、既定 True)。
+        self._se_text_enabled = True
+        # Laying out kana costs more than blitting them, and this draws on
+        # every visible note every frame, so each distinct (syllable, size)
+        # pair is laid out once into a QStaticText and reused. Keyed by
+        # (label, size) and dropped whenever the widget font family changes;
+        # QStaticText holds no color, so a theme switch doesn't invalidate it
+        # (the pen does that) - but _font()/_color() above are still the
+        # single source of both, so nothing here reads COLORS directly.
+        self._se_static_cache = {}
+        self._se_static_family = None
 
         self._timer = QTimer(self)
         # PreciseTimer is required on Windows to actually tick faster than the
@@ -228,6 +345,155 @@ class ChartPreviewWidget(QWidget):
             self._font_cache[cache_key] = f
         return f
 
+    def widget_height(self) -> int:
+        """打音表記の帯を含めた現在の固定高さ。オフのときは帯の 26 px を
+        まるごと確保しない(窓を大きくしないという要望のため)。"""
+        return self.WIDGET_HEIGHT if self._se_text_enabled else self.WIDGET_HEIGHT_NO_SE
+
+    def set_se_text_enabled(self, enabled: bool):
+        """打音表記(ド/ドン/コ/カ/カッ)の表示切り替え。settings.json の
+        se_text_enabled から復元され、環境設定ダイアログのチェックボックスで
+        変更される。オフでも解析側のラベル計算は残る(切り替えが再解析なしで
+        即反映されるように)が、描画だけを止める。
+
+        あわせてウィジェットの固定高さも切り替える: オンなら帯の分だけ背が
+        高く(212)、オフならもとの高さ(186)。収める側の窓は heightChanged を
+        受けて自分の固定サイズを取り直す。"""
+        enabled = bool(enabled)
+        changed = (enabled != self._se_text_enabled)
+        self._se_text_enabled = enabled
+        h = self.widget_height()
+        # setFixedHeight は min/max 両方を固定するので、まだ固定されていない
+        # 段階(コンストラクタ直後、窓に入る前)でも安全に呼べる。
+        if self.maximumHeight() != h or self.minimumHeight() != h:
+            self.setFixedHeight(h)
+        if changed:
+            self.heightChanged.emit(h)
+            self.update()
+
+    # ------------------------------------------------------------------
+    # 叩いた音符の飛び方 (PeepoDrumKit GameNoteHitPath 移植)
+    # ------------------------------------------------------------------
+    @classmethod
+    def hit_fly_offset(cls, elapsed: float):
+        """判定線を通過してから `elapsed` 秒後の、判定点からのオフセット
+        (dx, dy) を px で返す。dy は Qt と同じく下が正 = 負なら上。
+
+        PeepoDrumKit の `SampleBezierFCurve(GameNoteHitPath, t)` は全キーが
+        `BezierKeyFrame2D::Linear` (HandleL = HandleR = Value) なので、
+        3 次ベジエ B(t) = A·(1-t)³ + A·3(1-t)²t + B·3(1-t)t² + B·t³
+                        = A·(1 - 3t² + 2t³) + B·(3t² - 2t³)
+        すなわち **smoothstep 補間** と厳密に等価になる。ここではその閉じた形を
+        直接使っているので、原典の曲線を近似ではなく完全に再現しつつ、
+        60fps のキー間も滑らかに埋まる(144Hz でも階段状にならない)。"""
+        if elapsed <= 0.0:
+            return (0.0, 0.0)
+        p = cls.HIT_PATH
+        f = elapsed * cls.HIT_PATH_FPS
+        i = int(f)
+        if i >= len(p) - 1:
+            return p[-1]
+        t = f - i
+        s = t * t * (3.0 - 2.0 * t)
+        x0, y0 = p[i]
+        x1, y1 = p[i + 1]
+        return (x0 + (x1 - x0) * s, y0 + (y1 - y0) * s)
+
+    # ------------------------------------------------------------------
+    # GOGO 判定リングの脈動 (PeepoDrumKit getGogoZoomAmount 移植)
+    # ------------------------------------------------------------------
+    def gogo_pulse(self, now: float) -> float:
+        """ゴーゴータイムの ADSR 風エンベロープを 0..1 で返す。
+
+        PeepoDrumKit (chart_editor_widgets_game.cpp:120-134) の fireAmount は
+        0→2 (アタック 0.05s)、2→1 (ディケイ 0.20s)、ゴーゴー中は 1 を保持、
+        区間終了後 1→0 (リリース 0.10s、二次関数)。ここでは扱いやすいよう
+        2 で割って 0..1 に正規化しているので、ピーク 1.0 / サステイン 0.5。
+
+        原典の laneAmount(レーンの縦ズーム)は **意図的に移植していない**:
+        譜面レーンの比率は固定という設計方針のため。"""
+        starts = self._gogo_starts
+        if not starts:
+            return 0.0
+        i = bisect.bisect_right(starts, now) - 1
+        if i < 0:
+            return 0.0
+        g0, g1 = self._gogo_regions[i]
+        is_gogo = now < g1
+        peak = self.GOGO_ATT + self.GOGO_DEC
+        ft = now - g0
+        if ft > peak:
+            ft = peak
+        if not is_gogo:
+            ft += (now - g1)
+        if ft > peak + self.GOGO_REL:
+            return 0.0
+        if ft > peak:
+            v = 1.0 - ((ft - peak) / self.GOGO_REL) ** 2
+        elif ft >= self.GOGO_ATT:
+            v = 2.0 - (1.0 - (1.0 - (ft - self.GOGO_ATT) / self.GOGO_DEC) ** 2)
+        else:
+            v = 2.0 * (ft / self.GOGO_ATT)
+        v *= 0.5
+        return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+    SE_MIN_CONTRAST = 3.0  # WCAG 2.1 minimum for large/bold text
+
+    @staticmethod
+    def _relative_luminance(c: QColor) -> float:
+        def channel(v):
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return (0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF())
+                + 0.0722 * channel(c.blueF()))
+
+    @classmethod
+    def _contrast_ratio(cls, a: QColor, b: QColor) -> float:
+        la, lb = cls._relative_luminance(a), cls._relative_luminance(b)
+        hi, lo = (la, lb) if la >= lb else (lb, la)
+        return (hi + 0.05) / (lo + 0.05)
+
+    def _se_color(self, key: str) -> QColor:
+        """打音表記用の色。基本は音符と同じ don/ka 色だが、ライトテーマの
+        `surface`(白)の上では ka (#0dcaf0) のように輝度が高い色がそのままだと
+        読めない(コントラスト比 1.9)。WCAG のコントラスト比で測って足りない
+        場合だけ、背景と反対方向へ段階的に寄せてから使う。テーマ生成番号が
+        進むと _color() 側で _qcolor_cache ごと捨てられるので、ここも同じ
+        タイミングで作り直される(計算はテーマ切替時のみ、毎フレームではない)。
+        """
+        cache_key = ("se", key)
+        # Touch _color first: it is what drops the shared cache on a theme
+        # switch, which must happen before we look for our own entry.
+        base = self._color(key)
+        c = self._qcolor_cache.get(cache_key)
+        if c is None:
+            bg = self._color("surface")
+            bg_is_light = self._relative_luminance(bg) > 0.5
+            c = QColor(base)
+            # 10 steps of 25% is always enough to reach black/white, so this
+            # terminates regardless of palette.
+            for _ in range(10):
+                if self._contrast_ratio(c, bg) >= self.SE_MIN_CONTRAST:
+                    break
+                c = c.darker(125) if bg_is_light else c.lighter(125)
+            self._qcolor_cache[cache_key] = c
+        return c
+
+    def _se_static_text(self, label: str, size: int) -> QStaticText:
+        family = self.font().family()
+        if family != self._se_static_family:
+            self._se_static_cache.clear()
+            self._se_static_family = family
+        key = (label, size)
+        st = self._se_static_cache.get(key)
+        if st is None:
+            st = QStaticText(label)
+            st.setTextFormat(Qt.PlainText)
+            # Freeze the layout now, with the exact font it will be painted
+            # with, so paintEvent never runs text shaping or font metrics.
+            st.prepare(font=self._font(size, True))
+            self._se_static_cache[key] = st
+        return st
+
     def _on_tick(self):
         # Finalize a scroll tween once it runs out - snap the extrapolation
         # base exactly to the target and, if we're not actually playing, let
@@ -268,33 +534,49 @@ class ChartPreviewWidget(QWidget):
 
     def set_preview_data(self, data: dict):
         """`data` is the dict returned by TJACourseAnalyzer.build_preview_timeline:
-        notes/rolls/balloons/gogo_regions/bar_times/bpm_changes/measure_changes/
-        scroll_changes/course_key/course_label/course_color/level/available_courses."""
-        notes = sorted(data.get("notes") or [])
-        self._note_times = [t for t, _, _, _ in notes]
-        self._note_chars = [c for _, c, _, _ in notes]
-        self._note_bpms = [bpm for _, _, bpm, _ in notes]
-        self._note_scrolls = [sc for _, _, _, sc in notes]
+        notes/rolls/balloons/kusudamas/gogo_regions/bar_times/bpm_changes/
+        measure_changes/scroll_changes/course_key/course_label/course_color/
+        level/available_courses."""
+        notes = sorted(data.get("notes") or [], key=lambda n: n[0])
+        self._note_times = [n[0] for n in notes]
+        self._note_chars = [n[1] for n in notes]
+        self._note_bpms = [n[2] for n in notes]
+        self._note_scrolls = [n[3] for n in notes]
+        # 5th element is the precomputed 打音表記 syllable (see se_text.py).
+        # Tolerated as absent so an older/hand-built dict still loads.
+        self._note_se = [(n[4] if len(n) > 4 else None) for n in notes]
         self._rolls = sorted(data.get("rolls") or [], key=lambda r: r[0])
         self._balloons = sorted(data.get("balloons") or [], key=lambda b: b[0])
-        # (start, end, hits) view combining both, used only for the live/
-        # held combo-count readout - independent of the rolls/balloons lists
-        # above since those keep their full per-type tuples for rendering.
+        # Kusudama ('9'...'8') is a balloon-shaped span (same 5-tuple shape:
+        # start, end, bpm, scroll, hits) but drawn in its own color and kept
+        # in its own list rather than tagged onto _balloons, so callers that
+        # want "just balloons" (info-bar balloon count, etc.) don't need to
+        # filter it back out.
+        self._kusudamas = sorted(data.get("kusudamas") or [], key=lambda k: k[0])
+        # (start, end, hits) view combining all three span types, used only
+        # for the live/held combo-count readout - independent of the rolls/
+        # balloons/kusudamas lists above since those keep their full
+        # per-type tuples for rendering.
         self._live_spans = sorted(
-            [(r[0], r[1], r[-1]) for r in self._rolls] + [(b[0], b[1], b[-1]) for b in self._balloons],
+            [(r[0], r[1], r[-1]) for r in self._rolls]
+            + [(b[0], b[1], b[-1]) for b in self._balloons]
+            + [(k[0], k[1], k[-1]) for k in self._kusudamas],
             key=lambda s: s[0],
         )
         self._gogo_regions = sorted(data.get("gogo_regions") or [])
+        self._gogo_starts = [g[0] for g in self._gogo_regions]
         bars = sorted(data.get("bar_times") or [])
-        self._bar_times = [t for t, _, _ in bars]
-        self._bar_bpms = [bpm for _, bpm, _ in bars]
-        self._bar_scrolls = [sc for _, _, sc in bars]
+        self._bar_times = [t for t, _, _, _ in bars]
+        self._bar_bpms = [bpm for _, bpm, _, _ in bars]
+        self._bar_scrolls = [sc for _, _, sc, _ in bars]
+        self._bar_visible = [vis for _, _, _, vis in bars]
         self._bpm_changes = sorted(data.get("bpm_changes") or [(0.0, DEFAULT_BPM)])
         self._measure_changes = sorted(data.get("measure_changes") or [(0.0, 4, 4)])
         self._scroll_changes = sorted(data.get("scroll_changes") or [(0.0, 1.0)])
         self._bpm_times = [c[0] for c in self._bpm_changes]
         self._measure_times = [c[0] for c in self._measure_changes]
         self._scroll_times = [c[0] for c in self._scroll_changes]
+        self._rebuild_span_draw_data()
         self._course_key = data.get("course_key")
         self._course_label = data.get("course_label") or ""
         self._course_color = data.get("course_color") or COLORS["fg_bright"]
@@ -394,15 +676,54 @@ class ChartPreviewWidget(QWidget):
         if key == Qt.Key_BracketRight:
             self._adjust_speed(0.05)
             return
+        # 再生速度プリセットキー(機能2、PeepoDrumKit 移植:
+        # chart_editor_settings.h の Timeline_SetPlaybackSpeed_100/75/50/25
+        # = 7/8/9/0、Timeline_IncreasePlaybackSpeed/DecreasePlaybackSpeed
+        # = C/Z)。ノーツ文字と衝突する数字キーだが、このウィジェットが
+        # フォーカスを持っている間だけ横取りする(エディタ側の keyPressEvent
+        # には一切届かない - フォーカスは同時に片方にしかないため、機能1の
+        # ノーツ入力音とも衝突しない)。
+        if key == Qt.Key_7:
+            self._set_speed_preset(1.00, "100%")
+            return
+        if key == Qt.Key_8:
+            self._set_speed_preset(0.75, "75%")
+            return
+        if key == Qt.Key_9:
+            self._set_speed_preset(0.50, "50%")
+            return
+        if key == Qt.Key_0:
+            self._set_speed_preset(0.25, "25%")
+            return
+        if key == Qt.Key_C:
+            self._adjust_speed(0.1, toast=True)
+            return
+        if key == Qt.Key_Z:
+            self._adjust_speed(-0.1, toast=True)
+            return
         super().keyPressEvent(event)
 
-    def _adjust_speed(self, delta: float):
-        rate = round(max(0.25, min(2.0, self._playback_rate + delta)), 2)
+    def _apply_speed(self, rate: float) -> float:
+        """目標倍率(0.25〜2.0にクランプ・小数2桁に丸め)を適用して、実際に
+        適用された値を返す。スライダー配線済みなら set_speed_cb 経由(→
+        スライダー値変更→valueChanged で audio/chart_preview 双方に同期反映)、
+        未配線(単体使用)なら自分の _playback_rate を直接更新するフォール
+        バック。"""
+        rate = round(max(0.25, min(2.0, rate)), 2)
         if self._set_speed_cb:
             self._set_speed_cb(rate)
         else:
-            # スライダー未配線(単体使用)でも動くようフォールバック。
             self.set_playback_rate(rate)
+        return rate
+
+    def _adjust_speed(self, delta: float, toast: bool = False):
+        rate = self._apply_speed(self._playback_rate + delta)
+        if toast:
+            self.show_toast(f"再生速度 : ×{rate:.2f}")
+
+    def _set_speed_preset(self, rate: float, label: str):
+        rate = self._apply_speed(rate)
+        self.show_toast(f"再生速度 : {label} (×{rate:.2f})")
 
     def set_playback_rate(self, rate: float):
         """再生速度倍率(0.25〜2.0)を設定。再生中の時間外挿に使う。"""
@@ -648,6 +969,47 @@ class ChartPreviewWidget(QWidget):
         s = scroll if scroll is not None else 1.0
         return self.BASE_PIXELS_PER_BEAT * b / 60.0 * s
 
+    def _speed_at(self, t: float) -> float:
+        """On-screen speed implied by the BPM/SCROLL in effect at chart time
+        `t`. build_preview_timeline already hands us sorted "bpm_changes" /
+        "scroll_changes" for exactly this bisect lookup, so nothing here
+        re-derives timing. Only ever called from _rebuild_span_draw_data
+        (once per chart edit), never per frame."""
+        bpm = self._bpm_changes[self._idx_at(self._bpm_times, t)][1]
+        scroll = self._scroll_changes[self._idx_at(self._scroll_times, t)][1]
+        return self._speed(bpm, scroll)
+
+    def _rebuild_span_draw_data(self):
+        """Resolve head/tail on-screen speeds for every roll/balloon/kusudama.
+
+        Previously both ends of a span were positioned with the span's
+        *starting* bpm+scroll, so a #SCROLL or #BPMCHANGE landing inside the
+        span put the tail in the wrong place. PeepoDrumKit computes the head
+        and tail lane coordinates completely independently
+        (chart_editor_widgets_game.cpp:733-735, two separate
+        GetNoteCoordinatesLane calls with the tail's own Tempo/ScrollSpeed),
+        which is what this reproduces: the bar visibly stretches or
+        compresses across a mid-span change.
+
+        The head keeps the bpm/scroll the analyzer already attached to it
+        (authoritative for mid-measure cases); only the tail needs a lookup.
+        Both are resolved here, outside the paint loop, so the 144 Hz redraw
+        just multiplies two precomputed floats."""
+        self._roll_draw = [
+            (r[0], r[1],
+             self._speed(r[3], r[4]), self._speed_at(r[1]),
+             self.NOTE_R_BIG if r[2] == "6" else self.NOTE_R_SMALL)
+            for r in self._rolls
+        ]
+        self._balloon_draw = [
+            (b[0], b[1], self._speed(b[2], b[3]), self._speed_at(b[1]))
+            for b in self._balloons
+        ]
+        self._kusudama_draw = [
+            (k[0], k[1], self._speed(k[2], k[3]), self._speed_at(k[1]))
+            for k in self._kusudamas
+        ]
+
     def _visible_window(self, now, w, judge_x):
         # Higher BPM -> faster on-screen speed -> a smaller time window covers
         # the same pixel range. Sizing the window at the slowest plausible
@@ -687,7 +1049,7 @@ class ChartPreviewWidget(QWidget):
         # climbs continuously during playback instead of jumping straight to
         # the whole-course total up front.
         total = 0
-        for spans in (self._rolls, self._balloons):
+        for spans in (self._rolls, self._balloons, self._kusudamas):
             for span in spans:
                 start, end, hits = span[0], span[1], span[-1]
                 if end <= now:
@@ -739,10 +1101,16 @@ class ChartPreviewWidget(QWidget):
 
     def _draw_roll_bar(self, painter: QPainter, x0: float, x1: float, cy: float, r: int, color: QColor):
         d = r * 2
+        # A negative/zero #SCROLL (or a big enough mid-span speed change) can
+        # put the tail to the LEFT of the head, so the body rect is built
+        # from the ordered pair rather than assuming x1 >= x0 - otherwise the
+        # rect would collapse to the 1 px minimum and the bar would look
+        # broken.
+        lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(color))
         painter.drawEllipse(int(x0 - r), int(cy - r), d, d)
-        painter.drawRect(int(x0), int(cy - r), max(1, int(x1 - x0)), d)
+        painter.drawRect(int(lo), int(cy - r), max(1, int(hi - lo)), d)
         painter.drawEllipse(int(x1 - r), int(cy - r), d, d)
         # Re-outline just the start point like a normal note (white border)
         # so it reads clearly as "the roll begins here", distinct from the
@@ -776,6 +1144,12 @@ class ChartPreviewWidget(QWidget):
         band_top = int(self.TOP_MARGIN)
         band_bottom = band_top + band_h
         mid_y = band_top + band_h / 2.0
+        # 打音表記の帯: 音符帯の直下、レーン枠の内側(PeepoDrumKit の
+        # GameLaneSlice.Footer 相当)。band_bottom の線がそのまま MidBorder。
+        # 打音表記がオフのときは帯そのものを確保しない(= ウィジェットが
+        # 26px 低くなる。窓を大きくしたくないという要望のため)。
+        footer_h = int(self.SE_FOOTER_HEIGHT) if self._se_text_enabled else 0
+        footer_bottom = band_bottom + footer_h
 
         painter.fillRect(self.rect(), self._color("bg"))
 
@@ -844,11 +1218,16 @@ class ChartPreviewWidget(QWidget):
 
         t_past, t_future = self._visible_window(now, lane_w, judge_x)
 
-        # --- bar (measure) lines ---
+        # --- bar (measure) lines. #BARLINEOFF/#BARLINEON only hides the
+        # visual line - the boundary itself always stays in _bar_times (and
+        # therefore in _nav_points/measure navigation/the measure counter
+        # below), so skipping a hidden entry here is purely cosmetic. ---
         lo_bar = bisect.bisect_left(self._bar_times, t_past)
         hi_bar = bisect.bisect_right(self._bar_times, t_future)
         painter.setPen(QPen(self._color("fg_dim"), 2))
         for i in range(lo_bar, hi_bar):
+            if not self._bar_visible[i]:
+                continue
             x = judge_x + (self._bar_times[i] - now) * self._speed(self._bar_bpms[i], self._bar_scrolls[i])
             painter.drawLine(int(x), band_top, int(x), band_bottom)
 
@@ -871,13 +1250,27 @@ class ChartPreviewWidget(QWidget):
         # big note) rather than an arbitrary multiplier, and the start point
         # is re-outlined like a normal note (white border) on top of the bar
         # so it's obvious at a glance where the roll begins. ---
-        for r_start, r_end, r_char, r_bpm, r_scroll, _r_hits in self._rolls:
-            if r_end < t_past or r_start > t_future:
+        #
+        # Head and tail are positioned INDEPENDENTLY, each from the on-screen
+        # speed implied by the bpm/scroll in effect at its own time
+        # (precomputed in _rebuild_span_draw_data), so a mid-span #SCROLL or
+        # #BPMCHANGE stretches/compresses the bar like the real game instead
+        # of misplacing the tail. Because the two ends can now move at
+        # different rates, the old "is the span's time range inside the
+        # visible time window" cull would be wrong (a slow head can still be
+        # on screen long after the window's lower bound, and a fast tail can
+        # arrive earlier than the window's upper bound), so the cull is done
+        # on the actual pixel extent instead - the same thing PeepoDrumKit
+        # does with Camera.IsRangeVisibleOnLane
+        # (chart_editor_widgets_game.cpp:779). These lists are short (one
+        # entry per roll/balloon/kusudama in the whole chart), and each
+        # iteration is two multiply-adds, so this stays far cheaper than the
+        # drawing it guards.
+        for r_start, r_end, sp0, sp1, r in self._roll_draw:
+            x0 = judge_x + (r_start - now) * sp0
+            x1 = judge_x + (r_end - now) * sp1
+            if (x0 < -r and x1 < -r) or (x0 > lane_w + r and x1 > lane_w + r):
                 continue
-            speed = self._speed(r_bpm, r_scroll)
-            x0 = judge_x + (r_start - now) * speed
-            x1 = judge_x + (r_end - now) * speed
-            r = self.NOTE_R_BIG if r_char == "6" else self.NOTE_R_SMALL
             # Turns red while actually being hit (now inside the span),
             # yellow otherwise - a clear "this one's live" cue distinct from
             # rolls still approaching or already finished.
@@ -886,13 +1279,22 @@ class ChartPreviewWidget(QWidget):
 
         # --- balloons: a color variant of the small roll (same size, same
         # bar shape), just in the balloon color so it's still distinct. ---
-        for b_start, b_end, b_bpm, b_scroll, b_hits in self._balloons:
-            if b_end < t_past or b_start > t_future:
+        rs = self.NOTE_R_SMALL
+        for b_start, b_end, sp0, sp1 in self._balloon_draw:
+            x0 = judge_x + (b_start - now) * sp0
+            x1 = judge_x + (b_end - now) * sp1
+            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
                 continue
-            speed = self._speed(b_bpm, b_scroll)
-            x0 = judge_x + (b_start - now) * speed
-            x1 = judge_x + (b_end - now) * speed
-            self._draw_roll_bar(painter, x0, x1, mid_y, self.NOTE_R_SMALL, self._color("balloon"))
+            self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
+
+        # --- kusudama ('9'...'8'): same capsule-bar shape as balloon/roll,
+        # its own color so it still reads as a distinct note type. ---
+        for k_start, k_end, sp0, sp1 in self._kusudama_draw:
+            x0 = judge_x + (k_start - now) * sp0
+            x1 = judge_x + (k_end - now) * sp1
+            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
+                continue
+            self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
 
         judge_r = self.NOTE_R_BIG + 5
         judge_r_inner = self.NOTE_R_SMALL
@@ -901,12 +1303,45 @@ class ChartPreviewWidget(QWidget):
         painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
         painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
 
-        # --- notes: approach normally, then fly off up-and-right (Taiko no
-        # Tatsujin style) for HIT_ANIM_DURATION once they cross the judgment
-        # line, instead of continuing to scroll past indefinitely. Past
-        # notes older than that are simply not drawn anymore, so the note
-        # window's lower bound is the animation duration rather than a wide
-        # scroll-based lookback.
+        # --- GOGO judgment-ring pulse ------------------------------------
+        # PeepoDrumKit pulses a flame sprite centered on the hit circle with
+        # an ADSR-ish envelope (getGogoZoomAmount,
+        # chart_editor_widgets_game.cpp:120-134; used at :640/:690 as the
+        # Game_Lane_GogoFire sprite's scale). There is no sprite sheet here,
+        # so the same envelope drives a QPainter glow ring instead: it grows
+        # outward from the judgment circle and thickens, snapping bright on
+        # every gogo entry and easing back to a steady hum while inside.
+        # Drawn in the note "don" color, which is a saturated red in both the
+        # light and dark palettes, and layered ON TOP of the flat GOGO_TINT
+        # wash above (the wash is unchanged - it was explicitly requested).
+        # NOTE: the lane-zoom half of getGogoZoomAmount (tAttLane) is
+        # deliberately not ported - the lane's proportions are fixed.
+        gogo_env = self.gogo_pulse(now)
+        if gogo_env > 0.0:
+            glow_r = int(judge_r + 4 + 11 * gogo_env)
+            painter.setOpacity(0.18 + 0.55 * gogo_env)
+            painter.setPen(QPen(self._color("don"), 2.0 + 5.0 * gogo_env))
+            painter.drawEllipse(int(judge_x - glow_r), int(mid_y - glow_r), glow_r * 2, glow_r * 2)
+            # Re-stroke the judgment ring itself so the pulse also reads on a
+            # light background, where a thin outer halo alone can get lost.
+            painter.setOpacity(0.30 + 0.60 * gogo_env)
+            painter.setPen(QPen(self._color("don"), 3))
+            painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
+            painter.setOpacity(1.0)
+
+        # --- notes: approach normally, then fly off along PeepoDrumKit's
+        # GameNoteHitPath parabola (up-and-right, arcing over and back down)
+        # for HIT_ANIM_DURATION once they cross the judgment line, instead of
+        # continuing to scroll past indefinitely. Past notes older than that
+        # are simply not drawn anymore, so the note window's lower bound is
+        # the animation duration rather than a wide scroll-based lookback.
+        #
+        # The alpha fade + slight shrink are NeoTJAEditor's own and are kept:
+        # PeepoDrumKit's equivalent white-flash / alpha-fade curves
+        # (GameNoteHitFadeIn/FadeOut, chart_editor_widgets_game.cpp:40-50) are
+        # `#if 0`-disabled at the call site (:94-97, "Just doesn't really look
+        # that great..."), so the reference neither contradicts nor supplies
+        # them.
         note_t_past = now - self.HIT_ANIM_DURATION
         lo = bisect.bisect_left(self._note_times, note_t_past)
         hi = bisect.bisect_right(self._note_times, t_future)
@@ -916,9 +1351,18 @@ class ChartPreviewWidget(QWidget):
             big = c in NOTE_BIG
             r = self.NOTE_R_BIG if big else self.NOTE_R_SMALL
             if t <= now:
-                progress = min(1.0, (now - t) / self.HIT_ANIM_DURATION)
-                x = judge_x + self.HIT_FLY_DX * progress
-                y = mid_y - self.HIT_FLY_DY * progress
+                elapsed = now - t
+                dx, dy = self.hit_fly_offset(elapsed)
+                x = judge_x + dx
+                y = mid_y + dy   # path y is world-space (down positive), same as Qt
+                # The arc leaves the clipped lane box quickly (as it does in
+                # the reference, relative to its own lane); skipping those
+                # keeps the extra 0.5 s of history from costing any drawing.
+                if y + r < band_top or y - r > band_bottom or x - r > lane_w:
+                    continue
+                progress = elapsed / self.HIT_ANIM_DURATION
+                if progress > 1.0:
+                    progress = 1.0
                 painter.setOpacity(max(0.0, 1.0 - progress))
                 self._draw_note(painter, x, y, max(1, int(r * (1.0 - 0.25 * progress))), c, big)
                 painter.setOpacity(1.0)
@@ -956,6 +1400,55 @@ class ChartPreviewWidget(QWidget):
 
         painter.setClipRect(self.rect())
 
+        # --- 打音表記 (automatic SE text) -------------------------------
+        # A footer strip inside the lane box, mirroring PeepoDrumKit's
+        # GameLaneSlice.Footer: each syllable sits horizontally on its note's
+        # x but vertically below the note band, so it never covers the note
+        # art and never has to fight the red/blue fills for contrast in
+        # either theme (it is drawn on `surface`, the same background the
+        # notes themselves are drawn on, in the note's own don/ka color).
+        # The strip costs height only while se_text_enabled is on - toggling
+        # it re-fixes the widget height (see set_se_text_enabled) and the
+        # containing window re-fits, rather than the window permanently
+        # carrying 26 px of empty strip.
+        if self._se_text_enabled:
+            painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
+            painter.setPen(QPen(self._color("border"), 2))
+            painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
+            painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
+        if self._se_text_enabled and self._note_se:
+            painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
+            for i in range(hi - 1, lo - 1, -1):
+                label = self._note_se[i]
+                if not label:
+                    continue
+                c = self._note_chars[i]
+                big = c in NOTE_BIG
+                size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
+                st = self._se_static_text(label, size)
+                t = self._note_times[i]
+                if t <= now:
+                    # Follow the note's fly-off horizontally and fade with
+                    # it, but stay in the footer row - PeepoDrumKit has no
+                    # fly-off animation at all, so gluing the label to its
+                    # note's x is the closest available behavior.
+                    elapsed = now - t
+                    progress = min(1.0, elapsed / self.HIT_ANIM_DURATION)
+                    x = judge_x + self.hit_fly_offset(elapsed)[0]
+                    painter.setOpacity(max(0.0, 1.0 - progress))
+                else:
+                    progress = 0.0
+                    x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
+                painter.setPen(self._se_color(NOTE_COLOR[c]))
+                painter.setFont(self._font(size, True))
+                sz = st.size()
+                painter.drawStaticText(int(x - sz.width() / 2.0),
+                                       int(band_bottom + (footer_h - sz.height()) / 2.0), st)
+                if progress:
+                    painter.setOpacity(1.0)
+            painter.setOpacity(1.0)
+            painter.setClipRect(self.rect())
+
         # Current measure / total measures ("15/90"), below the judgment
         # ring in the bottom margin - same bisect-over-bar_times approach as
         # seek_relative_measure, so "current measure" always agrees with
@@ -968,7 +1461,7 @@ class ChartPreviewWidget(QWidget):
         painter.setPen(self._color("fg_dim"))
         painter.setFont(self._font(12, True))
         box_w = 160
-        painter.drawText(int(judge_x - box_w / 2), band_bottom + 2, box_w, self.BOTTOM_MARGIN - 4,
+        painter.drawText(int(judge_x - box_w / 2), footer_bottom + 2, box_w, self.BOTTOM_MARGIN - 4,
                           Qt.AlignCenter, measure_text)
 
         # Focus indicator: matches the accent-colored :focus border the QSS
