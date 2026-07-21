@@ -37,12 +37,16 @@ class WaveformWidget(QWidget):
     NUDGE_STEP = 0.001
     NUDGE_STEP_COARSE = 0.010
 
-    def __init__(self, parent=None, toggle_play_cb=None):
+    def __init__(self, parent=None, toggle_play_cb=None, force_dark=False):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self._toggle_play_cb = toggle_play_cb
+        # ゲーム窓(えぬいーさん次郎)の波形は常にダーク基調。force_dark の
+        # ときは live COLORS ではなく固定のダークパレットを色源にする。
+        self._force_dark = force_dark
+        self._pal = theme.THEMES["dark"] if force_dark else COLORS
 
         self.mips = None
         self.duration = 0.0
@@ -338,7 +342,7 @@ class WaveformWidget(QWidget):
         cache_key = (key, width)
         pen = self._pens.get(cache_key)
         if pen is None:
-            pen = QPen(QColor(COLORS[key]))
+            pen = QPen(QColor(self._pal[key]))
             pen.setWidth(width)
             self._pens[cache_key] = pen
         return pen
@@ -347,7 +351,7 @@ class WaveformWidget(QWidget):
         painter = QPainter(self)
         w = self.width()
         h = self.height()
-        painter.fillRect(self.rect(), QColor(COLORS["bg2"]))
+        painter.fillRect(self.rect(), QColor(self._pal["bg2"]))
 
         t0 = self.view_start
         t1 = t0 + self._visible_span()
@@ -376,8 +380,8 @@ class WaveformWidget(QWidget):
             painter.setPen(self._pen("accent2", 2))
             painter.drawRect(1, 1, w - 2, h - 2)
             if self._readout:
-                painter.setPen(QColor(COLORS["bg"]))
-                painter.fillRect(6, h - 24, 240, 18, QColor(COLORS["accent2"]))
+                painter.setPen(QColor(self._pal["bg"]))
+                painter.fillRect(6, h - 24, 240, 18, QColor(self._pal["accent2"]))
                 painter.drawText(10, h - 10, self._readout)
 
     def _lane_buffer(self, w: int, h: int):
@@ -402,7 +406,7 @@ class WaveformWidget(QWidget):
             return
         self._check_theme()
         if self._lane_color is None:
-            self._lane_color = np.uint32(QColor(COLORS["accent"]).rgba())
+            self._lane_color = np.uint32(QColor(self._pal["accent"]).rgba())
 
         _mins, maxs = self.mips.peaks(channel, t0, t1, w)
         mid = (lane_h - 1) / 2.0

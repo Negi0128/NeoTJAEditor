@@ -9,8 +9,9 @@ import traceback
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressDialog,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QProgressDialog, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar,
+    QVBoxLayout, QWidget,
 )
 
 from neotja import settings as settings_mod
@@ -392,6 +393,11 @@ class MainWindow(QMainWindow):
             return
         content = self.editor.toPlainText()
         if not self.analyzer.line_in_course_body(content, line_no):
+            return
+        # 命令文(#MEASURE 4/4, #BPMCHANGE 120, #SCROLL 1 ...)の中の数字では
+        # 鳴らさない - 譜面本文としてのノーツ入力だけを対象にする。
+        line_text = self.editor.document().findBlockByNumber(line_no - 1).text()
+        if line_text.lstrip().startswith("#"):
             return
         hit_sounds = getattr(self.preview_dock, "hit_sounds", None)
         if hit_sounds is not None:
@@ -854,6 +860,31 @@ class MainWindow(QMainWindow):
             worker.failed.connect(on_failed)
             worker.start()
 
+    def _begin_loading(self, message: str):
+        """重い読み込み処理の間、中央に「読み込み中」オーバーレイを出す。
+        setPlainText(構文ハイライト)や _force_update(譜面解析)は GUI スレッド
+        で同期実行されて数百 ms 固まるので、その前にこれを見せて processEvents で
+        一度だけ描画しておく(処理中はこの表示のまま静止する)。"""
+        lbl = getattr(self, "_loading_overlay", None)
+        if lbl is None:
+            lbl = QLabel(self)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(
+                "background-color: rgba(0,0,0,160); color: #ffffff;"
+                " font-size: 18px; font-weight: bold;"
+            )
+            self._loading_overlay = lbl
+        lbl.setText(message)
+        lbl.setGeometry(self.rect())
+        lbl.raise_()
+        lbl.show()
+        QApplication.processEvents()
+
+    def _end_loading(self):
+        lbl = getattr(self, "_loading_overlay", None)
+        if lbl is not None:
+            lbl.hide()
+
     def open_file(self):
         if not self._unsaved_check():
             return
@@ -871,11 +902,15 @@ class MainWindow(QMainWindow):
                 "UTF-8で保存されたファイルを読み込みました。\n次回保存時に自動的にANSI形式で保存されます。",
             )
 
-        self.editor.setPlainText(content)
-        self.current_file = path
-        self.editor.modified_lines.clear()
-        self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
-        self._force_update()
+        self._begin_loading("TJAを読み込み中...")
+        try:
+            self.editor.setPlainText(content)
+            self.current_file = path
+            self.editor.modified_lines.clear()
+            self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
+            self._force_update()
+        finally:
+            self._end_loading()
 
     def open_folder(self):
         if self.current_file and os.path.exists(self.current_file):

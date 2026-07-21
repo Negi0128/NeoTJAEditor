@@ -11,7 +11,12 @@ from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, So
 from neotja.worker_util import detach_worker
 from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import ChartPreviewWidget
+from neotja import theme
 from neotja.theme import COLORS
+
+# えぬいーさん次郎(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
+# 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
+_DARK = theme.THEMES["dark"]
 from neotja.waveform_widget import WaveformWidget
 
 
@@ -82,7 +87,7 @@ class ChartInfoBar(QWidget):
 
         self.lbl_subtitle = QLabel("")
         self.lbl_subtitle.setAlignment(Qt.AlignCenter)
-        self.lbl_subtitle.setStyleSheet(f"color: {COLORS['fg_dim']};")
+        self.lbl_subtitle.setStyleSheet(f"color: {_DARK['fg_dim']};")
         layout.addWidget(self.lbl_subtitle)
 
         # Cards are tinted by category so the panel reads at a glance instead
@@ -132,24 +137,23 @@ class ChartInfoBar(QWidget):
 
     @staticmethod
     def _style_card(frame, lbl_header, lbl_value, color_key):
-        color = COLORS[color_key] if color_key else None
-        border_color = color or COLORS["border"]
-        value_color = color or COLORS["fg_bright"]
+        # 情報バーは常にダーク基調(_DARK)で描く。テーマに追従しない。
+        color = _DARK[color_key] if color_key else None
+        border_color = color or _DARK["border"]
+        value_color = color or _DARK["fg_bright"]
         frame.setStyleSheet(
-            f"QFrame {{ background-color: {COLORS['surface']}; border: 1px solid {border_color};"
+            f"QFrame {{ background-color: {_DARK['surface']}; border: 1px solid {border_color};"
             f" border-radius: 6px; }}"
         )
-        lbl_header.setStyleSheet(f"color: {COLORS['fg_dim']}; font-size: 10px; border: none;")
+        lbl_header.setStyleSheet(f"color: {_DARK['fg_dim']}; font-size: 10px; border: none;")
         lbl_value.setStyleSheet(f"border: none; color: {value_color};")
 
     def refresh_theme(self):
-        """Re-resolve the colors baked into per-widget stylesheets. The
-        app-level QSS that apply_theme() installs can't reach these - a
-        widget's own stylesheet wins - so without this the cards keep the
-        palette they were built with while the rest of the app restyles."""
+        """常にダーク基調に固定しているので、テーマ切替時も同じダーク色で
+        引き直すだけ(実質不変)。呼び出し側との整合のため残している。"""
         for frame, lbl_header, lbl_value, color_key in self._cards:
             self._style_card(frame, lbl_header, lbl_value, color_key)
-        self.lbl_subtitle.setStyleSheet(f"color: {COLORS['fg_dim']};")
+        self.lbl_subtitle.setStyleSheet(f"color: {_DARK['fg_dim']};")
 
     @staticmethod
     def _row(*cards):
@@ -234,6 +238,10 @@ class GamePreviewWindow(QWidget):
     def __init__(self, chart_preview: ChartPreviewWidget, bottom_widget: QWidget, parent=None, pause_cb=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("えぬいーさん次郎")
+        # アプリのテーマに関わらず窓全体をダーク基調に固定する。ウィジェット
+        # 自身のスタイルシートは app 全体の QSS より優先されるので、ライト
+        # テーマに切り替えても速度スライダー・ラベル・ボタン等はダークのまま。
+        self.setStyleSheet(theme.build_qss(theme.THEMES["dark"]))
         self._pause_cb = pause_cb
         self._chart_preview = chart_preview
         self._bottom_widget = bottom_widget
@@ -641,7 +649,7 @@ class PreviewDock(QDockWidget):
 
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
-        self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause)
+        self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause, force_dark=True)
         self._wire_waveform(self.game_waveform)
         self.game_waveform.setFixedHeight(150)
         v.addWidget(self.game_waveform)

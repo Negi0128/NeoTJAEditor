@@ -125,20 +125,14 @@ class ChartPreviewWidget(QWidget):
     SE_FONT_SIZE_BIG = 14
     RESYNC_THRESHOLD_SEC = 0.05
 
-    # --- hit fly-off (PeepoDrumKit GameNoteHitPath port) -----------------
-    # Precomputed once at class-definition time: offsets from the judgment
-    # point, already scaled to this lane, so paintEvent only does a table
-    # lookup + one lerp per hit note.
-    # Uniform (shape-preserving) scale chosen so the arc's apex puts the note
-    # centre exactly on the top edge of the lane band - see the long comment
-    # on _HIT_PATH_APEX_RISE for why the plain 106/195 lane-height ratio is
-    # NOT used. ~0.1296.
-    HIT_PATH_SCALE = (LANE_HEIGHT / 2.0) / _HIT_PATH_APEX_RISE
-    HIT_PATH = _scaled_hit_path(HIT_PATH_SCALE)
-    HIT_PATH_FPS = _HIT_PATH_FPS
-    # 0.5 s, exactly PeepoDrumKit's GameNoteHitAnimationDuration
-    # (chart_editor_widgets_game.cpp:51 - the last key's time).
-    HIT_ANIM_DURATION = (len(_HIT_PATH_RAW) - 1) / _HIT_PATH_FPS
+    # --- hit fly-off -----------------------------------------------------
+    # 叩いた音符は判定線を越えると右上へ直線的に飛んで消える(太鼓の達人風)。
+    # 以前はこの直線方式で、一度 PeepoDrumKit の放物線(GameNoteHitPath)に
+    # 差し替えたが、利用者の希望で直線方式に戻した。0.25 秒、右へ HIT_FLY_DX、
+    # 上へ HIT_FLY_DY、透明度と半径は progress に対して線形。
+    HIT_ANIM_DURATION = 0.25
+    HIT_FLY_DX = 90.0
+    HIT_FLY_DY = 70.0
 
     # --- GOGO judgment-ring pulse (PeepoDrumKit getGogoZoomAmount port) --
     # chart_editor_widgets_game.cpp:120-134. Only the "fire" envelope is
@@ -276,8 +270,12 @@ class ChartPreviewWidget(QWidget):
         # Per-frame paint allocations (QColor/QFont) are cached once and reused
         # rather than reconstructed from theme strings/font family on every
         # frame, which matters a lot at 120 fps.
-        self._qcolor_cache = {k: QColor(v) for k, v in COLORS.items()}
-        self._theme_gen = theme.GENERATION
+        # えぬいーさん次郎(ゲーム風プレビュー)はアプリのテーマに関わらず
+        # 常にダーク基調で描く。ライトテーマに切り替えても本家太鼓のような
+        # 暗いレーンの見た目を保つため、live な COLORS ではなく固定の dark
+        # パレットを色源にする。
+        self._palette = theme.THEMES["dark"]
+        self._qcolor_cache = {k: QColor(v) for k, v in self._palette.items()}
         self._font_cache = {}
         # 打音表記の表示可否(settings.json の se_text_enabled、既定 True)。
         self._se_text_enabled = True
@@ -323,17 +321,11 @@ class ChartPreviewWidget(QWidget):
         self._timer.setInterval(max(1, int(1000.0 / hz)))
 
     def _color(self, key: str) -> QColor:
-        # Parsing hex strings into QColor every paint is what this cache
-        # avoids, but COLORS is mutated in place by apply_theme, so the cache
-        # has to be dropped when the theme generation moves - otherwise the
-        # lane keeps painting the old palette while the rest of the app
-        # restyles (dark editor, light lane).
-        if self._theme_gen != theme.GENERATION:
-            self._qcolor_cache = {k: QColor(v) for k, v in COLORS.items()}
-            self._theme_gen = theme.GENERATION
+        # 固定のダークパレット(self._palette)から引くだけ。テーマ切替で
+        # 色が変わらないので、GENERATION による無効化はしない。
         c = self._qcolor_cache.get(key)
         if c is None:
-            c = QColor(COLORS.get(key, "#ffffff"))
+            c = QColor(self._palette.get(key, "#ffffff"))
             self._qcolor_cache[key] = c
         return c
 
@@ -372,32 +364,16 @@ class ChartPreviewWidget(QWidget):
             self.update()
 
     # ------------------------------------------------------------------
-    # 叩いた音符の飛び方 (PeepoDrumKit GameNoteHitPath 移植)
+    # 叩いた音符の飛び方(右上への直線移動)
     # ------------------------------------------------------------------
     @classmethod
     def hit_fly_offset(cls, elapsed: float):
         """判定線を通過してから `elapsed` 秒後の、判定点からのオフセット
-        (dx, dy) を px で返す。dy は Qt と同じく下が正 = 負なら上。
-
-        PeepoDrumKit の `SampleBezierFCurve(GameNoteHitPath, t)` は全キーが
-        `BezierKeyFrame2D::Linear` (HandleL = HandleR = Value) なので、
-        3 次ベジエ B(t) = A·(1-t)³ + A·3(1-t)²t + B·3(1-t)t² + B·t³
-                        = A·(1 - 3t² + 2t³) + B·(3t² - 2t³)
-        すなわち **smoothstep 補間** と厳密に等価になる。ここではその閉じた形を
-        直接使っているので、原典の曲線を近似ではなく完全に再現しつつ、
-        60fps のキー間も滑らかに埋まる(144Hz でも階段状にならない)。"""
+        (dx, dy) を px で返す。dy は Qt と同じく下が正なので、上方向へは負。"""
         if elapsed <= 0.0:
             return (0.0, 0.0)
-        p = cls.HIT_PATH
-        f = elapsed * cls.HIT_PATH_FPS
-        i = int(f)
-        if i >= len(p) - 1:
-            return p[-1]
-        t = f - i
-        s = t * t * (3.0 - 2.0 * t)
-        x0, y0 = p[i]
-        x1, y1 = p[i + 1]
-        return (x0 + (x1 - x0) * s, y0 + (y1 - y0) * s)
+        progress = min(1.0, elapsed / cls.HIT_ANIM_DURATION)
+        return (cls.HIT_FLY_DX * progress, -cls.HIT_FLY_DY * progress)
 
     # ------------------------------------------------------------------
     # GOGO 判定リングの脈動 (PeepoDrumKit getGogoZoomAmount 移植)
@@ -676,31 +652,6 @@ class ChartPreviewWidget(QWidget):
         if key == Qt.Key_BracketRight:
             self._adjust_speed(0.05)
             return
-        # 再生速度プリセットキー(機能2、PeepoDrumKit 移植:
-        # chart_editor_settings.h の Timeline_SetPlaybackSpeed_100/75/50/25
-        # = 7/8/9/0、Timeline_IncreasePlaybackSpeed/DecreasePlaybackSpeed
-        # = C/Z)。ノーツ文字と衝突する数字キーだが、このウィジェットが
-        # フォーカスを持っている間だけ横取りする(エディタ側の keyPressEvent
-        # には一切届かない - フォーカスは同時に片方にしかないため、機能1の
-        # ノーツ入力音とも衝突しない)。
-        if key == Qt.Key_7:
-            self._set_speed_preset(1.00, "100%")
-            return
-        if key == Qt.Key_8:
-            self._set_speed_preset(0.75, "75%")
-            return
-        if key == Qt.Key_9:
-            self._set_speed_preset(0.50, "50%")
-            return
-        if key == Qt.Key_0:
-            self._set_speed_preset(0.25, "25%")
-            return
-        if key == Qt.Key_C:
-            self._adjust_speed(0.1, toast=True)
-            return
-        if key == Qt.Key_Z:
-            self._adjust_speed(-0.1, toast=True)
-            return
         super().keyPressEvent(event)
 
     def _apply_speed(self, rate: float) -> float:
@@ -720,10 +671,6 @@ class ChartPreviewWidget(QWidget):
         rate = self._apply_speed(self._playback_rate + delta)
         if toast:
             self.show_toast(f"再生速度 : ×{rate:.2f}")
-
-    def _set_speed_preset(self, rate: float, label: str):
-        rate = self._apply_speed(rate)
-        self.show_toast(f"再生速度 : {label} (×{rate:.2f})")
 
     def set_playback_rate(self, rate: float):
         """再生速度倍率(0.25〜2.0)を設定。再生中の時間外挿に使う。"""
@@ -1418,7 +1365,15 @@ class ChartPreviewWidget(QWidget):
             painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
             painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
+            # 音符の色には合わせず、地色に対して読みやすい中立色(fg)で描く。
+            # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
+            # 音符には SE 文字を残さない。
+            painter.setPen(self._color("fg"))
+            fy = int(band_bottom + footer_h / 2.0)
             for i in range(hi - 1, lo - 1, -1):
+                t = self._note_times[i]
+                if t <= now:
+                    continue
                 label = self._note_se[i]
                 if not label:
                     continue
@@ -1426,27 +1381,11 @@ class ChartPreviewWidget(QWidget):
                 big = c in NOTE_BIG
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
                 st = self._se_static_text(label, size)
-                t = self._note_times[i]
-                if t <= now:
-                    # Follow the note's fly-off horizontally and fade with
-                    # it, but stay in the footer row - PeepoDrumKit has no
-                    # fly-off animation at all, so gluing the label to its
-                    # note's x is the closest available behavior.
-                    elapsed = now - t
-                    progress = min(1.0, elapsed / self.HIT_ANIM_DURATION)
-                    x = judge_x + self.hit_fly_offset(elapsed)[0]
-                    painter.setOpacity(max(0.0, 1.0 - progress))
-                else:
-                    progress = 0.0
-                    x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                painter.setPen(self._se_color(NOTE_COLOR[c]))
+                x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
                 painter.setFont(self._font(size, True))
                 sz = st.size()
                 painter.drawStaticText(int(x - sz.width() / 2.0),
-                                       int(band_bottom + (footer_h - sz.height()) / 2.0), st)
-                if progress:
-                    painter.setOpacity(1.0)
-            painter.setOpacity(1.0)
+                                       int(fy - sz.height() / 2.0), st)
             painter.setClipRect(self.rect())
 
         # Current measure / total measures ("15/90"), below the judgment
