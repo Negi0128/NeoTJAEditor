@@ -8,6 +8,7 @@ _SETTINGS_KEYS = (
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
+    "recent_files", "window_geometry", "splitter_state",
 )
 
 
@@ -49,6 +50,13 @@ def default_settings() -> dict:
         # ペースト操作では鳴らない。環境設定ダイアログ「エディタ・ツール」
         # タブのチェックボックスで変更。
         "note_input_sound": True,
+        # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
+        "recent_files": [],
+        # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
+        # base64 文字列(QMainWindow.saveGeometry / QSplitter.saveState)。空文字
+        # なら既定サイズで開く。
+        "window_geometry": "",
+        "splitter_state": "",
     }
 
 
@@ -97,6 +105,8 @@ def _coerce(default, loaded):
         for k, v in loaded.items():
             merged[k] = _coerce(default[k], v) if k in default else v
         return merged
+    if isinstance(default, list):
+        return loaded if isinstance(loaded, list) else default
     return loaded
 
 

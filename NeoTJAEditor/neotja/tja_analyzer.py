@@ -280,6 +280,31 @@ class TJACourseAnalyzer:
                 start = None
         return False
 
+    def measure_at_cursor(self, content: str, line_no: int):
+        """カーソル行が属する小節の1始まり番号を返す。#START..#END の外なら
+        None。ステータスバーの位置表示用なので、タイミング計算はせずカンマ数
+        だけ数える(その行より前のカンマ数 + 1 = その行が入る小節)。"""
+        lines = content.split('\n')
+        bounds = []
+        start = None
+        for idx, raw in enumerate(lines, start=1):
+            s = raw.split("//")[0].strip()
+            if s.startswith("#START"):
+                start = idx
+            elif s.startswith("#END") and start is not None:
+                bounds.append((start, idx))
+                start = None
+        target = next(((a, b) for a, b in bounds if a <= line_no <= b), None)
+        if target is None:
+            return None
+        a, b = target
+        measure = 1
+        for idx in range(a + 1, b):
+            if idx >= line_no:
+                break
+            measure += lines[idx - 1].split("//")[0].count(",")
+        return measure
+
     def time_at_cursor(self, content: str, line_no: int):
         """Returns the chart-time (seconds, float) at the start of the measure
         that contains `line_no` (1-indexed), or None if the line isn't inside

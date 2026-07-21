@@ -6,7 +6,7 @@ import sys
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QByteArray
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -165,8 +165,10 @@ class MainWindow(QMainWindow):
         self._metronome_timer.setSingleShot(True)
         self._metronome_timer.timeout.connect(self._update_metronome_schedule)
 
-        self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         self.resize(1280, 820)
+        # .tja/.txt をウィンドウにドラッグして開けるようにする(dropEvent)。
+        self.setAcceptDrops(True)
+        self._refresh_title()
 
         # Set once the update batch has been armed and the exit is already
         # agreed to, so closeEvent doesn't re-ask and veto the shutdown the
@@ -188,6 +190,8 @@ class MainWindow(QMainWindow):
         self.editor.checkpointsChanged.connect(self._update_status)
         self.editor.set_note_typed_cb(self._on_note_typed)
 
+        self._rebuild_recent_menu()
+        self._restore_window_state()
         self.new_file(confirm=False)
 
         # A failed update can only be reported now: the batch that applies it
@@ -298,6 +302,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([260, 1020])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        self.splitter = splitter   # サイドバー分割比の保存/復元に使う
         self.setCentralWidget(splitter)
 
     def _build_preview_dock(self):
@@ -489,6 +494,8 @@ class MainWindow(QMainWindow):
         fm = mb.addMenu("ファイル")
         fm.addAction("新規作成", self.new_file_dialog)
         fm.addAction("開く", self.open_file)
+        self._recent_menu = fm.addMenu("最近使ったファイル")
+        self._rebuild_recent_menu()
         fm.addAction("別ウィンドウで開く", self.open_new_window)
         fm.addSeparator()
         fm.addAction("上書き保存  Ctrl+S", self.save_file)
@@ -605,10 +612,96 @@ class MainWindow(QMainWindow):
     # Debounced analysis pass (mirrors the original's after(400, ...) pattern)
     # ------------------------------------------------------------------
     def _on_text_changed(self):
+        # タイトルバー/タスクバーに未保存(*)を出す。dirty 判定はアプリ独自の
+        # modified_lines(実際のキー入力で増える)に合わせる。setPlainText や
+        # OFFSET の裏書き戻しといったプログラム的な編集では増えないので、
+        # 読み込み/保存直後に * が付いてしまうのを防げる。setWindowModified は
+        # タイトル内の [*] プレースホルダを * / 空 に切り替える。
+        self.setWindowModified(bool(self.editor.modified_lines))
         # On large real-world charts, one heavy pass (full re-highlight +
         # course analysis) can take 100ms+, so a longer debounce keeps it
         # from re-triggering on every short pause while actively typing.
         self._heavy_timer.start(600)
+
+    # ------------------------------------------------------------------
+    # タイトル / 最近使ったファイル / ウィンドウ状態 (クイックウィン群)
+    # ------------------------------------------------------------------
+    def _refresh_title(self):
+        """タイトルを現在のファイル名から組み立て直す。末尾の [*] は Qt の
+        未保存インジケータで、setWindowModified(True) のとき * になる。"""
+        base = f"{APP_NAME}  v{VERSION}"
+        if self.current_file:
+            base += f"  —  {os.path.basename(self.current_file)}"
+        self.setWindowTitle(base + " [*]")
+
+    def _mark_saved(self):
+        """保存済み/新規/読込直後に呼ぶ。タイトルの * を消す。"""
+        self.setWindowModified(False)
+
+    def _push_recent(self, path):
+        if not path:
+            return
+        path = os.path.abspath(path)
+        recent = [p for p in self.config_data.get("recent_files", []) if p != path]
+        recent.insert(0, path)
+        self.config_data["recent_files"] = recent[:10]
+        settings_mod.save_settings(self.config_data)
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self):
+        menu = getattr(self, "_recent_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        recent = [p for p in self.config_data.get("recent_files", []) if os.path.exists(p)]
+        # 存在しなくなったパスは掃除して保存し直す。
+        if recent != self.config_data.get("recent_files", []):
+            self.config_data["recent_files"] = recent
+            settings_mod.save_settings(self.config_data)
+        if not recent:
+            act = menu.addAction("(履歴なし)")
+            act.setEnabled(False)
+            return
+        for p in recent:
+            menu.addAction(os.path.basename(p), lambda checked=False, path=p: self._open_recent(path))
+        menu.addSeparator()
+        menu.addAction("履歴を消去", self._clear_recent)
+
+    def _clear_recent(self):
+        self.config_data["recent_files"] = []
+        settings_mod.save_settings(self.config_data)
+        self._rebuild_recent_menu()
+
+    def _open_recent(self, path):
+        if not os.path.exists(path):
+            QMessageBox.information(self, "情報", "このファイルは見つかりませんでした。")
+            self._rebuild_recent_menu()
+            return
+        if not self._unsaved_check():
+            return
+        self._open_path(path)
+
+    def _restore_window_state(self):
+        try:
+            geo = self.config_data.get("window_geometry", "")
+            if geo:
+                self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
+            st = self.config_data.get("splitter_state", "")
+            if st and hasattr(self, "splitter"):
+                self.splitter.restoreState(QByteArray.fromBase64(st.encode("ascii")))
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def _save_window_state(self):
+        try:
+            self.config_data["window_geometry"] = bytes(
+                self.saveGeometry().toBase64()).decode("ascii")
+            if hasattr(self, "splitter"):
+                self.config_data["splitter_state"] = bytes(
+                    self.splitter.saveState().toBase64()).decode("ascii")
+            settings_mod.save_settings(self.config_data)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
 
     def _force_update(self):
         self._heavy_timer.stop()
@@ -706,7 +799,21 @@ class MainWindow(QMainWindow):
         cursor = self.editor.textCursor()
         line = cursor.blockNumber() + 1
         col = cursor.positionInBlock()
-        msg = f"  行 {line}  文字数 {col}  │  ANSI (CP932)"
+        msg = f"  行 {line}  文字数 {col}"
+        # カーソルがコース本文内なら、その小節番号と譜面上の時刻を出す。
+        # time_at_cursor/measure_at_cursor は本文外だと None を返す。
+        try:
+            content = self.editor.toPlainText()
+            measure = self.analyzer.measure_at_cursor(content, line)
+            if measure is not None:
+                sec = self.analyzer.time_at_cursor(content, line)
+                pos = f"第{measure}小節"
+                if sec is not None:
+                    pos += f"  {int(sec) // 60}:{sec % 60:06.3f}"
+                msg += f"  │  {pos}"
+        except Exception:  # noqa: BLE001
+            pass
+        msg += "  │  ANSI (CP932)"
         invalid_lines = getattr(self.editor, "invalid_lines", {})
         if line in invalid_lines:
             msg += f"  │  ⚠ 不正文字数 ({invalid_lines[line]})"
@@ -738,7 +845,8 @@ class MainWindow(QMainWindow):
         self.current_file = None
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
-        self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
+        self._refresh_title()
+        self._mark_saved()
         self._force_update()
 
     def new_file_dialog(self):
@@ -816,8 +924,10 @@ class MainWindow(QMainWindow):
         self.current_file = tja_path
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
-        self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(tja_path)}")
+        self._refresh_title()
         self.save_file()
+        self._mark_saved()
+        self._push_recent(tja_path)
         self._force_update()
 
         self.preview_dock.expand()
@@ -891,6 +1001,12 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "開く", "", "TJA Files (*.tja);;Text Files (*.txt)")
         if not path:
             return
+        self._open_path(path)
+
+    def _open_path(self, path):
+        """指定パスの TJA を読み込んでエディタに反映する。ダイアログ経由の
+        open_file、ドラッグ&ドロップ、最近使ったファイルの共通処理。呼び出し側
+        で未保存確認(_unsaved_check)を済ませておくこと。"""
         try:
             with open(path, "r", encoding="cp932") as f:
                 content = f.read()
@@ -905,6 +1021,9 @@ class MainWindow(QMainWindow):
                 self, "文字コード変換",
                 "UTF-8で保存されたファイルを読み込みました。\n次回保存時に自動的にANSI形式で保存されます。",
             )
+        except OSError as e:
+            QMessageBox.critical(self, "読み込みエラー", f"ファイルを開けませんでした:\n{e}")
+            return
         # Belt and braces: strip any stray leading BOM so header parsing always
         # sees a clean first line, whichever decode path ran.
         content = content.lstrip("﻿")
@@ -914,7 +1033,9 @@ class MainWindow(QMainWindow):
             self.editor.setPlainText(content)
             self.current_file = path
             self.editor.modified_lines.clear()
-            self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
+            self._refresh_title()
+            self._mark_saved()
+            self._push_recent(path)
             self._force_update()
         finally:
             self._end_loading()
@@ -954,6 +1075,7 @@ class MainWindow(QMainWindow):
                 return False
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
+            self._mark_saved()
             self.statusBar().showMessage(
                 "UTF-8で保存しました。TJAシミュレータによっては読み込めないことがあります。", 8000)
             return True
@@ -965,6 +1087,7 @@ class MainWindow(QMainWindow):
                 f.write(content)
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
+            self._mark_saved()
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", str(e))
             return False
@@ -1053,14 +1176,47 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".tja") and "." not in os.path.basename(path):
             path += ".tja"
         self.current_file = path
-        self.setWindowTitle(f"{APP_NAME}  v{VERSION}  —  {os.path.basename(path)}")
-        return self.save_file()
+        self._refresh_title()
+        ok = self.save_file()
+        if ok:
+            self._push_recent(path)
+        return ok
 
     def open_new_window(self):
         if getattr(sys, "frozen", False):
             subprocess.Popen([sys.executable])
         else:
             subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
+
+    # ------------------------------------------------------------------
+    # ドラッグ&ドロップで開く
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dropped_tja_path(event):
+        md = event.mimeData()
+        if not md.hasUrls():
+            return None
+        for url in md.urls():
+            p = url.toLocalFile()
+            if p and p.lower().endswith((".tja", ".txt")):
+                return p
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_tja_path(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        path = self._dropped_tja_path(event)
+        if not path:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        if not self._unsaved_check():
+            return
+        self._open_path(path)
 
     def closeEvent(self, event):
         # _updating means the unsaved check already ran and the updater batch is
@@ -1069,6 +1225,7 @@ class MainWindow(QMainWindow):
             # 終了が確定したこの時点で音声デバイスを確定的に閉じる。以前は
             # MixerAudioEngine.close() を誰も呼んでおらず、PortAudio の
             # ストリームがプロセス終了任せになっていた。
+            self._save_window_state()
             try:
                 self.preview_dock.shutdown_audio()
             except Exception:  # noqa: BLE001
