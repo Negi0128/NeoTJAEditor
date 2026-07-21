@@ -103,7 +103,10 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
             if type_ == 'cmd':
                 if val.startswith("#MEASURE"):
                     m = re.search(r"(\d+)/(\d+)", val)
-                    if m:
+                    # 分母0(#MEASURE 4/0 等の書きかけ)は無視して直前の拍子を維持。
+                    # tja_analyzer 側と同じ扱い。無いと length_beats 計算で
+                    # ZeroDivisionError になり書き出しが例外を出す。
+                    if m and int(m.group(2)) != 0:
                         current_num, current_den = int(m.group(1)), int(m.group(2))
                 elif val.startswith("#GOGOSTART"):
                     gogo_active = True

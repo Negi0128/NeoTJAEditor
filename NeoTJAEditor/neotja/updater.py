@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,8 +23,11 @@ def _version_tuple(v: str):
         v = v[1:]
     parts = []
     for p in v.split("."):
-        digits = "".join(c for c in p if c.isdigit())
-        parts.append(int(digits) if digits else 0)
+        # Take only the LEADING run of digits, so a suffixed segment like
+        # "0-beta1" reads as 0, not 01(=1). "".join(all digits) used to fuse
+        # the pre-release "1" onto the "0" and rank v6.2.0-beta1 above v6.2.0.
+        m = re.match(r"\d+", p)
+        parts.append(int(m.group()) if m else 0)
     return tuple(parts)
 
 
@@ -71,14 +75,24 @@ class UpdateDownloadWorker(QThread):
     progress = Signal(int)      # 0-100, or -1 if content-length is unknown
     finished_ok = Signal(str)   # path to the downloaded exe
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, asset_url: str, parent=None):
         super().__init__(parent)
         self.asset_url = asset_url
+        self._cancelled = False
+
+    def cancel(self):
+        """Cooperative cancel - the run loop checks this between chunks. Used
+        instead of QThread.terminate(), which can strike mid-write and corrupt
+        interpreter state or leave the fixed dest path locked (bricking the
+        next update attempt with PermissionError). Matches the cancellation
+        pattern the other workers in this app already use."""
+        self._cancelled = True
 
     def run(self):
+        dest = os.path.join(tempfile.gettempdir(), "NeoTJAEditor_update.exe")
         try:
-            dest = os.path.join(tempfile.gettempdir(), "NeoTJAEditor_update.exe")
             req = urllib.request.Request(self.asset_url, headers={"User-Agent": _USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
                 # Prefer the Content-Length header (resp.length decreases as we
@@ -90,6 +104,8 @@ class UpdateDownloadWorker(QThread):
                 total = expected or (resp.length or 0)
                 read = 0
                 while True:
+                    if self._cancelled:
+                        break
                     chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
@@ -97,15 +113,26 @@ class UpdateDownloadWorker(QThread):
                     read += len(chunk)
                     self.progress.emit(int(read * 100 / total) if total else -1)
 
+            if self._cancelled:
+                # The with-block closed both handles; now the partial file can
+                # be removed so the fixed path isn't left half-written/locked.
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                self.cancelled.emit()
+                return
+
             # A truncated download (dropped connection) would otherwise be
             # copied over the running exe and brick it - a onefile PyInstaller
             # build stores its archive at the tail, so a short file fails at
             # startup with e.g. "No module named 'PySide6.QtGui'". Validate the
-            # size against Content-Length and sanity-check the PE header before
+            # size against whatever total we know (Content-Length or the
+            # response's initial length) and sanity-check the PE header before
             # letting the caller apply it.
-            if expected and read != expected:
+            if total and read != total:
                 raise IOError(
-                    f"ダウンロードが不完全です ({read}/{expected} バイト)。"
+                    f"ダウンロードが不完全です ({read}/{total} バイト)。"
                     "通信状況を確認してもう一度お試しください。"
                 )
             with open(dest, "rb") as f:
@@ -114,6 +141,15 @@ class UpdateDownloadWorker(QThread):
 
             self.finished_ok.emit(dest)
         except Exception as e:
+            if self._cancelled:
+                # A read raised because we're tearing down mid-cancel - not a
+                # real failure to report to the user.
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                self.cancelled.emit()
+                return
             self.failed.emit(str(e))
 
 

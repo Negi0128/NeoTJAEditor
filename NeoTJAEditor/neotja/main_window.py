@@ -895,12 +895,19 @@ class MainWindow(QMainWindow):
             with open(path, "r", encoding="cp932") as f:
                 content = f.read()
         except UnicodeDecodeError:
-            with open(path, "r", encoding="utf-8") as f:
+            # utf-8-sig (not plain utf-8) so a leading BOM (U+FEFF) is stripped.
+            # A UTF-8-BOM file otherwise leaves U+FEFF on line 1, and since
+            # TITLE: is conventionally the first line, every startswith("TITLE:")
+            # check across the app silently fails (blank title, etc.).
+            with open(path, "r", encoding="utf-8-sig") as f:
                 content = f.read()
             QMessageBox.information(
                 self, "文字コード変換",
                 "UTF-8で保存されたファイルを読み込みました。\n次回保存時に自動的にANSI形式で保存されます。",
             )
+        # Belt and braces: strip any stray leading BOM so header parsing always
+        # sees a clean first line, whichever decode path ran.
+        content = content.lstrip("﻿")
 
         self._begin_loading("TJAを読み込み中...")
         try:
@@ -1066,6 +1073,14 @@ class MainWindow(QMainWindow):
                 self.preview_dock.shutdown_audio()
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
+            # 実行中かもしれない自前ワーカー(BPM/OFFSET検出・更新確認・更新DL・
+            # AI譜面生成)を待機所へ退避する。これをしないと、走行中に閉じたとき
+            # "QThread: Destroyed while thread is still running" でアプリごと
+            # 落ちうる。detach_worker は終了済み/None を安全に無視する。
+            from neotja.worker_util import detach_worker
+            for attr in ("_bpm_detect_worker", "_update_check_worker",
+                         "_update_download_worker", "_new_project_chart_gen_worker"):
+                detach_worker(getattr(self, attr, None))
             event.accept()
         else:
             event.ignore()
@@ -1341,7 +1356,11 @@ class MainWindow(QMainWindow):
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_ok)
         worker.failed.connect(on_failed)
-        progress.canceled.connect(worker.terminate)
+        worker.cancelled.connect(progress.close)
+        # Cooperative cancel (a flag checked between chunks), NOT QThread.
+        # terminate() - a forced kill mid-write could corrupt interpreter state
+        # or leave the fixed dest exe locked, breaking the next update attempt.
+        progress.canceled.connect(worker.cancel)
         self._update_download_worker = worker
         worker.start()
         progress.exec()

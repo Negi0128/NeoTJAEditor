@@ -63,6 +63,43 @@ def settings_path() -> Path:
     return base / "settings.json"
 
 
+def _coerce(default, loaded):
+    """設定値を default の型に合わせて安全に取り込む。JSON は正しくパースでき
+    ても型がずれている(手編集で font_size が "12"、run_config の F2 が文字列
+    等)ことがあり、そのまま採用すると起動時に QFont(str,str) や
+    run_config[k]['name'] で TypeError になってウィンドウ表示前に落ちる。
+    変換できない値は default にフォールバックする。"""
+    if isinstance(default, bool):
+        return loaded if isinstance(loaded, bool) else default
+    if isinstance(default, int):
+        if isinstance(loaded, bool):
+            return default
+        try:
+            return int(loaded)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        if isinstance(loaded, bool):
+            return default
+        try:
+            return float(loaded)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, str):
+        return loaded if isinstance(loaded, str) else default
+    if isinstance(default, dict):
+        if not isinstance(loaded, dict):
+            return default
+        # default の各キーは型を検証しつつ取り込み、既知キーの構造(run_config
+        # の各エントリが name/path を持つ dict であること等)を保証する。未知の
+        # 追加キーはそのまま通す。
+        merged = dict(default)
+        for k, v in loaded.items():
+            merged[k] = _coerce(default[k], v) if k in default else v
+        return merged
+    return loaded
+
+
 def load_settings() -> dict:
     data = default_settings()
     path = settings_path()
@@ -70,12 +107,10 @@ def load_settings() -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            for key in _SETTINGS_KEYS:
-                if key in loaded:
-                    if isinstance(loaded[key], dict) and isinstance(data[key], dict):
-                        data[key].update(loaded[key])
-                    else:
-                        data[key] = loaded[key]
+            if isinstance(loaded, dict):
+                for key in _SETTINGS_KEYS:
+                    if key in loaded:
+                        data[key] = _coerce(data[key], loaded[key])
         except Exception:
             pass
     return data
