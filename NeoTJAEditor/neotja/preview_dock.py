@@ -470,14 +470,18 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_info_update_cb(self.info_bar.set_realtime_info)
 
         # 下部パネルを3モードの QStackedWidget に(フェーズ3):
-        #   index 0 = 情報モード(既存 ChartInfoBar)
+        #   index 0 = 非表示モード(曲名・サブタイトルだけ表示) ← 既定
         #   index 1 = 作譜モード(波形 + 再生速度スライダー)
-        #   index 2 = 非表示モード(空白 = レーンのみ見える)
+        #   index 2 = 情報モード(既存 ChartInfoBar)
+        # 先頭(index 0)が起動時の既定表示になるので、既定を「非表示」にし、
+        # Tab/トグルは 非表示→作譜→情報→… と循環する。非表示でも「今どの曲を
+        # 見ているか」は分かるように曲名・サブタイトルだけは残す。
         self._sakufu_page = self._build_sakufu_page()
+        self._title_page = self._build_title_page()
         self.bottom_stack = QStackedWidget()
-        self.bottom_stack.addWidget(self.info_bar)      # 0 情報
+        self.bottom_stack.addWidget(self._title_page)   # 0 非表示(曲名のみ)
         self.bottom_stack.addWidget(self._sakufu_page)  # 1 作譜
-        self.bottom_stack.addWidget(QWidget())          # 2 非表示(空白)
+        self.bottom_stack.addWidget(self.info_bar)      # 2 情報
 
         # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
         # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
@@ -500,7 +504,7 @@ class PreviewDock(QDockWidget):
         # モード切替トグルボタン(キーと併用)。レーン右上隅に浮かせ、どのモード
         # でも常に見えるようにする。現在モード名を短く表示。フォーカスは奪わない
         # (Space/Tab/PgUp/PgDn はレーンに保持)。
-        self._mode_names = ["情報", "作譜", "非表示"]
+        self._mode_names = ["非表示", "作譜", "情報"]
         self.mode_button = QPushButton(self._mode_names[0], self.chart_preview)
         self.mode_button.setFocusPolicy(Qt.NoFocus)
         self.mode_button.setToolTip("下部パネルの表示切替(Tab)")
@@ -656,6 +660,35 @@ class PreviewDock(QDockWidget):
         v.addStretch()
         return page
 
+    def _build_title_page(self) -> QWidget:
+        """非表示モードのページ: 情報カードは出さず、曲名とサブタイトルだけを
+        中央に表示する。今どの譜面を見ているかは常に分かるようにするため。
+        ラベルは _sync_title_page() で情報バーと同じ内容に同期する。"""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(2)
+        v.addStretch()
+        self._tp_title = QLabel("-")
+        self._tp_title.setAlignment(Qt.AlignCenter)
+        f = self._tp_title.font()
+        f.setBold(True)
+        f.setPointSize(13)
+        self._tp_title.setFont(f)
+        v.addWidget(self._tp_title)
+        self._tp_subtitle = QLabel("")
+        self._tp_subtitle.setAlignment(Qt.AlignCenter)
+        self._tp_subtitle.setStyleSheet(f"color: {_DARK['fg_dim']};")
+        v.addWidget(self._tp_subtitle)
+        v.addStretch()
+        return page
+
+    def _sync_title_page(self, title: str, subtitle: str):
+        """非表示ページの曲名・サブタイトルを情報バーと同じ値に更新する。"""
+        self._tp_title.setText(title or "(無題)")
+        self._tp_subtitle.setText(subtitle or "")
+        self._tp_subtitle.setVisible(bool(subtitle))
+
     def _build_speed_row(self) -> QWidget:
         """再生速度スライダー(0.25〜1.0)。作譜モード専用ではなく、下部パネルの
         どのモードでも常に見えるよう、モードスタックの外に置く。"""
@@ -685,7 +718,7 @@ class PreviewDock(QDockWidget):
             wf.refresh_theme()
 
     def cycle_bottom_mode(self):
-        """情報(0)→作譜(1)→非表示(2)→情報… と循環。Tab キー(chart_preview)と
+        """非表示(0)→作譜(1)→情報(2)→非表示… と循環。Tab キー(chart_preview)と
         モードトグルボタンの両方から呼ばれる。"""
         idx = (self.bottom_stack.currentIndex() + 1) % 3
         self.bottom_stack.setCurrentIndex(idx)
@@ -749,6 +782,7 @@ class PreviewDock(QDockWidget):
             )
             self.info_bar.set_branch_info(preview_data.get("branch_level"), preview_data.get("has_branches"))
         self.info_bar.set_static_info(headers["title"], headers["subtitle"], course_stats)
+        self._sync_title_page(headers["title"], headers["subtitle"])
 
         wave = headers["wave"]
         if not current_file or not wave:
@@ -951,6 +985,7 @@ class PreviewDock(QDockWidget):
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
         self.info_bar.set_branch_info(data.get("branch_level"), data.get("has_branches"))
         self.info_bar.set_static_info(self.title_label.text(), self._editor_subtitle, course_stats)
+        self._sync_title_page(self.title_label.text(), self._editor_subtitle)
 
     def set_hit_sound_files(self, don_path: str, ka_path: str):
         self.hit_sounds.set_sound_files(don_path, ka_path)

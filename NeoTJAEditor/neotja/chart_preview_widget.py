@@ -15,6 +15,10 @@ NOTE_COLOR = {"1": "don", "2": "ka", "3": "don", "4": "ka"}
 NOTE_BIG = {"3", "4"}
 GOGO_TINT = QColor(255, 90, 90, 55)
 DEFAULT_BPM = 120.0
+# 判定文字「良」の色。本家太鼓の GOOD 判定と同じ金色。テーマに依らず固定
+# (レーンは常にダーク基調のため)。このプレビューは全ノーツを自動で・正確な
+# 時刻に叩く静的可視化なので、判定は常に「良」になる(可/不可は出ない)。
+JUDGE_GOOD = QColor(255, 206, 70)
 
 # --- 叩いた音符の飛び方 (PeepoDrumKit の GameNoteHitPath 移植) -------------
 # chart_editor_widgets_game.cpp:5-38 の `GameNoteHitPath`: 60fps 換算で
@@ -134,6 +138,14 @@ class ChartPreviewWidget(QWidget):
     HIT_FLY_DX = 90.0
     HIT_FLY_DY = 70.0
 
+    # --- 叩いた瞬間の判定エフェクト (本家風) ----------------------------
+    # このプレビューは全ノーツを正確な時刻に自動ヒットする静的可視化なので、
+    # 判定は常に「良」。直近ヒット音符からの経過時間だけで演出を描くステートレス
+    # 方式なので、シーク・部分再生・逆再生でも余計な状態を持たずに整合する。
+    HIT_BURST_DURATION = 0.18   # 判定枠から広がる閃光リング + 内側フラッシュ
+    JUDGE_POP_DURATION = 0.34   # 「良」の文字が上へ昇りながらフェードする時間
+    COMBO_POP_DURATION = 0.16   # コンボ数字がヒットごとに拡大→等倍へ戻る時間
+
     # --- GOGO judgment-ring pulse (PeepoDrumKit getGogoZoomAmount port) --
     # chart_editor_widgets_game.cpp:120-134. Only the "fire" envelope is
     # ported; the lane zoom (tAttLane) is deliberately NOT - this lane's
@@ -193,6 +205,10 @@ class ChartPreviewWidget(QWidget):
         self._bpm_changes = [(0.0, DEFAULT_BPM)]
         self._measure_changes = [(0.0, 4, 4)]
         self._scroll_changes = [(0.0, 1.0)]
+        # Slowest on-screen note/bar speed in the current chart, used to size
+        # the visible-time window in _visible_window so even very slow charts
+        # slide their notes in from the right edge (rebuilt per chart edit).
+        self._min_vis_speed = self.BASE_PIXELS_PER_BEAT * self.WINDOW_REF_BPM / 60.0
         self._course_key = None
         self._course_label = ""
         self._course_color = COLORS["fg_bright"]
@@ -375,6 +391,15 @@ class ChartPreviewWidget(QWidget):
         progress = min(1.0, elapsed / cls.HIT_ANIM_DURATION)
         return (cls.HIT_FLY_DX * progress, -cls.HIT_FLY_DY * progress)
 
+    def _recent_hit(self, now: float):
+        """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
+        判定エフェクト(しぶき・「良」・コンボ演出)はこれだけから描ける。
+        まだ1つも叩いていなければ None。"""
+        i = bisect.bisect_right(self._note_times, now) - 1
+        if i < 0:
+            return None
+        return (now - self._note_times[i], self._note_chars[i], i + 1)
+
     # ------------------------------------------------------------------
     # GOGO 判定リングの脈動 (PeepoDrumKit getGogoZoomAmount 移植)
     # ------------------------------------------------------------------
@@ -553,6 +578,7 @@ class ChartPreviewWidget(QWidget):
         self._measure_times = [c[0] for c in self._measure_changes]
         self._scroll_times = [c[0] for c in self._scroll_changes]
         self._rebuild_span_draw_data()
+        self._rebuild_min_vis_speed()
         self._course_key = data.get("course_key")
         self._course_label = data.get("course_label") or ""
         self._course_color = data.get("course_color") or COLORS["fg_bright"]
@@ -957,12 +983,39 @@ class ChartPreviewWidget(QWidget):
             for k in self._kusudamas
         ]
 
+    def _rebuild_min_vis_speed(self):
+        """Slowest positive on-screen speed among the chart's notes and bars,
+        capped at the 60-BPM reference. Drives the visible-time window so even
+        very slow charts (low BPM or #SCROLL < 1) slide their notes in from the
+        right edge instead of popping in mid-lane. Rebuilt once per chart edit.
+        Non-positive speeds (#SCROLL <= 0 gimmicks) are ignored - those notes
+        don't approach from the right edge, and the span cull handles them by
+        pixel extent anyway."""
+        ref = self.BASE_PIXELS_PER_BEAT * self.WINDOW_REF_BPM / 60.0
+        slowest = ref
+        for bpm, sc in zip(self._note_bpms, self._note_scrolls):
+            s = self._speed(bpm, sc)
+            if 0.0 < s < slowest:
+                slowest = s
+        for bpm, sc in zip(self._bar_bpms, self._bar_scrolls):
+            s = self._speed(bpm, sc)
+            if 0.0 < s < slowest:
+                slowest = s
+        self._min_vis_speed = slowest
+
     def _visible_window(self, now, w, judge_x):
-        # Higher BPM -> faster on-screen speed -> a smaller time window covers
-        # the same pixel range. Sizing the window at the slowest plausible
-        # tempo guarantees nothing visible gets excluded; faster songs just
-        # end up with a few harmless extra candidates bisected in.
-        speed = self.BASE_PIXELS_PER_BEAT * self.WINDOW_REF_BPM / 60.0
+        # Convert the visible pixel span into a time window for the note/bar
+        # bisect. Window width = pixels / speed, so the SLOWER the on-screen
+        # speed, the WIDER the time window a note needs to be caught before it
+        # reaches the right edge. Using a fixed 60-BPM reference used to
+        # under-size the window for genuinely slow charts (low BPM or #SCROLL
+        # < 1), so a slow note got culled until it had already scrolled partway
+        # in - it "appeared mid-lane" instead of sliding in from the edge.
+        # _min_vis_speed is the actual slowest on-screen speed in the chart
+        # (never above the 60-BPM reference), so the window is always wide
+        # enough for the slowest note; faster notes just get a few harmless
+        # extra candidates bisected in (all clipped to the box anyway).
+        speed = self._min_vis_speed
         return now - judge_x / speed, now + (w - judge_x) / speed
 
     LIVE_COUNT_HOLD_SEC = 1.0
@@ -1192,57 +1245,8 @@ class ChartPreviewWidget(QWidget):
                 painter.setPen(QPen(self._color("accent"), 3))
                 painter.drawLine(int(ax), band_top, int(ax), band_bottom)
 
-        # --- rolls (drawn under notes, like the real game). Sized to match
-        # an actual note's diameter (small roll = normal note, big roll =
-        # big note) rather than an arbitrary multiplier, and the start point
-        # is re-outlined like a normal note (white border) on top of the bar
-        # so it's obvious at a glance where the roll begins. ---
-        #
-        # Head and tail are positioned INDEPENDENTLY, each from the on-screen
-        # speed implied by the bpm/scroll in effect at its own time
-        # (precomputed in _rebuild_span_draw_data), so a mid-span #SCROLL or
-        # #BPMCHANGE stretches/compresses the bar like the real game instead
-        # of misplacing the tail. Because the two ends can now move at
-        # different rates, the old "is the span's time range inside the
-        # visible time window" cull would be wrong (a slow head can still be
-        # on screen long after the window's lower bound, and a fast tail can
-        # arrive earlier than the window's upper bound), so the cull is done
-        # on the actual pixel extent instead - the same thing PeepoDrumKit
-        # does with Camera.IsRangeVisibleOnLane
-        # (chart_editor_widgets_game.cpp:779). These lists are short (one
-        # entry per roll/balloon/kusudama in the whole chart), and each
-        # iteration is two multiply-adds, so this stays far cheaper than the
-        # drawing it guards.
-        for r_start, r_end, sp0, sp1, r in self._roll_draw:
-            x0 = judge_x + (r_start - now) * sp0
-            x1 = judge_x + (r_end - now) * sp1
-            if (x0 < -r and x1 < -r) or (x0 > lane_w + r and x1 > lane_w + r):
-                continue
-            # Turns red while actually being hit (now inside the span),
-            # yellow otherwise - a clear "this one's live" cue distinct from
-            # rolls still approaching or already finished.
-            color = self._color("don") if r_start <= now <= r_end else self._color("roll")
-            self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
-
-        # --- balloons: a color variant of the small roll (same size, same
-        # bar shape), just in the balloon color so it's still distinct. ---
-        rs = self.NOTE_R_SMALL
-        for b_start, b_end, sp0, sp1 in self._balloon_draw:
-            x0 = judge_x + (b_start - now) * sp0
-            x1 = judge_x + (b_end - now) * sp1
-            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
-                continue
-            self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
-
-        # --- kusudama ('9'...'8'): same capsule-bar shape as balloon/roll,
-        # its own color so it still reads as a distinct note type. ---
-        for k_start, k_end, sp0, sp1 in self._kusudama_draw:
-            x0 = judge_x + (k_start - now) * sp0
-            x1 = judge_x + (k_end - now) * sp1
-            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
-                continue
-            self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
-
+        # --- judgment ring (drawn BEFORE notes/rolls so they pass over it,
+        # like notes crossing the drum face in the real game). ---
         judge_r = self.NOTE_R_BIG + 5
         judge_r_inner = self.NOTE_R_SMALL
         painter.setPen(QPen(self._color("fg_bright"), 3))
@@ -1269,53 +1273,124 @@ class ChartPreviewWidget(QWidget):
             painter.setOpacity(0.18 + 0.55 * gogo_env)
             painter.setPen(QPen(self._color("don"), 2.0 + 5.0 * gogo_env))
             painter.drawEllipse(int(judge_x - glow_r), int(mid_y - glow_r), glow_r * 2, glow_r * 2)
-            # Re-stroke the judgment ring itself so the pulse also reads on a
-            # light background, where a thin outer halo alone can get lost.
             painter.setOpacity(0.30 + 0.60 * gogo_env)
             painter.setPen(QPen(self._color("don"), 3))
             painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
             painter.setOpacity(1.0)
 
-        # --- notes: approach normally, then fly off along PeepoDrumKit's
-        # GameNoteHitPath parabola (up-and-right, arcing over and back down)
-        # for HIT_ANIM_DURATION once they cross the judgment line, instead of
-        # continuing to scroll past indefinitely. Past notes older than that
-        # are simply not drawn anymore, so the note window's lower bound is
-        # the animation duration rather than a wide scroll-based lookback.
+        # --- notes, rolls, balloons and kusudama, drawn in ONE pass sorted
+        # by time descending so earlier objects land on top of later ones -
+        # exactly like the real game (太鼓の達人: 時間が早い音符ほど手前)。
+        # Previously rolls/balloons were drawn in their own passes *before* all
+        # notes, so an earlier roll that a #SCROLL let overtake a later note
+        # got drawn UNDERNEATH that note ("後ろからぬかす"). Merging everything
+        # into a single back-to-front pass fixes that ordering. Rolls/spans use
+        # their START time as the z-key (an earlier-starting roll is in front).
         #
-        # The alpha fade + slight shrink are NeoTJAEditor's own and are kept:
-        # PeepoDrumKit's equivalent white-flash / alpha-fade curves
-        # (GameNoteHitFadeIn/FadeOut, chart_editor_widgets_game.cpp:40-50) are
-        # `#if 0`-disabled at the call site (:94-97, "Just doesn't really look
-        # that great..."), so the reference neither contradicts nor supplies
-        # them.
+        # Roll head/tail are positioned INDEPENDENTLY from the on-screen speed
+        # at their own time (precomputed in _rebuild_span_draw_data), so a
+        # mid-span #SCROLL/#BPMCHANGE stretches the bar like the real game; the
+        # cull is on the actual pixel extent (Camera.IsRangeVisibleOnLane,
+        # chart_editor_widgets_game.cpp:779), not the time window.
         note_t_past = now - self.HIT_ANIM_DURATION
         lo = bisect.bisect_left(self._note_times, note_t_past)
         hi = bisect.bisect_right(self._note_times, t_future)
-        for i in range(hi - 1, lo - 1, -1):
-            t = self._note_times[i]
-            c = self._note_chars[i]
-            big = c in NOTE_BIG
-            r = self.NOTE_R_BIG if big else self.NOTE_R_SMALL
-            if t <= now:
-                elapsed = now - t
-                dx, dy = self.hit_fly_offset(elapsed)
-                x = judge_x + dx
-                y = mid_y + dy   # path y is world-space (down positive), same as Qt
-                # The arc leaves the clipped lane box quickly (as it does in
-                # the reference, relative to its own lane); skipping those
-                # keeps the extra 0.5 s of history from costing any drawing.
-                if y + r < band_top or y - r > band_bottom or x - r > lane_w:
-                    continue
-                progress = elapsed / self.HIT_ANIM_DURATION
-                if progress > 1.0:
-                    progress = 1.0
-                painter.setOpacity(max(0.0, 1.0 - progress))
-                self._draw_note(painter, x, y, max(1, int(r * (1.0 - 0.25 * progress))), c, big)
+        rs = self.NOTE_R_SMALL
+        draw_items = []
+        for r_start, r_end, sp0, sp1, r in self._roll_draw:
+            x0 = judge_x + (r_start - now) * sp0
+            x1 = judge_x + (r_end - now) * sp1
+            if (x0 < -r and x1 < -r) or (x0 > lane_w + r and x1 > lane_w + r):
+                continue
+            draw_items.append((r_start, "roll", (x0, x1, r, r_start, r_end)))
+        for b_start, b_end, sp0, sp1 in self._balloon_draw:
+            x0 = judge_x + (b_start - now) * sp0
+            x1 = judge_x + (b_end - now) * sp1
+            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
+                continue
+            draw_items.append((b_start, "balloon", (x0, x1)))
+        for k_start, k_end, sp0, sp1 in self._kusudama_draw:
+            x0 = judge_x + (k_start - now) * sp0
+            x1 = judge_x + (k_end - now) * sp1
+            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
+                continue
+            draw_items.append((k_start, "kusudama", (x0, x1)))
+        for i in range(lo, hi):
+            draw_items.append((self._note_times[i], "note", i))
+        # Latest first -> earliest drawn last -> earliest ends up on top.
+        draw_items.sort(key=lambda d: d[0], reverse=True)
+        for t0, kind, payload in draw_items:
+            if kind == "roll":
+                x0, x1, r, r_start, r_end = payload
+                # Red while being hit (now inside the span), yellow otherwise.
+                color = self._color("don") if r_start <= now <= r_end else self._color("roll")
+                self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
+            elif kind == "balloon":
+                x0, x1 = payload
+                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
+            elif kind == "kusudama":
+                x0, x1 = payload
+                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
+            else:  # note - approach, then fly off after crossing the line.
+                i = payload
+                t = self._note_times[i]
+                c = self._note_chars[i]
+                big = c in NOTE_BIG
+                r = self.NOTE_R_BIG if big else self.NOTE_R_SMALL
+                if t <= now:
+                    elapsed = now - t
+                    dx, dy = self.hit_fly_offset(elapsed)
+                    x = judge_x + dx
+                    y = mid_y + dy   # path y is world-space (down positive), same as Qt
+                    if y + r < band_top or y - r > band_bottom or x - r > lane_w:
+                        continue
+                    progress = elapsed / self.HIT_ANIM_DURATION
+                    if progress > 1.0:
+                        progress = 1.0
+                    painter.setOpacity(max(0.0, 1.0 - progress))
+                    self._draw_note(painter, x, y, max(1, int(r * (1.0 - 0.25 * progress))), c, big)
+                    painter.setOpacity(1.0)
+                else:
+                    x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
+                    self._draw_note(painter, x, mid_y, r, c, big)
+
+        # --- 叩いた瞬間の判定エフェクト (本家風) --------------------------
+        # 直近ヒット音符からの経過時間だけで、判定枠から広がるしぶきと「良」の
+        # ポップを描く。判定枠のすぐ上・レーンクリップ内なので他の演出の上に
+        # 重なって出る。全ノーツ自動ヒットのため判定は常に「良」。
+        hit = self._recent_hit(now)
+        if hit is not None:
+            h_elapsed, h_char, _h_combo = hit
+            h_big = h_char in NOTE_BIG
+            h_base = self.NOTE_R_BIG if h_big else self.NOTE_R_SMALL
+            # ヒットしぶき: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
+            if 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
+                bp = h_elapsed / self.HIT_BURST_DURATION      # 0..1
+                ring_r = int(h_base + 6 + 34 * bp)
+                painter.setBrush(Qt.NoBrush)
+                painter.setOpacity(max(0.0, 0.6 * (1.0 - bp)))
+                painter.setPen(QPen(self._color("fg_bright"), 3))
+                painter.drawEllipse(int(judge_x - ring_r), int(mid_y - ring_r), ring_r * 2, ring_r * 2)
+                flash_r = int(judge_r_inner * (1.0 - 0.35 * bp))
+                painter.setOpacity(max(0.0, 0.5 * (1.0 - bp)))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(self._color("fg_bright")))
+                painter.drawEllipse(int(judge_x - flash_r), int(mid_y - flash_r), flash_r * 2, flash_r * 2)
                 painter.setOpacity(1.0)
-            else:
-                x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                self._draw_note(painter, x, mid_y, r, c, big)
+            # 判定文字「良」: 判定枠の上にポップし、上へ昇りながらフェード。
+            # 上マージンへはみ出すので、この文字だけレーンクリップを一時解除して
+            # 描き(本家でも判定文字はレーン枠の上に出る)、直後にクリップを戻す。
+            if 0.0 <= h_elapsed < self.JUDGE_POP_DURATION:
+                jp = h_elapsed / self.JUDGE_POP_DURATION      # 0..1
+                rise = 13.0 * (1.0 - (1.0 - jp) ** 2)         # ease-out で上昇(控えめ)
+                painter.setClipRect(self.rect())
+                painter.setOpacity(max(0.0, 1.0 - jp))
+                painter.setPen(JUDGE_GOOD)
+                painter.setFont(self._font(20, True))
+                jy = int(mid_y - judge_r - 8 - rise)
+                painter.drawText(int(judge_x - 40), jy, 80, 26, Qt.AlignCenter, "良")
+                painter.setOpacity(1.0)
+                painter.setClipRect(0, band_top, lane_w, band_h)
 
         # --- combo readout, covering the lane left of the judgment line
         # (like the real game's score/combo panel). A small gap separates
@@ -1341,9 +1416,27 @@ class ChartPreviewWidget(QWidget):
         painter.setPen(self._color("fg_dim"))
         painter.setFont(self._font(9))
         painter.drawText(int(panel_x), band_top + 6, int(panel_w), 18, Qt.AlignCenter, "コンボ")
+        # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
+        # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
+        pop = 1.0
+        if combo > 0:
+            ce = now - self._note_times[combo - 1]
+            if 0.0 <= ce < self.COMBO_POP_DURATION:
+                pop = 1.0 + 0.14 * (1.0 - ce / self.COMBO_POP_DURATION)
+        num_h = band_h - 28
+        num_cx = panel_x + panel_w / 2.0
+        num_cy = band_top + 24 + num_h / 2.0
         painter.setPen(self._color("fg_bright"))
         painter.setFont(self._font(22, True))
-        painter.drawText(int(panel_x), band_top + 24, int(panel_w), band_h - 28, Qt.AlignCenter, str(combo))
+        if pop > 1.0:
+            painter.save()
+            painter.translate(num_cx, num_cy)
+            painter.scale(pop, pop)
+            painter.drawText(int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h),
+                             Qt.AlignCenter, str(combo))
+            painter.restore()
+        else:
+            painter.drawText(int(panel_x), band_top + 24, int(panel_w), num_h, Qt.AlignCenter, str(combo))
 
         painter.setClipRect(self.rect())
 
