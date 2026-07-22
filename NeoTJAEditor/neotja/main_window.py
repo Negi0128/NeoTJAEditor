@@ -152,6 +152,12 @@ class MainWindow(QMainWindow):
         self.courses_info = []
         self._preview_course_override = None
         self._preview_branch_level = "M"
+        # プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)が映す譜面テキスト。
+        # 入力中のバッファではなく、最後に保存/読込した内容を保持する。保存/開く/
+        # 新規のときだけ更新し、打鍵では変えない(=プレビューは保存済みの譜面を
+        # 映す)。_preview_courses はその内容のコース解析結果のキャッシュ。
+        self._preview_content = ""
+        self._preview_courses = []
         self._heavy_timer = QTimer(self)
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
@@ -771,30 +777,52 @@ class MainWindow(QMainWindow):
         self.highlighter.apply_data(data)
         self.editor.gutter.update()
         self._update_status()
+        # プレビューは「保存済みの内容」を映すので、打鍵ごとの再解析(この
+        # _heavy_analysis)では作り直さない。_refresh_preview は self._preview_content
+        # (保存/読込時のスナップショット)から組むため、ここで呼んでも表示は
+        # 変わらない(=保存するまでプレビューは固定)。保存/開く/新規のときに
+        # _set_preview_content でスナップショットを更新してから呼ぶ。
+        self._refresh_preview()
+
+    def _set_preview_content(self, content):
+        """プレビューが映す譜面スナップショットを更新する(保存/開く/新規時)。"""
+        self._preview_content = content
+        self._preview_courses = self.analyzer.parse_courses(content)
+
+    def _refresh_preview(self):
+        """プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)を保存済みの
+        self._preview_content から組み直す。OFFSET・波形の合わせ込みは別経路
+        (OFFSETスピンボックス)でライブのまま。"""
+        content = self._preview_content
         cursor_line = self.editor.textCursor().blockNumber() + 1
         metronome_clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         preview_data = self.analyzer.build_preview_timeline(
             content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
         )
-        course_stats = self._find_course_stats(preview_data.get("course_key"))
+        course_stats = self._preview_course_stats(preview_data.get("course_key"))
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
 
     def _find_course_stats(self, course_key):
         return next((c for c in self.courses_info if c["key"] == course_key), None)
+
+    def _preview_course_stats(self, course_key):
+        return next((c for c in self._preview_courses if c["key"] == course_key), None)
 
     def _update_metronome_schedule(self):
         # Lighter-weight than _heavy_tasks: just re-picks which course's
         # #MEASURE/#BPMCHANGE the metronome/preview should follow when the
         # cursor moves into a different course, without re-running the
         # expensive syntax highlighter over the whole document.
-        content = self.editor.toPlainText()
+        # プレビューは保存済み内容(self._preview_content)を映す方針なので、
+        # ここでも入力中バッファではなくスナップショットを使う。
+        content = self._preview_content
         cursor_line = self.editor.textCursor().blockNumber() + 1
         clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         self.preview_dock.set_metronome_clicks(clicks)
         preview_data = self.analyzer.build_preview_timeline(
             content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
         )
-        self.preview_dock.set_preview_data(preview_data, self._find_course_stats(preview_data.get("course_key")))
+        self.preview_dock.set_preview_data(preview_data, self._preview_course_stats(preview_data.get("course_key")))
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')
@@ -882,6 +910,7 @@ class MainWindow(QMainWindow):
         self.editor.checkpoints.clear()
         self._refresh_title()
         self._mark_saved()
+        self._set_preview_content(NEW_FILE_TEMPLATE)
         self._force_update()
 
     def new_file_dialog(self):
@@ -1071,6 +1100,7 @@ class MainWindow(QMainWindow):
             self._refresh_title()
             self._mark_saved()
             self._push_recent(path)
+            self._set_preview_content(content)
             self._force_update()
         finally:
             self._end_loading()
@@ -1111,6 +1141,8 @@ class MainWindow(QMainWindow):
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
             self._mark_saved()
+            self._set_preview_content(content)
+            self._refresh_preview()
             self.statusBar().showMessage(
                 "UTF-8で保存しました。TJAシミュレータによっては読み込めないことがあります。", 8000)
             return True
@@ -1123,6 +1155,8 @@ class MainWindow(QMainWindow):
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
             self._mark_saved()
+            self._set_preview_content(content)
+            self._refresh_preview()
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", str(e))
             return False
