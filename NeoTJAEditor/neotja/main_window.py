@@ -14,8 +14,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from neotja import measure_edit
 from neotja import settings as settings_mod
 from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
+from neotja.find_replace import FindReplaceBar
 from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
@@ -210,10 +212,13 @@ class MainWindow(QMainWindow):
         self.highlighter = TJAHighlighter(self.editor.document())
         self.ruler = RulerWidget(self.editor)
 
+        self.find_bar = FindReplaceBar(self.editor)
+
         editor_container = QWidget()
         v = QVBoxLayout(editor_container)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+        v.addWidget(self.find_bar)
         v.addWidget(self.ruler)
         v.addWidget(self.editor)
         self.editor_container = editor_container
@@ -504,6 +509,15 @@ class MainWindow(QMainWindow):
         fm.addAction("終了", self.close)
 
         tm = mb.addMenu("ツール")
+        tm.addAction("検索  Ctrl+F", self.find_bar.show_find)
+        tm.addAction("置換  Ctrl+H", self.find_bar.show_replace)
+        mm = tm.addMenu("小節編集")
+        mm.addAction("小節を複製  Ctrl+D", lambda: self._measure_op("dup"))
+        mm.addAction("小節を削除  Ctrl+Shift+D", lambda: self._measure_op("del"))
+        mm.addAction("空の小節を挿入  Ctrl+Shift+N", lambda: self._measure_op("ins"))
+        mm.addAction("小節を上へ移動  Ctrl+Shift+↑", lambda: self._measure_op("move", "up"))
+        mm.addAction("小節を下へ移動  Ctrl+Shift+↓", lambda: self._measure_op("move", "down"))
+        tm.addSeparator()
         tm.addAction("ハイスピ変換", self.open_scroll_splitter)
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
         tm.addSeparator()
@@ -571,6 +585,27 @@ class MainWindow(QMainWindow):
         sc_reverse = QShortcut(QKeySequence("Ctrl+M"), self.editor)
         sc_reverse.setContext(Qt.WidgetWithChildrenShortcut)
         sc_reverse.activated.connect(self.reverse_don_ka)
+
+        # 検索・置換。
+        sc_find = QShortcut(QKeySequence("Ctrl+F"), self.editor)
+        sc_find.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_find.activated.connect(self.find_bar.show_find)
+        sc_repl = QShortcut(QKeySequence("Ctrl+H"), self.editor)
+        sc_repl.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_repl.activated.connect(self.find_bar.show_replace)
+
+        # 小節編集(カーソルのある小節が対象)。
+        measure_ops = {
+            "Ctrl+D": ("dup", None),
+            "Ctrl+Shift+D": ("del", None),
+            "Ctrl+Shift+N": ("ins", None),
+            "Ctrl+Shift+Up": ("move", "up"),
+            "Ctrl+Shift+Down": ("move", "down"),
+        }
+        for seq, (op, arg) in measure_ops.items():
+            sc = QShortcut(QKeySequence(seq), self.editor)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda o=op, a=arg: self._measure_op(o, a))
 
         sc_toggle_cp = QShortcut(QKeySequence("Alt+P"), self.editor)
         sc_toggle_cp.setContext(Qt.WidgetWithChildrenShortcut)
@@ -1272,6 +1307,40 @@ class MainWindow(QMainWindow):
             return
         new = txt.translate(str.maketrans("1234", "2143"))
         cursor.insertText(new)
+        self._force_update()
+
+    # ------------------------------------------------------------------
+    # 小節編集(複製/削除/空小節挿入/前後入れ替え)
+    # ------------------------------------------------------------------
+    _MEASURE_OPS = {
+        "dup": measure_edit.op_duplicate,
+        "del": measure_edit.op_delete,
+        "ins": measure_edit.op_insert_after,
+    }
+
+    def _measure_op(self, op, arg=None):
+        text = self.editor.toPlainText()
+        pos = self.editor.textCursor().position()
+        if op == "move":
+            result = measure_edit.op_move(text, pos, arg)
+        else:
+            result = self._MEASURE_OPS[op](text, pos)
+        if result is None:
+            self.statusBar().showMessage("小節編集: カーソルを譜面本文(#START〜#END内)の小節に置いてください", 4000)
+            return
+        start, end, replacement, cursor = result
+        tc = self.editor.textCursor()
+        tc.beginEditBlock()
+        tc.setPosition(start)
+        tc.setPosition(end, QTextCursor.KeepAnchor)
+        tc.insertText(replacement)
+        tc.endEditBlock()
+        # カーソルを移動先へ。プログラム編集なので dirty を明示的に立てる。
+        nc = self.editor.textCursor()
+        nc.setPosition(max(0, min(cursor, len(self.editor.toPlainText()))))
+        self.editor.setTextCursor(nc)
+        self.editor.modified_lines.add(nc.blockNumber() + 1)
+        self.setWindowModified(True)
         self._force_update()
 
     # ------------------------------------------------------------------
