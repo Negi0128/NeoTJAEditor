@@ -73,6 +73,32 @@ def _pil_to_qpixmap(img) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
+def _slice_alpha_bands(img):
+    """Split a vertical sprite sheet into its opaque horizontal bands (rows),
+    each tight-cropped, top to bottom. Used for OpenTaiko-style Judge.png and
+    SENotes.png which stack one label per row separated by transparent gaps."""
+    import numpy as np
+    a = np.asarray(img.convert("RGBA"))[:, :, 3]
+    row_opaque = a.max(axis=1) > 16
+    bands, start = [], None
+    for y in range(a.shape[0]):
+        if row_opaque[y] and start is None:
+            start = y
+        elif not row_opaque[y] and start is not None:
+            bands.append((start, y - 1)); start = None
+    if start is not None:
+        bands.append((start, a.shape[0] - 1))
+    out = []
+    for (y0, y1) in bands:
+        strip = img.crop((0, y0, img.width, y1 + 1))
+        sa = np.asarray(strip.convert("RGBA"))[:, :, 3]
+        cols = np.where(sa.max(axis=0) > 16)[0]
+        if len(cols) == 0:
+            continue
+        out.append(strip.crop((int(cols.min()), 0, int(cols.max()) + 1, strip.height)))
+    return out
+
+
 class ChartPreviewWidget(QWidget):
     """Fixed-judgment-line, real-time scrolling note preview (taiko-simulator
     style), synced to the audio playback position.
@@ -316,6 +342,13 @@ class ChartPreviewWidget(QWidget):
         self._timer.timeout.connect(self._on_tick)
 
         self._sprites_small, self._sprites_big = self._load_sprites()
+        # Optional OpenTaiko-style skin art for lane furniture, loaded once.
+        # All None when the user has no skin - the code falls back to drawing
+        # its own text/shapes, so nothing here is required.
+        self._skin_judge_good = self._load_skin_judge()
+        self._skin_lane = self._load_skin_lane()
+        self._skin_ring = self._load_skin_ring()
+        self._skin_se = self._load_skin_se()
 
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
@@ -550,6 +583,107 @@ class ChartPreviewWidget(QWidget):
         for c in ("3", "4"):
             big.setdefault(c, self._make_note_sprite(NOTE_COLOR[c], self.NOTE_R_BIG))
         return small, big
+
+    JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
+    SE_SPRITE_H = 22     # on-screen height each 打音表記 sprite is scaled to
+    # (SE label, is_big) -> row index in an OpenTaiko-style SENotes.png sheet.
+    # Sheet row order: ドン, ド, コ, カッ, カ, ドン(大), カッ(大), ...
+    SE_ROW_INDEX = {
+        ("ドン", False): 0, ("ド", False): 1, ("コ", False): 2,
+        ("カッ", False): 3, ("カ", False): 4,
+        ("ドン", True): 5, ("カッ", True): 6,
+        # big ド/コ/カ don't occur in practice; map to their small rows anyway
+        ("ド", True): 1, ("コ", True): 2, ("カ", True): 4,
+    }
+
+    def _load_skin_judge(self):
+        """Top cell (良) of an OpenTaiko-style skin/Judge.png, scaled for the
+        judge pop, or None. This preview auto-hits every note so the judgment
+        is always 良 - only that first row is needed."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Judge.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            from PIL import Image
+            bands = _slice_alpha_bands(Image.open(path))
+            if not bands:
+                return None
+            good = bands[0]
+            scale = self.JUDGE_SPRITE_H / good.height
+            good = good.resize((max(1, round(good.width * scale)), self.JUDGE_SPRITE_H),
+                               Image.Resampling.LANCZOS)
+            return _pil_to_qpixmap(good)
+        except Exception:
+            return None
+
+    def _load_skin_se(self):
+        """Rows of an OpenTaiko-style skin/SENotes.png (ドン/ド/コ/カッ/カ/…),
+        each scaled to the footer height, as {row_index: QPixmap}, or None."""
+        path = os.path.join(str(settings_mod.skin_dir()), "SENotes.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            from PIL import Image
+            bands = _slice_alpha_bands(Image.open(path))
+            if len(bands) < 7:
+                return None
+            out = {}
+            for idx, band in enumerate(bands):
+                scale = self.SE_SPRITE_H / band.height
+                out[idx] = _pil_to_qpixmap(band.resize(
+                    (max(1, round(band.width * scale)), self.SE_SPRITE_H),
+                    Image.Resampling.LANCZOS))
+            return out
+        except Exception:
+            return None
+
+    def _load_skin_lane(self):
+        """skin/Base.png stretched to the note band, or None. Drawn as the lane
+        floor behind notes when present."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Base.png")
+        if not os.path.exists(path):
+            return None
+        pix = QPixmap(path)
+        if pix.isNull():
+            return None
+        return pix.scaled(int(self.LANE_WIDTH), int(self.LANE_HEIGHT),
+                          Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+    def _load_skin_ring(self):
+        """Hit-target receptor: the leftmost cell of skin/Notes.png (the ◎ the
+        real game shows at the judge line), scaled to the judge circle, or
+        None."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            from PIL import Image
+            sheet = Image.open(path).convert("RGBA")
+            w, h = sheet.size
+            row_h = h // 3
+            y0 = row_h                          # middle animation frame
+            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+            col = band.max(axis=0) > 16
+            start, span = None, None
+            for x in range(w):
+                if col[x] and start is None:
+                    start = x
+                elif not col[x] and start is not None:
+                    span = (start, x - 1); break
+            if span is None:
+                return None
+            cell = sheet.crop((span[0], y0, span[1] + 1, y0 + row_h))
+            ca = np.asarray(cell)[:, :, 3]
+            ys, xs = np.where(ca > 16)
+            if len(xs) == 0:
+                return None
+            cell = cell.crop((int(xs.min()), int(ys.min()),
+                              int(xs.max()) + 1, int(ys.max()) + 1))
+            d = (self.NOTE_R_BIG + 5) * 2
+            return _pil_to_qpixmap(cell.resize((d, d), Image.Resampling.LANCZOS))
+        except Exception:
+            return None
 
     def _load_skin_sprites(self):
         """Slice don/ka (small & big) out of an OpenTaiko-style Notes.png skin,
@@ -1337,7 +1471,10 @@ class ChartPreviewWidget(QWidget):
         # window size or per-note speed.
         painter.setClipRect(0, band_top, lane_w, band_h)
 
-        painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
+        if self._skin_lane is not None:
+            painter.drawPixmap(0, band_top, self._skin_lane)
+        else:
+            painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
 
         # Real Taiko no Tatsujin flashes the whole play field, triggered the
         # instant a gogo region's start/end crosses the judgment line - not a
@@ -1385,10 +1522,13 @@ class ChartPreviewWidget(QWidget):
         # like notes crossing the drum face in the real game). ---
         judge_r = self.NOTE_R_BIG + 5
         judge_r_inner = self.NOTE_R_SMALL
-        painter.setPen(QPen(self._color("fg_bright"), 3))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
-        painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
+        if self._skin_ring is not None:
+            painter.drawPixmap(int(judge_x - judge_r), int(mid_y - judge_r), self._skin_ring)
+        else:
+            painter.setPen(QPen(self._color("fg_bright"), 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
+            painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
 
         # --- GOGO judgment-ring pulse ------------------------------------
         # PeepoDrumKit pulses a flame sprite centered on the hit circle with
@@ -1521,10 +1661,16 @@ class ChartPreviewWidget(QWidget):
                 rise = 13.0 * (1.0 - (1.0 - jp) ** 2)         # ease-out で上昇(控えめ)
                 painter.setClipRect(self.rect())
                 painter.setOpacity(max(0.0, 1.0 - jp))
-                painter.setPen(JUDGE_GOOD)
-                painter.setFont(self._font(20, True))
-                jy = int(mid_y - judge_r - 8 - rise)
-                painter.drawText(int(judge_x - 40), jy, 80, 26, Qt.AlignCenter, "良")
+                if self._skin_judge_good is not None:
+                    # 本家画像の「良」。判定枠のすぐ上に、画像の下端が来るよう配置。
+                    spr = self._skin_judge_good
+                    jy = int(mid_y - judge_r - 6 - rise - spr.height())
+                    painter.drawPixmap(int(judge_x - spr.width() / 2), jy, spr)
+                else:
+                    painter.setPen(JUDGE_GOOD)
+                    painter.setFont(self._font(20, True))
+                    jy = int(mid_y - judge_r - 8 - rise)
+                    painter.drawText(int(judge_x - 40), jy, 80, 26, Qt.AlignCenter, "良")
                 painter.setOpacity(1.0)
                 painter.setClipRect(0, band_top, lane_w, band_h)
 
@@ -1608,13 +1754,22 @@ class ChartPreviewWidget(QWidget):
                     continue
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
-                size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
-                st = self._se_static_text(label, size)
                 x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                painter.setFont(self._font(size, True))
-                sz = st.size()
-                painter.drawStaticText(int(x - sz.width() / 2.0),
-                                       int(fy - sz.height() / 2.0), st)
+                spr = None
+                if self._skin_se is not None:
+                    idx = self.SE_ROW_INDEX.get((label, big))
+                    if idx is not None:
+                        spr = self._skin_se.get(idx)
+                if spr is not None:
+                    painter.drawPixmap(int(x - spr.width() / 2.0),
+                                       int(fy - spr.height() / 2.0), spr)
+                else:
+                    size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
+                    st = self._se_static_text(label, size)
+                    painter.setFont(self._font(size, True))
+                    sz = st.size()
+                    painter.drawStaticText(int(x - sz.width() / 2.0),
+                                           int(fy - sz.height() / 2.0), st)
             painter.setClipRect(self.rect())
 
         # Current measure / total measures ("15/90"), below the judgment
