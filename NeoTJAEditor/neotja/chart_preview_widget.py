@@ -1,9 +1,11 @@
 import bisect
+import os
 import time as _time
 
-from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QStaticText,
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
+    QStaticText,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -513,25 +515,159 @@ class ChartPreviewWidget(QWidget):
             self._hit_sound_engine.check_and_play(self._current_audio_time())
 
     def _load_sprites(self):
-        """Reuses the same notes.png sheet as the image-export feature, if
-        the user has one configured, so the preview matches the exported
-        chart image's note art instead of maintaining a second asset."""
+        """Note art for the preview, in priority order per note:
+        1. an OpenTaiko-style skin (skin/Notes.png next to the exe), the
+           optional 本家 look the author hands out separately;
+        2. a user-configured notes.png sheet (same one image-export uses);
+        3. a procedurally drawn glossy sprite (see _make_note_sprite), which
+           needs no asset and ships in the app.
+        Each tier only fills notes the previous one didn't, so the preview
+        always has a full set - and looks decent with nothing installed."""
         small, big = {}, {}
+        # tier 1: OpenTaiko-style skin the user dropped in
+        skin_small, skin_big = self._load_skin_sprites()
+        small.update(skin_small)
+        big.update(skin_big)
+        # tier 2: legacy notes.png sheet (image-export format)
+        pil_sprites = {}
         try:
             from PIL import Image
             from neotja.tja_image_export import load_sprites
             pil_sprites = load_sprites(settings_mod.notes_png_path())
         except Exception:
-            return small, big
+            pil_sprites = {}
         for c in ("1", "2"):
-            if c in pil_sprites:
+            if c not in small and c in pil_sprites:
                 d = self.NOTE_R_SMALL * 2
                 small[c] = _pil_to_qpixmap(pil_sprites[c].resize((d, d), Image.Resampling.LANCZOS))
         for c in ("3", "4"):
-            if c in pil_sprites:
+            if c not in big and c in pil_sprites:
                 d = self.NOTE_R_BIG * 2
                 big[c] = _pil_to_qpixmap(pil_sprites[c].resize((d, d), Image.Resampling.LANCZOS))
+        # tier 3: procedural fallback
+        for c in ("1", "2"):
+            small.setdefault(c, self._make_note_sprite(NOTE_COLOR[c], self.NOTE_R_SMALL))
+        for c in ("3", "4"):
+            big.setdefault(c, self._make_note_sprite(NOTE_COLOR[c], self.NOTE_R_BIG))
         return small, big
+
+    def _load_skin_sprites(self):
+        """Slice don/ka (small & big) out of an OpenTaiko-style Notes.png skin,
+        if the user dropped one into the `skin` folder. The sheet is 3 stacked
+        animation frames; the opaque sprite columns are detected by alpha (so
+        it adapts to different skin resolutions) and the middle frame is used
+        as the still pose. Returns ({},{}) when there's no skin or on any error
+        - the caller then falls back to the built-in art."""
+        small, big = {}, {}
+        path = settings_mod.skin_notes_path()
+        if not path or not os.path.exists(str(path)):
+            return small, big
+        try:
+            import numpy as np
+            from PIL import Image
+
+            sheet = Image.open(str(path)).convert("RGBA")
+            w, h = sheet.size
+            row_h = h // 3
+            y0 = row_h                      # middle animation frame
+            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+            col_opaque = band.max(axis=0) > 16
+
+            # group consecutive opaque columns into sprite spans
+            spans, start = [], None
+            for x in range(w):
+                if col_opaque[x] and start is None:
+                    start = x
+                elif not col_opaque[x] and start is not None:
+                    spans.append((start, x - 1))
+                    start = None
+            if start is not None:
+                spans.append((start, w - 1))
+
+            # Standard layout: [0]=hit target ring, [1]=don, [2]=ka,
+            # [3]=don-big, [4]=ka-big, then rolls/balloons we don't need here.
+            if len(spans) < 5:
+                return {}, {}
+            picks = {"1": (spans[1], self.NOTE_R_SMALL, small),
+                     "2": (spans[2], self.NOTE_R_SMALL, small),
+                     "3": (spans[3], self.NOTE_R_BIG, big),
+                     "4": (spans[4], self.NOTE_R_BIG, big)}
+            for c, ((sx0, sx1), r, target) in picks.items():
+                cell = sheet.crop((sx0, y0, sx1 + 1, y0 + row_h))
+                # tighten to the sprite's own alpha box, then center on a square
+                ca = np.asarray(cell)[:, :, 3]
+                ys, xs = np.where(ca > 16)
+                if len(xs) == 0:
+                    continue
+                cell = cell.crop((int(xs.min()), int(ys.min()),
+                                  int(xs.max()) + 1, int(ys.max()) + 1))
+                side = max(cell.width, cell.height)
+                sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+                sq.paste(cell, ((side - cell.width) // 2, (side - cell.height) // 2))
+                d = r * 2
+                target[c] = _pil_to_qpixmap(sq.resize((d, d), Image.Resampling.LANCZOS))
+        except Exception:
+            return {}, {}
+        return small, big
+
+    @staticmethod
+    def _blend(a: QColor, b: QColor, t: float) -> QColor:
+        """Linear mix of two colors; t=0 -> a, t=1 -> b."""
+        return QColor(
+            round(a.red() * (1 - t) + b.red() * t),
+            round(a.green() * (1 - t) + b.green() * t),
+            round(a.blue() * (1 - t) + b.blue() * t),
+        )
+
+    def _make_note_sprite(self, color_key: str, r: int) -> QPixmap:
+        """Render a glossy, 本家-style note once and cache it as a pixmap: a
+        colored sphere shaded top-left-to-bottom-right (highlight -> body ->
+        dark rim), wrapped in the game's cream ring and a thin dark outline,
+        with a soft specular gloss. Rendered at 2x and smooth-scaled down so
+        the edges stay crisp. Blitting this each frame is both prettier and
+        cheaper than re-running a gradient fill per note."""
+        ss = 2  # supersample factor
+        d = r * 2 * ss
+        img = QImage(d, d, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        cx = cy = d / 2.0
+        big_r = r * ss
+
+        base = self._color(color_key)
+        highlight = self._blend(base, QColor(255, 255, 255), 0.55)
+        rim = base.darker(170)
+        ring = QColor("#fbf3e0")       # 本家のクリーム色のフチ
+        outline = QColor(54, 32, 30)
+
+        # thin dark outline, then the cream ring inside it
+        p.setBrush(outline)
+        p.drawEllipse(QRectF(cx - big_r, cy - big_r, 2 * big_r, 2 * big_r))
+        p.setBrush(ring)
+        p.drawEllipse(QRectF(cx - big_r + ss, cy - big_r + ss,
+                             2 * (big_r - ss), 2 * (big_r - ss)))
+
+        # colored body: radial gradient lit from the upper-left
+        inner_r = big_r - max(2.0 * ss, big_r * 0.16)
+        fx, fy = cx - inner_r * 0.33, cy - inner_r * 0.33
+        grad = QRadialGradient(fx, fy, inner_r * 1.5, fx, fy)
+        grad.setColorAt(0.0, highlight)
+        grad.setColorAt(0.55, base)
+        grad.setColorAt(1.0, rim)
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(QRectF(cx - inner_r, cy - inner_r, 2 * inner_r, 2 * inner_r))
+
+        # soft specular gloss near the top
+        p.setBrush(QColor(255, 255, 255, 95))
+        gw, gh = inner_r * 0.80, inner_r * 0.48
+        p.drawEllipse(QRectF(cx - gw / 2, cy - inner_r * 0.60, gw, gh))
+        p.end()
+
+        return QPixmap.fromImage(
+            img.scaled(r * 2, r * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
 
     def set_preview_data(self, data: dict):
         """`data` is the dict returned by TJACourseAnalyzer.build_preview_timeline:

@@ -148,3 +148,17 @@ def icon_path() -> Path:
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "app_icon.ico"
+
+
+def skin_notes_path() -> Path:
+    """Optional note skin the preview uses if present: an OpenTaiko-style
+    Notes.png the user drops into a `skin` folder next to the exe. Kept in its
+    own folder (not the bare `notes.png` the image-export feature reads) so the
+    two never collide on case-insensitive Windows. Never bundled - the author
+    distributes skins out-of-band; without one the preview draws its own
+    copyright-free 本家風 notes."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "skin" / "Notes.png"

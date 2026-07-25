@@ -4,3 +4,7 @@ NeoTJAEditor/dist/
 __pycache__/
 *.pyc
 NeoTJAEditor/.venv/
+# Copyrighted note skins are distributed by the author out-of-band, never
+# committed. The app loads skin/Notes.png next to the exe if present.
+skin/
+NeoTJAEditor/skin/
