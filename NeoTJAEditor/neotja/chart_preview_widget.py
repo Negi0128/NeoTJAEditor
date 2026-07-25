@@ -798,10 +798,27 @@ class ChartPreviewWidget(QWidget):
             return None
         dw = sheet.width() // 10
         digits = [sheet.copy(i * dw, 0, dw, sheet.height()) for i in range(10)]
+        # The コンボ label sits in a big mostly-transparent canvas; tight-crop
+        # to its glyphs so it doesn't render tiny after scaling.
         text_p = os.path.join(d, "Text.png")
-        text = QPixmap(text_p) if os.path.exists(text_p) else None
-        if text is not None and text.isNull():
-            text = None
+        text = None
+        if os.path.exists(text_p):
+            try:
+                import numpy as np
+                from PIL import Image
+                ti = Image.open(text_p).convert("RGBA")
+                a = np.asarray(ti)[:, :, 3]
+                ys, xs = np.where(a > 16)
+                if len(xs):
+                    ti = ti.crop((int(xs.min()), int(ys.min()),
+                                  int(xs.max()) + 1, int(ys.max()) + 1))
+                    text = _pil_to_qpixmap(ti)
+            except Exception:
+                text = None
+            if text is None:
+                text = QPixmap(text_p)
+                if text.isNull():
+                    text = None
         return {"base": base, "digits": digits, "text": text}
 
     def _load_skin_course_symbols(self):
@@ -918,22 +935,34 @@ class ChartPreviewWidget(QWidget):
         drum = cb["base"].scaledToHeight(int(band_h * 0.94), Qt.SmoothTransformation)
         painter.drawPixmap(int(cx - drum.width() / 2), int(cy - drum.height() / 2), drum)
 
-        # number on the drum's cream face, popping on each hit
-        digit_h = max(1, int(drum.height() * 0.30 * pop))
+        # Big combo number on the drum's cream face, popping on each hit.
+        # Scaled to fit the drum width too, so 3-digit combos don't overflow
+        # while 1-2 digit ones stay nice and large like the real game.
+        digit_h = max(1, int(drum.height() * 0.40 * pop))
         scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
                   for ch in str(combo)]
         total_w = sum(s.width() for s in scaled)
-        face_cy = cy - drum.height() * 0.14        # numbers ride the upper face
+        max_w = drum.width() * 0.66
+        if total_w > max_w and total_w > 0:
+            digit_h = max(1, int(digit_h * max_w / total_w))
+            scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
+                      for ch in str(combo)]
+            total_w = sum(s.width() for s in scaled)
+        face_cy = cy - drum.height() * 0.16        # number rides the upper face
         x = cx - total_w / 2.0
         for s in scaled:
             painter.drawPixmap(int(x), int(face_cy - s.height() / 2), s)
             x += s.width()
 
+        # コンボ label, clearly readable, just below the number.
         if cb["text"] is not None:
-            th = max(1, int(drum.height() * 0.17))
-            ts = cb["text"].scaledToHeight(th, Qt.SmoothTransformation)
+            ts = cb["text"].scaledToHeight(max(1, int(drum.height() * 0.22)),
+                                           Qt.SmoothTransformation)
+            if ts.width() > drum.width() * 0.72:
+                ts = cb["text"].scaledToWidth(int(drum.width() * 0.72),
+                                              Qt.SmoothTransformation)
             painter.drawPixmap(int(cx - ts.width() / 2),
-                               int(face_cy + digit_h * 0.5 + drum.height() * 0.03), ts)
+                               int(face_cy + digit_h * 0.5 + drum.height() * 0.02), ts)
 
     def _load_skin_lane(self):
         """skin/Base.png stretched to the note band, or None. Drawn as the lane
@@ -1750,9 +1779,8 @@ class ChartPreviewWidget(QWidget):
             painter.drawText(w - 92, 2, 88, 18, Qt.AlignRight | Qt.AlignVCenter,
                              f"{fps:.0f} FPS")
 
-        # Difficulty badge (icon + nameplate + おに ★9), top-left margin.
-        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
-            self._draw_difficulty_badge(painter, self.PANEL_INSET, 8, band_top - 16)
+        # (Difficulty badge + combo drum are drawn later, ON the solid left
+        # HUD panel, so nothing shows through them - see the combo section.)
 
         # Live roll/balloon tap count, upper-left of the judgment ring, in
         # the margin above the lane box - reuses _live_span_count as-is
@@ -2016,26 +2044,30 @@ class ChartPreviewWidget(QWidget):
                 painter.setOpacity(1.0)
                 painter.setClipRect(0, band_top, lane_w, band_h)
 
-        # --- combo readout, covering the lane left of the judgment line
-        # (like the real game's score/combo panel). A small gap separates
-        # it from the judgment ring - safe now that passed notes fly off
-        # instead of lingering there, so there's nothing left to flicker in
-        # that gap - and it's inset from the widget's own left edge so it
-        # reads as a floating card rather than edge-to-edge. The combo
-        # itself is just "how many notes have a time <= now", which comes
-        # straight out of the same bisect index already used to pick which
-        # notes are visible, so it counts up live during playback and
-        # re-syncs instantly on seeks without any extra state.
-        #
-        # Course/level moved below the lane (see the info bar under the
-        # widget), so this panel is combo-only now.
-        combo = bisect.bisect_right(self._note_times, now)
-        panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
-        panel_x = self.PANEL_INSET
-        panel_w = panel_right - panel_x
+        # --- left HUD panel -------------------------------------------------
+        # Every taiko simulator (and the real game) puts a SOLID block on the
+        # left of the lane and stacks the drum/combo, difficulty and score on
+        # it - the notes never show through it. We draw that opaque panel here,
+        # over the lane/notes, then place the drum + difficulty badge on top,
+        # so nothing scrolls behind them. Its right edge sits just left of the
+        # judgment ring, which stays fully visible on the lane.
+        painter.setClipRect(self.rect())
+        panel_edge = int(judge_x - judge_r)
+        painter.fillRect(0, 0, panel_edge, h, QColor(20, 21, 28))
+        painter.setPen(QPen(self._color("border"), 1))
+        painter.drawLine(0, 0, panel_edge, 0)
+        painter.drawLine(0, h - 1, panel_edge, h - 1)
+        painter.setPen(QPen(QColor("#c9a24a"), 3))     # warm 本家風のフチ
+        painter.drawLine(panel_edge, 0, panel_edge, h)
 
-        # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
-        # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
+        # difficulty badge on the panel (top)
+        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
+            self._draw_difficulty_badge(painter, 6, 8, band_top - 16)
+
+        # combo drum on the panel (middle). Combo = notes with time <= now,
+        # straight from the same bisect used for visibility, so it counts up
+        # live and re-syncs on seeks with no extra state.
+        combo = bisect.bisect_right(self._note_times, now)
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]
@@ -2043,10 +2075,10 @@ class ChartPreviewWidget(QWidget):
                 pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
 
         if self._skin_combo is not None:
-            # 本家風の太鼓グラフィック + 専用数字フォント
-            self._draw_combo_drum(painter, panel_x, panel_w, band_top, band_h, combo, pop)
+            self._draw_combo_drum(painter, 0, panel_edge, band_top, band_h, combo, pop)
         else:
-            # フォールバック: 箱なしの金/銀アウトライン数字 + 「コンボ」ラベル
+            # フォールバック: 金/銀アウトライン数字 + 「コンボ」ラベル
+            panel_x, panel_w = 0, panel_edge
             painter.setPen(self._color("checkpoint"))
             painter.setFont(self._font(11, True))
             painter.drawText(int(panel_x), band_top + 4, int(panel_w), 16, Qt.AlignCenter, "コンボ")
