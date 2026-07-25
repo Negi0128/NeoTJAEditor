@@ -362,6 +362,13 @@ class ChartPreviewWidget(QWidget):
         self._skin_hit = self._load_skin_hit()
         self._skin_course_symbols = self._load_skin_course_symbols()
         self._skin_nameplate = self._load_skin_nameplate()
+        self._skin_panel = self._load_skin_panel()
+        self._skin_score = self._load_skin_score()
+        self._panel_cache = None    # (edge, h, scaled panel QPixmap)
+        try:
+            self._player_name = settings_mod.load_settings().get("player_name", "Player")
+        except Exception:
+            self._player_name = "Player"
         self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
         # FPS readout: wall-clock timestamps of recent paints (top-right).
         self._fps_samples = []
@@ -845,6 +852,27 @@ class ChartPreviewWidget(QWidget):
         pix = QPixmap(p)
         return None if pix.isNull() else pix
 
+    def _load_skin_panel(self):
+        """skin/Panel.png - the 本家風 red patterned block behind the left HUD,
+        native size, or None."""
+        p = os.path.join(str(settings_mod.skin_dir()), "Panel.png")
+        if not os.path.exists(p):
+            return None
+        pix = QPixmap(p)
+        return None if pix.isNull() else pix
+
+    def _load_skin_score(self):
+        """Score number font from skin/Score.png (a 0-9 strip), as 10 QPixmaps,
+        or None."""
+        p = os.path.join(str(settings_mod.skin_dir()), "Score.png")
+        if not os.path.exists(p):
+            return None
+        sheet = QPixmap(p)
+        if sheet.isNull():
+            return None
+        dw = sheet.width() // 10
+        return [sheet.copy(i * dw, 0, dw, sheet.height()) for i in range(10)]
+
     def _load_skin_hit(self):
         """Frames of the 良 hit splash (the yellow radiating burst) from a
         square-framed grid sheet skin/HitExplosion.png, row-major, or None.
@@ -894,8 +922,7 @@ class ChartPreviewWidget(QWidget):
         return True
 
     def _draw_difficulty_badge(self, painter, x, y, h):
-        """本家風の難易度銘板: 上マージン左に、難易度アイコン + 銘板プレート +
-        「おに ★9」等のラベルを出す。"""
+        """本家風の難易度銘板: 難易度アイコン + 銘板プレート + プレイヤー名。"""
         plate = self._skin_nameplate
         key = (self._course_key or "").lower()
         icon = self._skin_course_symbols.get(key) if self._skin_course_symbols else None
@@ -906,25 +933,36 @@ class ChartPreviewWidget(QWidget):
             painter.drawPixmap(int(x), int(y), p)
             plate_w = p.width()
 
-        # label + ★level, with a dark shadow so it reads on the plate art
-        label = self._course_label or ""
-        lvl = f"  ★{self._course_level}" if self._course_level else ""
-        txt = label + lvl
-        text_x = x + h * 0.95
-        text_w = plate_w - h * 0.95 - 6
-        painter.setFont(self._font(13, True))
-        painter.setPen(QColor(0, 0, 0, 160))
+        # player name on the plate, with a dark shadow so it reads on the art
+        name = self._player_name or ""
+        text_x = x + h * 0.85
+        text_w = plate_w - h * 0.85 - 6
+        painter.setFont(self._font(12, True))
+        painter.setPen(QColor(0, 0, 0, 170))
         painter.drawText(int(text_x + 1), int(y + 1), int(text_w), int(h),
-                         Qt.AlignVCenter | Qt.AlignLeft, txt)
+                         Qt.AlignVCenter | Qt.AlignLeft, name)
         painter.setPen(self._color("fg_bright"))
         painter.drawText(int(text_x), int(y), int(text_w), int(h),
-                         Qt.AlignVCenter | Qt.AlignLeft, txt)
+                         Qt.AlignVCenter | Qt.AlignLeft, name)
 
         # difficulty icon overlapping the plate's left edge
         if icon is not None:
-            ic = icon.scaledToHeight(int(h * 1.12), Qt.SmoothTransformation)
+            ic = icon.scaledToHeight(int(h * 1.18), Qt.SmoothTransformation)
             painter.drawPixmap(int(x - ic.width() * 0.12),
                                int(y + h / 2 - ic.height() / 2), ic)
+
+    def _draw_score(self, painter, panel_edge, y, score):
+        """Draw the (cosmetic) score right-aligned at the top of the HUD panel
+        using the skin's Score.png number font."""
+        digits = self._skin_score
+        dh = 26
+        scaled = [digits[int(c)].scaledToHeight(dh, Qt.SmoothTransformation)
+                  for c in str(score)]
+        total = sum(d.width() for d in scaled)
+        x = panel_edge - 8 - total
+        for d in scaled:
+            painter.drawPixmap(int(x), int(y), d)
+            x += d.width()
 
     def _draw_combo_drum(self, painter, panel_x, panel_w, band_top, band_h, combo, pop):
         """本家風のコンボ表示: 太鼓の顔グラフィックに専用数字フォントで
@@ -2053,21 +2091,33 @@ class ChartPreviewWidget(QWidget):
         # judgment ring, which stays fully visible on the lane.
         painter.setClipRect(self.rect())
         panel_edge = int(judge_x - judge_r)
-        painter.fillRect(0, 0, panel_edge, h, QColor(20, 21, 28))
-        painter.setPen(QPen(self._color("border"), 1))
-        painter.drawLine(0, 0, panel_edge, 0)
-        painter.drawLine(0, h - 1, panel_edge, h - 1)
+        # panel background: 本家風の赤い和柄パネル(あれば)、無ければ単色ブロック
+        if self._skin_panel is not None:
+            if (self._panel_cache is None or self._panel_cache[0] != panel_edge
+                    or self._panel_cache[1] != h):
+                sp = self._skin_panel.scaled(panel_edge, h, Qt.IgnoreAspectRatio,
+                                             Qt.SmoothTransformation)
+                self._panel_cache = (panel_edge, h, sp)
+            painter.drawPixmap(0, 0, self._panel_cache[2])
+        else:
+            painter.fillRect(0, 0, panel_edge, h, QColor(20, 21, 28))
         painter.setPen(QPen(QColor("#c9a24a"), 3))     # warm 本家風のフチ
         painter.drawLine(panel_edge, 0, panel_edge, h)
 
-        # difficulty badge on the panel (top)
+        combo = bisect.bisect_right(self._note_times, now)
+
+        # score (top of panel, cosmetic - this is a static "all 良" preview)
+        if self._skin_score is not None:
+            score = (combo * 1000 + self._cumulative_hits(now) * 100) // 10 * 10
+            self._draw_score(painter, panel_edge, 6, score)
+
+        # difficulty icon + player-name plate (bottom of panel)
         if self._skin_course_symbols is not None or self._skin_nameplate is not None:
-            self._draw_difficulty_badge(painter, 6, 8, band_top - 16)
+            self._draw_difficulty_badge(painter, 4, h - 40, 32)
 
         # combo drum on the panel (middle). Combo = notes with time <= now,
         # straight from the same bisect used for visibility, so it counts up
         # live and re-syncs on seeks with no extra state.
-        combo = bisect.bisect_right(self._note_times, now)
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]

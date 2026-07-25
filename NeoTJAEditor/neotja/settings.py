@@ -8,7 +8,7 @@ _SETTINGS_KEYS = (
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
-    "recent_files", "window_geometry", "splitter_state",
+    "recent_files", "window_geometry", "splitter_state", "player_name",
 )
 
 
@@ -50,6 +50,8 @@ def default_settings() -> dict:
         # ペースト操作では鳴らない。環境設定ダイアログ「エディタ・ツール」
         # タブのチェックボックスで変更。
         "note_input_sound": True,
+        # ゲーム風プレビューの左パネルに表示するプレイヤー名(銘板)。
+        "player_name": "Player",
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
