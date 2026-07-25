@@ -150,15 +150,39 @@ def icon_path() -> Path:
     return base / "app_icon.ico"
 
 
-def skin_notes_path() -> Path:
-    """Optional note skin the preview uses if present: an OpenTaiko-style
-    Notes.png the user drops into a `skin` folder next to the exe. Kept in its
-    own folder (not the bare `notes.png` the image-export feature reads) so the
-    two never collide on case-insensitive Windows. Never bundled - the author
-    distributes skins out-of-band; without one the preview draws its own
-    copyright-free 本家風 notes."""
+def skin_dir() -> Path:
+    """The optional `skin` folder next to the exe (project root in dev). A
+    self-contained pack the author distributes out-of-band: note art plus hit
+    sounds. Nothing here is bundled/committed (copyright), and everything is
+    optional - the app draws its own 本家風 notes and synths its own hit
+    sounds when the folder or a file is absent."""
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
     else:
         base = Path(__file__).resolve().parent.parent
-    return base / "skin" / "Notes.png"
+    return base / "skin"
+
+
+def skin_notes_path() -> Path:
+    """Note skin the preview uses if present (OpenTaiko-style Notes.png). Kept
+    in skin/ rather than the bare `notes.png` the image-export reads, so the
+    two never collide on case-insensitive Windows."""
+    return skin_dir() / "Notes.png"
+
+
+def _first_existing(directory: Path, names) -> str:
+    for n in names:
+        p = directory / n
+        if p.exists():
+            return str(p)
+    return ""
+
+
+def skin_sound_paths():
+    """(don, ka) hit-sound paths from the skin folder if the author packed
+    them, else ("", ""). Accepts a few common filenames so the pack is
+    forgiving about naming."""
+    d = skin_dir()
+    don = _first_existing(d, ("don.wav", "dong.wav", "Don.wav", "Dong.wav"))
+    ka = _first_existing(d, ("ka.wav", "katsu.wav", "Ka.wav", "Katsu.wav"))
+    return don, ka
