@@ -125,10 +125,16 @@ class ChartPreviewWidget(QWidget):
     smooth 16ms-timer extrapolation is left alone; only a real drift or seek
     re-anchors it."""
 
-    BASE_PIXELS_PER_BEAT = 189.0
+    # Spacing tuned to PeepoDrumKit: its lane puts one beat at
+    # GameWorldSpaceDistancePerLaneBeat=356 world units over a 1422-wide lane,
+    # i.e. ~3.66 beats from the hit circle to the right edge. We were slightly
+    # looser (3.75 beats over a wider pixels/beat), so notes read a touch wide;
+    # 177 px/beat over a 4-beat lookahead tightens them to match while keeping
+    # the lane's overall pixel width the same (200 + 4*177 == old 200+3.75*189).
+    BASE_PIXELS_PER_BEAT = 177.0
     WINDOW_REF_BPM = 60.0  # lower bound used only to size the visible-time window (see _visible_window)
     JUDGE_X = 200.0            # fixed pixel offset - not a ratio of widget width, so it never moves on resize
-    LOOKAHEAD_BEATS = 3.75     # 15 sixteenth notes: show up to the 15th, not the 16th, of a 4/4 measure ahead
+    LOOKAHEAD_BEATS = 4.0      # one full 4/4 measure ahead
     LANE_WIDTH = JUDGE_X + LOOKAHEAD_BEATS * BASE_PIXELS_PER_BEAT  # fixed total box width, independent of the widget/window size
     NOTE_R_SMALL = 28
     NOTE_R_BIG = 38
@@ -754,7 +760,15 @@ class ChartPreviewWidget(QWidget):
                 return None
             cell = cell.crop((int(xs.min()), int(ys.min()),
                               int(xs.max()) + 1, int(ys.max()) + 1))
-            return _pil_to_qpixmap(cell)
+            # The balloon's round face (the part sized to match a note) is only
+            # the left blob and is shorter than the whole sprite, so measure its
+            # height fraction: the draw code scales so the FACE - not the full
+            # sprite - matches the note diameter.
+            ca2 = np.asarray(cell)[:, :, 3]
+            col_h = (ca2 > 16).sum(axis=0)
+            left = col_h[:max(1, int(cell.width * 0.4))]
+            face_frac = float(left.max()) / cell.height if cell.height else 1.0
+            return {"pix": _pil_to_qpixmap(cell), "face_frac": max(0.3, face_frac)}
         except Exception:
             return None
 
@@ -816,18 +830,24 @@ class ChartPreviewWidget(QWidget):
     def _draw_balloon_sprite(self, painter, x0, x1, cy, r, guide_color) -> bool:
         """Draw a 本家-style balloon/kusudama: a thin duration guide from the
         hit point to the span end, with the orange balloon sprite's round face
-        anchored at the start. Returns False when there's no skin."""
+        anchored at the start and sized so the FACE (not the whole sprite)
+        matches the note diameter 2*r. Returns False when there's no skin."""
         if self._skin_balloon is None:
             return False
-        d = r * 2
-        scaled = self._skin_balloon.scaledToHeight(int(d), Qt.SmoothTransformation)
+        pix = self._skin_balloon["pix"]
+        ff = self._skin_balloon["face_frac"]
+        # scale so the face ~ 2*r, but never taller than the lane band
+        sprite_h = min(self.LANE_HEIGHT * 0.98, (2.0 * r) / ff)
+        face_r = sprite_h * ff / 2.0
+        scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
         lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
-        gh = max(3.0, r * 0.5)
+        gh = max(3.0, face_r * 0.5)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(guide_color))
         painter.drawRoundedRect(QRectF(lo, cy - gh / 2, max(1.0, hi - lo), gh),
                                 gh / 2, gh / 2)
-        painter.drawPixmap(int(x0 - r), int(cy - d / 2), scaled)
+        # face centre sits at x0 (face_r in from the sprite's left edge)
+        painter.drawPixmap(int(x0 - face_r), int(cy - scaled.height() / 2), scaled)
         return True
 
     def _draw_combo_drum(self, painter, panel_x, panel_w, band_top, band_h, combo, pop):
@@ -840,7 +860,7 @@ class ChartPreviewWidget(QWidget):
         painter.drawPixmap(int(cx - drum.width() / 2), int(cy - drum.height() / 2), drum)
 
         # number on the drum's cream face, popping on each hit
-        digit_h = max(1, int(drum.height() * 0.40 * pop))
+        digit_h = max(1, int(drum.height() * 0.30 * pop))
         scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
                   for ch in str(combo)]
         total_w = sum(s.width() for s in scaled)
