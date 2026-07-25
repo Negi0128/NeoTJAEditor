@@ -352,6 +352,8 @@ class ChartPreviewWidget(QWidget):
         self._skin_roll = self._load_skin_roll()
         self._skin_balloon = self._load_skin_balloon()
         self._skin_bg = self._load_skin_bg()
+        self._skin_combo = self._load_skin_combo()
+        self._skin_hit = self._load_skin_hit()
         self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
         # FPS readout: wall-clock timestamps of recent paints (top-right).
         self._fps_samples = []
@@ -765,6 +767,52 @@ class ChartPreviewWidget(QWidget):
         pix = QPixmap(path)
         return None if pix.isNull() else pix
 
+    def _load_skin_combo(self):
+        """The combo drum graphic from skin/Combo/: Base.png (the taiko drum),
+        Digits.png (a 0-9 number strip) and optional Text.png (コンボ). Returns
+        {base, digits[10], text} or None."""
+        d = os.path.join(str(settings_mod.skin_dir()), "Combo")
+        base_p = os.path.join(d, "Base.png")
+        digits_p = os.path.join(d, "Digits.png")
+        if not (os.path.exists(base_p) and os.path.exists(digits_p)):
+            return None
+        base = QPixmap(base_p)
+        sheet = QPixmap(digits_p)
+        if base.isNull() or sheet.isNull():
+            return None
+        dw = sheet.width() // 10
+        digits = [sheet.copy(i * dw, 0, dw, sheet.height()) for i in range(10)]
+        text_p = os.path.join(d, "Text.png")
+        text = QPixmap(text_p) if os.path.exists(text_p) else None
+        if text is not None and text.isNull():
+            text = None
+        return {"base": base, "digits": digits, "text": text}
+
+    def _load_skin_hit(self):
+        """Frames of the 良 hit splash (the yellow radiating burst) from a
+        square-framed grid sheet skin/HitExplosion.png, row-major, or None.
+        The frame size is the gcd of the sheet's dimensions (260 for the stock
+        1820x1040 = 7x4 sheet)."""
+        import math
+        path = os.path.join(str(settings_mod.skin_dir()), "HitExplosion.png")
+        if not os.path.exists(path):
+            return None
+        sheet = QPixmap(path)
+        if sheet.isNull():
+            return None
+        w, h = sheet.width(), sheet.height()
+        fs = math.gcd(w, h)
+        if fs < 32:
+            return None
+        cols, rows = w // fs, h // fs
+        if not (2 <= cols * rows <= 128):
+            return None
+        frames = []
+        for ry in range(rows):
+            for cxi in range(cols):
+                frames.append(sheet.copy(cxi * fs, ry * fs, fs, fs))
+        return frames or None
+
     def _draw_balloon_sprite(self, painter, x0, x1, cy, r, guide_color) -> bool:
         """Draw a 本家-style balloon/kusudama: a thin duration guide from the
         hit point to the span end, with the orange balloon sprite's round face
@@ -781,6 +829,32 @@ class ChartPreviewWidget(QWidget):
                                 gh / 2, gh / 2)
         painter.drawPixmap(int(x0 - r), int(cy - d / 2), scaled)
         return True
+
+    def _draw_combo_drum(self, painter, panel_x, panel_w, band_top, band_h, combo, pop):
+        """本家風のコンボ表示: 太鼓の顔グラフィックに専用数字フォントで
+        コンボ数を重ね、下に「コンボ」を出す。"""
+        cb = self._skin_combo
+        cx = panel_x + panel_w / 2.0
+        cy = band_top + band_h / 2.0
+        drum = cb["base"].scaledToHeight(int(band_h * 0.94), Qt.SmoothTransformation)
+        painter.drawPixmap(int(cx - drum.width() / 2), int(cy - drum.height() / 2), drum)
+
+        # number on the drum's cream face, popping on each hit
+        digit_h = max(1, int(drum.height() * 0.40 * pop))
+        scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
+                  for ch in str(combo)]
+        total_w = sum(s.width() for s in scaled)
+        face_cy = cy - drum.height() * 0.14        # numbers ride the upper face
+        x = cx - total_w / 2.0
+        for s in scaled:
+            painter.drawPixmap(int(x), int(face_cy - s.height() / 2), s)
+            x += s.width()
+
+        if cb["text"] is not None:
+            th = max(1, int(drum.height() * 0.17))
+            ts = cb["text"].scaledToHeight(th, Qt.SmoothTransformation)
+            painter.drawPixmap(int(cx - ts.width() / 2),
+                               int(face_cy + digit_h * 0.5 + drum.height() * 0.03), ts)
 
     def _load_skin_lane(self):
         """skin/Base.png stretched to the note band, or None. Drawn as the lane
@@ -1814,8 +1888,18 @@ class ChartPreviewWidget(QWidget):
             h_elapsed, h_char, _h_combo = hit
             h_big = h_char in NOTE_BIG
             h_base = self.NOTE_R_BIG if h_big else self.NOTE_R_SMALL
-            # ヒットしぶき: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
-            if 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
+            if self._skin_hit is not None:
+                # 本家風の「良」花火: HitGood のフレームを判定枠中心で再生。
+                dur = self.HIT_BURST_DURATION * 1.6
+                if 0.0 <= h_elapsed < dur:
+                    n = len(self._skin_hit)
+                    fi = min(n - 1, int(h_elapsed / dur * n))
+                    eff = self._skin_hit[fi].scaledToHeight(
+                        int(self.NOTE_R_BIG * 2 * 2.0), Qt.SmoothTransformation)
+                    painter.drawPixmap(int(judge_x - eff.width() / 2),
+                                       int(mid_y - eff.height() / 2), eff)
+            elif 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
+                # フォールバック: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
                 bp = h_elapsed / self.HIT_BURST_DURATION      # 0..1
                 ring_r = int(h_base + 6 + 34 * bp)
                 painter.setBrush(Qt.NoBrush)
@@ -1867,14 +1951,6 @@ class ChartPreviewWidget(QWidget):
         panel_x = self.PANEL_INSET
         panel_w = panel_right - panel_x
 
-        # 本家風: no boxed panel - a small gold "コンボ" label over a big
-        # outlined number that floats on the lane, gold once the combo builds
-        # up (like the real game) and silver below that. The dark outline keeps
-        # it readable straight on the lane art / background.
-        painter.setPen(self._color("checkpoint"))
-        painter.setFont(self._font(11, True))
-        painter.drawText(int(panel_x), band_top + 4, int(panel_w), 16, Qt.AlignCenter, "コンボ")
-
         # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
         # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
         pop = 1.0
@@ -1882,23 +1958,32 @@ class ChartPreviewWidget(QWidget):
             ce = now - self._note_times[combo - 1]
             if 0.0 <= ce < self.COMBO_POP_DURATION:
                 pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
-        num_h = band_h - 26
-        num_cx = panel_x + panel_w / 2.0
-        num_cy = band_top + 22 + num_h / 2.0
-        fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
-        outline = QColor(28, 18, 8)
-        txt = str(combo)
-        rect = (int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h))
-        painter.save()
-        painter.translate(num_cx, num_cy)
-        painter.scale(pop, pop)
-        painter.setFont(self._font(30, True))
-        painter.setPen(outline)
-        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (2, -2), (-2, 2)):
-            painter.drawText(rect[0] + ox, rect[1] + oy, rect[2], rect[3], Qt.AlignCenter, txt)
-        painter.setPen(fill)
-        painter.drawText(rect[0], rect[1], rect[2], rect[3], Qt.AlignCenter, txt)
-        painter.restore()
+
+        if self._skin_combo is not None:
+            # 本家風の太鼓グラフィック + 専用数字フォント
+            self._draw_combo_drum(painter, panel_x, panel_w, band_top, band_h, combo, pop)
+        else:
+            # フォールバック: 箱なしの金/銀アウトライン数字 + 「コンボ」ラベル
+            painter.setPen(self._color("checkpoint"))
+            painter.setFont(self._font(11, True))
+            painter.drawText(int(panel_x), band_top + 4, int(panel_w), 16, Qt.AlignCenter, "コンボ")
+            num_h = band_h - 26
+            num_cx = panel_x + panel_w / 2.0
+            num_cy = band_top + 22 + num_h / 2.0
+            fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
+            outline = QColor(28, 18, 8)
+            txt = str(combo)
+            rect = (int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h))
+            painter.save()
+            painter.translate(num_cx, num_cy)
+            painter.scale(pop, pop)
+            painter.setFont(self._font(30, True))
+            painter.setPen(outline)
+            for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (2, -2), (-2, 2)):
+                painter.drawText(rect[0] + ox, rect[1] + oy, rect[2], rect[3], Qt.AlignCenter, txt)
+            painter.setPen(fill)
+            painter.drawText(rect[0], rect[1], rect[2], rect[3], Qt.AlignCenter, txt)
+            painter.restore()
 
         painter.setClipRect(self.rect())
 
