@@ -360,6 +360,8 @@ class ChartPreviewWidget(QWidget):
         self._skin_bg = self._load_skin_bg()
         self._skin_combo = self._load_skin_combo()
         self._skin_hit = self._load_skin_hit()
+        self._skin_course_symbols = self._load_skin_course_symbols()
+        self._skin_nameplate = self._load_skin_nameplate()
         self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
         # FPS readout: wall-clock timestamps of recent paints (top-right).
         self._fps_samples = []
@@ -802,6 +804,30 @@ class ChartPreviewWidget(QWidget):
             text = None
         return {"base": base, "digits": digits, "text": text}
 
+    def _load_skin_course_symbols(self):
+        """Difficulty icons from skin/CourseSymbol/ (Easy/Normal/Hard/Oni/Edit
+        .png), keyed lowercase, or None."""
+        d = os.path.join(str(settings_mod.skin_dir()), "CourseSymbol")
+        if not os.path.isdir(d):
+            return None
+        out = {}
+        for key in ("Easy", "Normal", "Hard", "Oni", "Edit"):
+            p = os.path.join(d, key + ".png")
+            if os.path.exists(p):
+                pix = QPixmap(p)
+                if not pix.isNull():
+                    out[key.lower()] = pix
+        return out or None
+
+    def _load_skin_nameplate(self):
+        """skin/NamePlate.png (the plate frame the difficulty rides on), or
+        None."""
+        p = os.path.join(str(settings_mod.skin_dir()), "NamePlate.png")
+        if not os.path.exists(p):
+            return None
+        pix = QPixmap(p)
+        return None if pix.isNull() else pix
+
     def _load_skin_hit(self):
         """Frames of the 良 hit splash (the yellow radiating burst) from a
         square-framed grid sheet skin/HitExplosion.png, row-major, or None.
@@ -849,6 +875,39 @@ class ChartPreviewWidget(QWidget):
         # face centre sits at x0 (face_r in from the sprite's left edge)
         painter.drawPixmap(int(x0 - face_r), int(cy - scaled.height() / 2), scaled)
         return True
+
+    def _draw_difficulty_badge(self, painter, x, y, h):
+        """本家風の難易度銘板: 上マージン左に、難易度アイコン + 銘板プレート +
+        「おに ★9」等のラベルを出す。"""
+        plate = self._skin_nameplate
+        key = (self._course_key or "").lower()
+        icon = self._skin_course_symbols.get(key) if self._skin_course_symbols else None
+
+        plate_w = 150
+        if plate is not None:
+            p = plate.scaledToHeight(int(h), Qt.SmoothTransformation)
+            painter.drawPixmap(int(x), int(y), p)
+            plate_w = p.width()
+
+        # label + ★level, with a dark shadow so it reads on the plate art
+        label = self._course_label or ""
+        lvl = f"  ★{self._course_level}" if self._course_level else ""
+        txt = label + lvl
+        text_x = x + h * 0.95
+        text_w = plate_w - h * 0.95 - 6
+        painter.setFont(self._font(13, True))
+        painter.setPen(QColor(0, 0, 0, 160))
+        painter.drawText(int(text_x + 1), int(y + 1), int(text_w), int(h),
+                         Qt.AlignVCenter | Qt.AlignLeft, txt)
+        painter.setPen(self._color("fg_bright"))
+        painter.drawText(int(text_x), int(y), int(text_w), int(h),
+                         Qt.AlignVCenter | Qt.AlignLeft, txt)
+
+        # difficulty icon overlapping the plate's left edge
+        if icon is not None:
+            ic = icon.scaledToHeight(int(h * 1.12), Qt.SmoothTransformation)
+            painter.drawPixmap(int(x - ic.width() * 0.12),
+                               int(y + h / 2 - ic.height() / 2), ic)
 
     def _draw_combo_drum(self, painter, panel_x, panel_w, band_top, band_h, combo, pop):
         """本家風のコンボ表示: 太鼓の顔グラフィックに専用数字フォントで
@@ -1690,6 +1749,10 @@ class ChartPreviewWidget(QWidget):
             painter.setFont(self._font(11, True))
             painter.drawText(w - 92, 2, 88, 18, Qt.AlignRight | Qt.AlignVCenter,
                              f"{fps:.0f} FPS")
+
+        # Difficulty badge (icon + nameplate + おに ★9), top-left margin.
+        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
+            self._draw_difficulty_badge(painter, self.PANEL_INSET, 8, band_top - 16)
 
         # Live roll/balloon tap count, upper-left of the judgment ring, in
         # the margin above the lane box - reuses _live_span_count as-is
