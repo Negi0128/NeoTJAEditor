@@ -349,6 +349,10 @@ class ChartPreviewWidget(QWidget):
         self._skin_lane = self._load_skin_lane()
         self._skin_ring = self._load_skin_ring()
         self._skin_se = self._load_skin_se()
+        self._skin_roll = self._load_skin_roll()
+        # FPS readout: wall-clock timestamps of recent paints (top-right).
+        self._fps_samples = []
+        self._show_fps = True
 
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
@@ -636,6 +640,81 @@ class ChartPreviewWidget(QWidget):
             return out
         except Exception:
             return None
+
+    def _load_skin_roll(self):
+        """Drumroll art from an OpenTaiko-style skin/Notes.png: the yellow head
+        (a round 連打 note) and the body bar (flat left, rounded right cap).
+        Returns {"small": pack, "big": pack} where pack is
+        {head, mid, cap, body_h}, or None. The body is pre-split into a
+        stretchable middle and a fixed rounded cap so stretching the bar to any
+        length never distorts the rounded tail."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            from PIL import Image
+            sheet = Image.open(path).convert("RGBA")
+            w, h = sheet.size
+            row_h = h // 3
+            y0 = row_h
+            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+            col = band.max(axis=0) > 16
+            spans, start = [], None
+            for x in range(w):
+                if col[x] and start is None:
+                    start = x
+                elif not col[x] and start is not None:
+                    spans.append((start, x - 1)); start = None
+            if start is not None:
+                spans.append((start, w - 1))
+            # [5]=roll head, [6]=roll body, [7]=big head, [8]=big body
+            if len(spans) < 9:
+                return None
+
+            def cell(sp):
+                c = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
+                ca = np.asarray(c)[:, :, 3]
+                ys, xs = np.where(ca > 16)
+                if len(xs) == 0:
+                    return None
+                return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+
+            def pack(head, body):
+                if head is None or body is None:
+                    return None
+                bw, bh = body.width, body.height
+                cap_w = min(bh, bw)                       # rounded end ~ as wide as tall
+                mid = body.crop((0, 0, max(1, bw - cap_w), bh))
+                cap = body.crop((max(0, bw - cap_w), 0, bw, bh))
+                return {"head": _pil_to_qpixmap(head), "mid": _pil_to_qpixmap(mid),
+                        "cap": _pil_to_qpixmap(cap), "body_h": bh}
+
+            return {"small": pack(cell(spans[5]), cell(spans[6])),
+                    "big": pack(cell(spans[7]), cell(spans[8]))}
+        except Exception:
+            return None
+
+    def _draw_roll_sprite(self, painter, x0, x1, cy, r, big) -> bool:
+        """Draw a 本家-style drumroll from skin art: stretchable body + rounded
+        cap + head. Returns False (caller falls back to the plain bar) when
+        there's no skin or the span is reversed by a negative #SCROLL."""
+        pack = self._skin_roll.get("big" if big else "small") if self._skin_roll else None
+        if pack is None or x1 < x0:
+            return False
+        d = float(r * 2)
+        scale = d / pack["body_h"]
+        mid, cap, head = pack["mid"], pack["cap"], pack["head"]
+        cap_dst = cap.width() * scale
+        total = max(cap_dst, x1 - x0)
+        mid_dst = max(0.0, total - cap_dst)
+        painter.drawPixmap(QRectF(x0, cy - r, mid_dst, d), mid,
+                           QRectF(0, 0, mid.width(), mid.height()))
+        painter.drawPixmap(QRectF(x0 + mid_dst, cy - r, cap_dst, d), cap,
+                           QRectF(0, 0, cap.width(), cap.height()))
+        hd = head.scaledToHeight(int(d), Qt.SmoothTransformation)
+        painter.drawPixmap(int(x0 - r), int(cy - r), hd)
+        return True
 
     def _load_skin_lane(self):
         """skin/Base.png stretched to the note band, or None. Drawn as the lane
@@ -1425,6 +1504,23 @@ class ChartPreviewWidget(QWidget):
 
         now = self._current_chart_time()
 
+        # FPS readout, top-right. Measured from the real interval between paints
+        # (a rolling window of recent frames), so it reflects the actual
+        # on-screen rate during playback rather than the timer's target.
+        if self._show_fps:
+            self._fps_samples.append(_time.monotonic())
+            if len(self._fps_samples) > 30:
+                del self._fps_samples[:-30]
+            fps = 0.0
+            if len(self._fps_samples) >= 2:
+                span = self._fps_samples[-1] - self._fps_samples[0]
+                if span > 0:
+                    fps = (len(self._fps_samples) - 1) / span
+            painter.setPen(self._color("fg_dim"))
+            painter.setFont(self._font(11, True))
+            painter.drawText(w - 92, 2, 88, 18, Qt.AlignRight | Qt.AlignVCenter,
+                             f"{fps:.0f} FPS")
+
         # Live roll/balloon tap count, upper-left of the judgment ring, in
         # the margin above the lane box - reuses _live_span_count as-is
         # (in-progress live number, held for LIVE_COUNT_HOLD_SEC after the
@@ -1598,9 +1694,10 @@ class ChartPreviewWidget(QWidget):
         for t0, kind, payload in draw_items:
             if kind == "roll":
                 x0, x1, r, r_start, r_end = payload
-                # Red while being hit (now inside the span), yellow otherwise.
-                color = self._color("don") if r_start <= now <= r_end else self._color("roll")
-                self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
+                if not self._draw_roll_sprite(painter, x0, x1, mid_y, r, r >= self.NOTE_R_BIG):
+                    # Red while being hit (now inside the span), yellow otherwise.
+                    color = self._color("don") if r_start <= now <= r_end else self._color("roll")
+                    self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
             elif kind == "balloon":
                 x0, x1 = payload
                 self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
