@@ -350,6 +350,9 @@ class ChartPreviewWidget(QWidget):
         self._skin_ring = self._load_skin_ring()
         self._skin_se = self._load_skin_se()
         self._skin_roll = self._load_skin_roll()
+        self._skin_balloon = self._load_skin_balloon()
+        self._skin_bg = self._load_skin_bg()
+        self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
         # FPS readout: wall-clock timestamps of recent paints (top-right).
         self._fps_samples = []
         self._show_fps = True
@@ -714,6 +717,69 @@ class ChartPreviewWidget(QWidget):
                            QRectF(0, 0, cap.width(), cap.height()))
         hd = head.scaledToHeight(int(d), Qt.SmoothTransformation)
         painter.drawPixmap(int(x0 - r), int(cy - r), hd)
+        return True
+
+    def _load_skin_balloon(self):
+        """The balloon/kusudama sprite: the last cell of skin/Notes.png (the
+        orange round-face balloon), tight-cropped, or None."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            from PIL import Image
+            sheet = Image.open(path).convert("RGBA")
+            w, h = sheet.size
+            row_h = h // 3
+            y0 = row_h
+            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+            col = band.max(axis=0) > 16
+            spans, start = [], None
+            for x in range(w):
+                if col[x] and start is None:
+                    start = x
+                elif not col[x] and start is not None:
+                    spans.append((start, x - 1)); start = None
+            if start is not None:
+                spans.append((start, w - 1))
+            if len(spans) < 10:
+                return None
+            sp = spans[9]                        # orange balloon
+            cell = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
+            ca = np.asarray(cell)[:, :, 3]
+            ys, xs = np.where(ca > 16)
+            if len(xs) == 0:
+                return None
+            cell = cell.crop((int(xs.min()), int(ys.min()),
+                              int(xs.max()) + 1, int(ys.max()) + 1))
+            return _pil_to_qpixmap(cell)
+        except Exception:
+            return None
+
+    def _load_skin_bg(self):
+        """skin/Background.png (a full 本家風 field scene), native size, or
+        None. Scaled to the widget per-size and cached in paintEvent."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Background.png")
+        if not os.path.exists(path):
+            return None
+        pix = QPixmap(path)
+        return None if pix.isNull() else pix
+
+    def _draw_balloon_sprite(self, painter, x0, x1, cy, r, guide_color) -> bool:
+        """Draw a 本家-style balloon/kusudama: a thin duration guide from the
+        hit point to the span end, with the orange balloon sprite's round face
+        anchored at the start. Returns False when there's no skin."""
+        if self._skin_balloon is None:
+            return False
+        d = r * 2
+        scaled = self._skin_balloon.scaledToHeight(int(d), Qt.SmoothTransformation)
+        lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
+        gh = max(3.0, r * 0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(guide_color))
+        painter.drawRoundedRect(QRectF(lo, cy - gh / 2, max(1.0, hi - lo), gh),
+                                gh / 2, gh / 2)
+        painter.drawPixmap(int(x0 - r), int(cy - d / 2), scaled)
         return True
 
     def _load_skin_lane(self):
@@ -1500,7 +1566,17 @@ class ChartPreviewWidget(QWidget):
         footer_h = int(self.SE_FOOTER_HEIGHT) if self._se_text_enabled else 0
         footer_bottom = band_bottom + footer_h
 
-        painter.fillRect(self.rect(), self._color("bg"))
+        if self._skin_bg is not None:
+            # Cover the widget with the background scene, cached per size so we
+            # don't rescale a big image every frame.
+            if self._bg_cache is None or self._bg_cache[0] != w or self._bg_cache[1] != h:
+                scaled = self._skin_bg.scaled(w, h, Qt.KeepAspectRatioByExpanding,
+                                              Qt.SmoothTransformation)
+                self._bg_cache = (w, h, scaled)
+            sc = self._bg_cache[2]
+            painter.drawPixmap((w - sc.width()) // 2, (h - sc.height()) // 2, sc)
+        else:
+            painter.fillRect(self.rect(), self._color("bg"))
 
         now = self._current_chart_time()
 
@@ -1700,10 +1776,12 @@ class ChartPreviewWidget(QWidget):
                     self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
             elif kind == "balloon":
                 x0, x1 = payload
-                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
+                if not self._draw_balloon_sprite(painter, x0, x1, mid_y, rs, self._color("balloon")):
+                    self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
             elif kind == "kusudama":
                 x0, x1 = payload
-                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
+                if not self._draw_balloon_sprite(painter, x0, x1, mid_y, self.NOTE_R_BIG, self._color("kusudama")):
+                    self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
             else:  # note - approach, then fly off after crossing the line.
                 i = payload
                 t = self._note_times[i]
@@ -1788,34 +1866,39 @@ class ChartPreviewWidget(QWidget):
         panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
         panel_x = self.PANEL_INSET
         panel_w = panel_right - panel_x
-        painter.setPen(QPen(self._color("accent"), 2))
-        painter.setBrush(QBrush(self._color("surface")))
-        painter.drawRect(int(panel_x), band_top, int(panel_w), band_h)
 
-        painter.setPen(self._color("fg_dim"))
-        painter.setFont(self._font(9))
-        painter.drawText(int(panel_x), band_top + 6, int(panel_w), 18, Qt.AlignCenter, "コンボ")
+        # 本家風: no boxed panel - a small gold "コンボ" label over a big
+        # outlined number that floats on the lane, gold once the combo builds
+        # up (like the real game) and silver below that. The dark outline keeps
+        # it readable straight on the lane art / background.
+        painter.setPen(self._color("checkpoint"))
+        painter.setFont(self._font(11, True))
+        painter.drawText(int(panel_x), band_top + 4, int(panel_w), 16, Qt.AlignCenter, "コンボ")
+
         # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
         # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]
             if 0.0 <= ce < self.COMBO_POP_DURATION:
-                pop = 1.0 + 0.14 * (1.0 - ce / self.COMBO_POP_DURATION)
-        num_h = band_h - 28
+                pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
+        num_h = band_h - 26
         num_cx = panel_x + panel_w / 2.0
-        num_cy = band_top + 24 + num_h / 2.0
-        painter.setPen(self._color("fg_bright"))
-        painter.setFont(self._font(22, True))
-        if pop > 1.0:
-            painter.save()
-            painter.translate(num_cx, num_cy)
-            painter.scale(pop, pop)
-            painter.drawText(int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h),
-                             Qt.AlignCenter, str(combo))
-            painter.restore()
-        else:
-            painter.drawText(int(panel_x), band_top + 24, int(panel_w), num_h, Qt.AlignCenter, str(combo))
+        num_cy = band_top + 22 + num_h / 2.0
+        fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
+        outline = QColor(28, 18, 8)
+        txt = str(combo)
+        rect = (int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h))
+        painter.save()
+        painter.translate(num_cx, num_cy)
+        painter.scale(pop, pop)
+        painter.setFont(self._font(30, True))
+        painter.setPen(outline)
+        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (2, -2), (-2, 2)):
+            painter.drawText(rect[0] + ox, rect[1] + oy, rect[2], rect[3], Qt.AlignCenter, txt)
+        painter.setPen(fill)
+        painter.drawText(rect[0], rect[1], rect[2], rect[3], Qt.AlignCenter, txt)
+        painter.restore()
 
         painter.setClipRect(self.rect())
 
