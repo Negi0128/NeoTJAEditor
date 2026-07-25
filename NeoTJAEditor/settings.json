@@ -35,16 +35,5 @@
   "short_roll_comp": "段階的補正 (理論値-1)",
   "preview_volume": 0.8,
   "last_project_folder": "",
-  "check_updates_on_startup": true,
-  "auto_save_enabled": false,
-  "hit_sound_don_path": "C:\\Users\\NegiA\\Desktop\\game\\元ファイルまとめ\\太鼓の達人シミュレーター\\2024太鼓さん次郎\\taikojiro292\\snd\\dong.wav",
-  "hit_sound_ka_path": "C:\\Users\\NegiA\\Desktop\\game\\元ファイルまとめ\\太鼓の達人シミュレーター\\2024太鼓さん次郎\\taikojiro292\\snd\\ka.wav",
-  "sfx_volume": 0.9,
-  "audio_backend": "mixer",
-  "waveform_stereo": true,
-  "se_text_enabled": true,
-  "note_input_sound": true,
-  "recent_files": [],
-  "window_geometry": "",
-  "splitter_state": ""
+  "check_updates_on_startup": true
 }
