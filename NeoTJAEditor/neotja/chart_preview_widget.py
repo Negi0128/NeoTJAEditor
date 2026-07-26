@@ -2,7 +2,7 @@ import bisect
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
     QStaticText,
@@ -366,9 +366,21 @@ class ChartPreviewWidget(QWidget):
         self._skin_score = self._load_skin_score()
         self._panel_cache = None    # (edge, h, scaled panel QPixmap)
         try:
-            self._player_name = settings_mod.load_settings().get("player_name", "Player")
+            _cfg0 = settings_mod.load_settings()
+            self._player_name = _cfg0.get("player_name", "Player")
+            self._hud_layout = dict(_cfg0.get("hud_layout") or {})
         except Exception:
             self._player_name = "Player"
+            self._hud_layout = {}
+        # Drag-to-place HUD editor state. In edit mode the score/combo/name/
+        # panel can be dragged (and the panel resized); positions persist in
+        # settings["hud_layout"]. _hud_bboxes is recomputed each paint for
+        # hit-testing.
+        self._layout_edit = False
+        self._hud_bboxes = {}
+        self._drag_name = None
+        self._drag_mode = None      # "move" | "resize"
+        self._drag_off = (0, 0)
         self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
         # FPS readout: wall-clock timestamps of recent paints (top-right).
         self._fps_samples = []
@@ -389,10 +401,19 @@ class ChartPreviewWidget(QWidget):
                     hz = r
         except Exception:
             pass
-        hz = max(60.0, min(hz, 144.0))
+        # Cap the redraw rate to keep CPU use down. Default 60 fps (smooth but
+        # far lighter than pumping a 144 Hz panel); tunable via settings
+        # "preview_max_fps" if the user wants it even lower / higher.
+        cap = 60
+        try:
+            cap = int(settings_mod.load_settings().get("preview_max_fps", 60))
+        except Exception:
+            cap = 60
+        cap = max(20, min(144, cap))
+        hz = max(20.0, min(hz, float(cap)))
         # Floor (not round) the interval so we tick at least as fast as the
-        # refresh - round() would give 17 ms at 60 Hz (~59 fps), just under
-        # the target; int() gives 16 ms (~62 fps).
+        # target - round() would give 17 ms at 60 Hz (~59 fps); int() gives
+        # 16 ms (~62 fps).
         self._timer.setInterval(max(1, int(1000.0 / hz)))
 
     def _color(self, key: str) -> QColor:
@@ -921,8 +942,43 @@ class ChartPreviewWidget(QWidget):
         painter.drawPixmap(int(x0 - face_r), int(cy - scaled.height() / 2), scaled)
         return True
 
+    HUD_LABELS = {"panel": "パネル", "score": "スコア", "combo": "コンボ太鼓",
+                  "name": "難易度・名前"}
+
+    def set_layout_edit(self, on):
+        """Toggle the drag-to-place HUD editor."""
+        self._layout_edit = bool(on)
+        self.setCursor(Qt.OpenHandCursor if on else Qt.ArrowCursor)
+        self.update()
+
+    def is_layout_edit(self):
+        return self._layout_edit
+
+    def _save_hud_layout(self):
+        try:
+            cfg = settings_mod.load_settings()
+            cfg["hud_layout"] = self._hud_layout
+            settings_mod.save_settings(cfg)
+        except Exception:
+            pass
+
+    def _hud_pos(self, name, dx, dy):
+        """Stored top-left for a HUD element, or the given default."""
+        p = self._hud_layout.get(name)
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            return int(p[0]), int(p[1])
+        return int(dx), int(dy)
+
+    def _hud_rect(self, name, dx, dy, dw, dh):
+        """Stored (x,y,w,h) for a HUD element, or the given default."""
+        p = self._hud_layout.get(name)
+        if isinstance(p, (list, tuple)) and len(p) >= 4:
+            return int(p[0]), int(p[1]), int(p[2]), int(p[3])
+        return int(dx), int(dy), int(dw), int(dh)
+
     def _draw_difficulty_badge(self, painter, x, y, h):
-        """本家風の難易度銘板: 難易度アイコン + 銘板プレート + プレイヤー名。"""
+        """本家風の難易度銘板: 難易度アイコン + 銘板プレート + プレイヤー名。
+        戻り値は描いた幅(当たり判定用)。"""
         plate = self._skin_nameplate
         key = (self._course_key or "").lower()
         icon = self._skin_course_symbols.get(key) if self._skin_course_symbols else None
@@ -950,28 +1006,30 @@ class ChartPreviewWidget(QWidget):
             ic = icon.scaledToHeight(int(h * 1.18), Qt.SmoothTransformation)
             painter.drawPixmap(int(x - ic.width() * 0.12),
                                int(y + h / 2 - ic.height() / 2), ic)
+        return int(plate_w)
 
-    def _draw_score(self, painter, panel_edge, y, score):
-        """Draw the (cosmetic) score right-aligned at the top of the HUD panel
-        using the skin's Score.png number font."""
+    def _draw_score(self, painter, x, y, score):
+        """Draw the (cosmetic) score left-anchored at (x, y) using the skin's
+        Score.png number font. Returns (width, height) for hit-testing."""
         digits = self._skin_score
         dh = 26
         scaled = [digits[int(c)].scaledToHeight(dh, Qt.SmoothTransformation)
                   for c in str(score)]
-        total = sum(d.width() for d in scaled)
-        x = panel_edge - 8 - total
+        cx = x
         for d in scaled:
-            painter.drawPixmap(int(x), int(y), d)
-            x += d.width()
+            painter.drawPixmap(int(cx), int(y), d)
+            cx += d.width()
+        return int(cx - x), dh
 
-    def _draw_combo_drum(self, painter, panel_x, panel_w, band_top, band_h, combo, pop):
+    def _draw_combo_drum(self, painter, x, y, drum_h, combo, pop):
         """本家風のコンボ表示: 太鼓の顔グラフィックに専用数字フォントで
-        コンボ数を重ね、下に「コンボ」を出す。"""
+        コンボ数を重ね、下に「コンボ」を出す。左上(x,y)基準・高さ drum_h。
+        戻り値は (幅, 高さ)。"""
         cb = self._skin_combo
-        cx = panel_x + panel_w / 2.0
-        cy = band_top + band_h / 2.0
-        drum = cb["base"].scaledToHeight(int(band_h * 0.94), Qt.SmoothTransformation)
-        painter.drawPixmap(int(cx - drum.width() / 2), int(cy - drum.height() / 2), drum)
+        drum = cb["base"].scaledToHeight(max(1, int(drum_h)), Qt.SmoothTransformation)
+        cx = x + drum.width() / 2.0
+        cy = y + drum.height() / 2.0
+        painter.drawPixmap(int(x), int(y), drum)
 
         # Big combo number on the drum's cream face, popping on each hit.
         # Scaled to fit the drum width too, so 3-digit combos don't overflow
@@ -1001,6 +1059,7 @@ class ChartPreviewWidget(QWidget):
                                               Qt.SmoothTransformation)
             painter.drawPixmap(int(cx - ts.width() / 2),
                                int(face_cy + digit_h * 0.5 + drum.height() * 0.02), ts)
+        return drum.width(), drum.height()
 
     def _load_skin_lane(self):
         """skin/Base.png stretched to the note band, or None. Drawn as the lane
@@ -1235,7 +1294,50 @@ class ChartPreviewWidget(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
+        if self._layout_edit and event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            # panel resize handle (bottom-right corner) takes priority
+            pr = self._hud_bboxes.get("panel")
+            if pr is not None and abs(pos.x() - pr.right()) <= 12 and abs(pos.y() - pr.bottom()) <= 12:
+                self._drag_name, self._drag_mode = "panel", "resize"
+                event.accept(); return
+            # otherwise move whichever element is under the cursor (elements
+            # before the panel so the small ones win over the big backdrop)
+            for nm in ("score", "combo", "name", "panel"):
+                r = self._hud_bboxes.get(nm)
+                if r is not None and r.contains(pos):
+                    self._drag_name, self._drag_mode = nm, "move"
+                    self._drag_off = (pos.x() - r.left(), pos.y() - r.top())
+                    self.setCursor(Qt.ClosedHandCursor)
+                    event.accept(); return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._layout_edit and self._drag_name is not None:
+            pos = event.position().toPoint()
+            pr = self._hud_bboxes.get(self._drag_name)
+            if self._drag_mode == "resize" and self._drag_name == "panel" and pr is not None:
+                self._hud_layout["panel"] = [pr.left(), pr.top(),
+                                             max(40, pos.x() - pr.left()),
+                                             max(30, pos.y() - pr.top())]
+            elif self._drag_mode == "move":
+                nx = pos.x() - self._drag_off[0]
+                ny = pos.y() - self._drag_off[1]
+                if self._drag_name == "panel" and pr is not None:
+                    self._hud_layout["panel"] = [nx, ny, pr.width(), pr.height()]
+                else:
+                    self._hud_layout[self._drag_name] = [nx, ny]
+            self.update()
+            event.accept(); return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._layout_edit and self._drag_name is not None:
+            self._drag_name = self._drag_mode = None
+            self.setCursor(Qt.OpenHandCursor)
+            self._save_hud_layout()
+            event.accept(); return
+        super().mouseReleaseEvent(event)
 
     def cycle_course(self):
         # Each call steps down one rank (Ura -> Oni -> Hard -> Normal ->
@@ -2090,71 +2192,79 @@ class ChartPreviewWidget(QWidget):
         # so nothing scrolls behind them. Its right edge sits just left of the
         # judgment ring, which stays fully visible on the lane.
         painter.setClipRect(self.rect())
-        panel_edge = int(judge_x - judge_r)
-        # The panel spans only the lane's vertical extent (note band + SE
-        # footer), NOT the whole widget, so it doesn't poke up into the
-        # background above the lane.
-        panel_top = band_top
-        panel_bot = footer_bottom
-        panel_h = panel_bot - panel_top
+        self._hud_bboxes = {}
+        # Panel geometry: default is the lane-left block, but the user can drag/
+        # resize it (and every element below) in layout-edit mode.
+        def_pe = int(judge_x - judge_r)
+        px, py, pw, ph = self._hud_rect("panel", 0, band_top, def_pe, footer_bottom - band_top)
+        pw = max(40, pw); ph = max(30, ph)
+        self._hud_bboxes["panel"] = QRect(px, py, pw, ph)
         if self._skin_panel is not None:
-            if (self._panel_cache is None or self._panel_cache[0] != panel_edge
-                    or self._panel_cache[1] != panel_h):
-                sp = self._skin_panel.scaled(panel_edge, panel_h, Qt.IgnoreAspectRatio,
-                                             Qt.SmoothTransformation)
-                self._panel_cache = (panel_edge, panel_h, sp)
-            painter.drawPixmap(0, panel_top, self._panel_cache[2])
+            if (self._panel_cache is None or self._panel_cache[0] != pw
+                    or self._panel_cache[1] != ph):
+                sp = self._skin_panel.scaled(pw, ph, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                self._panel_cache = (pw, ph, sp)
+            painter.drawPixmap(px, py, self._panel_cache[2])
         else:
-            painter.fillRect(0, panel_top, panel_edge, panel_h, QColor(20, 21, 28))
+            painter.fillRect(px, py, pw, ph, QColor(20, 21, 28))
         painter.setPen(QPen(QColor("#c9a24a"), 3))     # warm 本家風のフチ
-        painter.drawLine(panel_edge, panel_top, panel_edge, panel_bot)
+        painter.drawLine(px + pw, py, px + pw, py + ph)
+        self._panel_right_px = px + pw     # SE strip starts here (hidden by block)
 
         combo = bisect.bisect_right(self._note_times, now)
-
-        # score (top of panel, cosmetic - this is a static "all 良" preview)
-        if self._skin_score is not None:
-            score = (combo * 1000 + self._cumulative_hits(now) * 100) // 10 * 10
-            self._draw_score(painter, panel_edge, panel_top + 3, score)
-
-        # difficulty icon + player-name plate (bottom of panel)
-        name_h = 24
-        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
-            self._draw_difficulty_badge(painter, 4, panel_bot - name_h - 2, name_h)
-
-        # combo drum in the middle region, between score and name.
-        drum_top = panel_top + 26
-        drum_h = max(20, (panel_bot - name_h - 4) - drum_top)
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]
             if 0.0 <= ce < self.COMBO_POP_DURATION:
                 pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
 
+        # score (default: top of panel)
+        if self._skin_score is not None:
+            score = (combo * 1000 + self._cumulative_hits(now) * 100) // 10 * 10
+            sx, sy = self._hud_pos("score", px + 8, py + 3)
+            sw, sh = self._draw_score(painter, sx, sy, score)
+            self._hud_bboxes["score"] = QRect(sx, sy, max(12, sw), sh)
+
+        # combo drum (default: middle of panel)
+        cx0, cy0 = self._hud_pos("combo", px + max(0, (pw - 64) // 2), py + 26)
         if self._skin_combo is not None:
-            self._draw_combo_drum(painter, 0, panel_edge, drum_top, drum_h, combo, pop)
+            cw, ch = self._draw_combo_drum(painter, cx0, cy0, 72, combo, pop)
+            self._hud_bboxes["combo"] = QRect(cx0, cy0, cw, ch)
         else:
-            # フォールバック: 金/銀アウトライン数字 + 「コンボ」ラベル
-            panel_x, panel_w = 0, panel_edge
-            painter.setPen(self._color("checkpoint"))
-            painter.setFont(self._font(11, True))
-            painter.drawText(int(panel_x), drum_top, int(panel_w), 16, Qt.AlignCenter, "コンボ")
-            num_h = drum_h - 18
-            num_cx = panel_x + panel_w / 2.0
-            num_cy = drum_top + 18 + num_h / 2.0
-            fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
-            outline = QColor(28, 18, 8)
             txt = str(combo)
-            rect = (int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h))
+            fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
             painter.save()
-            painter.translate(num_cx, num_cy)
+            painter.translate(cx0 + 32, cy0 + 34)
             painter.scale(pop, pop)
             painter.setFont(self._font(30, True))
-            painter.setPen(outline)
+            painter.setPen(QColor(28, 18, 8))
             for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (2, -2), (-2, 2)):
-                painter.drawText(rect[0] + ox, rect[1] + oy, rect[2], rect[3], Qt.AlignCenter, txt)
+                painter.drawText(-40 + ox, -22 + oy, 80, 44, Qt.AlignCenter, txt)
             painter.setPen(fill)
-            painter.drawText(rect[0], rect[1], rect[2], rect[3], Qt.AlignCenter, txt)
+            painter.drawText(-40, -22, 80, 44, Qt.AlignCenter, txt)
             painter.restore()
+            self._hud_bboxes["combo"] = QRect(cx0, cy0, 64, 68)
+
+        # difficulty icon + player-name plate (default: bottom of panel)
+        name_h = 24
+        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
+            nx, ny = self._hud_pos("name", px + 4, py + ph - name_h - 2)
+            nw = self._draw_difficulty_badge(painter, nx, ny, name_h)
+            self._hud_bboxes["name"] = QRect(nx, ny, max(20, nw), name_h)
+
+        # layout-edit overlay: dashed boxes + labels + a resize handle on panel
+        if self._layout_edit:
+            for nm, r in self._hud_bboxes.items():
+                painter.setPen(QPen(self._color("accent"), 1, Qt.DashLine))
+                painter.setBrush(QColor(79, 156, 249, 36))
+                painter.drawRect(r)
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(self._color("fg_bright"))
+                painter.setFont(self._font(9, True))
+                painter.drawText(r.left() + 3, r.top() + 1, 120, 13,
+                                 Qt.AlignLeft | Qt.AlignVCenter, self.HUD_LABELS.get(nm, nm))
+                if nm == "panel":
+                    painter.fillRect(r.right() - 9, r.bottom() - 9, 9, 9, self._color("accent"))
 
         painter.setClipRect(self.rect())
 
@@ -2171,7 +2281,7 @@ class ChartPreviewWidget(QWidget):
         # carrying 26 px of empty strip.
         # The SE strip and its labels start at the panel's right edge, so the
         # left HUD block hides the ドン/カッ that would otherwise show under it.
-        se_left = int(judge_x - judge_r)
+        se_left = getattr(self, "_panel_right_px", int(judge_x - judge_r))
         if self._se_text_enabled:
             painter.fillRect(se_left, band_bottom + 1, lane_w - se_left, footer_h - 1, self._color("surface"))
             painter.setPen(QPen(self._color("border"), 2))
