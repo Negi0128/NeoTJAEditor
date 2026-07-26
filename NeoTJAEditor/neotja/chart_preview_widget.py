@@ -99,10 +99,13 @@ class ChartPreviewWidget(QWidget):
     smooth 16ms-timer extrapolation is left alone; only a real drift or seek
     re-anchors it."""
 
-    BASE_PIXELS_PER_BEAT = 189.0
+    # PeepoDrumKit の拡張レーン(広い窓)は 1 拍 = GameWorldSpaceDistancePerLane
+    # Beat(356) を多めに見せて詰まって見えるので、こちらも 4 拍ぶん見せて
+    # 177px/拍 に詰める(レーンの総ピクセル幅は 200+4*177 で従来とほぼ同じ)。
+    BASE_PIXELS_PER_BEAT = 177.0
     WINDOW_REF_BPM = 60.0  # lower bound used only to size the visible-time window (see _visible_window)
     JUDGE_X = 200.0            # fixed pixel offset - not a ratio of widget width, so it never moves on resize
-    LOOKAHEAD_BEATS = 3.75     # 15 sixteenth notes: show up to the 15th, not the 16th, of a 4/4 measure ahead
+    LOOKAHEAD_BEATS = 4.0      # one full 4/4 measure ahead
     LANE_WIDTH = JUDGE_X + LOOKAHEAD_BEATS * BASE_PIXELS_PER_BEAT  # fixed total box width, independent of the widget/window size
     NOTE_R_SMALL = 28
     NOTE_R_BIG = 38
@@ -318,6 +321,8 @@ class ChartPreviewWidget(QWidget):
         self._sprites_small, self._sprites_big = self._load_sprites()
         # Optional 良 judge sprite (skin/Judge.png). None -> drawn text fallback.
         self._skin_judge_good = self._load_skin_judge()
+        # Optional balloon sprite (for 風船/くす玉). None -> procedural circle.
+        self._skin_balloon = self._load_skin_balloon()
 
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
@@ -525,6 +530,48 @@ class ChartPreviewWidget(QWidget):
             self._hit_sound_engine.check_and_play(self._current_audio_time())
 
     JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
+
+    def _load_skin_balloon(self):
+        """The balloon sprite (last cell of skin/Notes.png - the orange
+        round-face balloon), tight-cropped, plus the height fraction its round
+        face takes up (so the face can be sized to a note). Returns
+        {pix, face_frac} or None. Used for both 風船 and くす玉."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            from PIL import Image
+            sheet = Image.open(path).convert("RGBA")
+            w, h = sheet.size
+            row_h = h // 3
+            y0 = row_h                       # middle animation frame
+            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+            col = band.max(axis=0) > 16
+            spans, start = [], None
+            for x in range(w):
+                if col[x] and start is None:
+                    start = x
+                elif not col[x] and start is not None:
+                    spans.append((start, x - 1)); start = None
+            if start is not None:
+                spans.append((start, w - 1))
+            if len(spans) < 10:
+                return None
+            sp = spans[9]
+            cell = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
+            ca = np.asarray(cell)[:, :, 3]
+            ys, xs = np.where(ca > 16)
+            if len(xs) == 0:
+                return None
+            cell = cell.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+            ca2 = np.asarray(cell)[:, :, 3]
+            col_h = (ca2 > 16).sum(axis=0)
+            left = col_h[:max(1, int(cell.width * 0.4))]
+            face_frac = float(left.max()) / cell.height if cell.height else 1.0
+            return {"pix": _pil_to_qpixmap(cell), "face_frac": max(0.3, face_frac)}
+        except Exception:
+            return None
 
     def _load_skin_judge(self):
         """Top cell (良) of an OpenTaiko-style skin/Judge.png, scaled for the
@@ -1305,6 +1352,23 @@ class ChartPreviewWidget(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(int(x0 - r), int(cy - r), d, d)
 
+    def _draw_balloon_note(self, painter, x, cy):
+        """A single 風船/くす玉 note centred at (x, cy): the balloon sprite's
+        round face sized to a small note (no duration bar). Falls back to a
+        procedural balloon-coloured circle when there's no skin."""
+        r = self.NOTE_R_SMALL
+        if self._skin_balloon is not None:
+            pix = self._skin_balloon["pix"]
+            ff = self._skin_balloon["face_frac"]
+            sprite_h = (2.0 * r) / ff
+            face_r = sprite_h * ff / 2.0
+            scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
+            painter.drawPixmap(int(x - face_r), int(cy - scaled.height() / 2), scaled)
+        else:
+            painter.setPen(QPen(self._color("fg_bright"), 2))
+            painter.setBrush(QBrush(self._color("balloon")))
+            painter.drawEllipse(int(x - r), int(cy - r), r * 2, r * 2)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1489,18 +1553,23 @@ class ChartPreviewWidget(QWidget):
             if (x0 < -r and x1 < -r) or (x0 > lane_w + r and x1 > lane_w + r):
                 continue
             draw_items.append((r_start, "roll", (x0, x1, r, r_start, r_end)))
+        # 風船・くす玉: 終点バーは出さず、風船ノーツ1個だけを描く。区間に入る
+        # 前は右から流れてきて、区間中(now が [start,end])は判定枠に固定する。
+        # 固定されている間ずっと表示されるので、いつまで残っているか分かる。
         for b_start, b_end, sp0, sp1 in self._balloon_draw:
+            if now > b_end:
+                continue
             x0 = judge_x + (b_start - now) * sp0
-            x1 = judge_x + (b_end - now) * sp1
-            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
+            if now < b_start and x0 > lane_w + rs:
                 continue
-            draw_items.append((b_start, "balloon", (x0, x1)))
+            draw_items.append((b_start, "balloon", (b_start, b_end, sp0)))
         for k_start, k_end, sp0, sp1 in self._kusudama_draw:
-            x0 = judge_x + (k_start - now) * sp0
-            x1 = judge_x + (k_end - now) * sp1
-            if (x0 < -rs and x1 < -rs) or (x0 > lane_w + rs and x1 > lane_w + rs):
+            if now > k_end:
                 continue
-            draw_items.append((k_start, "kusudama", (x0, x1)))
+            x0 = judge_x + (k_start - now) * sp0
+            if now < k_start and x0 > lane_w + rs:
+                continue
+            draw_items.append((k_start, "kusudama", (k_start, k_end, sp0)))
         for i in range(lo, hi):
             draw_items.append((self._note_times[i], "note", i))
         # Latest first -> earliest drawn last -> earliest ends up on top.
@@ -1511,12 +1580,11 @@ class ChartPreviewWidget(QWidget):
                 # Red while being hit (now inside the span), yellow otherwise.
                 color = self._color("don") if r_start <= now <= r_end else self._color("roll")
                 self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
-            elif kind == "balloon":
-                x0, x1 = payload
-                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
-            elif kind == "kusudama":
-                x0, x1 = payload
-                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
+            elif kind in ("balloon", "kusudama"):
+                # くす玉も風船と同じ見た目。区間中は判定枠に固定、前は流れてくる。
+                b_start, b_end, sp0 = payload
+                bx = judge_x if now >= b_start else judge_x + (b_start - now) * sp0
+                self._draw_balloon_note(painter, bx, mid_y)
             else:  # note - approach, then fly off after crossing the line.
                 i = payload
                 t = self._note_times[i]
