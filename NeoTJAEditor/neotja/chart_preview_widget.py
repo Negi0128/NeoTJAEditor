@@ -2091,33 +2091,39 @@ class ChartPreviewWidget(QWidget):
         # judgment ring, which stays fully visible on the lane.
         painter.setClipRect(self.rect())
         panel_edge = int(judge_x - judge_r)
-        # panel background: 本家風の赤い和柄パネル(あれば)、無ければ単色ブロック
+        # The panel spans only the lane's vertical extent (note band + SE
+        # footer), NOT the whole widget, so it doesn't poke up into the
+        # background above the lane.
+        panel_top = band_top
+        panel_bot = footer_bottom
+        panel_h = panel_bot - panel_top
         if self._skin_panel is not None:
             if (self._panel_cache is None or self._panel_cache[0] != panel_edge
-                    or self._panel_cache[1] != h):
-                sp = self._skin_panel.scaled(panel_edge, h, Qt.IgnoreAspectRatio,
+                    or self._panel_cache[1] != panel_h):
+                sp = self._skin_panel.scaled(panel_edge, panel_h, Qt.IgnoreAspectRatio,
                                              Qt.SmoothTransformation)
-                self._panel_cache = (panel_edge, h, sp)
-            painter.drawPixmap(0, 0, self._panel_cache[2])
+                self._panel_cache = (panel_edge, panel_h, sp)
+            painter.drawPixmap(0, panel_top, self._panel_cache[2])
         else:
-            painter.fillRect(0, 0, panel_edge, h, QColor(20, 21, 28))
+            painter.fillRect(0, panel_top, panel_edge, panel_h, QColor(20, 21, 28))
         painter.setPen(QPen(QColor("#c9a24a"), 3))     # warm 本家風のフチ
-        painter.drawLine(panel_edge, 0, panel_edge, h)
+        painter.drawLine(panel_edge, panel_top, panel_edge, panel_bot)
 
         combo = bisect.bisect_right(self._note_times, now)
 
         # score (top of panel, cosmetic - this is a static "all 良" preview)
         if self._skin_score is not None:
             score = (combo * 1000 + self._cumulative_hits(now) * 100) // 10 * 10
-            self._draw_score(painter, panel_edge, 6, score)
+            self._draw_score(painter, panel_edge, panel_top + 3, score)
 
         # difficulty icon + player-name plate (bottom of panel)
+        name_h = 24
         if self._skin_course_symbols is not None or self._skin_nameplate is not None:
-            self._draw_difficulty_badge(painter, 4, h - 40, 32)
+            self._draw_difficulty_badge(painter, 4, panel_bot - name_h - 2, name_h)
 
-        # combo drum on the panel (middle). Combo = notes with time <= now,
-        # straight from the same bisect used for visibility, so it counts up
-        # live and re-syncs on seeks with no extra state.
+        # combo drum in the middle region, between score and name.
+        drum_top = panel_top + 26
+        drum_h = max(20, (panel_bot - name_h - 4) - drum_top)
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]
@@ -2125,16 +2131,16 @@ class ChartPreviewWidget(QWidget):
                 pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
 
         if self._skin_combo is not None:
-            self._draw_combo_drum(painter, 0, panel_edge, band_top, band_h, combo, pop)
+            self._draw_combo_drum(painter, 0, panel_edge, drum_top, drum_h, combo, pop)
         else:
             # フォールバック: 金/銀アウトライン数字 + 「コンボ」ラベル
             panel_x, panel_w = 0, panel_edge
             painter.setPen(self._color("checkpoint"))
             painter.setFont(self._font(11, True))
-            painter.drawText(int(panel_x), band_top + 4, int(panel_w), 16, Qt.AlignCenter, "コンボ")
-            num_h = band_h - 26
+            painter.drawText(int(panel_x), drum_top, int(panel_w), 16, Qt.AlignCenter, "コンボ")
+            num_h = drum_h - 18
             num_cx = panel_x + panel_w / 2.0
-            num_cy = band_top + 22 + num_h / 2.0
+            num_cy = drum_top + 18 + num_h / 2.0
             fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
             outline = QColor(28, 18, 8)
             txt = str(combo)
@@ -2163,13 +2169,16 @@ class ChartPreviewWidget(QWidget):
         # it re-fixes the widget height (see set_se_text_enabled) and the
         # containing window re-fits, rather than the window permanently
         # carrying 26 px of empty strip.
+        # The SE strip and its labels start at the panel's right edge, so the
+        # left HUD block hides the ドン/カッ that would otherwise show under it.
+        se_left = int(judge_x - judge_r)
         if self._se_text_enabled:
-            painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
+            painter.fillRect(se_left, band_bottom + 1, lane_w - se_left, footer_h - 1, self._color("surface"))
             painter.setPen(QPen(self._color("border"), 2))
-            painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
+            painter.drawLine(se_left, footer_bottom, lane_w, footer_bottom)
             painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
-            painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
+            painter.setClipRect(se_left, band_bottom + 1, lane_w - se_left, footer_h - 1)
             # 音符の色には合わせず、地色に対して読みやすい中立色(fg)で描く。
             # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
             # 音符には SE 文字を残さない。
