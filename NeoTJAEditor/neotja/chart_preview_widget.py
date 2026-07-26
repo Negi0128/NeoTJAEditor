@@ -2,7 +2,7 @@ import bisect
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
     QStaticText,
@@ -73,32 +73,6 @@ def _pil_to_qpixmap(img) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
-def _slice_alpha_bands(img):
-    """Split a vertical sprite sheet into its opaque horizontal bands (rows),
-    each tight-cropped, top to bottom. Used for OpenTaiko-style Judge.png and
-    SENotes.png which stack one label per row separated by transparent gaps."""
-    import numpy as np
-    a = np.asarray(img.convert("RGBA"))[:, :, 3]
-    row_opaque = a.max(axis=1) > 16
-    bands, start = [], None
-    for y in range(a.shape[0]):
-        if row_opaque[y] and start is None:
-            start = y
-        elif not row_opaque[y] and start is not None:
-            bands.append((start, y - 1)); start = None
-    if start is not None:
-        bands.append((start, a.shape[0] - 1))
-    out = []
-    for (y0, y1) in bands:
-        strip = img.crop((0, y0, img.width, y1 + 1))
-        sa = np.asarray(strip.convert("RGBA"))[:, :, 3]
-        cols = np.where(sa.max(axis=0) > 16)[0]
-        if len(cols) == 0:
-            continue
-        out.append(strip.crop((int(cols.min()), 0, int(cols.max()) + 1, strip.height)))
-    return out
-
-
 class ChartPreviewWidget(QWidget):
     """Fixed-judgment-line, real-time scrolling note preview (taiko-simulator
     style), synced to the audio playback position.
@@ -125,16 +99,10 @@ class ChartPreviewWidget(QWidget):
     smooth 16ms-timer extrapolation is left alone; only a real drift or seek
     re-anchors it."""
 
-    # Spacing tuned to PeepoDrumKit: its lane puts one beat at
-    # GameWorldSpaceDistancePerLaneBeat=356 world units over a 1422-wide lane,
-    # i.e. ~3.66 beats from the hit circle to the right edge. We were slightly
-    # looser (3.75 beats over a wider pixels/beat), so notes read a touch wide;
-    # 177 px/beat over a 4-beat lookahead tightens them to match while keeping
-    # the lane's overall pixel width the same (200 + 4*177 == old 200+3.75*189).
-    BASE_PIXELS_PER_BEAT = 177.0
+    BASE_PIXELS_PER_BEAT = 189.0
     WINDOW_REF_BPM = 60.0  # lower bound used only to size the visible-time window (see _visible_window)
     JUDGE_X = 200.0            # fixed pixel offset - not a ratio of widget width, so it never moves on resize
-    LOOKAHEAD_BEATS = 4.0      # one full 4/4 measure ahead
+    LOOKAHEAD_BEATS = 3.75     # 15 sixteenth notes: show up to the 15th, not the 16th, of a 4/4 measure ahead
     LANE_WIDTH = JUDGE_X + LOOKAHEAD_BEATS * BASE_PIXELS_PER_BEAT  # fixed total box width, independent of the widget/window size
     NOTE_R_SMALL = 28
     NOTE_R_BIG = 38
@@ -348,43 +316,8 @@ class ChartPreviewWidget(QWidget):
         self._timer.timeout.connect(self._on_tick)
 
         self._sprites_small, self._sprites_big = self._load_sprites()
-        # Optional OpenTaiko-style skin art for lane furniture, loaded once.
-        # All None when the user has no skin - the code falls back to drawing
-        # its own text/shapes, so nothing here is required.
+        # Optional 良 judge sprite (skin/Judge.png). None -> drawn text fallback.
         self._skin_judge_good = self._load_skin_judge()
-        self._skin_lane = self._load_skin_lane()
-        self._skin_ring = self._load_skin_ring()
-        self._skin_se = self._load_skin_se()
-        self._skin_roll = self._load_skin_roll()
-        self._skin_balloon = self._load_skin_balloon()
-        self._skin_bg = self._load_skin_bg()
-        self._skin_combo = self._load_skin_combo()
-        self._skin_hit = self._load_skin_hit()
-        self._skin_course_symbols = self._load_skin_course_symbols()
-        self._skin_nameplate = self._load_skin_nameplate()
-        self._skin_panel = self._load_skin_panel()
-        self._skin_score = self._load_skin_score()
-        self._panel_cache = None    # (edge, h, scaled panel QPixmap)
-        try:
-            _cfg0 = settings_mod.load_settings()
-            self._player_name = _cfg0.get("player_name", "Player")
-            self._hud_layout = dict(_cfg0.get("hud_layout") or {})
-        except Exception:
-            self._player_name = "Player"
-            self._hud_layout = {}
-        # Drag-to-place HUD editor state. In edit mode the score/combo/name/
-        # panel can be dragged (and the panel resized); positions persist in
-        # settings["hud_layout"]. _hud_bboxes is recomputed each paint for
-        # hit-testing.
-        self._layout_edit = False
-        self._hud_bboxes = {}
-        self._drag_name = None
-        self._drag_mode = None      # "move" | "resize"
-        self._drag_off = (0, 0)
-        self._bg_cache = None   # (w, h, scaled QPixmap) for the background image
-        # FPS readout: wall-clock timestamps of recent paints (top-right).
-        self._fps_samples = []
-        self._show_fps = True
 
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
@@ -401,9 +334,8 @@ class ChartPreviewWidget(QWidget):
                     hz = r
         except Exception:
             pass
-        # Cap the redraw rate to keep CPU use down. Default 60 fps (smooth but
-        # far lighter than pumping a 144 Hz panel); tunable via settings
-        # "preview_max_fps" if the user wants it even lower / higher.
+        # Cap the redraw rate to keep CPU use down. Default 60 fps; tunable via
+        # settings "preview_max_fps" (20-144).
         cap = 60
         try:
             cap = int(settings_mod.load_settings().get("preview_max_fps", 60))
@@ -412,8 +344,8 @@ class ChartPreviewWidget(QWidget):
         cap = max(20, min(144, cap))
         hz = max(20.0, min(hz, float(cap)))
         # Floor (not round) the interval so we tick at least as fast as the
-        # target - round() would give 17 ms at 60 Hz (~59 fps); int() gives
-        # 16 ms (~62 fps).
+        # refresh - round() would give 17 ms at 60 Hz (~59 fps), just under
+        # the target; int() gives 16 ms (~62 fps).
         self._timer.setInterval(max(1, int(1000.0 / hz)))
 
     def _color(self, key: str) -> QColor:
@@ -592,6 +524,46 @@ class ChartPreviewWidget(QWidget):
         if self._hit_sound_engine is not None and self._playing:
             self._hit_sound_engine.check_and_play(self._current_audio_time())
 
+    JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
+
+    def _load_skin_judge(self):
+        """Top cell (良) of an OpenTaiko-style skin/Judge.png, scaled for the
+        judge pop, or None. This preview auto-hits every note so the judgment
+        is always 良 - only that first row is needed."""
+        path = os.path.join(str(settings_mod.skin_dir()), "Judge.png")
+        if not os.path.exists(path):
+            return None
+        try:
+            import numpy as np
+            from PIL import Image
+            img = Image.open(path).convert("RGBA")
+            a = np.asarray(img)[:, :, 3]
+            row_opaque = a.max(axis=1) > 16
+            y0 = y1 = None
+            start = None
+            for y in range(a.shape[0]):
+                if row_opaque[y] and start is None:
+                    start = y
+                elif not row_opaque[y] and start is not None:
+                    y0, y1 = start, y - 1
+                    break
+            if y0 is None:
+                if start is None:
+                    return None
+                y0, y1 = start, a.shape[0] - 1
+            band = img.crop((0, y0, img.width, y1 + 1))
+            ba = np.asarray(band)[:, :, 3]
+            cols = np.where(ba.max(axis=0) > 16)[0]
+            if len(cols) == 0:
+                return None
+            band = band.crop((int(cols.min()), 0, int(cols.max()) + 1, band.height))
+            scale = self.JUDGE_SPRITE_H / band.height
+            band = band.resize((max(1, round(band.width * scale)), self.JUDGE_SPRITE_H),
+                               Image.Resampling.LANCZOS)
+            return _pil_to_qpixmap(band)
+        except Exception:
+            return None
+
     def _load_sprites(self):
         """Note art for the preview, in priority order per note:
         1. an OpenTaiko-style skin (skin/Notes.png next to the exe), the
@@ -628,486 +600,6 @@ class ChartPreviewWidget(QWidget):
         for c in ("3", "4"):
             big.setdefault(c, self._make_note_sprite(NOTE_COLOR[c], self.NOTE_R_BIG))
         return small, big
-
-    JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
-    SE_SPRITE_H = 22     # on-screen height each 打音表記 sprite is scaled to
-    # (SE label, is_big) -> row index in an OpenTaiko-style SENotes.png sheet.
-    # Sheet row order: ドン, ド, コ, カッ, カ, ドン(大), カッ(大), ...
-    SE_ROW_INDEX = {
-        ("ドン", False): 0, ("ド", False): 1, ("コ", False): 2,
-        ("カッ", False): 3, ("カ", False): 4,
-        ("ドン", True): 5, ("カッ", True): 6,
-        # big ド/コ/カ don't occur in practice; map to their small rows anyway
-        ("ド", True): 1, ("コ", True): 2, ("カ", True): 4,
-    }
-
-    def _load_skin_judge(self):
-        """Top cell (良) of an OpenTaiko-style skin/Judge.png, scaled for the
-        judge pop, or None. This preview auto-hits every note so the judgment
-        is always 良 - only that first row is needed."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Judge.png")
-        if not os.path.exists(path):
-            return None
-        try:
-            from PIL import Image
-            bands = _slice_alpha_bands(Image.open(path))
-            if not bands:
-                return None
-            good = bands[0]
-            scale = self.JUDGE_SPRITE_H / good.height
-            good = good.resize((max(1, round(good.width * scale)), self.JUDGE_SPRITE_H),
-                               Image.Resampling.LANCZOS)
-            return _pil_to_qpixmap(good)
-        except Exception:
-            return None
-
-    def _load_skin_se(self):
-        """Rows of an OpenTaiko-style skin/SENotes.png (ドン/ド/コ/カッ/カ/…),
-        each scaled to the footer height, as {row_index: QPixmap}, or None."""
-        path = os.path.join(str(settings_mod.skin_dir()), "SENotes.png")
-        if not os.path.exists(path):
-            return None
-        try:
-            from PIL import Image
-            bands = _slice_alpha_bands(Image.open(path))
-            if len(bands) < 7:
-                return None
-            out = {}
-            for idx, band in enumerate(bands):
-                scale = self.SE_SPRITE_H / band.height
-                out[idx] = _pil_to_qpixmap(band.resize(
-                    (max(1, round(band.width * scale)), self.SE_SPRITE_H),
-                    Image.Resampling.LANCZOS))
-            return out
-        except Exception:
-            return None
-
-    def _load_skin_roll(self):
-        """Drumroll art from an OpenTaiko-style skin/Notes.png: the yellow head
-        (a round 連打 note) and the body bar (flat left, rounded right cap).
-        Returns {"small": pack, "big": pack} where pack is
-        {head, mid, cap, body_h}, or None. The body is pre-split into a
-        stretchable middle and a fixed rounded cap so stretching the bar to any
-        length never distorts the rounded tail."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
-        if not os.path.exists(path):
-            return None
-        try:
-            import numpy as np
-            from PIL import Image
-            sheet = Image.open(path).convert("RGBA")
-            w, h = sheet.size
-            row_h = h // 3
-            y0 = row_h
-            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
-            col = band.max(axis=0) > 16
-            spans, start = [], None
-            for x in range(w):
-                if col[x] and start is None:
-                    start = x
-                elif not col[x] and start is not None:
-                    spans.append((start, x - 1)); start = None
-            if start is not None:
-                spans.append((start, w - 1))
-            # [5]=roll head, [6]=roll body, [7]=big head, [8]=big body
-            if len(spans) < 9:
-                return None
-
-            def cell(sp):
-                c = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
-                ca = np.asarray(c)[:, :, 3]
-                ys, xs = np.where(ca > 16)
-                if len(xs) == 0:
-                    return None
-                return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
-
-            def pack(head, body):
-                if head is None or body is None:
-                    return None
-                bw, bh = body.width, body.height
-                cap_w = min(bh, bw)                       # rounded end ~ as wide as tall
-                mid = body.crop((0, 0, max(1, bw - cap_w), bh))
-                cap = body.crop((max(0, bw - cap_w), 0, bw, bh))
-                return {"head": _pil_to_qpixmap(head), "mid": _pil_to_qpixmap(mid),
-                        "cap": _pil_to_qpixmap(cap), "body_h": bh}
-
-            return {"small": pack(cell(spans[5]), cell(spans[6])),
-                    "big": pack(cell(spans[7]), cell(spans[8]))}
-        except Exception:
-            return None
-
-    def _draw_roll_sprite(self, painter, x0, x1, cy, r, big) -> bool:
-        """Draw a 本家-style drumroll from skin art: stretchable body + rounded
-        cap + head. Returns False (caller falls back to the plain bar) when
-        there's no skin or the span is reversed by a negative #SCROLL."""
-        pack = self._skin_roll.get("big" if big else "small") if self._skin_roll else None
-        if pack is None or x1 < x0:
-            return False
-        d = float(r * 2)
-        scale = d / pack["body_h"]
-        mid, cap, head = pack["mid"], pack["cap"], pack["head"]
-        cap_dst = cap.width() * scale
-        total = max(cap_dst, x1 - x0)
-        mid_dst = max(0.0, total - cap_dst)
-        painter.drawPixmap(QRectF(x0, cy - r, mid_dst, d), mid,
-                           QRectF(0, 0, mid.width(), mid.height()))
-        painter.drawPixmap(QRectF(x0 + mid_dst, cy - r, cap_dst, d), cap,
-                           QRectF(0, 0, cap.width(), cap.height()))
-        hd = head.scaledToHeight(int(d), Qt.SmoothTransformation)
-        painter.drawPixmap(int(x0 - r), int(cy - r), hd)
-        return True
-
-    def _load_skin_balloon(self):
-        """The balloon/kusudama sprite: the last cell of skin/Notes.png (the
-        orange round-face balloon), tight-cropped, or None."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
-        if not os.path.exists(path):
-            return None
-        try:
-            import numpy as np
-            from PIL import Image
-            sheet = Image.open(path).convert("RGBA")
-            w, h = sheet.size
-            row_h = h // 3
-            y0 = row_h
-            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
-            col = band.max(axis=0) > 16
-            spans, start = [], None
-            for x in range(w):
-                if col[x] and start is None:
-                    start = x
-                elif not col[x] and start is not None:
-                    spans.append((start, x - 1)); start = None
-            if start is not None:
-                spans.append((start, w - 1))
-            if len(spans) < 10:
-                return None
-            sp = spans[9]                        # orange balloon
-            cell = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
-            ca = np.asarray(cell)[:, :, 3]
-            ys, xs = np.where(ca > 16)
-            if len(xs) == 0:
-                return None
-            cell = cell.crop((int(xs.min()), int(ys.min()),
-                              int(xs.max()) + 1, int(ys.max()) + 1))
-            # The balloon's round face (the part sized to match a note) is only
-            # the left blob and is shorter than the whole sprite, so measure its
-            # height fraction: the draw code scales so the FACE - not the full
-            # sprite - matches the note diameter.
-            ca2 = np.asarray(cell)[:, :, 3]
-            col_h = (ca2 > 16).sum(axis=0)
-            left = col_h[:max(1, int(cell.width * 0.4))]
-            face_frac = float(left.max()) / cell.height if cell.height else 1.0
-            return {"pix": _pil_to_qpixmap(cell), "face_frac": max(0.3, face_frac)}
-        except Exception:
-            return None
-
-    def _load_skin_bg(self):
-        """skin/Background.png (a full 本家風 field scene), native size, or
-        None. Scaled to the widget per-size and cached in paintEvent."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Background.png")
-        if not os.path.exists(path):
-            return None
-        pix = QPixmap(path)
-        return None if pix.isNull() else pix
-
-    def _load_skin_combo(self):
-        """The combo drum graphic from skin/Combo/: Base.png (the taiko drum),
-        Digits.png (a 0-9 number strip) and optional Text.png (コンボ). Returns
-        {base, digits[10], text} or None."""
-        d = os.path.join(str(settings_mod.skin_dir()), "Combo")
-        base_p = os.path.join(d, "Base.png")
-        digits_p = os.path.join(d, "Digits.png")
-        if not (os.path.exists(base_p) and os.path.exists(digits_p)):
-            return None
-        base = QPixmap(base_p)
-        sheet = QPixmap(digits_p)
-        if base.isNull() or sheet.isNull():
-            return None
-        dw = sheet.width() // 10
-        digits = [sheet.copy(i * dw, 0, dw, sheet.height()) for i in range(10)]
-        # The コンボ label sits in a big mostly-transparent canvas; tight-crop
-        # to its glyphs so it doesn't render tiny after scaling.
-        text_p = os.path.join(d, "Text.png")
-        text = None
-        if os.path.exists(text_p):
-            try:
-                import numpy as np
-                from PIL import Image
-                ti = Image.open(text_p).convert("RGBA")
-                a = np.asarray(ti)[:, :, 3]
-                ys, xs = np.where(a > 16)
-                if len(xs):
-                    ti = ti.crop((int(xs.min()), int(ys.min()),
-                                  int(xs.max()) + 1, int(ys.max()) + 1))
-                    text = _pil_to_qpixmap(ti)
-            except Exception:
-                text = None
-            if text is None:
-                text = QPixmap(text_p)
-                if text.isNull():
-                    text = None
-        return {"base": base, "digits": digits, "text": text}
-
-    def _load_skin_course_symbols(self):
-        """Difficulty icons from skin/CourseSymbol/ (Easy/Normal/Hard/Oni/Edit
-        .png), keyed lowercase, or None."""
-        d = os.path.join(str(settings_mod.skin_dir()), "CourseSymbol")
-        if not os.path.isdir(d):
-            return None
-        out = {}
-        for key in ("Easy", "Normal", "Hard", "Oni", "Edit"):
-            p = os.path.join(d, key + ".png")
-            if os.path.exists(p):
-                pix = QPixmap(p)
-                if not pix.isNull():
-                    out[key.lower()] = pix
-        return out or None
-
-    def _load_skin_nameplate(self):
-        """skin/NamePlate.png (the plate frame the difficulty rides on), or
-        None."""
-        p = os.path.join(str(settings_mod.skin_dir()), "NamePlate.png")
-        if not os.path.exists(p):
-            return None
-        pix = QPixmap(p)
-        return None if pix.isNull() else pix
-
-    def _load_skin_panel(self):
-        """skin/Panel.png - the 本家風 red patterned block behind the left HUD,
-        native size, or None."""
-        p = os.path.join(str(settings_mod.skin_dir()), "Panel.png")
-        if not os.path.exists(p):
-            return None
-        pix = QPixmap(p)
-        return None if pix.isNull() else pix
-
-    def _load_skin_score(self):
-        """Score number font from skin/Score.png (a 0-9 strip), as 10 QPixmaps,
-        or None."""
-        p = os.path.join(str(settings_mod.skin_dir()), "Score.png")
-        if not os.path.exists(p):
-            return None
-        sheet = QPixmap(p)
-        if sheet.isNull():
-            return None
-        dw = sheet.width() // 10
-        return [sheet.copy(i * dw, 0, dw, sheet.height()) for i in range(10)]
-
-    def _load_skin_hit(self):
-        """Frames of the 良 hit splash (the yellow radiating burst) from a
-        square-framed grid sheet skin/HitExplosion.png, row-major, or None.
-        The frame size is the gcd of the sheet's dimensions (260 for the stock
-        1820x1040 = 7x4 sheet)."""
-        import math
-        path = os.path.join(str(settings_mod.skin_dir()), "HitExplosion.png")
-        if not os.path.exists(path):
-            return None
-        sheet = QPixmap(path)
-        if sheet.isNull():
-            return None
-        w, h = sheet.width(), sheet.height()
-        fs = math.gcd(w, h)
-        if fs < 32:
-            return None
-        cols, rows = w // fs, h // fs
-        if not (2 <= cols * rows <= 128):
-            return None
-        frames = []
-        for ry in range(rows):
-            for cxi in range(cols):
-                frames.append(sheet.copy(cxi * fs, ry * fs, fs, fs))
-        return frames or None
-
-    def _draw_balloon_sprite(self, painter, x0, x1, cy, r, guide_color) -> bool:
-        """Draw a 本家-style balloon/kusudama: a thin duration guide from the
-        hit point to the span end, with the orange balloon sprite's round face
-        anchored at the start and sized so the FACE (not the whole sprite)
-        matches the note diameter 2*r. Returns False when there's no skin."""
-        if self._skin_balloon is None:
-            return False
-        pix = self._skin_balloon["pix"]
-        ff = self._skin_balloon["face_frac"]
-        # scale so the face ~ 2*r, but never taller than the lane band
-        sprite_h = min(self.LANE_HEIGHT * 0.98, (2.0 * r) / ff)
-        face_r = sprite_h * ff / 2.0
-        scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
-        lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
-        gh = max(3.0, face_r * 0.5)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(guide_color))
-        painter.drawRoundedRect(QRectF(lo, cy - gh / 2, max(1.0, hi - lo), gh),
-                                gh / 2, gh / 2)
-        # face centre sits at x0 (face_r in from the sprite's left edge)
-        painter.drawPixmap(int(x0 - face_r), int(cy - scaled.height() / 2), scaled)
-        return True
-
-    HUD_LABELS = {"panel": "パネル", "score": "スコア", "combo": "コンボ太鼓",
-                  "name": "難易度・名前"}
-
-    def set_layout_edit(self, on):
-        """Toggle the drag-to-place HUD editor."""
-        self._layout_edit = bool(on)
-        self.setCursor(Qt.OpenHandCursor if on else Qt.ArrowCursor)
-        self.update()
-
-    def is_layout_edit(self):
-        return self._layout_edit
-
-    def _save_hud_layout(self):
-        try:
-            cfg = settings_mod.load_settings()
-            cfg["hud_layout"] = self._hud_layout
-            settings_mod.save_settings(cfg)
-        except Exception:
-            pass
-
-    def _hud_pos(self, name, dx, dy):
-        """Stored top-left for a HUD element, or the given default."""
-        p = self._hud_layout.get(name)
-        if isinstance(p, (list, tuple)) and len(p) >= 2:
-            return int(p[0]), int(p[1])
-        return int(dx), int(dy)
-
-    def _hud_rect(self, name, dx, dy, dw, dh):
-        """Stored (x,y,w,h) for a HUD element, or the given default."""
-        p = self._hud_layout.get(name)
-        if isinstance(p, (list, tuple)) and len(p) >= 4:
-            return int(p[0]), int(p[1]), int(p[2]), int(p[3])
-        return int(dx), int(dy), int(dw), int(dh)
-
-    def _draw_difficulty_badge(self, painter, x, y, h):
-        """本家風の難易度銘板: 難易度アイコン + 銘板プレート + プレイヤー名。
-        戻り値は描いた幅(当たり判定用)。"""
-        plate = self._skin_nameplate
-        key = (self._course_key or "").lower()
-        icon = self._skin_course_symbols.get(key) if self._skin_course_symbols else None
-
-        plate_w = 150
-        if plate is not None:
-            p = plate.scaledToHeight(int(h), Qt.SmoothTransformation)
-            painter.drawPixmap(int(x), int(y), p)
-            plate_w = p.width()
-
-        # player name on the plate, with a dark shadow so it reads on the art
-        name = self._player_name or ""
-        text_x = x + h * 0.85
-        text_w = plate_w - h * 0.85 - 6
-        painter.setFont(self._font(12, True))
-        painter.setPen(QColor(0, 0, 0, 170))
-        painter.drawText(int(text_x + 1), int(y + 1), int(text_w), int(h),
-                         Qt.AlignVCenter | Qt.AlignLeft, name)
-        painter.setPen(self._color("fg_bright"))
-        painter.drawText(int(text_x), int(y), int(text_w), int(h),
-                         Qt.AlignVCenter | Qt.AlignLeft, name)
-
-        # difficulty icon overlapping the plate's left edge
-        if icon is not None:
-            ic = icon.scaledToHeight(int(h * 1.18), Qt.SmoothTransformation)
-            painter.drawPixmap(int(x - ic.width() * 0.12),
-                               int(y + h / 2 - ic.height() / 2), ic)
-        return int(plate_w)
-
-    def _draw_score(self, painter, x, y, score):
-        """Draw the (cosmetic) score left-anchored at (x, y) using the skin's
-        Score.png number font. Returns (width, height) for hit-testing."""
-        digits = self._skin_score
-        dh = 26
-        scaled = [digits[int(c)].scaledToHeight(dh, Qt.SmoothTransformation)
-                  for c in str(score)]
-        cx = x
-        for d in scaled:
-            painter.drawPixmap(int(cx), int(y), d)
-            cx += d.width()
-        return int(cx - x), dh
-
-    def _draw_combo_drum(self, painter, x, y, drum_h, combo, pop):
-        """本家風のコンボ表示: 太鼓の顔グラフィックに専用数字フォントで
-        コンボ数を重ね、下に「コンボ」を出す。左上(x,y)基準・高さ drum_h。
-        戻り値は (幅, 高さ)。"""
-        cb = self._skin_combo
-        drum = cb["base"].scaledToHeight(max(1, int(drum_h)), Qt.SmoothTransformation)
-        cx = x + drum.width() / 2.0
-        cy = y + drum.height() / 2.0
-        painter.drawPixmap(int(x), int(y), drum)
-
-        # Big combo number on the drum's cream face, popping on each hit.
-        # Scaled to fit the drum width too, so 3-digit combos don't overflow
-        # while 1-2 digit ones stay nice and large like the real game.
-        digit_h = max(1, int(drum.height() * 0.40 * pop))
-        scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
-                  for ch in str(combo)]
-        total_w = sum(s.width() for s in scaled)
-        max_w = drum.width() * 0.66
-        if total_w > max_w and total_w > 0:
-            digit_h = max(1, int(digit_h * max_w / total_w))
-            scaled = [cb["digits"][int(ch)].scaledToHeight(digit_h, Qt.SmoothTransformation)
-                      for ch in str(combo)]
-            total_w = sum(s.width() for s in scaled)
-        face_cy = cy - drum.height() * 0.16        # number rides the upper face
-        x = cx - total_w / 2.0
-        for s in scaled:
-            painter.drawPixmap(int(x), int(face_cy - s.height() / 2), s)
-            x += s.width()
-
-        # コンボ label, clearly readable, just below the number.
-        if cb["text"] is not None:
-            ts = cb["text"].scaledToHeight(max(1, int(drum.height() * 0.22)),
-                                           Qt.SmoothTransformation)
-            if ts.width() > drum.width() * 0.72:
-                ts = cb["text"].scaledToWidth(int(drum.width() * 0.72),
-                                              Qt.SmoothTransformation)
-            painter.drawPixmap(int(cx - ts.width() / 2),
-                               int(face_cy + digit_h * 0.5 + drum.height() * 0.02), ts)
-        return drum.width(), drum.height()
-
-    def _load_skin_lane(self):
-        """skin/Base.png stretched to the note band, or None. Drawn as the lane
-        floor behind notes when present."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Base.png")
-        if not os.path.exists(path):
-            return None
-        pix = QPixmap(path)
-        if pix.isNull():
-            return None
-        return pix.scaled(int(self.LANE_WIDTH), int(self.LANE_HEIGHT),
-                          Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-    def _load_skin_ring(self):
-        """Hit-target receptor: the leftmost cell of skin/Notes.png (the ◎ the
-        real game shows at the judge line), scaled to the judge circle, or
-        None."""
-        path = os.path.join(str(settings_mod.skin_dir()), "Notes.png")
-        if not os.path.exists(path):
-            return None
-        try:
-            import numpy as np
-            from PIL import Image
-            sheet = Image.open(path).convert("RGBA")
-            w, h = sheet.size
-            row_h = h // 3
-            y0 = row_h                          # middle animation frame
-            band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
-            col = band.max(axis=0) > 16
-            start, span = None, None
-            for x in range(w):
-                if col[x] and start is None:
-                    start = x
-                elif not col[x] and start is not None:
-                    span = (start, x - 1); break
-            if span is None:
-                return None
-            cell = sheet.crop((span[0], y0, span[1] + 1, y0 + row_h))
-            ca = np.asarray(cell)[:, :, 3]
-            ys, xs = np.where(ca > 16)
-            if len(xs) == 0:
-                return None
-            cell = cell.crop((int(xs.min()), int(ys.min()),
-                              int(xs.max()) + 1, int(ys.max()) + 1))
-            d = (self.NOTE_R_BIG + 5) * 2
-            return _pil_to_qpixmap(cell.resize((d, d), Image.Resampling.LANCZOS))
-        except Exception:
-            return None
 
     def _load_skin_sprites(self):
         """Slice don/ka (small & big) out of an OpenTaiko-style Notes.png skin,
@@ -1294,50 +786,7 @@ class ChartPreviewWidget(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
-        if self._layout_edit and event.button() == Qt.LeftButton:
-            pos = event.position().toPoint()
-            # panel resize handle (bottom-right corner) takes priority
-            pr = self._hud_bboxes.get("panel")
-            if pr is not None and abs(pos.x() - pr.right()) <= 12 and abs(pos.y() - pr.bottom()) <= 12:
-                self._drag_name, self._drag_mode = "panel", "resize"
-                event.accept(); return
-            # otherwise move whichever element is under the cursor (elements
-            # before the panel so the small ones win over the big backdrop)
-            for nm in ("score", "combo", "name", "panel"):
-                r = self._hud_bboxes.get(nm)
-                if r is not None and r.contains(pos):
-                    self._drag_name, self._drag_mode = nm, "move"
-                    self._drag_off = (pos.x() - r.left(), pos.y() - r.top())
-                    self.setCursor(Qt.ClosedHandCursor)
-                    event.accept(); return
         super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._layout_edit and self._drag_name is not None:
-            pos = event.position().toPoint()
-            pr = self._hud_bboxes.get(self._drag_name)
-            if self._drag_mode == "resize" and self._drag_name == "panel" and pr is not None:
-                self._hud_layout["panel"] = [pr.left(), pr.top(),
-                                             max(40, pos.x() - pr.left()),
-                                             max(30, pos.y() - pr.top())]
-            elif self._drag_mode == "move":
-                nx = pos.x() - self._drag_off[0]
-                ny = pos.y() - self._drag_off[1]
-                if self._drag_name == "panel" and pr is not None:
-                    self._hud_layout["panel"] = [nx, ny, pr.width(), pr.height()]
-                else:
-                    self._hud_layout[self._drag_name] = [nx, ny]
-            self.update()
-            event.accept(); return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if self._layout_edit and self._drag_name is not None:
-            self._drag_name = self._drag_mode = None
-            self.setCursor(Qt.OpenHandCursor)
-            self._save_hud_layout()
-            event.accept(); return
-        super().mouseReleaseEvent(event)
 
     def cycle_course(self):
         # Each call steps down one rank (Ura -> Oni -> Hard -> Normal ->
@@ -1888,39 +1337,9 @@ class ChartPreviewWidget(QWidget):
         footer_h = int(self.SE_FOOTER_HEIGHT) if self._se_text_enabled else 0
         footer_bottom = band_bottom + footer_h
 
-        if self._skin_bg is not None:
-            # Cover the widget with the background scene, cached per size so we
-            # don't rescale a big image every frame.
-            if self._bg_cache is None or self._bg_cache[0] != w or self._bg_cache[1] != h:
-                scaled = self._skin_bg.scaled(w, h, Qt.KeepAspectRatioByExpanding,
-                                              Qt.SmoothTransformation)
-                self._bg_cache = (w, h, scaled)
-            sc = self._bg_cache[2]
-            painter.drawPixmap((w - sc.width()) // 2, (h - sc.height()) // 2, sc)
-        else:
-            painter.fillRect(self.rect(), self._color("bg"))
+        painter.fillRect(self.rect(), self._color("bg"))
 
         now = self._current_chart_time()
-
-        # FPS readout, top-right. Measured from the real interval between paints
-        # (a rolling window of recent frames), so it reflects the actual
-        # on-screen rate during playback rather than the timer's target.
-        if self._show_fps:
-            self._fps_samples.append(_time.monotonic())
-            if len(self._fps_samples) > 30:
-                del self._fps_samples[:-30]
-            fps = 0.0
-            if len(self._fps_samples) >= 2:
-                span = self._fps_samples[-1] - self._fps_samples[0]
-                if span > 0:
-                    fps = (len(self._fps_samples) - 1) / span
-            painter.setPen(self._color("fg_dim"))
-            painter.setFont(self._font(11, True))
-            painter.drawText(w - 92, 2, 88, 18, Qt.AlignRight | Qt.AlignVCenter,
-                             f"{fps:.0f} FPS")
-
-        # (Difficulty badge + combo drum are drawn later, ON the solid left
-        # HUD panel, so nothing shows through them - see the combo section.)
 
         # Live roll/balloon tap count, upper-left of the judgment ring, in
         # the margin above the lane box - reuses _live_span_count as-is
@@ -1968,10 +1387,7 @@ class ChartPreviewWidget(QWidget):
         # window size or per-note speed.
         painter.setClipRect(0, band_top, lane_w, band_h)
 
-        if self._skin_lane is not None:
-            painter.drawPixmap(0, band_top, self._skin_lane)
-        else:
-            painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
+        painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
 
         # Real Taiko no Tatsujin flashes the whole play field, triggered the
         # instant a gogo region's start/end crosses the judgment line - not a
@@ -2019,13 +1435,10 @@ class ChartPreviewWidget(QWidget):
         # like notes crossing the drum face in the real game). ---
         judge_r = self.NOTE_R_BIG + 5
         judge_r_inner = self.NOTE_R_SMALL
-        if self._skin_ring is not None:
-            painter.drawPixmap(int(judge_x - judge_r), int(mid_y - judge_r), self._skin_ring)
-        else:
-            painter.setPen(QPen(self._color("fg_bright"), 3))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
-            painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
+        painter.setPen(QPen(self._color("fg_bright"), 3))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
+        painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
 
         # --- GOGO judgment-ring pulse ------------------------------------
         # PeepoDrumKit pulses a flame sprite centered on the hit circle with
@@ -2095,18 +1508,15 @@ class ChartPreviewWidget(QWidget):
         for t0, kind, payload in draw_items:
             if kind == "roll":
                 x0, x1, r, r_start, r_end = payload
-                if not self._draw_roll_sprite(painter, x0, x1, mid_y, r, r >= self.NOTE_R_BIG):
-                    # Red while being hit (now inside the span), yellow otherwise.
-                    color = self._color("don") if r_start <= now <= r_end else self._color("roll")
-                    self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
+                # Red while being hit (now inside the span), yellow otherwise.
+                color = self._color("don") if r_start <= now <= r_end else self._color("roll")
+                self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
             elif kind == "balloon":
                 x0, x1 = payload
-                if not self._draw_balloon_sprite(painter, x0, x1, mid_y, rs, self._color("balloon")):
-                    self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
+                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("balloon"))
             elif kind == "kusudama":
                 x0, x1 = payload
-                if not self._draw_balloon_sprite(painter, x0, x1, mid_y, self.NOTE_R_BIG, self._color("kusudama")):
-                    self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
+                self._draw_roll_bar(painter, x0, x1, mid_y, rs, self._color("kusudama"))
             else:  # note - approach, then fly off after crossing the line.
                 i = payload
                 t = self._note_times[i]
@@ -2139,18 +1549,8 @@ class ChartPreviewWidget(QWidget):
             h_elapsed, h_char, _h_combo = hit
             h_big = h_char in NOTE_BIG
             h_base = self.NOTE_R_BIG if h_big else self.NOTE_R_SMALL
-            if self._skin_hit is not None:
-                # 本家風の「良」花火: HitGood のフレームを判定枠中心で再生。
-                dur = self.HIT_BURST_DURATION * 1.6
-                if 0.0 <= h_elapsed < dur:
-                    n = len(self._skin_hit)
-                    fi = min(n - 1, int(h_elapsed / dur * n))
-                    eff = self._skin_hit[fi].scaledToHeight(
-                        int(self.NOTE_R_BIG * 2 * 2.0), Qt.SmoothTransformation)
-                    painter.drawPixmap(int(judge_x - eff.width() / 2),
-                                       int(mid_y - eff.height() / 2), eff)
-            elif 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
-                # フォールバック: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
+            # ヒットしぶき: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
+            if 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
                 bp = h_elapsed / self.HIT_BURST_DURATION      # 0..1
                 ring_r = int(h_base + 6 + 34 * bp)
                 painter.setBrush(Qt.NoBrush)
@@ -2172,7 +1572,6 @@ class ChartPreviewWidget(QWidget):
                 painter.setClipRect(self.rect())
                 painter.setOpacity(max(0.0, 1.0 - jp))
                 if self._skin_judge_good is not None:
-                    # 本家画像の「良」。判定枠のすぐ上に、画像の下端が来るよう配置。
                     spr = self._skin_judge_good
                     jy = int(mid_y - judge_r - 6 - rise - spr.height())
                     painter.drawPixmap(int(judge_x - spr.width() / 2), jy, spr)
@@ -2184,87 +1583,51 @@ class ChartPreviewWidget(QWidget):
                 painter.setOpacity(1.0)
                 painter.setClipRect(0, band_top, lane_w, band_h)
 
-        # --- left HUD panel -------------------------------------------------
-        # Every taiko simulator (and the real game) puts a SOLID block on the
-        # left of the lane and stacks the drum/combo, difficulty and score on
-        # it - the notes never show through it. We draw that opaque panel here,
-        # over the lane/notes, then place the drum + difficulty badge on top,
-        # so nothing scrolls behind them. Its right edge sits just left of the
-        # judgment ring, which stays fully visible on the lane.
-        painter.setClipRect(self.rect())
-        self._hud_bboxes = {}
-        # Panel geometry: default is the lane-left block, but the user can drag/
-        # resize it (and every element below) in layout-edit mode.
-        def_pe = int(judge_x - judge_r)
-        px, py, pw, ph = self._hud_rect("panel", 0, band_top, def_pe, footer_bottom - band_top)
-        pw = max(40, pw); ph = max(30, ph)
-        self._hud_bboxes["panel"] = QRect(px, py, pw, ph)
-        if self._skin_panel is not None:
-            if (self._panel_cache is None or self._panel_cache[0] != pw
-                    or self._panel_cache[1] != ph):
-                sp = self._skin_panel.scaled(pw, ph, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-                self._panel_cache = (pw, ph, sp)
-            painter.drawPixmap(px, py, self._panel_cache[2])
-        else:
-            painter.fillRect(px, py, pw, ph, QColor(20, 21, 28))
-        painter.setPen(QPen(QColor("#c9a24a"), 3))     # warm 本家風のフチ
-        painter.drawLine(px + pw, py, px + pw, py + ph)
-        self._panel_right_px = px + pw     # SE strip starts here (hidden by block)
-
+        # --- combo readout, covering the lane left of the judgment line
+        # (like the real game's score/combo panel). A small gap separates
+        # it from the judgment ring - safe now that passed notes fly off
+        # instead of lingering there, so there's nothing left to flicker in
+        # that gap - and it's inset from the widget's own left edge so it
+        # reads as a floating card rather than edge-to-edge. The combo
+        # itself is just "how many notes have a time <= now", which comes
+        # straight out of the same bisect index already used to pick which
+        # notes are visible, so it counts up live during playback and
+        # re-syncs instantly on seeks without any extra state.
+        #
+        # Course/level moved below the lane (see the info bar under the
+        # widget), so this panel is combo-only now.
         combo = bisect.bisect_right(self._note_times, now)
+        panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
+        panel_x = self.PANEL_INSET
+        panel_w = panel_right - panel_x
+        painter.setPen(QPen(self._color("accent"), 2))
+        painter.setBrush(QBrush(self._color("surface")))
+        painter.drawRect(int(panel_x), band_top, int(panel_w), band_h)
+
+        painter.setPen(self._color("fg_dim"))
+        painter.setFont(self._font(9))
+        painter.drawText(int(panel_x), band_top + 6, int(panel_w), 18, Qt.AlignCenter, "コンボ")
+        # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
+        # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
         pop = 1.0
         if combo > 0:
             ce = now - self._note_times[combo - 1]
             if 0.0 <= ce < self.COMBO_POP_DURATION:
-                pop = 1.0 + 0.18 * (1.0 - ce / self.COMBO_POP_DURATION)
-
-        # score (default: top of panel)
-        if self._skin_score is not None:
-            score = (combo * 1000 + self._cumulative_hits(now) * 100) // 10 * 10
-            sx, sy = self._hud_pos("score", px + 8, py + 3)
-            sw, sh = self._draw_score(painter, sx, sy, score)
-            self._hud_bboxes["score"] = QRect(sx, sy, max(12, sw), sh)
-
-        # combo drum (default: middle of panel)
-        cx0, cy0 = self._hud_pos("combo", px + max(0, (pw - 64) // 2), py + 26)
-        if self._skin_combo is not None:
-            cw, ch = self._draw_combo_drum(painter, cx0, cy0, 72, combo, pop)
-            self._hud_bboxes["combo"] = QRect(cx0, cy0, cw, ch)
-        else:
-            txt = str(combo)
-            fill = JUDGE_GOOD if combo >= 10 else QColor("#e9eefc")
+                pop = 1.0 + 0.14 * (1.0 - ce / self.COMBO_POP_DURATION)
+        num_h = band_h - 28
+        num_cx = panel_x + panel_w / 2.0
+        num_cy = band_top + 24 + num_h / 2.0
+        painter.setPen(self._color("fg_bright"))
+        painter.setFont(self._font(22, True))
+        if pop > 1.0:
             painter.save()
-            painter.translate(cx0 + 32, cy0 + 34)
+            painter.translate(num_cx, num_cy)
             painter.scale(pop, pop)
-            painter.setFont(self._font(30, True))
-            painter.setPen(QColor(28, 18, 8))
-            for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (2, -2), (-2, 2)):
-                painter.drawText(-40 + ox, -22 + oy, 80, 44, Qt.AlignCenter, txt)
-            painter.setPen(fill)
-            painter.drawText(-40, -22, 80, 44, Qt.AlignCenter, txt)
+            painter.drawText(int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h),
+                             Qt.AlignCenter, str(combo))
             painter.restore()
-            self._hud_bboxes["combo"] = QRect(cx0, cy0, 64, 68)
-
-        # difficulty icon + player-name plate (default: bottom of panel)
-        name_h = 24
-        if self._skin_course_symbols is not None or self._skin_nameplate is not None:
-            nx, ny = self._hud_pos("name", px + 4, py + ph - name_h - 2)
-            nw = self._draw_difficulty_badge(painter, nx, ny, name_h)
-            self._hud_bboxes["name"] = QRect(nx, ny, max(20, nw), name_h)
-
-        # layout-edit overlay: dashed boxes + labels + a resize handle on panel
-        if self._layout_edit:
-            for nm, r in self._hud_bboxes.items():
-                painter.setPen(QPen(self._color("accent"), 1, Qt.DashLine))
-                painter.setBrush(QColor(79, 156, 249, 36))
-                painter.drawRect(r)
-                painter.setBrush(Qt.NoBrush)
-                painter.setPen(self._color("fg_bright"))
-                painter.setFont(self._font(9, True))
-                painter.drawText(r.left() + 3, r.top() + 1, 120, 13,
-                                 Qt.AlignLeft | Qt.AlignVCenter, self.HUD_LABELS.get(nm, nm))
-                if nm == "panel":
-                    painter.fillRect(r.right() - 9, r.bottom() - 9, 9, 9, self._color("accent"))
+        else:
+            painter.drawText(int(panel_x), band_top + 24, int(panel_w), num_h, Qt.AlignCenter, str(combo))
 
         painter.setClipRect(self.rect())
 
@@ -2279,16 +1642,13 @@ class ChartPreviewWidget(QWidget):
         # it re-fixes the widget height (see set_se_text_enabled) and the
         # containing window re-fits, rather than the window permanently
         # carrying 26 px of empty strip.
-        # The SE strip and its labels start at the panel's right edge, so the
-        # left HUD block hides the ドン/カッ that would otherwise show under it.
-        se_left = getattr(self, "_panel_right_px", int(judge_x - judge_r))
         if self._se_text_enabled:
-            painter.fillRect(se_left, band_bottom + 1, lane_w - se_left, footer_h - 1, self._color("surface"))
+            painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
             painter.setPen(QPen(self._color("border"), 2))
-            painter.drawLine(se_left, footer_bottom, lane_w, footer_bottom)
+            painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
             painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
-            painter.setClipRect(se_left, band_bottom + 1, lane_w - se_left, footer_h - 1)
+            painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
             # 音符の色には合わせず、地色に対して読みやすい中立色(fg)で描く。
             # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
             # 音符には SE 文字を残さない。
@@ -2303,22 +1663,13 @@ class ChartPreviewWidget(QWidget):
                     continue
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
+                size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
+                st = self._se_static_text(label, size)
                 x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                spr = None
-                if self._skin_se is not None:
-                    idx = self.SE_ROW_INDEX.get((label, big))
-                    if idx is not None:
-                        spr = self._skin_se.get(idx)
-                if spr is not None:
-                    painter.drawPixmap(int(x - spr.width() / 2.0),
-                                       int(fy - spr.height() / 2.0), spr)
-                else:
-                    size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
-                    st = self._se_static_text(label, size)
-                    painter.setFont(self._font(size, True))
-                    sz = st.size()
-                    painter.drawStaticText(int(x - sz.width() / 2.0),
-                                           int(fy - sz.height() / 2.0), st)
+                painter.setFont(self._font(size, True))
+                sz = st.size()
+                painter.drawStaticText(int(x - sz.width() / 2.0),
+                                       int(fy - sz.height() / 2.0), st)
             painter.setClipRect(self.rect())
 
         # Current measure / total measures ("15/90"), below the judgment

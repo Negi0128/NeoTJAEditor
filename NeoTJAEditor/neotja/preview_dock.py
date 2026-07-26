@@ -512,16 +512,6 @@ class PreviewDock(QDockWidget):
         self.mode_button.move(int(ChartPreviewWidget.LANE_WIDTH) - 96 - 8, 6)
         self.mode_button.clicked.connect(self.cycle_bottom_mode)
 
-        # HUD 配置編集トグル: オンにするとプレビュー上でスコア/太鼓/難易度・
-        # 名前/パネルをドラッグで動かせる(位置は settings["hud_layout"] に保存)。
-        self.layout_edit_button = QPushButton("配置編集", self.chart_preview)
-        self.layout_edit_button.setCheckable(True)
-        self.layout_edit_button.setFocusPolicy(Qt.NoFocus)
-        self.layout_edit_button.setToolTip("HUD(スコア/太鼓/難易度/名前/パネル)の配置をドラッグで編集")
-        self.layout_edit_button.resize(80, 26)
-        self.layout_edit_button.move(int(ChartPreviewWidget.LANE_WIDTH) - 96 - 8 - 84, 6)
-        self.layout_edit_button.toggled.connect(self.chart_preview.set_layout_edit)
-
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
         self.seek_slider.sliderMoved.connect(lambda ms: self.audio.seek(ms))
