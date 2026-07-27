@@ -21,6 +21,8 @@ class HighlightData:
         self.hover_spans = {}            # line -> [(start_col, end_col, kind, index)]  kind = "roll" | "balloon"
         self.roll_hits = {}              # index -> {"duration": float, "hits": int}
         self.balloon_hits = {}           # index -> {"duration": float, "hits": int}
+        self.line_count = 0              # 総行数。行の挿入/削除でどれだけ行番号がずれたかを
+                                         # 求めるのに使う(apply_data の差分計算)。
 
 
 def _find_char_class(lines, start_line, start_col, end_line, chars):
@@ -46,6 +48,7 @@ def _add_band(data, sline, scol, eline, ecol_exclusive, tag):
 def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
     lines = content.split('\n')
     data = HighlightData()
+    data.line_count = len(lines)
 
     sc = content.count("#START")
     ec = content.count("#END")
@@ -208,33 +211,66 @@ class TJAHighlighter(QSyntaxHighlighter):
         highlightBlock() for the lines whose formatting actually changed
         instead of the whole document. On a large real chart (tens of
         thousands of lines), rehighlight() alone can take over a second;
-        a single edit usually only changes a handful of lines."""
+        a single edit usually only changes a handful of lines.
+
+        行を挿入/削除すると以降の行番号が全部ずれるため、素朴に行番号で
+        突き合わせると「全行が変わった」と判定され、改行1回ごとに全文書の
+        再ハイライト(数万行で約2秒)に落ちてしまう。そこで先頭から一致する
+        範囲と末尾から一致する範囲(こちらは行数差 delta を補正して比較)を
+        求め、実際に変わった中央部分だけを塗り直す。"""
         old_data = self.data
         self.data = new_data
-
-        touched = set()
-        for d in (old_data, new_data):
-            touched.update(d.cmd_lines)
-            touched.update(d.warn_lines)
-            touched.update(d.comment_ranges.keys())
-            touched.update(d.header_ranges.keys())
-            touched.update(d.digit_spans.keys())
-            touched.update(d.color_band_spans.keys())
 
         doc = self.document()
         total_blocks = max(1, doc.blockCount())
 
-        # Individually rehighlighting many blocks can end up costing more
-        # than one bulk pass; fall back to a full rehighlight when most of
-        # the document is affected (e.g. loading a new file).
-        if not touched:
-            return
-        changed = [ln for ln in touched if self._line_signature(old_data, ln) != self._line_signature(new_data, ln)]
-        if len(changed) > max(50, total_blocks // 4):
+        old_n = old_data.line_count
+        new_n = new_data.line_count
+        # 旧データに行数が無い(初回や古い経路)ときは従来どおり全塗り。
+        if not old_n or not new_n:
             self.rehighlight()
             return
 
-        for ln in changed:
+        delta = new_n - old_n
+
+        def sig_old(ln):
+            return self._line_signature(old_data, ln)
+
+        def sig_new(ln):
+            return self._line_signature(new_data, ln)
+
+        # 先頭から一致する行数。
+        head = 0
+        limit = min(old_n, new_n)
+        while head < limit and sig_old(head + 1) == sig_new(head + 1):
+            head += 1
+        if head == limit and delta == 0:
+            return   # 完全一致 = 塗り直し不要
+
+        # 末尾から一致する行数(delta 分ずらして突き合わせる)。head と重ならない範囲まで。
+        tail = 0
+        while tail < (limit - head) and sig_old(old_n - tail) == sig_new(new_n - tail):
+            tail += 1
+
+        # 実際に塗り直すのは新データ側の [head+1, new_n-tail] の範囲。
+        start_ln = head + 1
+        end_ln = new_n - tail
+        # 行数が変わった(行の挿入/削除)ときは、末尾側の署名が一致していても
+        # ブロック自体が上下にずれているため、Qt が持っている既存の書式は
+        # 1行分ずれた状態のまま残ってしまう。ずれた行はすべて塗り直す必要が
+        # あるので、変更開始位置から文書末尾までを対象にする。
+        if delta != 0:
+            end_ln = new_n
+        if end_ln < start_ln:
+            return
+
+        count = end_ln - start_ln + 1
+        # 変更範囲が広いときは一括のほうが速い(ファイル読み込み直後など)。
+        if count > max(50, total_blocks // 4):
+            self.rehighlight()
+            return
+
+        for ln in range(start_ln, end_ln + 1):
             block = doc.findBlockByNumber(ln - 1)
             if block.isValid():
                 self.rehighlightBlock(block)
