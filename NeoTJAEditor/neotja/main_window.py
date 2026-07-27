@@ -140,6 +140,11 @@ class CourseCard(QFrame):
 
 
 class MainWindow(QMainWindow):
+    # プレビューの組み立てがこの秒数を超えたら、解析パスと同時にやらず
+    # 少し後ろへ回す(重い譜面で打鍵停止時の固まりを 1 回あたり半分にする)。
+    # 普通の譜面は数 ms なので、これまでどおり解析と同時に更新される。
+    PREVIEW_DEFER_SEC = 0.08
+
     def __init__(self, app):
         super().__init__()
         self.app = app
@@ -158,9 +163,23 @@ class MainWindow(QMainWindow):
         # 映す)。_preview_courses はその内容のコース解析結果のキャッシュ。
         self._preview_content = ""
         self._preview_courses = []
+        # 行番号 -> (小節番号, 譜面時刻[秒], コース番号) の索引。解析パスで
+        # 作り直し、ステータスバーとプレビュー再構築の要否判定が O(1) で引く。
+        # 数万行の譜面ではこれが無いとカーソル移動1回で 70ms 以上かかっていた。
+        self._cursor_index = {}
+        # 直近にプレビュー/メトロノームを組み立てたときの入力条件。同じなら
+        # 組み直しても結果が1ビットも変わらないので丸ごと省く(下記 _preview_key)。
+        self._preview_key = None
+        # 直近のプレビュー組み立てにかかった秒数。これが PREVIEW_DEFER_SEC を
+        # 超える重い譜面のときだけ、解析パスとプレビューを別々のタイミングに
+        # 分けて、打鍵を止めたときの停止時間を一度あたり半分にする。
+        self._preview_build_sec = 0.0
         self._heavy_timer = QTimer(self)
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._preview_tick)
         # 直近に報告した解析エラーの種類。デバウンスタイマで何度も同じ例外が
         # 出るため、同じものはステータスバーに出し直さない(トレースも1回だけ)。
         self._last_heavy_error = None
@@ -672,6 +691,10 @@ class MainWindow(QMainWindow):
         # course analysis) can take 100ms+, so a longer debounce keeps it
         # from re-triggering on every short pause while actively typing.
         self._heavy_timer.start(600)
+        # 打鍵が続いているあいだは、前回の解析パスが予約したプレビュー組み立てを
+        # 取り消す。入力中に 300ms の停止が割り込むのを防ぐため(次の解析パスが
+        # 改めて予約し直す)。
+        self._preview_timer.stop()
 
     # ------------------------------------------------------------------
     # タイトル / 最近使ったファイル / ウィンドウ状態 (クイックウィン群)
@@ -755,7 +778,9 @@ class MainWindow(QMainWindow):
 
     def _force_update(self):
         self._heavy_timer.stop()
+        self._preview_timer.stop()
         self._heavy_tasks()
+        self._preview_tick()
 
     def _heavy_tasks(self):
         content = self.editor.toPlainText()
@@ -785,11 +810,37 @@ class MainWindow(QMainWindow):
         self._global_warnings = data.global_warnings
         self.highlighter.apply_data(data)
         self.editor.gutter.update()
+        # ステータスバーが使う「行 -> 小節/時刻」索引をここで作り直す。
+        self._cursor_index = self.analyzer.build_cursor_index(content)
         self._update_status()
         # プレビューは「編集中(未保存)の内容」をそのまま映す。打鍵の
         # デバウンス(600ms)後にこの _heavy_analysis が走り、ライブの
         # エディタ内容からプレビューを組み直すので、保存しなくても即反映される。
-        self._refresh_preview()
+        #
+        # ただし数万行の譜面ではプレビューの組み立てだけで 300ms 近くかかり、
+        # ハイライト側と合わせて打鍵を止めるたびに 0.6 秒固まっていた。前回
+        # 組むのに時間がかかったときだけ、ここでは組まずに少し後ろへ回して
+        # 一度の停止時間を半分にする(普通の譜面は数 ms なので従来どおり即時)。
+        if self._preview_build_sec > self.PREVIEW_DEFER_SEC:
+            self._preview_timer.start(350)
+        else:
+            self._preview_tick()
+
+    def _preview_tick(self):
+        """プレビュー組み立て(遅延実行の入口)。所要時間を控えて、次回この処理を
+        後ろへ回すかどうかの判断に使う。解析側と同じく、例外が出ても自動保存や
+        編集を巻き込まないようここで受け止める。"""
+        self._preview_timer.stop()
+        t0 = time.perf_counter()
+        try:
+            self._refresh_preview()
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            sig = f"{type(e).__name__}: {e}"
+            if sig != self._last_heavy_error:
+                self._last_heavy_error = sig
+                self.statusBar().showMessage(f"プレビュー更新中にエラーが発生しました: {sig}", 8000)
+        self._preview_build_sec = time.perf_counter() - t0
 
     def _set_preview_content(self, content):
         """プレビューが映す譜面スナップショットを更新する(保存/開く/新規時)。"""
@@ -810,6 +861,23 @@ class MainWindow(QMainWindow):
         )
         course_stats = self._find_course_stats(preview_data.get("course_key"))
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
+        # 今組み立てた条件を控える。この直後にカーソル移動で走る
+        # _update_metronome_schedule が、同じ条件なら丸ごと省けるようにする。
+        self._preview_key = self._current_preview_key(cursor_line)
+
+    def _current_preview_key(self, cursor_line):
+        """プレビュー/メトロノームの組み立て結果を決める入力の組。これが同じ
+        なら再構築しても 1 ビットも変わらない。カーソル行そのものではなく
+        「カーソルがどのコース本文に居るか」だけが効く点が肝で、同じコース内で
+        カーソルを動かしているあいだ(=ほぼ常時)は再構築を省ける。"""
+        hit = self._cursor_index.get(cursor_line)
+        return (
+            self.editor.document().revision(),
+            hit[2] if hit is not None else None,
+            self._preview_course_override,
+            self._preview_branch_level,
+            round(self.preview_dock.duration_seconds(), 4),
+        )
 
     def _find_course_stats(self, course_key):
         return next((c for c in self.courses_info if c["key"] == course_key), None)
@@ -824,8 +892,25 @@ class MainWindow(QMainWindow):
         # expensive syntax highlighter over the whole document.
         # プレビューは編集中(未保存)の内容を映すので、ここでもライブの
         # エディタ内容を使う。
-        content = self.editor.toPlainText()
+        # 解析パス/プレビュー組み立てが既に予約されているなら、そちらが同じものを
+        # 作り直すのでここでは何もしない。打鍵はカーソルも動かすため、これが無いと
+        # 「150ms 後にここで組み直し → 600ms 後に解析パスでもう一度」と、重い譜面で
+        # 同じ 200ms 超の処理を二度払っていた。
+        if self._heavy_timer.isActive() or self._preview_timer.isActive():
+            return
+
         cursor_line = self.editor.textCursor().blockNumber() + 1
+        # このパスはカーソルが動くたびに(150ms デバウンスで)走るが、結果を
+        # 決めるのは「内容・カーソルが属するコース・コース上書き・分岐・曲の
+        # 長さ」だけ。同じコース内でカーソルを動かしているあいだは出力が
+        # まったく同じなので、数万行の譜面で 240ms かかる再構築を丸ごと省く。
+        # (方向キーを押しっぱなしにすると固まる主因がこれだった)
+        key = self._current_preview_key(cursor_line)
+        if key == self._preview_key:
+            return
+        self._preview_key = key
+
+        content = self.editor.toPlainText()
         clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         self.preview_dock.set_metronome_clicks(clicks)
         preview_data = self.analyzer.build_preview_timeline(
@@ -873,18 +958,15 @@ class MainWindow(QMainWindow):
         col = cursor.positionInBlock()
         msg = f"  行 {line}  文字数 {col}"
         # カーソルがコース本文内なら、その小節番号と譜面上の時刻を出す。
-        # time_at_cursor/measure_at_cursor は本文外だと None を返す。
-        try:
-            content = self.editor.toPlainText()
-            measure = self.analyzer.measure_at_cursor(content, line)
-            if measure is not None:
-                sec = self.analyzer.time_at_cursor(content, line)
-                pos = f"第{measure}小節"
-                if sec is not None:
-                    pos += f"  {int(sec) // 60}:{sec % 60:06.3f}"
-                msg += f"  │  {pos}"
-        except Exception:  # noqa: BLE001
-            pass
+        # 以前はここで measure_at_cursor()/time_at_cursor() を直接呼んでいたが、
+        # どちらも文書全体を走査するため数万行の譜面ではカーソル移動1回で
+        # 70ms 以上かかり、方向キーやクリックのたびに画面が固まっていた。
+        # いまは解析パスで作った索引を O(1) で引くだけ。打鍵直後のごく短い間
+        # (デバウンス 600ms)は 1 つ前の内容の値が出るが、表示専用なので実害は無い。
+        hit = self._cursor_index.get(line)
+        if hit is not None:
+            measure, sec = hit[0], hit[1]
+            msg += f"  │  第{measure}小節  {int(sec) // 60}:{sec % 60:06.3f}"
         msg += "  │  ANSI (CP932)"
         invalid_lines = getattr(self.editor, "invalid_lines", {})
         if line in invalid_lines:

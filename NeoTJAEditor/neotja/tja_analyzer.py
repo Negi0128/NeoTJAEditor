@@ -396,6 +396,114 @@ class TJACourseAnalyzer:
             found = total_time
         return float(found)
 
+    def build_cursor_index(self, content: str) -> dict:
+        """行番号 → (小節番号, 譜面時刻[秒], コース番号) の索引を1パスで作る。
+
+        ステータスバーは measure_at_cursor()/time_at_cursor() をカーソル移動の
+        たびに呼んでいたが、どちらも文書全体を走査するため数万行の譜面では
+        合計70ms 以上かかり、方向キーを押すたびに画面が固まっていた。解析パス
+        (600ms デバウンス)の中で一度だけこの索引を作り、以後は O(1) で引く。
+
+        小節番号・時刻の求め方は measure_at_cursor()/time_at_cursor() と
+        完全に同じ(各行を「処理する前」の値を記録する)。3 番目のコース番号は
+        「カーソルがどのコース本文に居るか」で、プレビュー/メトロノームの
+        再構築が必要かどうかの判定に使う(同じコース内の移動なら不要)。
+
+        #START..#END の外の行は索引に入らない(= None 扱い)。"""
+        lines = content.split('\n')
+
+        bpm = Decimal("120")
+        for l in lines:
+            if l.startswith("BPM:"):
+                try:
+                    bpm = Decimal(l[4:].strip())
+                except Exception:
+                    pass
+                break
+
+        bounds = []
+        start = None
+        for idx, raw in enumerate(lines, start=1):
+            # 音符行の大半は '#' を含まないので、split/strip を作る前に弾く。
+            if "#" not in raw:
+                continue
+            s = raw.split("//")[0].strip()
+            if s.startswith("#START"):
+                start = idx
+            elif s.startswith("#END") and start is not None:
+                bounds.append((start, idx))
+                start = None
+
+        index = {}
+        for course_ord, (a, b) in enumerate(bounds):
+            total_time = Decimal("0")
+            curr_bpm = bpm
+            measure_val = Decimal("1")
+            measure = 1
+            cur_events = []
+            index[a] = (1, 0.0, course_ord)
+            # total_time が動くのは小節の切れ目(カンマ)だけなので、float 変換は
+            # 変わったときだけ行う。prec=50 の Decimal -> float は 1 回が地味に
+            # 重く、数万行ぶん毎行やると索引作りが 3 割増しになる。
+            time_f = 0.0
+            time_d = total_time
+
+            for idx in range(a + 1, b):
+                raw = lines[idx - 1]
+                code = raw.split("//")[0] if "//" in raw else raw
+                # 記録はこの行を処理する前の値(= time/measure_at_cursor と同じ)。
+                if total_time is not time_d:
+                    time_d = total_time
+                    time_f = float(total_time)
+                index[idx] = (measure, time_f, course_ord)
+                if "," in code:
+                    measure += code.count(",")
+                s = code.strip()
+                if not s:
+                    continue
+
+                if s[0] == "#":
+                    if s.startswith("#BPMCHANGE"):
+                        try:
+                            cur_events.append(("#BPMCHANGE", Decimal(s.split()[1])))
+                        except Exception:
+                            pass
+                    elif s.startswith("#MEASURE"):
+                        m = re.search(r"(\d+)/(\d+)", s)
+                        if m and Decimal(m.group(2)) != 0:   # 分母0は無視(_analyze と同じ)
+                            cur_events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
+                    elif s.startswith("#DELAY"):
+                        try:
+                            cur_events.append(("#DELAY", Decimal(s.split()[1])))
+                        except Exception:
+                            pass
+                    continue
+
+                for c in s:
+                    if c in "0123456789":
+                        cur_events.append(("NOTE", c))
+                    elif c == ",":
+                        n_len = 0
+                        for t, _v in cur_events:
+                            if t == "NOTE":
+                                n_len += 1
+                        for t, v in cur_events:
+                            if t == "#BPMCHANGE":
+                                curr_bpm = v
+                            elif t == "#MEASURE":
+                                measure_val = v
+                            elif t == "#DELAY":
+                                total_time += v
+                            elif t == "NOTE":
+                                total_time += ((Decimal("240") * measure_val / curr_bpm) / n_len
+                                               if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
+                        cur_events = []
+
+            index[b] = (measure, float(total_time), course_ord)
+
+
+        return index
+
     def build_metronome_clicks(self, content: str, cursor_line: int = None, min_duration_seconds: float = 0.0) -> list:
         """Returns a list of (chart_time_seconds, is_measure_start) at
         1/4-note resolution, honoring #MEASURE (defaults to 4/4 where
