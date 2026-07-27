@@ -786,11 +786,9 @@ class MainWindow(QMainWindow):
         self.highlighter.apply_data(data)
         self.editor.gutter.update()
         self._update_status()
-        # プレビューは「保存済みの内容」を映すので、打鍵ごとの再解析(この
-        # _heavy_analysis)では作り直さない。_refresh_preview は self._preview_content
-        # (保存/読込時のスナップショット)から組むため、ここで呼んでも表示は
-        # 変わらない(=保存するまでプレビューは固定)。保存/開く/新規のときに
-        # _set_preview_content でスナップショットを更新してから呼ぶ。
+        # プレビューは「編集中(未保存)の内容」をそのまま映す。打鍵の
+        # デバウンス(600ms)後にこの _heavy_analysis が走り、ライブの
+        # エディタ内容からプレビューを組み直すので、保存しなくても即反映される。
         self._refresh_preview()
 
     def _set_preview_content(self, content):
@@ -799,16 +797,18 @@ class MainWindow(QMainWindow):
         self._preview_courses = self.analyzer.parse_courses(content)
 
     def _refresh_preview(self):
-        """プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)を保存済みの
-        self._preview_content から組み直す。OFFSET・波形の合わせ込みは別経路
-        (OFFSETスピンボックス)でライブのまま。"""
-        content = self._preview_content
+        """プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)を編集中(未保存)の
+        エディタ内容から組み直す。保存を待たずにすぐ反映される。音源(WAVE)は
+        refresh_from_content 側でパスが変わったときだけ読み直すので、編集中に
+        鳴り直すことはない。OFFSET・波形の合わせ込みは別経路(OFFSETスピン
+        ボックス)でライブのまま。"""
+        content = self.editor.toPlainText()
         cursor_line = self.editor.textCursor().blockNumber() + 1
         metronome_clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         preview_data = self.analyzer.build_preview_timeline(
             content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
         )
-        course_stats = self._preview_course_stats(preview_data.get("course_key"))
+        course_stats = self._find_course_stats(preview_data.get("course_key"))
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
 
     def _find_course_stats(self, course_key):
@@ -822,16 +822,16 @@ class MainWindow(QMainWindow):
         # #MEASURE/#BPMCHANGE the metronome/preview should follow when the
         # cursor moves into a different course, without re-running the
         # expensive syntax highlighter over the whole document.
-        # プレビューは保存済み内容(self._preview_content)を映す方針なので、
-        # ここでも入力中バッファではなくスナップショットを使う。
-        content = self._preview_content
+        # プレビューは編集中(未保存)の内容を映すので、ここでもライブの
+        # エディタ内容を使う。
+        content = self.editor.toPlainText()
         cursor_line = self.editor.textCursor().blockNumber() + 1
         clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
         self.preview_dock.set_metronome_clicks(clicks)
         preview_data = self.analyzer.build_preview_timeline(
             content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
         )
-        self.preview_dock.set_preview_data(preview_data, self._preview_course_stats(preview_data.get("course_key")))
+        self.preview_dock.set_preview_data(preview_data, self._find_course_stats(preview_data.get("course_key")))
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')

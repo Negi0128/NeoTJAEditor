@@ -2,8 +2,8 @@ import bisect
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from neotja import theme
@@ -54,11 +54,35 @@ class WaveformWidget(QWidget):
         self.offset = 0.0
         self._clicks_raw = None          # [(chart_time, is_measure_start), ...] or None
         self._click_audio_times = None   # sorted [(audio_time, is_measure_start), ...] or None
+        # 作譜モード用: 波形の下の帯に描く譜面データ。
+        # _notes_raw は [(chart_time, char)]、_note_audio は OFFSET 適用後の
+        # sorted [(audio_time, char)]。未設定(None)なら何も描かない。
+        self._notes_raw = None
+        self._note_audio = None
+        # 連打/風船/くす玉のスパン。raw は [(start_chart, end_chart, kind)]
+        # kind は 'roll'(小)/'roll_big'(大)/'balloon'/'kusudama'。audio は
+        # OFFSET 適用後の [(start_audio, end_audio, kind)]。
+        self._spans_raw = None
+        self._span_audio = None
+        # 作譜モード用: 命令注釈。_cmd_raw=[(chart_time, text, color)]、
+        # _gogo_raw=[(start_chart, end_chart)]。audio 版は OFFSET 適用後。
+        self._cmd_raw = None
+        self._cmd_audio = None
+        self._gogo_raw = None
+        self._gogo_audio = None
+        # チェックポイント(音源時刻の列)。作譜モードの命令レーンに CHECK POINT
+        # として表示する。chart_preview から set_checkpoints で届く。
+        self._checkpoint_audio = None
         self.position_sec = 0.0
         self.zoom = 1.0
         self.view_start = 0.0
         self._dragging = False
         self._last_repaint = 0.0
+        # 作譜モードの波形用: 固定幅の窓を再生位置に追従スクロールさせる。
+        # None なら従来の「曲全体をズーム」表示。float(秒)なら常にその秒数ぶん
+        # だけを表示し、再生位置が窓内の FOLLOW_FRAC の位置に来るよう view_start
+        # を動かす(スクロールする楽譜のような見え方)。ホイールで窓幅を変える。
+        self._follow_window = None
 
         self.stereo_view = True
         self.offset_mode = False
@@ -114,6 +138,49 @@ class WaveformWidget(QWidget):
         self._clicks_raw = list(clicks) if clicks else None
         self._apply_offset_local(offset)
 
+    def set_notes(self, notes):
+        """作譜モードの波形に重ねる音符列を設定する。`notes` は
+        build_preview_timeline() の "notes"（[(chart_time, char, bpm, scroll,
+        se)]）と同じ形。None/空で消える。OFFSET は既存の offset を使って
+        _apply_offset_local で audio 時刻に変換する。"""
+        self._notes_raw = [(n[0], n[1]) for n in notes] if notes else None
+        self._apply_offset_local(self.offset)
+
+    def set_spans(self, rolls, balloons, kusudamas):
+        """作譜モードの波形に描く連打/風船/くす玉のスパンを設定する。各引数は
+        build_preview_timeline() の "rolls"([(s,e,char,bpm,scroll,hits)])/
+        "balloons"/"kusudamas"([(s,e,bpm,scroll,hits)])と同じ形。"""
+        raw = []
+        for r in (rolls or []):
+            raw.append((r[0], r[1], "roll_big" if len(r) > 2 and r[2] == "6" else "roll"))
+        for b in (balloons or []):
+            raw.append((b[0], b[1], "balloon"))
+        for k in (kusudamas or []):
+            raw.append((k[0], k[1], "kusudama"))
+        self._spans_raw = raw or None
+        self._apply_offset_local(self.offset)
+
+    def set_checkpoints(self, times):
+        """作譜モードの命令レーンに表示するチェックポイント(音源時刻の列)。"""
+        self._checkpoint_audio = sorted(float(t) for t in (times or [])) or None
+        self.update()
+
+    def set_commands(self, bpm_changes, scroll_changes, measure_changes, gogo_regions):
+        """作譜モードの波形に描く命令注釈を設定する。各変化点(先頭=基準値は
+        除く)を色つきラベルに、GOGO区間を帯にする。引数は build_preview_timeline
+        の bpm_changes[(t,bpm)]/scroll_changes[(t,scroll)]/measure_changes[
+        (t,num,den)]/gogo_regions[(s,e)] と同じ形。"""
+        raw = []
+        for t, bpm in (bpm_changes or [])[1:]:
+            raw.append((t, f"BPM{bpm:g}", "#3aa0ff"))
+        for t, sc in (scroll_changes or [])[1:]:
+            raw.append((t, f"HS{sc:g}", "#ff6b6b"))
+        for t, num, den in (measure_changes or [])[1:]:
+            raw.append((t, f"{int(num)}/{int(den)}", "#e0c060"))
+        self._cmd_raw = raw or None
+        self._gogo_raw = list(gogo_regions or []) or None
+        self._apply_offset_local(self.offset)
+
     def _apply_offset_local(self, offset: float):
         """OFFSET だけを差し替えてグリッドを引き直す(ヘッダには書かない)。
         OFFSET convention: chart_time = audio_time + OFFSET."""
@@ -123,6 +190,22 @@ class WaveformWidget(QWidget):
                 (t - offset, is_measure) for t, is_measure in self._clicks_raw)
         else:
             self._click_audio_times = None
+        if self._notes_raw:
+            self._note_audio = sorted((t - offset, c) for t, c in self._notes_raw)
+        else:
+            self._note_audio = None
+        if self._spans_raw:
+            self._span_audio = sorted((s - offset, e - offset, k) for s, e, k in self._spans_raw)
+        else:
+            self._span_audio = None
+        if self._cmd_raw:
+            self._cmd_audio = sorted((t - offset, txt, col) for t, txt, col in self._cmd_raw)
+        else:
+            self._cmd_audio = None
+        if self._gogo_raw:
+            self._gogo_audio = sorted((s - offset, e - offset) for s, e in self._gogo_raw)
+        else:
+            self._gogo_audio = None
         self.update()
 
     def set_stereo_view(self, stereo: bool):
@@ -136,10 +219,23 @@ class WaveformWidget(QWidget):
         self._place_buttons()   # ラベル幅が変わるので再フィット
         self.update()
 
+    FOLLOW_FRAC = 0.3  # 追従時、再生位置を窓の左から何割の位置に置くか
+
+    def set_follow_window(self, seconds):
+        """作譜モードの波形を「固定幅の窓 + 再生位置追従」表示にする。
+        seconds に正の値を渡すとその秒数ぶんだけを表示して再生位置に追従、
+        None/0 で従来のズーム表示に戻す。"""
+        self._follow_window = float(seconds) if seconds and seconds > 0 else None
+        self.update()
+
     def set_position(self, seconds: float):
         self.position_sec = seconds
         span = self._visible_span()
-        if seconds < self.view_start or seconds > self.view_start + span:
+        if self._follow_window:
+            # 再生位置を窓内の一定割合の位置に保つようスクロール(端はクランプ)。
+            vs = seconds - span * self.FOLLOW_FRAC
+            self.view_start = max(0.0, min(vs, max(0.0, self.duration - span)))
+        elif seconds < self.view_start or seconds > self.view_start + span:
             self.view_start = max(0.0, seconds - span * 0.1)
 
         # QMediaPlayer can emit positionChanged far more often than a screen
@@ -151,6 +247,20 @@ class WaveformWidget(QWidget):
         self._last_repaint = now
         self.update()
 
+    def set_position_smooth(self, seconds: float):
+        """set_position の 30fps 間引きなし版。作譜モードの波形をレーンの
+        120fps クロック(chart_preview の毎フレーム外挿)で駆動して滑らかに
+        追従スクロールさせるための入口。非表示のときは update() が no-op に
+        なるので、隠れているモードでは実質コストゼロ。"""
+        self.position_sec = seconds
+        span = self._visible_span()
+        if self._follow_window:
+            vs = seconds - span * self.FOLLOW_FRAC
+            self.view_start = max(0.0, min(vs, max(0.0, self.duration - span)))
+        elif seconds < self.view_start or seconds > self.view_start + span:
+            self.view_start = max(0.0, seconds - span * 0.1)
+        self.update()
+
     def refresh_theme(self):
         self._theme_gen = -1
         self.update()
@@ -159,6 +269,11 @@ class WaveformWidget(QWidget):
     # Coordinate mapping
     # ------------------------------------------------------------------
     def _visible_span(self) -> float:
+        if self._follow_window:
+            # 固定幅の窓。曲がそれより短ければ曲全体。
+            if self.duration > 0:
+                return min(self._follow_window, self.duration)
+            return self._follow_window
         if self.duration <= 0:
             return 1.0
         return self.duration / max(self.zoom, 0.0001)
@@ -280,6 +395,12 @@ class WaveformWidget(QWidget):
     # ------------------------------------------------------------------
     def wheelEvent(self, event):
         factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
+        if self._follow_window:
+            # 追従モードでは窓幅そのものを増減(上スクロールで拡大表示=窓を狭く)。
+            self._follow_window = max(1.0, min(self._follow_window / factor, 60.0))
+            self.set_position(self.position_sec)  # 追従位置を取り直して即反映
+            self.update()
+            return
         old_span = self._visible_span()
         mouse_sec = self._x_to_sec(event.position().x())
         self.zoom = max(self.MIN_ZOOM, min(self.zoom * factor, self.MAX_ZOOM))
@@ -347,6 +468,12 @@ class WaveformWidget(QWidget):
             self._pens[cache_key] = pen
         return pen
 
+    NOTE_STRIP_H = 40  # 音符を波形の下に置く帯(譜面)の高さ
+    # 命令ラベルを譜面の下に置く帯の高さ。BPM/SCROLL/拍子が同時刻付近に並ぶと
+    # 最大3段に積むうえ、最下段に CHECK POINT ラベルも出すので、それらが
+    # 見切れないだけの高さを確保する。
+    CMD_STRIP_H = 56
+
     def paintEvent(self, event):
         painter = QPainter(self)
         w = self.width()
@@ -356,20 +483,47 @@ class WaveformWidget(QWidget):
         t0 = self.view_start
         t1 = t0 + self._visible_span()
 
+        # 上から順に「波形 / 譜面(音符) / 命令」の3段。譜面/命令帯は該当データが
+        # あるときだけ確保する(ドック側の波形は音符を渡さないので従来どおり)。
+        note_strip = self.NOTE_STRIP_H if (self._note_audio or self._span_audio) else 0
+        cmd_strip = self.CMD_STRIP_H if (self._cmd_audio or self._checkpoint_audio) else 0
+        wh = h - note_strip - cmd_strip
+        note_top = wh
+        note_bottom = wh + note_strip
+
         mips = self.mips
         stereo = bool(mips and mips.n_channels >= 2 and self.stereo_view)
         if mips and not mips.is_empty() and w > 0:
             if stereo:
                 # 2レーンは同じ高さにしておく(バッファを使い回すため)。
-                lane_h = h // 2
+                lane_h = wh // 2
                 self._draw_lane(painter, 0, 0, lane_h, t0, t1, w, "L")
-                self._draw_lane(painter, 1, h - lane_h, lane_h, t0, t1, w, "R")
+                self._draw_lane(painter, 1, wh - lane_h, lane_h, t0, t1, w, "R")
                 painter.setPen(self._pen("border"))
                 painter.drawLine(0, lane_h, w, lane_h)
             else:
-                self._draw_lane(painter, WaveformMips.MIX, 0, h, t0, t1, w, None)
+                self._draw_lane(painter, WaveformMips.MIX, 0, wh, t0, t1, w, None)
 
-        self._draw_grid(painter, w, h, t0, t1)
+        # GOGO は波形域の上に薄く重ねる(音符帯側にも下で別途重ねる)。
+        self._fill_gogo(painter, 0, wh, t0, t1)
+        self._draw_grid(painter, w, wh, t0, t1)
+
+        if note_strip:
+            # 譜面帯: 背景 → GOGO帯 → 白い小節線 → 音符/スパン。
+            painter.fillRect(0, note_top, w, note_strip, QColor(self._pal["bg"]))
+            painter.setPen(self._pen("border"))
+            painter.drawLine(0, note_top, w, note_top)
+            self._fill_gogo(painter, note_top, note_strip, t0, t1)
+            self._draw_measure_lines(painter, note_top, note_strip, t0, t1)
+            self._draw_notes(painter, w, t0, t1, note_top + note_strip // 2)
+
+        if cmd_strip:
+            # 命令帯: 譜面のさらに下。ラベル + その時刻へ伸びる縦線。
+            painter.fillRect(0, note_bottom, w, cmd_strip, QColor(self._pal["bg2"]))
+            painter.setPen(self._pen("border"))
+            painter.drawLine(0, note_bottom, w, note_bottom)
+            self._draw_checkpoints(painter, note_top, note_bottom, cmd_strip, t0, t1)
+            self._draw_command_labels(painter, w, note_top, note_bottom, cmd_strip, t0, t1)
 
         painter.setPen(self._pen("err", 2 if self.offset_mode else 1))
         x = self._sec_to_x(self.position_sec)
@@ -424,6 +578,143 @@ class WaveformWidget(QWidget):
         if label:
             painter.setPen(self._pen("fg_dim"))
             painter.drawText(6, int(y_top) + 14, label)
+
+    def _draw_notes(self, painter, w: int, t0: float, t1: float, cy: int):
+        """作譜モード: 波形の下の帯に譜面を描く。連打/風船/くす玉のスパン(バー)
+        を先に、その上に音符(ドン=赤 / カ=青、大音符は大きめ)を円で描く。
+        cy は帯の中心 y。"""
+        ring = QColor("#fbf3e0")
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # --- 連打/風船/くす玉のスパン(バー + 頭) ---
+        sa = self._span_audio
+        if sa:
+            span_col = {"roll": QColor("#fcdb38"), "roll_big": QColor("#fcdb38"),
+                        "balloon": QColor("#ff9f43"), "kusudama": QColor("#ff9f43")}
+            for s, e, kind in sa:
+                if e < t0 or s > t1:
+                    continue
+                xs = self._sec_to_x(s)
+                xe = self._sec_to_x(e)
+                col = span_col.get(kind, QColor("#fcdb38"))
+                th = 20 if kind == "roll_big" else 14
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(col))
+                painter.drawRoundedRect(min(xs, xe), cy - th // 2, max(2, abs(xe - xs)), th, th // 2, th // 2)
+                # 頭(始点)を丸で強調。風船/くす玉はそれと分かる色に。
+                hr = 10 if kind in ("balloon", "kusudama") else (11 if kind == "roll_big" else 9)
+                painter.setPen(QPen(ring, 2))
+                painter.setBrush(QBrush(col))
+                painter.drawEllipse(QPoint(xs, cy), hr, hr)
+
+        # --- 音符(1〜4) ---
+        na = self._note_audio
+        if na:
+            times = [t for t, _ in na]
+            lo = max(0, bisect.bisect_left(times, t0) - 1)
+            hi = bisect.bisect_right(times, t1) + 1
+            don = QColor(self._pal["don"])
+            ka = QColor(self._pal["ka"])
+            for t, c in na[lo:hi]:
+                x = self._sec_to_x(t)
+                big = c in ("3", "4")
+                r = 11 if big else 8
+                painter.setPen(QPen(ring, 2))
+                painter.setBrush(QBrush(don if c in ("1", "3") else ka))
+                painter.drawEllipse(QPoint(x, cy), r, r)
+        painter.setBrush(Qt.NoBrush)
+
+    def _fill_gogo(self, painter, y0: int, height: int, t0: float, t1: float):
+        """GOGO区間を [y0, y0+height] に薄い赤で重ねる。波形域・譜面帯の両方に
+        別々に重ねられるよう、対象の y 範囲を引数で受ける。"""
+        ga = self._gogo_audio
+        if not ga or height <= 0:
+            return
+        gogo_col = QColor(255, 120, 120, 46)
+        for s, e in ga:
+            if e < t0 or s > t1:
+                continue
+            xs = self._sec_to_x(s)
+            xe = self._sec_to_x(e)
+            painter.fillRect(xs, y0, max(1, xe - xs), height, gogo_col)
+
+    def _draw_measure_lines(self, painter, y0: int, height: int, t0: float, t1: float):
+        """譜面帯 [y0, y0+height] に白い小節線を引く(音符を小節ごとに区切る)。
+        小節位置はグリッド用クリック(_click_audio_times)の is_measure から。"""
+        cat = self._click_audio_times
+        if not cat:
+            return
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        for t, is_measure in cat:
+            if not is_measure or t < t0 or t > t1:
+                continue
+            x = self._sec_to_x(t)
+            painter.drawLine(x, y0, x, y0 + height)
+
+    def _draw_command_labels(self, painter, w: int, note_top: int, note_bottom: int,
+                             cmd_h: int, t0: float, t1: float):
+        """命令(BPM/SCROLL/拍子の変化)を譜面の下の帯にラベルで描く。ラベルは
+        重なると段違いにずらし(最大3段)、その時刻へ向けて譜面帯を貫く細い縦線を
+        引いて、どの音符位置の命令かが分かるようにする。"""
+        ca = self._cmd_audio
+        if not ca:
+            return
+        painter.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        fm = painter.fontMetrics()
+        line_h = fm.height() + 1
+        # 段(階段状の重なり回避)は「その命令の左側にある近い命令」だけで決まる。
+        # 以前は可視分だけを毎フレーム並べ直して段を計算していたため、命令が左端で
+        # 消えるたびに段が組み替わってチラついていた。ここでは可視範囲より少し前
+        # (2秒)からの命令を通して段を計算し、可視分だけ描く。スクロールしても
+        # 段が変わらず、位置もそのまま流れる。
+        times = [c[0] for c in ca]
+        lo = max(0, bisect.bisect_left(times, t0 - 2.0))
+        hi = bisect.bisect_right(times, t1)
+        last_end = [-1e9, -1e9, -1e9]     # 3段までの右端 x
+        for i in range(lo, hi):
+            t, txt, col = ca[i]
+            x = self._sec_to_x(t)
+            tw = fm.horizontalAdvance(txt)
+            level = 0
+            while level < 2 and x < last_end[level] + 4:
+                level += 1
+            last_end[level] = x + 4 + tw
+            if t < t0 or t > t1:
+                continue   # 段の計算だけして描画はしない(左外の命令で段を安定化)
+            ly = note_bottom + 2 + level * line_h
+            qcol = QColor(col)
+            painter.setPen(QPen(qcol, 1))
+            painter.drawLine(x, note_top, x, ly)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 170))
+            painter.drawRect(x + 1, ly, tw + 4, fm.height())
+            painter.setPen(qcol)
+            painter.drawText(x + 3, ly + fm.ascent(), txt)
+
+    def _draw_checkpoints(self, painter, note_top: int, note_bottom: int,
+                          cmd_h: int, t0: float, t1: float):
+        """作譜モードの命令レーンにチェックポイントを黄色で表示する。譜面帯〜命令帯
+        を貫く黄色の縦線 + 「CHECK POINT」ラベル。"""
+        cp = self._checkpoint_audio
+        if not cp:
+            return
+        yellow = QColor("#ffd166")
+        painter.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        fm = painter.fontMetrics()
+        label = "CHECK POINT"
+        tw = fm.horizontalAdvance(label)
+        ly = note_bottom + cmd_h - fm.height() - 1   # 命令帯の下段に置く
+        for t in cp:
+            if t < t0 or t > t1:
+                continue
+            x = self._sec_to_x(t)
+            painter.setPen(QPen(yellow, 2))
+            painter.drawLine(x, note_top, x, note_bottom + cmd_h)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 180))
+            painter.drawRect(x + 1, ly, tw + 4, fm.height())
+            painter.setPen(yellow)
+            painter.drawText(x + 3, ly + fm.ascent(), label)
 
     def _draw_grid(self, painter, w: int, h: int, visible_start: float, visible_end: float):
         if self.duration <= 0:

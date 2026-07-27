@@ -2,11 +2,12 @@ import bisect
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
     QStaticText,
 )
+from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
@@ -179,6 +180,15 @@ class ChartPreviewWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setFocusPolicy(Qt.StrongFocus)
+        # paintEvent fills the ENTIRE widget rect first thing (fillRect(rect,
+        # bg)), so tell Qt the widget paints all its own pixels. Without this,
+        # Qt erases the background to the window color before every paint, and
+        # at 60 fps that erase-then-repaint shows up as a flicker/shimmer on
+        # the scrolling lane. Declaring it opaque skips the erase (no flash)
+        # and is also a little cheaper.
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        # Don't let the system paint a background under us on resize/expose.
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._note_times = []
         self._note_chars = []
         self._note_bpms = []
@@ -230,6 +240,29 @@ class ChartPreviewWidget(QWidget):
         self._pause_cb = pause_cb
         self._info_update_cb = info_update_cb
         self._hit_sound_engine = hit_sound_engine
+        # 各フレーム(120fps外挿クロック)で現在の音源時刻を渡すフック。作譜
+        # モードの波形をレーンと同じ滑らかさ・同じ時刻で追従させるのに使う。
+        self._frame_cb = None
+        # 操作フィードバックのドン/カ単発再生 cb(kind)。ナビ=カ、再生=ドン。
+        self._hit_feedback_cb = None
+        # f/j 再生: 小節頭の少し前からフェードインして再生する cb(measure_time)。
+        self._fadein_play_cb = None
+        # チェックポイント(音源時刻の昇順リスト)。アンカーの概念を廃止し、
+        # これで「戻る位置」を表す。p でトグル、p 押しながら小節移動で最寄りへ。
+        self._checkpoints = []
+        self._checkpoints_changed_cb = None
+        # p の「タップ(=トグル) か 押しながら移動(=ジャンプ)」判定用。
+        self._p_held = False
+        self._p_moved = False
+        # f/j リード再生の「表示開始時刻(譜面時刻)」。再生位置がここに達するまで
+        # 譜面(音符/連打/効果/SE表記)を隠し、SE も止める。到達で reveal_cb を
+        # 呼んで元に戻す。None なら通常表示。
+        self._reveal_time = None
+        self._reveal_cb = None
+        # 等速モード(Tab): 流れる譜面を HS(スクロール速度)=1 固定で表示する。
+        # #SCROLL/HS ギミックを無視して一定速でスクロールする「表示だけ」の
+        # モード(譜面データ自体は変えない)。BPM による間隔は通常どおり。
+        self._constant_speed = False
         # 下部パネルのモード循環(Tab / トグルボタン)と速度変更([ ] キー)を
         # ゲーム窓側へ通知するコールバック(フェーズ3)。
         self._cycle_bottom_mode_cb = cycle_bottom_mode_cb
@@ -326,6 +359,25 @@ class ChartPreviewWidget(QWidget):
         # Optional 黄色連打 sprite. None -> procedural bar.
         self._skin_roll = self._load_skin_roll()
 
+        # 風船/くす玉の破裂音 (skin/balloon.wav)。打数を叩ききって割れた瞬間に
+        # 1回だけ鳴らす。無ければ無音(演出だけ)。
+        self._pop_sound = self._load_pop_sound()
+        # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
+        # これを跨いだ瞬間に _pop_sound を鳴らす。set_preview_data で再構築。
+        self._pop_times = []
+        # 直近に破裂スキャンした譜面時間。再生中のみ有効、シーク/一時停止で
+        # None に戻して跨ぎ判定をリセットする。
+        self._last_pop_scan_t = None
+
+        # 実測fpsの表示(左上)。paintEvent 間隔の指数移動平均から出す。実際に
+        # 何フレーム描けているかの目安 - 「本当に出てる?」を可視化するため。
+        try:
+            self._show_fps = bool(settings_mod.load_settings().get("preview_show_fps", True))
+        except Exception:
+            self._show_fps = True
+        self._fps_ema = 0.0
+        self._fps_last_wall = None
+
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
         # 60 Hz panel, up to 120/144 fps on a high-refresh one (capped so we
@@ -348,12 +400,25 @@ class ChartPreviewWidget(QWidget):
             cap = int(settings_mod.load_settings().get("preview_max_fps", 60))
         except Exception:
             cap = 60
-        cap = max(20, min(144, cap))
-        hz = max(20.0, min(hz, float(cap)))
-        # Floor (not round) the interval so we tick at least as fast as the
-        # refresh - round() would give 17 ms at 60 Hz (~59 fps), just under
-        # the target; int() gives 16 ms (~62 fps).
-        self._timer.setInterval(max(1, int(1000.0 / hz)))
+        cap = max(20, min(240, cap))
+        # This is a plain software-rendered QWidget, so its redraw timer is NOT
+        # synchronized to the display's vblank. Rendering at ~62.5 fps (the
+        # 16 ms floor) against a 60 Hz panel produces a ~2.5 Hz beat: every
+        # ~0.4 s a rendered frame lands on the same refresh as the previous one
+        # (or misses one), so the scroll periodically slips - perceived as
+        # judder/shimmer even though the fps counter reads ~60.
+        #
+        # Without a real vsync hook, the best software fix is to render at an
+        # integer MULTIPLE of the refresh (2x): every vblank then samples a
+        # frame at a stable phase and at most ~half a refresh old, so the beat
+        # disappears and frame-age jitter is halved. On a 60 Hz panel that's
+        # 120 fps (8 ms); on a 144 Hz panel the cap keeps it at 144. Bounded by
+        # the user's preview_max_fps so it can be dialed back for CPU.
+        target = min(float(cap), max(hz * 2.0, 60.0))
+        hz = max(20.0, target)
+        # Round to the nearest ms so the interval actually lands on the target
+        # (8 ms for 120 fps) instead of being biased fast/slow.
+        self._timer.setInterval(max(1, round(1000.0 / hz)))
 
     def _color(self, key: str) -> QColor:
         # 固定のダークパレット(self._palette)から引くだけ。テーマ切替で
@@ -530,6 +595,37 @@ class ChartPreviewWidget(QWidget):
         # tween moves the display but must stay silent.
         if self._hit_sound_engine is not None and self._playing:
             self._hit_sound_engine.check_and_play(self._current_audio_time())
+        self._scan_balloon_pops()
+        # リード再生: 再生位置が表示開始時刻に達したら譜面/SEを復帰させる。
+        if self._reveal_time is not None and self._current_chart_time() >= self._reveal_time:
+            self._clear_reveal()
+        # Drive any follower (作譜モードの波形) off this same smoothly-extrapolated
+        # clock so it scrolls at the lane's 120fps and stays perfectly in sync
+        # (no separate clock to drift). Cheap when the follower is hidden.
+        if self._frame_cb is not None:
+            self._frame_cb(self._current_audio_time())
+
+    # A seek/jump can move `now` by seconds in one tick; anything bigger than
+    # normal forward playback (~one tick) is a jump, not a burst of pops, so we
+    # resync silently instead of firing every crossed pop at once.
+    POP_JUMP_THRESHOLD_SEC = 0.5
+
+    def _scan_balloon_pops(self):
+        """再生中に譜面時間 now が風船/くす玉の終点を跨いだら破裂音を鳴らす。
+        叩ききって割れた瞬間の演出音。停止/一時停止/シーク中は鳴らさない。"""
+        if not self._playing or self._pop_sound is None or not self._pop_times:
+            self._last_pop_scan_t = None
+            return
+        now = self._current_chart_time()
+        prev = self._last_pop_scan_t
+        self._last_pop_scan_t = now
+        if prev is None or abs(now - prev) > self.POP_JUMP_THRESHOLD_SEC:
+            return
+        if now > prev:
+            lo = bisect.bisect_right(self._pop_times, prev)
+            hi = bisect.bisect_right(self._pop_times, now)
+            if hi > lo:
+                self._pop_sound.play()
 
     JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
 
@@ -570,18 +666,24 @@ class ChartPreviewWidget(QWidget):
                     return None
                 return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
 
-            def pack(head, body):
+            def pack(head, body, r):
                 if head is None or body is None:
                     return None
                 bw, bh = body.width, body.height
                 cap_w = min(bh, bw)
                 mid = body.crop((0, 0, max(1, bw - cap_w), bh))
                 cap = body.crop((max(0, bw - cap_w), 0, bw, bh))
-                return {"head": _pil_to_qpixmap(head), "mid": _pil_to_qpixmap(mid),
+                head_pix = _pil_to_qpixmap(head)
+                # Pre-scale the head to the exact on-screen size (a normal note
+                # diameter) so the paint loop just blits it - the per-frame
+                # scaledToHeight it used to do was a frame-drop source whenever
+                # a roll was on screen.
+                head_scaled = head_pix.scaledToHeight(int(r * 2), Qt.SmoothTransformation)
+                return {"head": head_scaled, "mid": _pil_to_qpixmap(mid),
                         "cap": _pil_to_qpixmap(cap), "body_h": bh}
 
-            return {"small": pack(cell(spans[5]), cell(spans[6])),
-                    "big": pack(cell(spans[7]), cell(spans[8]))}
+            return {"small": pack(cell(spans[5]), cell(spans[6]), self.NOTE_R_SMALL),
+                    "big": pack(cell(spans[7]), cell(spans[8]), self.NOTE_R_BIG)}
         except Exception:
             return None
 
@@ -601,8 +703,7 @@ class ChartPreviewWidget(QWidget):
                            QRectF(0, 0, mid.width(), mid.height()))
         painter.drawPixmap(QRectF(x0 + mid_dst, cy - r, cap_dst, d), cap,
                            QRectF(0, 0, cap.width(), cap.height()))
-        hd = head.scaledToHeight(int(d), Qt.SmoothTransformation)
-        painter.drawPixmap(int(x0 - r), int(cy - r), hd)
+        painter.drawPixmap(QPointF(x0 - r, cy - r), head)  # pre-scaled, sub-pixel
         return True
 
     def _load_skin_balloon(self):
@@ -643,7 +744,31 @@ class ChartPreviewWidget(QWidget):
             col_h = (ca2 > 16).sum(axis=0)
             left = col_h[:max(1, int(cell.width * 0.4))]
             face_frac = float(left.max()) / cell.height if cell.height else 1.0
-            return {"pix": _pil_to_qpixmap(cell), "face_frac": max(0.3, face_frac)}
+            face_frac = max(0.3, face_frac)
+            pix = _pil_to_qpixmap(cell)
+            # Pre-scale to the exact on-screen size a small note uses, so the
+            # paint loop just blits it (per-frame scaledToHeight was a real
+            # frame-drop source). face_r/off let the caller center the round
+            # face on the judgment point without re-deriving them each frame.
+            sprite_h = (2.0 * self.NOTE_R_SMALL) / face_frac
+            scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
+            face_r = sprite_h * face_frac / 2.0
+            return {"pix": pix, "face_frac": face_frac,
+                    "scaled": scaled, "face_r": face_r}
+        except Exception:
+            return None
+
+    def _load_pop_sound(self):
+        """風船/くす玉の破裂音を skin/balloon.wav から読み込む。無ければ None
+        (音は鳴らさず演出だけ)。QSoundEffect は低遅延で短い WAV に向く。"""
+        path = os.path.join(str(settings_mod.skin_dir()), "balloon.wav")
+        if not os.path.exists(path):
+            return None
+        try:
+            snd = QSoundEffect(self)
+            snd.setSource(QUrl.fromLocalFile(path))
+            snd.setVolume(0.9)
+            return snd
         except Exception:
             return None
 
@@ -944,48 +1069,100 @@ class ChartPreviewWidget(QWidget):
 
     def event(self, e):
         # Tab は通常 keyPressEvent に届く前に QWidget::event 内のフォーカス移動
-        # に消費されてしまうので、event() レベルで横取りして下部パネルのモード
-        # 循環(情報→作譜→非表示)に割り当てる(フェーズ3)。Space/Q/PgUp/PgDn
-        # とは非衝突。
+        # に消費されてしまうので、event() レベルで横取りする。操作刷新で Tab は
+        # 「等速モード(HS1固定表示)」のトグルに割り当てた(下部パネルのモード
+        # 切替は画面上のモードボタンで行う)。
         if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab:
-            if self._cycle_bottom_mode_cb:
-                self._cycle_bottom_mode_cb()
+            self.toggle_constant_speed()
             e.accept()
             return True
         return super().event(e)
 
+    # --- 操作キー割り当て(一新) --------------------------------------
+    # 再生:            f / j (小節頭0.5s前からフェードイン) / Space(その場から即)
+    # 一時停止:        Enter / Space
+    # 前の小節:        d / s / PageDown / →   (カの音)
+    # 次の小節:        k / l / PageUp / ←     (カの音)
+    # 曲頭/最終小節:   Home / End
+    # 再生速度 -/+:    z / ↓  と  c / ↑
+    # チェックポイント: p(タップでトグル / 押しながら小節移動で最寄りへジャンプ)
+    # ※アンカー(Q)は廃止。チェックポイントで代替。
+    _KEY_PREV = frozenset((Qt.Key_D, Qt.Key_S, Qt.Key_PageDown, Qt.Key_Right))
+    _KEY_NEXT = frozenset((Qt.Key_K, Qt.Key_L, Qt.Key_PageUp, Qt.Key_Left))
+
     def keyPressEvent(self, event):
         key = event.key()
+        # 再生/一時停止(f/j): 再生中なら一時停止、そうでなければ小節頭の少し前
+        # からリード再生(リード中は開始位置より前の譜面/SEを隠す)。ドンの音。
+        # フィードバックは動作(シーク)の後に鳴らす: ミキサーはシーク時に再生中の
+        # ボイスを消すため、先に鳴らすと直後のシークで消えてしまう。
+        if key in (Qt.Key_F, Qt.Key_J):
+            if self._state == "playing":
+                self.pause()
+            else:
+                self.play_from_current_measure(fade=True)
+            self._feedback("don")
+            return
+        # 再生/一時停止(Space): その場から即開始 or 一時停止。ドンの音。
         if key == Qt.Key_Space:
             self.toggle_play()
+            self._feedback("don")
             return
-        if key == Qt.Key_Q:
-            self.return_to_anchor()
+        # 一時停止(Enter)
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self.pause()
             return
-        if key == Qt.Key_PageUp:
-            self.seek_relative_measure(1)
+        # チェックポイント(p): 押した瞬間は保持フラグだけ立て、離したとき
+        # (移動していなければ)トグルする。押しながら小節移動はジャンプ。
+        if key == Qt.Key_P:
+            if not event.isAutoRepeat():
+                self._p_held = True
+                self._p_moved = False
             return
-        if key == Qt.Key_PageDown:
-            self.seek_relative_measure(-1)
+        # 小節移動(カの音)。p 押しながらなら最寄りチェックポイントへジャンプ。
+        if key in self._KEY_PREV:
+            self._measure_key(-1)
             return
-        # Home/End: 0小節目(曲頭)/最終小節へ一気に移動。PgUp/PgDn と同じく
-        # 再生中は無効。
+        if key in self._KEY_NEXT:
+            self._measure_key(1)
+            return
         if key == Qt.Key_Home:
             self.seek_to_first_measure()
             return
         if key == Qt.Key_End:
             self.seek_to_last_measure()
             return
-        # 再生速度の微調整(作譜モード。0.05刻み、0.25〜1.0でクランプ)。実際の
-        # レート適用はスライダー経由(set_speed_cb → スライダー値変更 → audio /
-        # chart_preview 双方に反映)なので、ここでは目標倍率を算出して通知する。
-        if key == Qt.Key_BracketLeft:
+        # 再生速度(z/↓ で遅く、c/↑ で速く)。
+        if key in (Qt.Key_Z, Qt.Key_Down):
             self._adjust_speed(-0.05)
             return
-        if key == Qt.Key_BracketRight:
+        if key in (Qt.Key_C, Qt.Key_Up):
             self._adjust_speed(0.05)
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_P and not event.isAutoRepeat():
+            if self._p_held and not self._p_moved:
+                self.toggle_checkpoint()
+            self._p_held = False
+            return
+        super().keyReleaseEvent(event)
+
+    def _feedback(self, kind: str):
+        if self._hit_feedback_cb is not None:
+            self._hit_feedback_cb(kind)
+
+    def _measure_key(self, direction: int):
+        """小節移動キー共通処理。p 押しながらなら最寄りのチェックポイントへ
+        ジャンプ、そうでなければ隣の小節へ。カの音は動作(シーク)の後に鳴らす:
+        ミキサーはシーク時に再生中ボイスを消すので、先に鳴らすと消される。"""
+        if self._p_held:
+            self._p_moved = True
+            self.jump_to_checkpoint(direction)
+        else:
+            self.seek_relative_measure(direction)
+        self._feedback("ka")
 
     def _apply_speed(self, rate: float) -> float:
         """目標倍率(0.25〜2.0にクランプ・小数2桁に丸め)を適用して、実際に
@@ -1088,12 +1265,10 @@ class ChartPreviewWidget(QWidget):
     # Transport (机能1)
     # ------------------------------------------------------------------
     def reset_to_start(self):
-        """Called when the game-preview window is (re)opened: park カレント/
-        アンカー at the song head (0小節目/曲頭), rewind the audio to 0, and
-        show the stopped state."""
+        """Called when the game-preview window is (re)opened: park カレントを
+        曲頭(0小節目)へ、音源を 0 に巻き戻して停止状態にする。チェックポイントは
+        譜面ごとの目印なので消さずに保持する。"""
         self._current_idx = 0
-        self._anchor_idx = 0
-        self._anchor_set = False
         self._state = "stopped"
         self._playing = False
         self._animating = False
@@ -1108,33 +1283,117 @@ class ChartPreviewWidget(QWidget):
         self._push_realtime_info()
 
     def toggle_play(self):
-        """Space: start playing from カレント (stopped) / pause in place
-        (playing) / snap to the head of the measure we're paused in, then
-        resume (paused)."""
+        """Space: 停止/一時停止中は「その場(現在位置)から」即再生(フェード
+        なし)、再生中は一時停止。小節頭にスナップしないので、一時停止した位置
+        からそのまま続けられる。"""
         if not self._nav_points:
             return
         if self._state == "playing":
-            if self._pause_cb:
-                self._pause_cb()
+            self.pause()
             return
-        # stopped or paused -> (re)start playback.
-        if self._state == "paused":
-            # Snap カレント to the measure head at/just before where we
-            # actually paused, so resuming always starts on a bar line.
-            self._current_idx = self._nav_idx_at_or_before(self._pos_sec)
-        # The first play of a session pins the anchor to カレント; later
-        # resumes leave the anchor where it was (Q's target) untouched.
-        if not self._anchor_set:
-            self._anchor_idx = self._current_idx
-            self._anchor_set = True
-        target = self._nav_points[self._current_idx]
+        self._clear_reveal()   # 保留中のリード表示があれば解除して即その場から
+        target = self._pos_sec
         self._animating = False
-        self._pos_sec = target
         self._pos_wall = _time.monotonic()
         if self._seek_seconds_cb:
             self._seek_seconds_cb(target)
         if self._play_cb:
             self._play_cb()
+
+    def pause(self):
+        """Enter / 一時停止。再生中なら止める(playingChanged → set_playback で
+        state が paused に落ちる)。リード表示中なら解除する。"""
+        self._clear_reveal()
+        if self._pause_cb:
+            self._pause_cb()
+
+    def play_from_current_measure(self, fade: bool = True):
+        """f/j: 今いる小節の頭から再生する。fade=True かつ fadein_play_cb が
+        あれば小節頭の少し前からフェードインして再生(音源とSEを徐々に上げる)。
+        未配線なら通常の即時再生にフォールバック。"""
+        if not self._nav_points:
+            return
+        idx = self._nav_idx_at_or_before(self._current_audio_time())
+        self._current_idx = idx
+        target = self._nav_points[idx]
+        self._animating = False
+        if fade and self._fadein_play_cb is not None:
+            # リード中(開始位置に達するまで)は譜面/SEを隠す。reveal_time は
+            # 譜面時刻(= 音源時刻 target + OFFSET)。実際のシーク/再生/SE停止は
+            # preview_dock 側。位置は positionChanged で追従する。
+            self._reveal_time = target + self._offset
+            self._fadein_play_cb(target)
+        else:
+            self._clear_reveal()
+            self._pos_sec = target
+            self._pos_wall = _time.monotonic()
+            if self._seek_seconds_cb:
+                self._seek_seconds_cb(target)
+            if self._play_cb:
+                self._play_cb()
+
+    def set_reveal_cb(self, cb):
+        """リード再生の「表示開始」到達時に呼ぶコールバック(SEを元に戻す等)。"""
+        self._reveal_cb = cb
+
+    def _clear_reveal(self):
+        """リード表示の抑制を解除する(到達 or 別操作でキャンセル)。armされて
+        いれば reveal_cb を1回呼ぶ。"""
+        if self._reveal_time is not None:
+            self._reveal_time = None
+            if self._reveal_cb is not None:
+                self._reveal_cb()
+
+    CHECKPOINT_SNAP = 0.02  # チェックポイント同一視/探索のしきい値(秒)
+
+    def toggle_checkpoint(self):
+        """p タップ: 現在位置の小節頭にチェックポイントを作成、既にあれば削除。"""
+        if not self._nav_points:
+            return
+        idx = self._nav_idx_at_or_before(self._current_audio_time())
+        t = self._nav_points[idx]
+        for i, c in enumerate(self._checkpoints):
+            if abs(c - t) < self.CHECKPOINT_SNAP:
+                self._checkpoints.pop(i)
+                self.show_toast("チェックポイント削除", 1.0)
+                self._on_checkpoints_changed()
+                return
+        self._checkpoints.append(t)
+        self._checkpoints.sort()
+        self.show_toast("チェックポイント追加", 1.0)
+        self._on_checkpoints_changed()
+
+    def _on_checkpoints_changed(self):
+        if self._checkpoints_changed_cb:
+            self._checkpoints_changed_cb(list(self._checkpoints))
+        self.update()
+        self._push_realtime_info()
+
+    def jump_to_checkpoint(self, direction: int):
+        """p 押しながら小節移動: 現在位置から direction 方向で最寄りの
+        チェックポイントへ一気に移動する。無ければ何もしない。"""
+        if not self._checkpoints:
+            return
+        pos = self._current_audio_time()
+        if direction > 0:
+            cands = [c for c in self._checkpoints if c > pos + self.CHECKPOINT_SNAP]
+            target = cands[0] if cands else None
+        else:
+            cands = [c for c in self._checkpoints if c < pos - self.CHECKPOINT_SNAP]
+            target = cands[-1] if cands else None
+        if target is None:
+            return
+        self._current_idx = self._nearest_nav_idx(target)
+        self._animating = False
+        if self._state == "playing":
+            self._pos_sec = target
+            self._pos_wall = _time.monotonic()
+            if self._seek_seconds_cb:
+                self._seek_seconds_cb(target)
+        else:
+            self._start_scroll_anim(target)
+            if self._seek_seconds_cb:
+                self._seek_seconds_cb(target)
 
     def return_to_anchor(self):
         """Q: seek back to the アンカー measure and pause there (stopping
@@ -1157,9 +1416,13 @@ class ChartPreviewWidget(QWidget):
         self._push_realtime_info()
 
     def seek_relative_measure(self, direction: int):
-        # PgUp/PgDn/wheel: step カレント one nav point, but only while
-        # stopped/paused - navigation is deliberately inert during playback.
-        self._seek_to_nav_idx(self._current_idx + direction)
+        # 小節を1つ前後へ。再生中は現在の再生位置の小節を基準に、停止/一時停止
+        # 中はカレント小節を基準に隣へ動く。
+        if self._state == "playing":
+            base = self._nav_idx_at_or_before(self._current_audio_time())
+        else:
+            base = self._current_idx
+        self._seek_to_nav_idx(base + direction)
 
     def seek_to_first_measure(self):
         """Home: jump カレント to 0小節目(曲頭)."""
@@ -1170,20 +1433,21 @@ class ChartPreviewWidget(QWidget):
         self._seek_to_nav_idx(len(self._nav_points) - 1)
 
     def _seek_to_nav_idx(self, idx: int):
-        if self._state == "playing":
-            return
         if not self._nav_points or not self._seek_seconds_cb:
             return
+        self._clear_reveal()   # 手動移動したらリード表示は解除
         new_idx = max(0, min(idx, len(self._nav_points) - 1))
         self._current_idx = new_idx
-        # Moving while paused re-pins the anchor (so Q comes back here); moving
-        # while stopped leaves the not-yet-set anchor alone (see toggle_play).
-        if self._state == "paused":
-            self._anchor_idx = self._current_idx
-            self._anchor_set = True
         target = self._nav_points[new_idx]
-        self._start_scroll_anim(target)
-        self._seek_seconds_cb(target)
+        if self._state == "playing":
+            # 再生中はトゥイーンせず、その位置へシークして再生継続。
+            self._pos_sec = target
+            self._pos_wall = _time.monotonic()
+            self._animating = False
+            self._seek_seconds_cb(target)
+        else:
+            self._start_scroll_anim(target)
+            self._seek_seconds_cb(target)
 
     def set_offset(self, offset: float):
         self._offset = offset
@@ -1246,8 +1510,21 @@ class ChartPreviewWidget(QWidget):
 
     def _speed(self, bpm: float, scroll: float = 1.0) -> float:
         b = bpm if bpm and bpm > 0 else DEFAULT_BPM
-        s = scroll if scroll is not None else 1.0
+        # 等速モードでは HS(scroll)を 1.0 固定にする(表示だけ)。
+        if self._constant_speed:
+            s = 1.0
+        else:
+            s = scroll if scroll is not None else 1.0
         return self.BASE_PIXELS_PER_BEAT * b / 60.0 * s
+
+    def toggle_constant_speed(self):
+        """Tab: 等速モード(HS1固定表示)のオン/オフ。スパンの描画速度や可視窓は
+        _speed に依存するので、切替時に前計算をやり直す。"""
+        self._constant_speed = not self._constant_speed
+        self._rebuild_span_draw_data()
+        self._rebuild_min_vis_speed()
+        self.show_toast("等速モード: " + ("ON (HS1固定)" if self._constant_speed else "OFF"), 1.5)
+        self.update()
 
     def _speed_at(self, t: float) -> float:
         """On-screen speed implied by the BPM/SCROLL in effect at chart time
@@ -1281,14 +1558,22 @@ class ChartPreviewWidget(QWidget):
              self.NOTE_R_BIG if r[2] == "6" else self.NOTE_R_SMALL)
             for r in self._rolls
         ]
+        # 風船/くす玉は打数(最後の要素)も持ち回る: 判定枠に固定されている間、
+        # 残り打数をカウントダウン表示するため。
         self._balloon_draw = [
-            (b[0], b[1], self._speed(b[2], b[3]), self._speed_at(b[1]))
+            (b[0], b[1], self._speed(b[2], b[3]), self._speed_at(b[1]), int(b[-1]))
             for b in self._balloons
         ]
         self._kusudama_draw = [
-            (k[0], k[1], self._speed(k[2], k[3]), self._speed_at(k[1]))
+            (k[0], k[1], self._speed(k[2], k[3]), self._speed_at(k[1]), int(k[-1]))
             for k in self._kusudamas
         ]
+        # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
+        # ここを跨いだら破裂音を鳴らす。
+        self._pop_times = sorted(
+            [b[1] for b in self._balloons] + [k[1] for k in self._kusudamas]
+        )
+        self._last_pop_scan_t = None
 
     def _rebuild_min_vis_speed(self):
         """Slowest positive on-screen speed among the chart's notes and bars,
@@ -1325,28 +1610,30 @@ class ChartPreviewWidget(QWidget):
         speed = self._min_vis_speed
         return now - judge_x / speed, now + (w - judge_x) / speed
 
-    LIVE_COUNT_HOLD_SEC = 1.0
-
-    def _live_span_count(self, now):
-        # self._live_spans: [(start, end, hits)] combining rolls+balloons -
-        # returns the interpolated tap count for whichever span (if any)
-        # currently contains `now`, so it counts up live while in progress
-        # like the real game. Once a span ends, its final count keeps
-        # showing for LIVE_COUNT_HOLD_SEC (so a quick glance can still catch
-        # it) unless the next span starts sooner, in which case that one
-        # takes over immediately.
-        for start, end, hits in self._live_spans:
+    def _live_top_count(self, now):
+        """上部読み出し(判定リングの右)に出す打数。連打・風船・くす玉で
+        表記位置とデザインを共通化する。
+        - 連打: 区間中は補間で数え上がる。
+        - 風船/くす玉: 区間中は残り打数をカウントダウン(割れる終点で消える)。
+        **今まさに進行中(now が [start,end] の中)** の区間だけを対象にする。
+        以前は連打終了後 1 秒だけ最終打数を保持していたが、その保持中に直後の
+        風船が流れてくると、風船の脇に連打の打数が出たままになり「風船の打数が
+        連打の打数に影響される」ように見えるバグになっていた。保持はやめ、常に
+        進行中の区間の値だけを出す。"""
+        for r in self._rolls:
+            start, end, hits = r[0], r[1], r[-1]
             if start <= now <= end:
                 if end <= start:
                     return hits
                 return int(hits * (now - start) / (end - start))
-        best_end = None
-        best_hits = None
-        for start, end, hits in self._live_spans:
-            if end <= now and (best_end is None or end > best_end):
-                best_end, best_hits = end, hits
-        if best_end is not None and now - best_end <= self.LIVE_COUNT_HOLD_SEC:
-            return best_hits
+        for spans in (self._balloons, self._kusudamas):
+            for s in spans:
+                start, end, hits = s[0], s[1], s[-1]
+                if start <= now < end:
+                    span = end - start
+                    frac = (now - start) / span if span > 0 else 1.0
+                    rem = int(hits * (1.0 - frac)) + (1 if frac < 1.0 else 0)
+                    return max(0, min(int(hits), rem))
         return None
 
     def _cumulative_hits(self, now):
@@ -1367,6 +1654,29 @@ class ChartPreviewWidget(QWidget):
 
     def set_info_update_cb(self, cb):
         self._info_update_cb = cb
+
+    def set_frame_cb(self, cb):
+        """毎フレーム(120fps)現在の音源時刻(秒)を受け取るコールバックを登録。
+        作譜モードの波形をレーンと同じクロックで滑らかに追従させるのに使う。"""
+        self._frame_cb = cb
+
+    def set_hit_feedback_cb(self, cb):
+        """操作フィードバックのドン/カ単発再生 cb(kind: 'don'|'ka')を登録。"""
+        self._hit_feedback_cb = cb
+
+    def set_fadein_play_cb(self, cb):
+        """f/j 再生用: 小節頭の少し前からフェードインして再生する cb(measure_time)
+        を登録。未登録なら f/j は通常再生にフォールバックする。"""
+        self._fadein_play_cb = cb
+
+    def set_checkpoints_changed_cb(self, cb):
+        self._checkpoints_changed_cb = cb
+
+    def set_checkpoints(self, times):
+        """チェックポイント(音源時刻の列)を外部から設定する(将来のエディタ同期
+        用の入口)。昇順に正規化して保持する。"""
+        self._checkpoints = sorted(float(t) for t in (times or []))
+        self.update()
 
     @staticmethod
     def _idx_at(times, now):
@@ -1400,7 +1710,7 @@ class ChartPreviewWidget(QWidget):
     def _draw_note(self, painter: QPainter, x: float, y: float, r: int, c: str, big: bool):
         sprite = (self._sprites_big if big else self._sprites_small).get(c)
         if sprite is not None:
-            painter.drawPixmap(int(x - r), int(y - r), sprite)
+            painter.drawPixmap(QPointF(x - r, y - r), sprite)  # sub-pixel placement
             return
         painter.setPen(QPen(self._color("fg_bright"), 2))
         painter.setBrush(QBrush(self._color(NOTE_COLOR[c])))
@@ -1432,12 +1742,9 @@ class ChartPreviewWidget(QWidget):
         procedural balloon-coloured circle when there's no skin."""
         r = self.NOTE_R_SMALL
         if self._skin_balloon is not None:
-            pix = self._skin_balloon["pix"]
-            ff = self._skin_balloon["face_frac"]
-            sprite_h = (2.0 * r) / ff
-            face_r = sprite_h * ff / 2.0
-            scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
-            painter.drawPixmap(int(x - face_r), int(cy - scaled.height() / 2), scaled)
+            scaled = self._skin_balloon["scaled"]
+            face_r = self._skin_balloon["face_r"]
+            painter.drawPixmap(QPointF(x - face_r, cy - scaled.height() / 2.0), scaled)
         else:
             painter.setPen(QPen(self._color("fg_bright"), 2))
             painter.setBrush(QBrush(self._color("balloon")))
@@ -1446,6 +1753,10 @@ class ChartPreviewWidget(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        # Sample note/roll/balloon sprites at sub-pixel offsets so a note gliding
+        # across the lane moves smoothly instead of snapping a whole pixel at a
+        # time - this makes the scroll look noticeably smoother at the SAME fps.
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         w, h = self.width(), self.height()
         # The lane box is a fixed pixel size (LANE_WIDTH x LANE_HEIGHT), not
         # tied to the widget's actual size, so resizing/maximizing the
@@ -1478,21 +1789,41 @@ class ChartPreviewWidget(QWidget):
         painter.fillRect(self.rect(), self._color("bg"))
 
         now = self._current_chart_time()
+        # f/j リード再生: 再生開始位置(reveal_t)より前の音符/連打/風船だけを
+        # 隠す。開始位置以降の音符は通常どおり右から流れてくる(いきなり全部が
+        # 出現しない)。到達後(reveal_cb で None化)は全表示に戻る。
+        reveal_t = self._reveal_time
 
-        # Live roll/balloon tap count, upper-left of the judgment ring, in
-        # the margin above the lane box - reuses _live_span_count as-is
-        # (in-progress live number, held for LIVE_COUNT_HOLD_SEC after the
-        # span ends), only appears while a roll/balloon is actually active
-        # (or just finished). Must be drawn before the lane clip below is
-        # applied - that clip is restricted to the band (y >= band_top), so
-        # this top-margin text would be entirely clipped out otherwise.
-        live_count = self._live_span_count(now)
-        if live_count is not None:
+        # 実測fps(paintEvent 間隔のEMA)。左上に小さく出す。実際にフレームが
+        # 出ているかの目安 - 表示がカクつく時に「何fps出ているか」を可視化する。
+        if self._show_fps:
+            wall = _time.monotonic()
+            if self._fps_last_wall is not None:
+                dt = wall - self._fps_last_wall
+                if dt > 0.0:
+                    inst = 1.0 / dt
+                    self._fps_ema = inst if self._fps_ema <= 0.0 else self._fps_ema * 0.85 + inst * 0.15
+            self._fps_last_wall = wall
+            painter.setPen(self._color("fg_dim"))
+            painter.setFont(self._font(10, True))
+            painter.drawText(6, 2, 96, band_top - 4, Qt.AlignLeft | Qt.AlignVCenter,
+                             f"{self._fps_ema:.0f} fps")
+
+        # Live tap count, in the top margin to the RIGHT of the judgment ring,
+        # so it no longer collides with the 良 judge pop that rises just above
+        # the ring. Shared by 連打 (count up) and 風船/くす玉 (count down) with
+        # the same position and design. Must be drawn before the lane clip
+        # below (that clip starts at band_top, so top-margin text would
+        # otherwise be clipped away).
+        roll_count = self._live_top_count(now)
+        if roll_count is not None:
+            judge_r_top = self.NOTE_R_BIG + 5
             painter.setPen(self._color("roll"))
             painter.setFont(self._font(22, True))
-            box_w = 160
-            box_x = max(0, judge_x - box_w)
-            painter.drawText(int(box_x), 2, box_w, band_top - 4, Qt.AlignRight | Qt.AlignVCenter, str(live_count))
+            box_x = judge_x + judge_r_top + 8
+            box_w = max(60, lane_w - box_x)
+            painter.drawText(int(box_x), 2, int(box_w), band_top - 4,
+                             Qt.AlignLeft | Qt.AlignVCenter, str(roll_count))
 
         # (The カレント/アンカー readout used to live here in the top margin.
         # Removed by request - the measure counter under the judgment ring and
@@ -1548,26 +1879,27 @@ class ChartPreviewWidget(QWidget):
         # below), so skipping a hidden entry here is purely cosmetic. ---
         lo_bar = bisect.bisect_left(self._bar_times, t_past)
         hi_bar = bisect.bisect_right(self._bar_times, t_future)
-        painter.setPen(QPen(self._color("fg_dim"), 2))
+        # チェックポイントの小節線は黄色で強調する(アンカーの代替)。
+        # チェックポイントは音源時刻なので、小節の譜面時刻から OFFSET を引いて
+        # 突き合わせる。
+        cps = self._checkpoints
+        snap = self.CHECKPOINT_SNAP
+        pen_bar = QPen(self._color("fg_dim"), 2)
+        pen_cp = QPen(self._color("checkpoint"), 3)
         for i in range(lo_bar, hi_bar):
             if not self._bar_visible[i]:
                 continue
-            x = judge_x + (self._bar_times[i] - now) * self._speed(self._bar_bpms[i], self._bar_scrolls[i])
+            bt = self._bar_times[i]
+            x = judge_x + (bt - now) * self._speed(self._bar_bpms[i], self._bar_scrolls[i])
+            is_cp = False
+            if cps:
+                at = bt - self._offset
+                for c in cps:
+                    if abs(c - at) < snap:
+                        is_cp = True
+                        break
+            painter.setPen(pen_cp if is_cp else pen_bar)
             painter.drawLine(int(x), band_top, int(x), band_bottom)
-
-        # Anchor measure line (机能1): the bar the current Space-play started
-        # from and where Q returns to - drawn over the plain bar lines in the
-        # accent color so it's obvious at a glance where "home" is. Its
-        # audio-time nav point is converted back to chart time to place it on
-        # the same scrolling axis as everything else.
-        if self._nav_points and self._anchor_idx < len(self._nav_points):
-            a_chart = self._nav_points[self._anchor_idx] + self._offset
-            if t_past <= a_chart <= t_future:
-                a_bpm = self._bpm_changes[self._idx_at(self._bpm_times, a_chart)][1]
-                a_scroll = self._scroll_changes[self._idx_at(self._scroll_times, a_chart)][1]
-                ax = judge_x + (a_chart - now) * self._speed(a_bpm, a_scroll)
-                painter.setPen(QPen(self._color("accent"), 3))
-                painter.drawLine(int(ax), band_top, int(ax), band_bottom)
 
         # --- judgment ring (drawn BEFORE notes/rolls so they pass over it,
         # like notes crossing the drum face in the real game). ---
@@ -1630,23 +1962,27 @@ class ChartPreviewWidget(QWidget):
         # 風船・くす玉: 終点バーは出さず、風船ノーツ1個だけを描く。区間に入る
         # 前は右から流れてきて、区間中(now が [start,end])は判定枠に固定する。
         # 固定されている間ずっと表示されるので、いつまで残っているか分かる。
-        for b_start, b_end, sp0, sp1 in self._balloon_draw:
-            if now > b_end:
+        for b_start, b_end, sp0, sp1, b_hits in self._balloon_draw:
+            if now >= b_end:
                 continue
             x0 = judge_x + (b_start - now) * sp0
             if now < b_start and x0 > lane_w + rs:
                 continue
-            draw_items.append((b_start, "balloon", (b_start, b_end, sp0)))
-        for k_start, k_end, sp0, sp1 in self._kusudama_draw:
-            if now > k_end:
+            draw_items.append((b_start, "balloon", (b_start, b_end, sp0, b_hits)))
+        for k_start, k_end, sp0, sp1, k_hits in self._kusudama_draw:
+            if now >= k_end:
                 continue
             x0 = judge_x + (k_start - now) * sp0
             if now < k_start and x0 > lane_w + rs:
                 continue
-            draw_items.append((k_start, "kusudama", (k_start, k_end, sp0)))
+            draw_items.append((k_start, "kusudama", (k_start, k_end, sp0, k_hits)))
         for i in range(lo, hi):
             draw_items.append((self._note_times[i], "note", i))
         # Latest first -> earliest drawn last -> earliest ends up on top.
+        if reveal_t is not None:
+            # 開始位置より前に始まる音符/連打/風船を隠す(z キーは各要素の時刻/
+            # 開始時刻なので、これで「開始位置から流れる」見え方になる)。
+            draw_items = [d for d in draw_items if d[0] >= reveal_t]
         draw_items.sort(key=lambda d: d[0], reverse=True)
         for t0, kind, payload in draw_items:
             if kind == "roll":
@@ -1656,8 +1992,15 @@ class ChartPreviewWidget(QWidget):
                     color = self._color("don") if r_start <= now <= r_end else self._color("roll")
                     self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
             elif kind in ("balloon", "kusudama"):
-                # くす玉も風船と同じ見た目。区間中は判定枠に固定、前は流れてくる。
-                b_start, b_end, sp0 = payload
+                # くす玉も風船と同じ見た目。区間に入る前は右から流れてきて、
+                # 区間中(now が [start,end))は判定枠に固定し、残り打数を
+                # カウントダウン表示する。終点(end)で割れる = 破裂音を鳴らして
+                # 消す(描画対象からも外れている)。指定打数を叩ききれなかった
+                # 場合だけ終点まで残る、という本家挙動を「等速で叩いて終点で
+                # ちょうど割れる」前提で再現している。
+                # 残り打数は上部読み出し(_live_top_count)に連打と同じ表記で
+                # 出すので、面には数字を描かない。区間中は判定枠に固定。
+                b_start, b_end, sp0, b_hits = payload
                 bx = judge_x if now >= b_start else judge_x + (b_start - now) * sp0
                 self._draw_balloon_note(painter, bx, mid_y)
             else:  # note - approach, then fly off after crossing the line.
@@ -1688,7 +2031,7 @@ class ChartPreviewWidget(QWidget):
         # ポップを描く。判定枠のすぐ上・レーンクリップ内なので他の演出の上に
         # 重なって出る。全ノーツ自動ヒットのため判定は常に「良」。
         hit = self._recent_hit(now)
-        if hit is not None:
+        if hit is not None and (reveal_t is None or (now - hit[0]) >= reveal_t):
             h_elapsed, h_char, _h_combo = hit
             h_big = h_char in NOTE_BIG
             h_base = self.NOTE_R_BIG if h_big else self.NOTE_R_SMALL
@@ -1801,6 +2144,8 @@ class ChartPreviewWidget(QWidget):
                 t = self._note_times[i]
                 if t <= now:
                     continue
+                if reveal_t is not None and t < reveal_t:
+                    continue   # リード再生中は開始位置より前の SE 表記も隠す
                 label = self._note_se[i]
                 if not label:
                     continue

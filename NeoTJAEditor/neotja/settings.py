@@ -9,6 +9,7 @@ _SETTINGS_KEYS = (
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
+    "preview_show_fps",
 )
 
 
@@ -50,8 +51,13 @@ def default_settings() -> dict:
         # ペースト操作では鳴らない。環境設定ダイアログ「エディタ・ツール」
         # タブのチェックボックスで変更。
         "note_input_sound": True,
-        # 譜面プレビューの最大再描画fps(CPU負荷の上限)。既定60。下げるほど軽い。
-        "preview_max_fps": 60,
+        # 譜面プレビューの最大再描画fps(CPU負荷の上限)。既定120。実際にはパネル
+        # のリフレッシュレートの2倍を狙い、この値で頭打ちにする(ソフト描画の
+        # ちらつき/カクつき対策。60Hzパネルなら120fps)。下げるほど軽い。
+        "preview_max_fps": 120,
+        # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
+        # 確認するための目安)。既定True。気になる場合はfalseで消せる。
+        "preview_show_fps": True,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための

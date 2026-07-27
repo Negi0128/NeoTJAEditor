@@ -39,12 +39,72 @@ def load_sprites(notes_png_path) -> dict:
     return sprites
 
 
-def generate_chart_image(content: str, selected_label: str, courses: list, sprites: dict = None) -> Image.Image:
+def load_skin_sprites_pil() -> dict:
+    """本家風エクスポート用に skin/Notes.png(OpenTaiko系。3行構成、中央行を
+    使い、不透明な列スパンで各スプライトを検出)を PIL で切り出す。プレビュー
+    (chart_preview_widget)の切り出しと同じ規約:
+    [1]ドン [2]カ [3]大ドン [4]大カ [5]連打頭 [7]大連打頭 [9]風船。
+    generate_chart_image の sprites 辞書と同じキー('1'..'4','5_head','6_head',
+    '7','9')で返す。skin が無い/失敗なら {}。"""
+    from neotja import settings as settings_mod
+    path = str(settings_mod.skin_notes_path())
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        import numpy as np
+        sheet = Image.open(path).convert("RGBA")
+        w, h = sheet.size
+        row_h = h // 3
+        y0 = row_h                      # middle animation frame
+        band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
+        col = band.max(axis=0) > 16
+        spans, start = [], None
+        for x in range(w):
+            if col[x] and start is None:
+                start = x
+            elif not col[x] and start is not None:
+                spans.append((start, x - 1)); start = None
+        if start is not None:
+            spans.append((start, w - 1))
+        if len(spans) < 10:
+            return {}
+
+        def cell(sp):
+            c = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
+            ca = np.asarray(c)[:, :, 3]
+            ys, xs = np.where(ca > 16)
+            if len(xs) == 0:
+                return None
+            return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+
+        out = {}
+        for key, idx in (("1", 1), ("2", 2), ("3", 3), ("4", 4),
+                         ("5_head", 5), ("6_head", 7), ("7", 9), ("9", 9)):
+            c = cell(spans[idx])
+            if c is not None:
+                out[key] = c
+        return out
+    except Exception:
+        return {}
+
+
+def generate_chart_image(content: str, selected_label: str, courses: list,
+                         sprites: dict = None, style: str = "default") -> Image.Image:
     """Renders a static timeline/score-sheet PNG for one course of a TJA file.
 
     `courses` is the output of TJACourseAnalyzer.parse_courses(content).
+    `style`: "default"(従来のスコアシート風) or "honke"(本家風。skin/Notes.png の
+    スプライトを使い、レーンを暗くしてゲーム画面に近い見た目にする)。
     """
+    honke = (style == "honke")
+    if honke:
+        skin = load_skin_sprites_pil()
+        if skin:
+            sprites = skin
     sprites = sprites or {}
+    # レーン(帯)の色。本家風は暗色でゲーム画面に近づける。
+    lane_fill = "#3c3c46" if honke else "#757575"
+    lane_mid = "#5a5a66" if honke else "#cccccc"
     ROW_BEATS = 16.0       # 1行に入る最大拍数 (4/4小節が4つ分 = 16拍)
     target_course = next((c for c in courses if c["label"] == selected_label), None)
     if target_course is None:
@@ -292,8 +352,8 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
     # --- A. 背景とレーン ---
     for r in range(total_rows):
         ly = MARGIN_Y + r * ROW_SPACING
-        draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill="#757575")
-        draw.line([0, ly + LANE_HEIGHT / 2, img_width, ly + LANE_HEIGHT / 2], fill="#cccccc", width=1)
+        draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill=lane_fill)
+        draw.line([0, ly + LANE_HEIGHT / 2, img_width, ly + LANE_HEIGHT / 2], fill=lane_mid, width=1)
 
     # --- B. ゴーゴータイム ---
     def draw_gogo(r, sx, ex, ly, is_first, is_last):
@@ -411,7 +471,9 @@ def generate_chart_image(content: str, selected_label: str, courses: list, sprit
                 fill_c = {"1": "#f44336", "2": "#29b6f6", "3": "#f44336", "4": "#29b6f6", "5": "#fcdb38",
                           "6": "#fcdb38", "7": "#ff9800", "9": "#9c27b0"}[nt]
                 r_radius = r_bg if nt in '3469' else r_sm
-                draw.ellipse([x - r_radius, y - r_radius, x + r_radius, y + r_radius], fill=fill_c, outline="#ffffff", width=2)
+                # 本家風は本家と同じクリーム色のフチ、既定は白フチ。
+                note_ring = "#fbf3e0" if honke else "#ffffff"
+                draw.ellipse([x - r_radius, y - r_radius, x + r_radius, y + r_radius], fill=fill_c, outline=note_ring, width=2)
                 if nt == '7' and n.get('hits', 0) > 0:
                     hits = n['hits']
                     draw.ellipse([x - 10, y - 10, x + 10, y + 10], fill="#ffffff", outline="#000000", width=1)

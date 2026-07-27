@@ -2,8 +2,8 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
-    QMessageBox, QPushButton, QVBoxLayout,
+    QComboBox, QDialog, QFileDialog, QGraphicsScene, QGraphicsView, QHBoxLayout,
+    QLabel, QMessageBox, QPushButton, QVBoxLayout,
 )
 
 from neotja import settings as settings_mod
@@ -27,6 +27,18 @@ class TJAImagePreviewDialog(QDialog):
         self.resize(1000, 700)
 
         layout = QVBoxLayout(self)
+
+        # スタイル選択(デフォルト / 本家風)。切り替えると再生成する。
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("スタイル:"))
+        self.style_combo = QComboBox()
+        self.style_combo.addItem("デフォルト", "default")
+        self.style_combo.addItem("本家風", "honke")
+        self.style_combo.currentIndexChanged.connect(self._on_style_changed)
+        style_row.addWidget(self.style_combo)
+        style_row.addStretch()
+        layout.addLayout(style_row)
+
         self.lbl_status = QLabel("画像生成中...")
         layout.addWidget(self.lbl_status)
 
@@ -51,11 +63,19 @@ class TJAImagePreviewDialog(QDialog):
 
         QTimer.singleShot(100, self._generate_and_show)
 
+    def _on_style_changed(self, _idx):
+        self.lbl_status.setText("画像生成中...")
+        self.lbl_status.show()
+        self.view.hide()
+        self.btn_save.setEnabled(False)
+        QTimer.singleShot(50, self._generate_and_show)
+
     def _generate_and_show(self):
         try:
+            style = self.style_combo.currentData()
             courses = self.main_window.analyzer.parse_courses(self.content)
             sprites = load_sprites(settings_mod.notes_png_path())
-            self.img = generate_chart_image(self.content, self.selected_label, courses, sprites)
+            self.img = generate_chart_image(self.content, self.selected_label, courses, sprites, style=style)
             qimage = ImageQt(self.img)
             pixmap = QPixmap.fromImage(qimage)
             self.scene.clear()

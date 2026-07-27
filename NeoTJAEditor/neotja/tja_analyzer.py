@@ -439,15 +439,43 @@ class TJACourseAnalyzer:
         measure_val = Decimal("1")
         clicks = []
 
-        def flush():
-            nonlocal total_time
-            if curr_bpm <= 0:
+        # 小節内で #BPMCHANGE があると 1 小節の実時間は「音符スロットごとの
+        # BPM で積算」しないと正しくない(build_preview_timeline と同じ)。以前は
+        # 小節末の 1 つの BPM で 240*measure_val/bpm と一括計算していたため、
+        # 小節途中で BPM が変わる曲(SUPERNOVA 等)で小節の頭が音符とずれ、
+        # メトロノーム音・波形グリッドが実際の小節線からずれていた。
+        #
+        # ここでは 1 小節を (音符数, その区間の BPM) のセグメントに分けて集計し、
+        # 小節の実時間 dur = Σ (count/N) * 240*measure_val/bpm を求める。拍(4分)
+        # は求めた dur を等分して打つ(小節の頭は必ず正確。BPM 変化が小節途中に
+        # ある「ギミック」小節の中間拍だけ等間隔近似になるが、頭は音符と一致)。
+        seg = []          # [(note_count, bpm)] 現在処理中の小節
+        cur_count = 0     # 現在のセグメントの音符スロット数
+        cur_seg_bpm = curr_bpm
+
+        def finalize_measure():
+            nonlocal total_time, seg, cur_count, cur_seg_bpm
+            if cur_count > 0:
+                seg.append((cur_count, cur_seg_bpm))
+            mv = measure_val
+            n_total = sum(c for c, _ in seg)
+            if mv <= 0:
+                seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
                 return
-            quarter_sec = Decimal(60) / curr_bpm
-            n_quarters = int(Decimal(4) * measure_val)  # truncates toward 0 == floor (measure_val > 0)
-            for k in range(max(0, n_quarters)):
-                clicks.append((total_time + k * quarter_sec, k == 0))
-            total_time += Decimal(240) * measure_val / curr_bpm
+            if n_total == 0:
+                dur = (Decimal(240) * mv / curr_bpm) if curr_bpm > 0 else Decimal(0)
+            else:
+                dur = Decimal(0)
+                for c, bp in seg:
+                    if bp > 0:
+                        dur += Decimal(c) * Decimal(240) * mv / bp / Decimal(n_total)
+            n_quarters = int(Decimal(4) * mv)  # floor
+            if n_quarters > 0:
+                beat = (dur / (Decimal(4) * mv)) if dur > 0 else Decimal(0)
+                for k in range(n_quarters):
+                    clicks.append((total_time + k * beat, k == 0))
+            total_time += dur
+            seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
 
         if course_bounds:
             target = None
@@ -462,7 +490,13 @@ class TJACourseAnalyzer:
                 if s.startswith("#"):
                     if s.startswith("#BPMCHANGE"):
                         try:
-                            curr_bpm = Decimal(s.split()[1])
+                            new_bpm = Decimal(s.split()[1])
+                            # 小節途中の変化: 直前までを旧BPMのセグメントとして確定。
+                            if cur_count > 0:
+                                seg.append((cur_count, cur_seg_bpm))
+                                cur_count = 0
+                            curr_bpm = new_bpm
+                            cur_seg_bpm = new_bpm
                         except Exception:
                             pass
                     elif s.startswith("#MEASURE"):
@@ -476,8 +510,10 @@ class TJACourseAnalyzer:
                             pass
                     continue
                 for c in s:
-                    if c == ",":
-                        flush()
+                    if c in "0123456789":
+                        cur_count += 1
+                    elif c == ",":
+                        finalize_measure()
 
         min_dur = Decimal(str(min_duration_seconds))
         if curr_bpm > 0:

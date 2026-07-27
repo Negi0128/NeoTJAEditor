@@ -1,7 +1,8 @@
 import math
 import os
+import time as _time
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QPushButton,
     QSlider, QStackedWidget, QVBoxLayout, QWidget,
@@ -43,36 +44,21 @@ class ChartInfoBar(QWidget):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
+        # 情報モードの上部にあった再生系マウス操作ボタン(再生/一時停止・
+        # アンカーへ・前後の小節)は削除した(要望)。すべてキーボード
+        # (Space/Q/PgUp/PgDn)で操作できるので情報モードは情報表示に専念する。
+        # コース/分岐だけは「今どのコースを見ているか」の表示も兼ねるので残す。
         button_row = QHBoxLayout()
-        btn_play = QPushButton("再生/一時停止 (Space)")
-        # Q now returns to the アンカー (the measure the current play started
-        # from), not the editor cursor - see ChartPreviewWidget.return_to_anchor.
-        btn_cursor = QPushButton("アンカーへ (Q)")
-        btn_prev = QPushButton("◀ 前の小節 (PgDn)")
-        btn_next = QPushButton("次の小節 ▶ (PgUp)")
         self.btn_course = QPushButton("コース: -")
         self.btn_branch = QPushButton("分岐: -")
         self.btn_branch.setVisible(False)  # only shown for courses that actually have #BRANCHSTART
-        if toggle_play_cb:
-            btn_play.clicked.connect(toggle_play_cb)
-        if return_anchor_cb:
-            btn_cursor.clicked.connect(return_anchor_cb)
-        if seek_prev_cb:
-            btn_prev.clicked.connect(lambda: seek_prev_cb(-1))
-        if seek_next_cb:
-            btn_next.clicked.connect(lambda: seek_next_cb(1))
         if cycle_course_cb:
             self.btn_course.clicked.connect(cycle_course_cb)
         if cycle_branch_cb:
             self.btn_branch.clicked.connect(cycle_branch_cb)
-        for btn in (btn_prev, btn_cursor, btn_play, self.btn_course, self.btn_branch, btn_next):
-            # QPushButton normally takes keyboard focus on click, and a
-            # focused QAbstractButton intercepts Space to click itself -
-            # e.g. after clicking "next measure", Space would trigger that
-            # button again instead of reaching ChartPreviewWidget's
-            # keyPressEvent (play/pause). NoFocus keeps these mouse-only, so
-            # keyboard focus - and Space/Q/PgUp/PgDn - always stays on the
-            # lane.
+        for btn in (self.btn_course, self.btn_branch):
+            # NoFocus keeps these mouse-only so keyboard focus - and
+            # Space/Q/PgUp/PgDn - always stays on the lane.
             btn.setFocusPolicy(Qt.NoFocus)
             button_row.addWidget(btn)
         layout.addLayout(button_row)
@@ -422,7 +408,26 @@ class PreviewDock(QDockWidget):
         self._editor_subtitle = ""
         self._editor_metronome_clicks = []
         self._editor_notes = []
+        self._preview_notes = []  # 作譜モードの波形の帯に描く音符 [(time,char,bpm,scroll,se)]
+        self._preview_spans = ([], [], [])  # (rolls, balloons, kusudamas) 同上
+        # 作譜モードの波形に描く命令注釈 (bpm/scroll/measure変化, gogo区間)
+        self._preview_commands = ([], [], [], [])
+        # f/j リード再生で一時的に止めた打音の復帰用に、直前の enabled を控える。
+        self._fade_prev_hit_enabled = True
+        # 作譜モードの波形グリッド用のクリック列 [(chart_time, is_measure)]。
+        # メトロノーム用の build_metronome_clicks は小節途中の #BPMCHANGE を
+        # 小節全体に一括適用するため build_preview_timeline の音符/小節時刻と
+        # ズレる(SUPERNOVA 等で小節線が音符とずれる)。作譜波形は音符と同じ
+        # 権威データ(bar_times)から小節線を作り、確実に音符と一致させる。
+        self._game_grid_clicks = []
         self._duration_ms = 0
+        # positionChanged fires ~60Hz. The playhead line / time label / seek
+        # slider don't need that, and the game preview extrapolates its own
+        # motion from a monotonic clock (needing only occasional drift
+        # correction), so running this whole handler at 60Hz just steals GUI-
+        # thread time and makes the preview's frame pacing uneven (visible
+        # microstutter). Throttle the handler to ~30Hz.
+        self._last_pos_ui_wall = 0.0
 
         self._build_ui()
 
@@ -468,6 +473,14 @@ class PreviewDock(QDockWidget):
         )
         self.chart_preview.set_se_text_enabled(self._se_text_enabled)
         self.chart_preview.set_info_update_cb(self.info_bar.set_realtime_info)
+        # 操作キー刷新: ドン/カの操作フィードバック音、f/j のリード再生。
+        self.chart_preview.set_hit_feedback_cb(self._play_feedback_sound)
+        self.chart_preview.set_fadein_play_cb(self._play_fadein)
+        self.chart_preview.set_reveal_cb(self._end_fadein)
+        # チェックポイントを作譜モードの命令レーンにも表示する(CHECK POINT)。
+        # game_waveform は後(_build_sakufu_page)で作られるので遅延参照する。
+        self.chart_preview.set_checkpoints_changed_cb(
+            lambda times: self.game_waveform.set_checkpoints(times))
 
         # 下部パネルを3モードの QStackedWidget に(フェーズ3):
         #   index 0 = 非表示モード(曲名・サブタイトルだけ表示) ← 既定
@@ -654,8 +667,20 @@ class PreviewDock(QDockWidget):
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
         self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause, force_dark=True)
-        self._wire_waveform(self.game_waveform)
-        self.game_waveform.setFixedHeight(150)
+        # 作譜モードの波形はドックと独立: 合成(モノ)を既定にし、固定幅の窓を
+        # 再生位置に追従スクロールさせる(スクロールする楽譜のような見え方)。
+        self._wire_waveform(self.game_waveform, sync_stereo=False)
+        self.game_waveform.set_stereo_view(False)     # 既定=合成
+        self.game_waveform.set_follow_window(6.0)      # 既定の表示幅(秒)。ホイールで変更可
+        # 波形の描画域(wh)は従来どおりにしつつ、命令帯を高くした分だけ全体を
+        # 高くする(命令ラベルの見切れ対策)。下部パネルには余白があるので窓
+        # サイズは変わらない。
+        self.game_waveform.setFixedHeight(170)
+        # レーン(120fps外挿クロック)の毎フレームで波形も同じ時刻に追従させる。
+        # 上のレーンと完全同期し、下の波形も 120fps で滑らかにスクロールする。
+        # 非表示モード/情報モードでは game_waveform が隠れていて update() が
+        # no-op になるため、そのときの追加コストは無い。
+        self.chart_preview.set_frame_cb(self.game_waveform.set_position_smooth)
         v.addWidget(self.game_waveform)
         v.addStretch()
         return page
@@ -666,9 +691,10 @@ class PreviewDock(QDockWidget):
         ラベルは _sync_title_page() で情報バーと同じ内容に同期する。"""
         page = QWidget()
         v = QVBoxLayout(page)
+        # 情報モードと同じく上寄せ(以前は上下 addStretch で中央寄せだった)。
+        # マージンも情報バー(10,8)に合わせ、曲名・サブタイトルの位置を揃える。
         v.setContentsMargins(10, 8, 10, 8)
         v.setSpacing(2)
-        v.addStretch()
         self._tp_title = QLabel("-")
         self._tp_title.setAlignment(Qt.AlignCenter)
         f = self._tp_title.font()
@@ -769,9 +795,21 @@ class PreviewDock(QDockWidget):
             self._editor_notes += _roll_tick_notes(preview_data.get("rolls", []), bpm_index=3)
             self._editor_notes += _roll_tick_notes(preview_data.get("balloons", []), bpm_index=2)
             self._editor_notes += _roll_tick_notes(preview_data.get("kusudamas", []), bpm_index=2)
+            self._preview_notes = list(preview_data.get("notes", []))
+            self._preview_spans = (list(preview_data.get("rolls", [])),
+                                   list(preview_data.get("balloons", [])),
+                                   list(preview_data.get("kusudamas", [])))
+            self._preview_commands = (list(preview_data.get("bpm_changes", [])),
+                                      list(preview_data.get("scroll_changes", [])),
+                                      list(preview_data.get("measure_changes", [])),
+                                      list(preview_data.get("gogo_regions", [])))
+            self._game_grid_clicks = self._bar_grid_clicks(preview_data.get("bar_times", []))
 
         self.waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
-        self.game_waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
+        self._set_game_grid(headers["bpm"], self.spin_offset.value())
+        self.game_waveform.set_notes(self._preview_notes)  # 作譜モード: 波形の下に譜面
+        self.game_waveform.set_spans(*self._preview_spans)
+        self.game_waveform.set_commands(*self._preview_commands)
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
@@ -800,7 +838,7 @@ class PreviewDock(QDockWidget):
         self.spin_offset.setValue(headers["offset"])
         self.spin_offset.blockSignals(False)
         self.waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
-        self.game_waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
+        self._set_game_grid(headers["bpm"], headers["offset"])
         self.metronome.set_schedule(self._editor_metronome_clicks, headers["offset"])
         self.hit_sounds.set_schedule(self._editor_notes, headers["offset"])
         self.chart_preview.set_offset(headers["offset"])
@@ -884,9 +922,26 @@ class PreviewDock(QDockWidget):
     # Playback
     # ------------------------------------------------------------------
     def _on_position_changed(self, ms):
+        # Throttle to ~30Hz while playing so the 60Hz position feed doesn't
+        # crowd the GUI thread and unevenly delay the preview's own redraw
+        # timer (which is what caused the "60fps but juddery" microstutter).
+        # The preview extrapolates smoothly between these anchors, so 30Hz
+        # drift correction is imperceptible; the playhead/label/slider are
+        # equally fine at 30Hz. Not throttled when paused/seeking (rare calls).
+        playing = self.audio.is_playing()
+        if playing:
+            now = _time.monotonic()
+            if now - self._last_pos_ui_wall < 0.030:
+                return
+            self._last_pos_ui_wall = now
         self.waveform.set_position(ms / 1000.0)
-        self.game_waveform.set_position(ms / 1000.0)
-        self.chart_preview.set_playback(ms / 1000.0, self.audio.is_playing())
+        # 再生中は作譜モードの波形をレーンの 120fps クロック(frame_cb →
+        # set_position_smooth)で駆動するので、ここでは触らない(30fpsの生値と
+        # 120fpsの外挿値が競合してカクつくのを避ける)。停止/一時停止/シーク中
+        # だけこちらで反映する。
+        if not playing:
+            self.game_waveform.set_position(ms / 1000.0)
+        self.chart_preview.set_playback(ms / 1000.0, playing)
         self.time_label.setText(f"{_fmt_time(ms)} / {_fmt_time(self._duration_ms)}")
         if not self.seek_slider.isSliderDown():
             self.seek_slider.blockSignals(True)
@@ -972,7 +1027,7 @@ class PreviewDock(QDockWidget):
         self._editor_metronome_clicks = clicks or []
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.waveform.set_beat_grid(self._editor_bpm, self.spin_offset.value(), self._editor_metronome_clicks)
-        self.game_waveform.set_beat_grid(self._editor_bpm, self.spin_offset.value(), self._editor_metronome_clicks)
+        self._set_game_grid(self._editor_bpm, self.spin_offset.value())
 
     def set_preview_data(self, data, course_stats=None):
         data = data or {}
@@ -980,6 +1035,17 @@ class PreviewDock(QDockWidget):
         self._editor_notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
         self._editor_notes += _roll_tick_notes(data.get("balloons", []), bpm_index=2)
         self._editor_notes += _roll_tick_notes(data.get("kusudamas", []), bpm_index=2)
+        self._preview_notes = list(data.get("notes", []))
+        self._preview_spans = (list(data.get("rolls", [])),
+                               list(data.get("balloons", [])),
+                               list(data.get("kusudamas", [])))
+        self._preview_commands = (list(data.get("bpm_changes", [])),
+                                  list(data.get("scroll_changes", [])),
+                                  list(data.get("measure_changes", [])),
+                                  list(data.get("gogo_regions", [])))
+        self.game_waveform.set_notes(self._preview_notes)  # 作譜モード: 波形の下に譜面
+        self.game_waveform.set_spans(*self._preview_spans)
+        self.game_waveform.set_commands(*self._preview_commands)
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
@@ -993,6 +1059,31 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # Volume
     # ------------------------------------------------------------------
+    def _play_feedback_sound(self, kind: str):
+        """操作フィードバックのドン/カ(kind='don'|'ka')を単発で鳴らす。打音
+        エンジンの play_once を使う(打音がオフのときは鳴らない)。"""
+        try:
+            self.hit_sounds.play_once(kind)
+        except Exception:
+            pass
+
+    def _play_fadein(self, measure_time: float, lead: float = 1.0):
+        """f/j 再生: 小節頭の少し前(measure_time - lead 秒)へシークして通常音量
+        で再生する。リード中(開始位置に達するまで)は打音(SE)を止め、譜面も
+        隠す(隠すのは chart_preview 側)。開始位置に達したら _end_fadein で SE を
+        元に戻す。音源はそのまま鳴らして「頭出しの助走」を聞かせる。"""
+        start = max(0.0, measure_time - lead)
+        # リード中は打音を止める(音量ではなく enabled を切る=確実に元へ戻せる)。
+        self._fade_prev_hit_enabled = getattr(self.hit_sounds, "enabled", True)
+        self.hit_sounds.set_enabled(False)
+        self.audio.seek(max(0, int(start * 1000)))
+        self.audio.play()
+
+    def _end_fadein(self):
+        """リード表示の終わり(再生位置が開始位置に到達 or 操作でキャンセル)。
+        止めていた打音を元の状態に戻す。"""
+        self.hit_sounds.set_enabled(getattr(self, "_fade_prev_hit_enabled", True))
+
     def set_volume(self, volume: float):
         """Sets the initial volume (0.0-1.0) without triggering the save
         callback, e.g. when restoring the value saved in settings.json."""
@@ -1037,16 +1128,52 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # OFFSET adjust
     # ------------------------------------------------------------------
-    def _wire_waveform(self, wf: WaveformWidget):
+    @staticmethod
+    def _bar_grid_clicks(bars):
+        """bar_times([(time,bpm,scroll,vis)] = 権威的な小節境界)から作譜波形の
+        グリッド用クリック [(chart_time, is_measure)] を作る。各小節は先頭を
+        小節線(True)にし、その小節の BPM の4分音符ぶんだけ次の小節境界まで
+        ビート線(False)で刻む。小節境界そのものは bar_times に一致するので、
+        音符/レーンと必ず揃う。"""
+        clicks = []
+        n = len(bars)
+        for i in range(n):
+            t = float(bars[i][0])
+            bpm = float(bars[i][1]) if bars[i][1] else 0.0
+            clicks.append((t, True))
+            if i + 1 >= n or bpm <= 0:
+                continue
+            t_next = float(bars[i + 1][0])
+            quarter = 60.0 / bpm
+            k = 1
+            while k < 64:
+                bt = t + k * quarter
+                if bt >= t_next - 1e-4:
+                    break
+                clicks.append((bt, False))
+                k += 1
+        return clicks
+
+    def _set_game_grid(self, bpm, offset):
+        """作譜波形のグリッドを bar_times 由来のクリックで引き直す。データが
+        まだ無ければメトロノーム用にフォールバック(空譜面/読み込み前)。"""
+        clicks = self._game_grid_clicks or self._editor_metronome_clicks
+        self.game_waveform.set_beat_grid(bpm, offset, clicks)
+
+    def _wire_waveform(self, wf: WaveformWidget, sync_stereo: bool = True):
         """ドック側/ゲーム窓側の2つの WaveformWidget を同じ配線にする。
-        ミップチェインは共有、ステレオ表示の切替も両方に伝播し、OFFSET調整
-        モードの確定値は既存の OFFSET スピンボックスへ流す(ヘッダ書き込みの
-        経路を二重に持たないため)。"""
+        ミップチェインは共有、OFFSET調整モードの確定値は既存の OFFSET スピン
+        ボックスへ流す(ヘッダ書き込みの経路を二重に持たないため)。
+
+        sync_stereo=False のときはステレオ/合成の共有をしない(作譜モードの
+        波形は常に合成を既定にしたいので、ドック側の設定と切り離す)。この波形の
+        合成ボタンは自分の表示だけを切り替える。"""
         wf.seekRequested.connect(self._on_seek_requested)
         wf.offsetPreview.connect(self._on_waveform_offset_preview)
         wf.offsetCommitted.connect(self._on_waveform_offset_committed)
-        wf.stereoToggled.connect(self._on_waveform_stereo_toggled)
-        wf.set_stereo_view(self._waveform_stereo)
+        if sync_stereo:
+            wf.stereoToggled.connect(self._on_waveform_stereo_toggled)
+            wf.set_stereo_view(self._waveform_stereo)
         if self._waveform_mips is not None:
             wf.set_mips(self._waveform_mips)
 
@@ -1054,9 +1181,10 @@ class PreviewDock(QDockWidget):
         return (self.waveform, self.game_waveform)
 
     def _on_waveform_stereo_toggled(self, stereo: bool):
+        # ドック側の波形の合成/ステレオ設定のみ同期・保存する。作譜モードの
+        # 波形(game_waveform)は合成固定の独立表示なので触らない。
         self._waveform_stereo = bool(stereo)
-        for wf in self._waveforms():
-            wf.set_stereo_view(stereo)
+        self.waveform.set_stereo_view(stereo)
         if self.waveform_stereo_cb:
             self.waveform_stereo_cb(self._waveform_stereo)
 
@@ -1070,14 +1198,13 @@ class PreviewDock(QDockWidget):
         """settings.json の waveform_stereo を復元するための入口(保存コール
         バックは呼ばない)。"""
         self._waveform_stereo = bool(stereo)
-        for wf in self._waveforms():
-            wf.set_stereo_view(self._waveform_stereo)
+        self.waveform.set_stereo_view(self._waveform_stereo)
 
     def _on_waveform_offset_preview(self, value: float):
         """ドラッグ中の未確定 OFFSET: グリッド表示だけ両方の波形に反映し、
         TJA ヘッダには書かない(確定は offsetCommitted 側)。"""
-        for wf in self._waveforms():
-            wf.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self._set_game_grid(self._editor_bpm, value)  # 作譜波形は bar_times 由来グリッド
         self.status_label.setText(f"OFFSET調整中: {value:+.3f} 秒")
 
     def _on_waveform_offset_committed(self, value: float):
@@ -1090,7 +1217,7 @@ class PreviewDock(QDockWidget):
 
     def _on_offset_value_changed(self, value):
         self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
-        self.game_waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self._set_game_grid(self._editor_bpm, value)
         self.metronome.set_schedule(self._editor_metronome_clicks, value)
         self.hit_sounds.set_schedule(self._editor_notes, value)
         self.chart_preview.set_offset(value)

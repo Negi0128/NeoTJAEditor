@@ -246,7 +246,11 @@ class MixerCore:
         n = self.song.shape[0] if self.song is not None else 0
         self.read_pos = float(max(0, min(frame, n)))
         self.ended = False
-        self.voices = []           # 飛び越えた効果音は鳴らさない(バースト不可)
+        # 発音中のボイスは消さずに自然に鳴らし切る。以前はシークのたびに
+        # self.voices=[] で全消去していたため、小節移動キーの操作音(ドン/カ)が
+        # 直後のシークで途切れて「一瞬だけ聞こえる」状態になっていた。飛び越えた
+        # 効果音を鳴らさない(バースト防止)のは _recompute_cursors のカーソル
+        # スキップで担保されるので、ここでの全消去は不要。
         self._recompute_cursors()
 
     def _recompute_cursors(self):
