@@ -1426,12 +1426,28 @@ class MainWindow(QMainWindow):
         text = cursor.selectedText().replace(" ", "\n")
         return cursor, text
 
+    # 譜面本文の音符文字だけを反転する変換表(ドン<->カ、大ドン<->大カ)。
+    _REVERSE_NOTE_MAP = str.maketrans("1234", "2143")
+
     def reverse_don_ka(self):
+        """あべこべ反転: 選択範囲の**譜面行のみ**ドン/カを入れ替える。
+
+        以前は選択範囲全体に translate をかけていたため、`#BPMCHANGE 180` の
+        `180` が `280` に、`#SCROLL 1.5` が `2.5` に化けるなど、命令の数値まで
+        書き換わって譜面が壊れていた。命令行(#で始まる)とヘッダ行(TITLE: 等)は
+        対象外にする。"""
         cursor, txt = self._get_selection()
         if txt is None:
             return
-        new = txt.translate(str.maketrans("1234", "2143"))
-        cursor.insertText(new)
+        out = []
+        for line in txt.split("\n"):
+            s = line.lstrip()
+            body = line.split("//")[0]
+            if s.startswith("#") or (":" in body and not s[:1].isdigit()):
+                out.append(line)          # 命令行/ヘッダ行はそのまま
+            else:
+                out.append(line.translate(self._REVERSE_NOTE_MAP))
+        cursor.insertText("\n".join(out))
         self._force_update()
 
     # ------------------------------------------------------------------
@@ -1749,11 +1765,27 @@ class MainWindow(QMainWindow):
         MeasureConvertDialog(self, txt, apply).exec()
 
     def open_image_exporter(self):
+        """譜面画像生成。書き出す対象は「いまプレビューで見ているコース」
+        (カーソル位置/コース切替に追従)にする。以前は常に courses_info[0]
+        (ファイル先頭のコース)固定だったので、おにを編集していても
+        かんたんの画像が出てしまっていた。"""
         content = self.editor.toPlainText()
         if not self.courses_info:
             QMessageBox.warning(self, "警告", "有効なコースが見つかりません。")
             return
-        target_label = self.courses_info[0]["label"]
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        target_label = None
+        try:
+            data = self.analyzer.build_preview_timeline(
+                content, cursor_line, self._preview_course_override,
+                branch_level=self._preview_branch_level,
+            )
+            key = data.get("course_key")
+            target_label = next((c["label"] for c in self.courses_info if c["key"] == key), None)
+        except Exception:
+            target_label = None
+        if not target_label:
+            target_label = self.courses_info[0]["label"]
         from neotja.dialogs.image_preview_dialog import TJAImagePreviewDialog
         TJAImagePreviewDialog(self, content, target_label).exec()
 

@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from neotja import theme
@@ -59,6 +59,13 @@ class WaveformWidget(QWidget):
         # sorted [(audio_time, char)]。未設定(None)なら何も描かない。
         self._notes_raw = None
         self._note_audio = None
+        # 描画ループ用の前計算(_apply_offset_local で構築)。
+        self._note_time_list = None
+        self._measure_time_list = None
+        # 音符の丸を毎フレーム drawEllipse(アンチエイリアス+ペン)で描くと、
+        # 1フレーム50個×120fps で描画時間の3割を占めていた。色/半径ごとに
+        # 1回だけ描いた QPixmap を貼るだけにする(レーン側と同じ手法)。
+        self._note_pix_cache = {}
         # 連打/風船/くす玉のスパン。raw は [(start_chart, end_chart, kind)]
         # kind は 'roll'(小)/'roll_big'(大)/'balloon'/'kusudama'。audio は
         # OFFSET 適用後の [(start_audio, end_audio, kind)]。
@@ -194,6 +201,15 @@ class WaveformWidget(QWidget):
             self._note_audio = sorted((t - offset, c) for t, c in self._notes_raw)
         else:
             self._note_audio = None
+        # 描画ループ用の前計算(作譜モードは120fpsで再描画されるので、毎フレーム
+        # リスト内包で作り直すと数千件の割当が毎秒十数万回になる)。
+        #  - _note_time_list: 音符時刻だけの列(bisect 用)
+        #  - _measure_time_list: 小節線の時刻だけの列(白い小節線の bisect 用)
+        self._note_time_list = [t for t, _c in self._note_audio] if self._note_audio else None
+        if self._click_audio_times:
+            self._measure_time_list = [t for t, is_m in self._click_audio_times if is_m]
+        else:
+            self._measure_time_list = None
         if self._spans_raw:
             self._span_audio = sorted((s - offset, e - offset, k) for s, e, k in self._spans_raw)
         else:
@@ -579,6 +595,28 @@ class WaveformWidget(QWidget):
             painter.setPen(self._pen("fg_dim"))
             painter.drawText(6, int(y_top) + 14, label)
 
+    def _note_pixmap(self, fill: QColor, r: int) -> QPixmap:
+        """半径 r・色 fill の音符の丸(クリーム色のフチ付き)を1回だけ描いて
+        キャッシュする。2倍で描いて縮小するのでフチが滑らか。"""
+        key = (fill.rgba(), r)
+        pix = self._note_pix_cache.get(key)
+        if pix is None:
+            ss = 2
+            d = r * 2 * ss
+            img = QImage(d + 2 * ss, d + 2 * ss, QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(QColor("#fbf3e0"), 2 * ss))
+            p.setBrush(QBrush(fill))
+            p.drawEllipse(ss, ss, d, d)
+            p.end()
+            side = r * 2 + 2
+            pix = QPixmap.fromImage(
+                img.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self._note_pix_cache[key] = pix
+        return pix
+
     def _draw_notes(self, painter, w: int, t0: float, t1: float, cy: int):
         """作譜モード: 波形の下の帯に譜面を描く。連打/風船/くす玉のスパン(バー)
         を先に、その上に音符(ドン=赤 / カ=青、大音符は大きめ)を円で描く。
@@ -610,18 +648,25 @@ class WaveformWidget(QWidget):
         # --- 音符(1〜4) ---
         na = self._note_audio
         if na:
-            times = [t for t, _ in na]
+            # 時刻列は前計算済み(_apply_offset_local)。以前はここで毎フレーム
+            # リスト内包で作り直しており、120fps×数千音符ぶんの割当になっていた。
+            times = self._note_time_list or []
             lo = max(0, bisect.bisect_left(times, t0) - 1)
             hi = bisect.bisect_right(times, t1) + 1
             don = QColor(self._pal["don"])
             ka = QColor(self._pal["ka"])
+            # 事前描画したピクスマップを貼るだけ(アンチエイリアスの
+            # drawEllipse+ペンを毎フレーム音符数ぶん実行しない)。
+            spr = {
+                (False, True): self._note_pixmap(don, 8),
+                (False, False): self._note_pixmap(ka, 8),
+                (True, True): self._note_pixmap(don, 11),
+                (True, False): self._note_pixmap(ka, 11),
+            }
             for t, c in na[lo:hi]:
                 x = self._sec_to_x(t)
-                big = c in ("3", "4")
-                r = 11 if big else 8
-                painter.setPen(QPen(ring, 2))
-                painter.setBrush(QBrush(don if c in ("1", "3") else ka))
-                painter.drawEllipse(QPoint(x, cy), r, r)
+                pix = spr[(c in ("3", "4"), c in ("1", "3"))]
+                painter.drawPixmap(x - pix.width() // 2, cy - pix.height() // 2, pix)
         painter.setBrush(Qt.NoBrush)
 
     def _fill_gogo(self, painter, y0: int, height: int, t0: float, t1: float):
@@ -641,14 +686,16 @@ class WaveformWidget(QWidget):
     def _draw_measure_lines(self, painter, y0: int, height: int, t0: float, t1: float):
         """譜面帯 [y0, y0+height] に白い小節線を引く(音符を小節ごとに区切る)。
         小節位置はグリッド用クリック(_click_audio_times)の is_measure から。"""
-        cat = self._click_audio_times
-        if not cat:
+        # 小節線の時刻だけを前計算した列を bisect で切り出す(以前は全クリックを
+        # 毎フレーム線形走査していた。長い曲では数千件×120fps になる)。
+        mt = self._measure_time_list
+        if not mt:
             return
+        lo = bisect.bisect_left(mt, t0)
+        hi = bisect.bisect_right(mt, t1)
         painter.setPen(QPen(QColor("#ffffff"), 1))
-        for t, is_measure in cat:
-            if not is_measure or t < t0 or t > t1:
-                continue
-            x = self._sec_to_x(t)
+        for i in range(lo, hi):
+            x = self._sec_to_x(mt[i])
             painter.drawLine(x, y0, x, y0 + height)
 
     def _draw_command_labels(self, painter, w: int, note_top: int, note_bottom: int,

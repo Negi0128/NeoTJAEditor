@@ -88,8 +88,30 @@ def load_skin_sprites_pil() -> dict:
         return {}
 
 
+def _draw_hits_above(draw, x, y, note_r, hits, font):
+    """本家風: 風船の打数を音符に重ねず、音符の**上**に白い角丸チップで描く。
+    顔(スプライト)が隠れないようにするため。"""
+    label = str(hits)
+    try:
+        tw = draw.textlength(label, font=font)
+    except Exception:
+        tw = len(label) * 7
+    pad = 4
+    bw = tw + pad * 2
+    bh = 16
+    bx = x - bw / 2
+    by = y - note_r - bh - 4          # 音符の上へ
+    try:
+        draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=4,
+                               fill="#ffffff", outline="#000000", width=1)
+    except Exception:                  # 古い Pillow に rounded_rectangle が無い場合
+        draw.rectangle([bx, by, bx + bw, by + bh], fill="#ffffff", outline="#000000", width=1)
+    draw.text((bx + pad, by + 1), label, fill="#000000", font=font)
+
+
 def generate_chart_image(content: str, selected_label: str, courses: list,
-                         sprites: dict = None, style: str = "default") -> Image.Image:
+                         sprites: dict = None, style: str = "default",
+                         measure_from: int = None, measure_to: int = None) -> Image.Image:
     """Renders a static timeline/score-sheet PNG for one course of a TJA file.
 
     `courses` is the output of TJACourseAnalyzer.parse_courses(content).
@@ -121,12 +143,72 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
             balloon_defs = [int(x.strip()) for x in l[8:].split(',') if x.strip().isdigit()]
 
     gogo_active = False
-    raw_measures, cur_m_lines = [], []
+    # 譜面分岐(#BRANCHSTART 〜 #N/#E/#M 〜 #BRANCHEND)に対応する。
+    # 分岐区間では 普通(N)/玄人(E)/達人(M) が同じ時間を共有するので、区間ごとに
+    # 3系統へ振り分けて集め、あとで「同じ位置の小節」を1スロットにまとめる。
+    # 分岐外の小節は branch=None の単独スロットになる。
+    cur_m_lines = []
+    slots = []                      # [{'variants': {branch: measure_lines}}]
+    branch_buf = {}                 # 分岐区間中: {'N': [...], 'E': [...], 'M': [...]}
+    cur_branch = None
+    in_branch = False
+
+    def _flush_branch():
+        """集めた分岐3系統を、位置ごとのスロットに変換して slots へ積む。"""
+        nonlocal branch_buf
+        if branch_buf:
+            n = max(len(v) for v in branch_buf.values())
+            for k in range(n):
+                variants = {}
+                for br, lst in branch_buf.items():
+                    if k < len(lst):
+                        variants[br] = lst[k]
+                if variants:
+                    slots.append({'variants': variants})
+        branch_buf = {}
+
     for line in target_course["data"]:
         line = line.split("//")[0].strip()
         if not line:
             continue
         if line.startswith("#"):
+            head = line.split()[0]
+            if head in ("#START", "#END"):
+                # 構造上の目印であって小節の中身ではない。以前はこれを命令として
+                # 溜め込むため、#END だけを含む「空の小節」が末尾に1つ増えていた。
+                continue
+            if head == "#BRANCHSTART":
+                # 実譜面では #BRANCHEND を書かず、次の #BRANCHSTART で暗黙に
+                # 前の分岐区間を閉じる書き方が普通にある(まださいたま2000 等)。
+                # ここで閉じずに捨てていたため、その区間の譜面が丸ごと消えていた。
+                if cur_m_lines:
+                    if in_branch and cur_branch:
+                        branch_buf.setdefault(cur_branch, []).append(cur_m_lines)
+                    else:
+                        slots.append({'variants': {None: cur_m_lines}})
+                    cur_m_lines = []
+                if in_branch:
+                    _flush_branch()
+                in_branch = True
+                cur_branch = None
+                branch_buf = {}
+                continue
+            if head in ("#N", "#E", "#M") and in_branch:
+                if cur_m_lines:
+                    # 直前のブランチの最後の小節(カンマ無しで終わった分)を確定
+                    branch_buf.setdefault(cur_branch or 'N', []).append(cur_m_lines)
+                    cur_m_lines = []
+                cur_branch = head[1]
+                branch_buf.setdefault(cur_branch, [])
+                continue
+            if head == "#BRANCHEND":
+                if cur_m_lines and cur_branch:
+                    branch_buf.setdefault(cur_branch, []).append(cur_m_lines)
+                    cur_m_lines = []
+                _flush_branch()
+                in_branch = False
+                cur_branch = None
+                continue
             cur_m_lines.append(('cmd', line))
         else:
             parts = line.split(',')
@@ -134,10 +216,39 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
                 if part:
                     cur_m_lines.append(('notes', part))
                 if i < len(parts) - 1:
-                    raw_measures.append(cur_m_lines)
+                    if in_branch and cur_branch:
+                        branch_buf.setdefault(cur_branch, []).append(cur_m_lines)
+                    else:
+                        slots.append({'variants': {None: cur_m_lines}})
                     cur_m_lines = []
     if cur_m_lines:
-        raw_measures.append(cur_m_lines)
+        if in_branch and cur_branch:
+            branch_buf.setdefault(cur_branch, []).append(cur_m_lines)
+        else:
+            slots.append({'variants': {None: cur_m_lines}})
+    if in_branch:
+        _flush_branch()
+
+    # #END 直前などで生まれる「中身の無い最後のスロット」は小節として数えない
+    # (放置すると存在しない小節が1つ余計に描かれる)。
+    while slots and not any(
+            any(t == 'notes' and v for t, v in lines)
+            or any(t == 'cmd' for t, v in lines)
+            for lines in slots[-1]['variants'].values()):
+        slots.pop()
+
+    # 既存処理との互換: 代表系統(達人>玄人>普通の順で存在するもの)を raw_measures と
+    # して扱い、時間・小節番号はこの代表で進める(分岐の各系統は同じ時間を占める)。
+    BRANCH_ORDER = ('N', 'E', 'M')
+    raw_measures = []
+    for sl in slots:
+        v = sl['variants']
+        rep = v.get(None)
+        if rep is None:
+            for br in ('M', 'E', 'N'):
+                if br in v:
+                    rep = v[br]; break
+        raw_measures.append(rep or [])
 
     # -------------------------------------------------------------
     # 1. タイムライン解析 (小節を4分音符を1とする「拍(beat)」単位に変換)
@@ -192,6 +303,26 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
                     if ch in "0123456789":
                         note_idx += 1
 
+        # 分岐の各系統(N/E/M)の音符も個別に取り出しておく(描画で3段に分ける)。
+        # 位置(frac)の求め方は上の代表系統と同じ。
+        variants = slots[m_idx]['variants'] if m_idx < len(slots) else {None: rm}
+        m_data['is_branch'] = (None not in variants)
+        bnotes = {}
+        for _br, _lines in variants.items():
+            _tot = sum(len(v) for t, v in _lines if t == 'notes')
+            _ni, _lst = 0, []
+            for _t, _v in _lines:
+                if _t != 'notes':
+                    continue
+                for _ch in _v:
+                    _fr = _ni / _tot if _tot > 0 else 0.0
+                    if _ch in "123456789":
+                        _lst.append((_fr, _ch))
+                    if _ch in "0123456789":
+                        _ni += 1
+            bnotes[_br] = _lst
+        m_data['bnotes'] = bnotes
+
         m_data['num'] = current_num
         m_data['den'] = current_den
         m_data['length_beats'] = current_num * 4 / current_den
@@ -199,6 +330,31 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         total_beats += m_data['length_beats']
 
         parsed_measures.append(m_data)
+
+    # -------------------------------------------------------------
+    # 1a. 小節範囲の切り出し(指定があれば)
+    #     measure_from/measure_to は 1 始まり・両端を含む。範囲外の小節を捨て、
+    #     残った先頭が拍0になるよう start_beat を寄せ直す。BALLOON: の割り当ては
+    #     曲全体での出現順なので、範囲より前にある風船/くす玉の数だけ開始番号を
+    #     ずらして、打数が食い違わないようにする。
+    # -------------------------------------------------------------
+    balloon_skip = 0
+    if parsed_measures and (measure_from or measure_to):
+        n_m = len(parsed_measures)
+        lo = max(1, int(measure_from or 1))
+        hi = min(n_m, int(measure_to or n_m))
+        if lo > hi:
+            lo, hi = hi, lo
+        lo_i, hi_i = lo - 1, hi - 1
+        for m in parsed_measures[:lo_i]:
+            balloon_skip += sum(1 for _f, c in m['notes'] if c in '79')
+        sel = parsed_measures[lo_i:hi_i + 1]
+        if sel:
+            base = sel[0]['start_beat']
+            for m in sel:
+                m['start_beat'] -= base
+            parsed_measures = sel
+            total_beats = sel[-1]['start_beat'] + sel[-1]['length_beats']
 
     # -------------------------------------------------------------
     # 1b. 小節ごとの行(row)割り当て
@@ -247,7 +403,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     events_cmd = []
     events_note = []
     events_roll = []
-    active_roll = None
+    active_rolls = {}          # branch(None/'N'/'E'/'M') -> 進行中の連打
 
     for m in parsed_measures:
         m_start = m['start_beat']
@@ -257,19 +413,26 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
             b = m_start + frac * m_len
             events_cmd.append({'beat': b, 'text': cmd_str, 'color': color})
 
-        for frac, c in m['notes']:
-            b = m_start + frac * m_len
-            if c in '567':
-                active_roll = {'r_type': c, 'start_beat': b}
-                events_note.append({'beat': b, 'note': c})
-            elif c == '8' and active_roll:
-                events_roll.append({'r_type': active_roll['r_type'], 'start_beat': active_roll['start_beat'], 'end_beat': b})
-                active_roll = None
-            elif c in '12349':
-                events_note.append({'beat': b, 'note': c})
+        # 分岐がある小節は系統ごとに、無い小節は単独(branch=None)で積む。
+        for br, blist in m['bnotes'].items():
+            ar = active_rolls.get(br)
+            for frac, c in blist:
+                b = m_start + frac * m_len
+                if c in '567':
+                    ar = {'r_type': c, 'start_beat': b}
+                    active_rolls[br] = ar
+                    events_note.append({'beat': b, 'note': c, 'branch': br})
+                elif c == '8' and ar:
+                    events_roll.append({'r_type': ar['r_type'], 'start_beat': ar['start_beat'],
+                                        'end_beat': b, 'branch': br})
+                    active_rolls[br] = ar = None
+                elif c in '12349':
+                    events_note.append({'beat': b, 'note': c, 'branch': br})
 
-    if active_roll:
-        events_roll.append({'r_type': active_roll['r_type'], 'start_beat': active_roll['start_beat'], 'end_beat': total_beats})
+    for _br, _ar in active_rolls.items():
+        if _ar:
+            events_roll.append({'r_type': _ar['r_type'], 'start_beat': _ar['start_beat'],
+                                'end_beat': total_beats, 'branch': _br})
 
     # ゴーゴータイム区間の抽出
     gogo_regions = []
@@ -288,7 +451,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         gogo_regions.append((current_gogo, total_beats))
 
     # 風船の打数を割り当て
-    balloon_idx = 0
+    balloon_idx = balloon_skip
     for n in events_note:
         if n['note'] == '7':
             n['hits'] = balloon_defs[balloon_idx] if balloon_idx < len(balloon_defs) else 0
@@ -309,7 +472,42 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
 
     total_rows = int((total_row_units - 1e-6) // ROW_BEATS) + 1 if total_row_units > 0 else 1
     img_width = MARGIN_X * 2 + int(ROW_BEATS * BEAT_WIDTH)
-    img_height = MARGIN_Y + total_rows * ROW_SPACING
+
+    # --- 譜面分岐の段組み ---------------------------------------------
+    # 分岐小節を含む行は 普通(N)/玄人(E)/達人(M) の3レーンを縦に積むので、行ごとに
+    # 高さが変わる。行の上端は cumulative に持つ(以前は r*ROW_SPACING 固定だった)。
+    BRANCH_ORDER = ('N', 'E', 'M')
+    BRANCH_LABEL = {'N': '普通', 'E': '玄人', 'M': '達人'}
+    BRANCH_TINT = {'N': "#9e9e9e", 'E': "#4f9a94", 'M': "#b5545c"}
+    row_branch = [False] * (total_rows + 1)
+    for m in parsed_measures:
+        if m.get('is_branch'):
+            # その小節が実際に占める行だけを3段にする(以前は前後の行まで巻き込んで
+            # いたので、分岐が無い行にまで3段レーンが出ていた)。
+            ru0 = m['row'] * ROW_BEATS + m['row_offset']
+            ru1 = ru0 + m['length_beats']
+            r0 = int(ru0 // ROW_BEATS)
+            r1 = int((ru1 - 1e-6) // ROW_BEATS)
+            for rr in range(max(0, r0), min(total_rows - 1, max(r0, r1)) + 1):
+                row_branch[rr] = True
+    row_lanes = [3 if row_branch[r] else 1 for r in range(total_rows + 1)]
+    row_tops = []
+    _y = MARGIN_Y
+    for r in range(total_rows):
+        row_tops.append(_y)
+        _y += (ROW_SPACING - LANE_HEIGHT) + LANE_HEIGHT * row_lanes[r]
+    row_tops.append(_y)
+    img_height = _y
+
+    def lane_y(r, branch=None):
+        """行 r・系統 branch のレーン上端 y。分岐でない行/系統は先頭レーン。"""
+        top = row_tops[r] if r < len(row_tops) else MARGIN_Y
+        if branch in BRANCH_ORDER and row_lanes[r] == 3:
+            return top + BRANCH_ORDER.index(branch) * LANE_HEIGHT
+        return top
+
+    def row_height(r):
+        return LANE_HEIGHT * (row_lanes[r] if r < len(row_lanes) else 1)
 
     img = Image.new("RGB", (img_width, img_height), "#dbdbdb")
     draw = ImageDraw.Draw(img)
@@ -345,15 +543,24 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
 
             sx = MARGIN_X + (row_start_b - r * ROW_BEATS) * BEAT_WIDTH
             ex = MARGIN_X + (row_end_b - r * ROW_BEATS) * BEAT_WIDTH
-            ly = MARGIN_Y + r * ROW_SPACING
+            ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
 
             draw_func(r, sx, ex, ly, row_start_b == start_b, row_end_b == end_b)
 
     # --- A. 背景とレーン ---
     for r in range(total_rows):
-        ly = MARGIN_Y + r * ROW_SPACING
-        draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill=lane_fill)
-        draw.line([0, ly + LANE_HEIGHT / 2, img_width, ly + LANE_HEIGHT / 2], fill=lane_mid, width=1)
+        if row_lanes[r] == 3:
+            # 分岐行: 普通/玄人/達人 の3レーンを積み、系統ごとに色味と見出しを付ける。
+            for bi, br in enumerate(BRANCH_ORDER):
+                ly = row_tops[r] + bi * LANE_HEIGHT
+                draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill=BRANCH_TINT[br])
+                draw.line([0, ly + LANE_HEIGHT / 2, img_width, ly + LANE_HEIGHT / 2],
+                          fill=lane_mid, width=1)
+                draw.text((4, ly + 2), BRANCH_LABEL[br], fill="#ffffff", font=font_cmd)
+        else:
+            ly = row_tops[r]
+            draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill=lane_fill)
+            draw.line([0, ly + LANE_HEIGHT / 2, img_width, ly + LANE_HEIGHT / 2], fill=lane_mid, width=1)
 
     # --- B. ゴーゴータイム ---
     def draw_gogo(r, sx, ex, ly, is_first, is_last):
@@ -374,9 +581,9 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         for i in range(1, div):
             b = m['start_beat'] + i * step
             r, x = get_row_x(row_units(b))
-            ly = MARGIN_Y + r * ROW_SPACING
+            ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
             color = "#aaaaaa" if (den % 4 == 0 and i % 2 != 0) else "#888888"
-            draw.line([x, ly, x, ly + LANE_HEIGHT], fill=color, width=1)
+            draw.line([x, ly, x, ly + row_height(r)], fill=color, width=1)
 
     # --- D. コマンド線とテキスト (階段状) ---
     row_cmds = {r: [] for r in range(total_rows + 1)}
@@ -387,7 +594,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     for r in range(total_rows):
         cmds = sorted(row_cmds[r], key=lambda c: c[0])
         last_end_x = [0, 0, 0]
-        ly = MARGIN_Y + r * ROW_SPACING
+        ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
         for x, text, color in cmds:
             try:
                 tw = draw.textlength(text, font=font_cmd)
@@ -403,16 +610,16 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
             last_end_x[level] = x + 2 + tw
             cmd_y = ly - 36 - level * 14
 
-            draw.line([x, cmd_y + 6, x, ly + LANE_HEIGHT], fill="#333333", width=2)
+            draw.line([x, cmd_y + 6, x, ly + row_height(r)], fill="#333333", width=2)
             draw.text((x + 2, cmd_y), text, fill=color, font=font_cmd)
 
     # --- E. 小節線（白太線） ---
     for m in parsed_measures:
         ru = m['row'] * ROW_BEATS + m['row_offset']
         r, x = get_row_x(ru)
-        ly = MARGIN_Y + r * ROW_SPACING
+        ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
 
-        draw.line([x, ly, x, ly + LANE_HEIGHT], fill="#ffffff", width=3)
+        draw.line([x, ly, x, ly + row_height(r)], fill="#ffffff", width=3)
         draw.text((x + 4, ly - 18), str(m['idx'] + 1), fill="#000000", font=font_num)
 
         # 行の右端にぴったり小節線が重なる場合の描画
@@ -420,8 +627,8 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         if end_ru > 0 and end_ru < total_row_units and abs(end_ru % ROW_BEATS) < 1e-6:
             r_end = int((end_ru - 1e-6) // ROW_BEATS)
             x_end = MARGIN_X + ROW_BEATS * BEAT_WIDTH
-            ly_end = MARGIN_Y + r_end * ROW_SPACING
-            draw.line([x_end, ly_end, x_end, ly_end + LANE_HEIGHT], fill="#ffffff", width=3)
+            ly_end = row_tops[r_end] if r_end < len(row_tops) else MARGIN_Y
+            draw.line([x_end, ly_end, x_end, ly_end + row_height(r_end)], fill="#ffffff", width=3)
 
     # 曲の最後の小節線
     if total_row_units > 0:
@@ -429,12 +636,13 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         if abs(total_row_units % ROW_BEATS) < 1e-6:
             r = int((total_row_units - 1e-6) // ROW_BEATS)
             x = MARGIN_X + ROW_BEATS * BEAT_WIDTH
-        ly = MARGIN_Y + r * ROW_SPACING
-        draw.line([x, ly, x, ly + LANE_HEIGHT], fill="#ffffff", width=3)
+        ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
+        draw.line([x, ly, x, ly + row_height(r)], fill="#ffffff", width=3)
 
     # --- F. 連打帯 ---
-    def draw_roll(r, sx, ex, ly, is_first, is_last, color, thick):
-        cy = ly + LANE_HEIGHT / 2
+    def draw_roll(r, sx, ex, ly, is_first, is_last, color, thick, branch=None):
+        # 分岐行では系統ごとのレーンへ(ly は行の上端なのでレーン分だけ下げる)。
+        cy = lane_y(r, branch) + LANE_HEIGHT / 2
         draw.line([sx, cy, ex, cy], fill=color, width=thick)
         if is_first:
             draw.ellipse([sx - thick / 2, cy - thick / 2, sx + thick / 2, cy + thick / 2], fill=color)
@@ -444,14 +652,21 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         draw.line([sx, cy + thick / 2, ex, cy + thick / 2], fill="#000000", width=1)
 
     for roll in events_roll:
+        # 本家風では風船/くす玉(7/9)の長さ(帯)は描かない。風船スプライトだけを
+        # 置く(要望)。連打(5/6)の帯は本家風でも従来どおり描く。
+        if honke and roll['r_type'] in '79':
+            continue
         color = "#fcdb38" if roll['r_type'] in '56' else "#ffb74d"
         thick = 34 if roll['r_type'] == '6' else 24
-        draw_band(row_units(roll['start_beat']), row_units(roll['end_beat']), lambda r, sx, ex, ly, first, last: draw_roll(r, sx, ex, ly, first, last, color, thick))
+        _br = roll.get('branch')
+        draw_band(row_units(roll['start_beat']), row_units(roll['end_beat']),
+                  lambda r, sx, ex, ly, first, last, _c=color, _t=thick, _b=_br:
+                      draw_roll(r, sx, ex, ly, first, last, _c, _t, _b))
 
     # --- G. ノーツ（左から重なる） ---
     for n in events_note:
         r, x = get_row_x(row_units(n['beat']))
-        y = MARGIN_Y + r * ROW_SPACING + LANE_HEIGHT / 2
+        y = lane_y(r, n.get('branch')) + LANE_HEIGHT / 2
         nt = n['note']
         r_sm, r_bg = 12, 17
 
@@ -459,13 +674,31 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
             spr = sprites.get(f"{nt}_head" if nt in '56' else nt)
             target_w = (r_bg * 2 + 4 if nt in '3469' else r_sm * 2 + 4)
             if nt in '79':
-                target_w = int(target_w * 1.5)
-            spr = spr.resize((target_w, target_w if nt not in '79' else int(target_w * 0.8)), Image.Resampling.LANCZOS)
-            img.paste(spr, (int(x - spr.width / 2), int(y - spr.height / 2)), spr)
+                if honke:
+                    # 本家風の風船/くす玉スプライトは「丸い顔 + 右へ伸びる袋」の
+                    # 横長画像。中心を音符位置に合わせると顔がずれ、袋が連打帯に
+                    # 覆いかぶさって重なって見えていた。高さを音符の直径に合わせ、
+                    # **顔の中心**を音符位置に置く(袋は右へ伸びる=本家と同じ)。
+                    scale = (r_sm * 2 + 4) / spr.height
+                    spr = spr.resize((max(1, int(spr.width * scale)),
+                                      max(1, int(spr.height * scale))), Image.Resampling.LANCZOS)
+                    face_r = spr.height / 2.0     # 顔はほぼ正円(直径=画像の高さ)
+                    img.paste(spr, (int(x - face_r), int(y - spr.height / 2)), spr)
+                else:
+                    target_w = int(target_w * 1.5)
+                    spr = spr.resize((target_w, int(target_w * 0.8)), Image.Resampling.LANCZOS)
+                    img.paste(spr, (int(x - spr.width / 2), int(y - spr.height / 2)), spr)
+            else:
+                spr = spr.resize((target_w, target_w), Image.Resampling.LANCZOS)
+                img.paste(spr, (int(x - spr.width / 2), int(y - spr.height / 2)), spr)
             if nt == '7' and n.get('hits', 0) > 0:
                 hits = n['hits']
-                draw.ellipse([x - 10, y - 10, x + 10, y + 10], fill="#ffffff", outline="#000000", width=1)
-                draw.text((x - (3 if hits < 10 else 6), y - 7), str(hits), fill="#000000", font=font_balloon)
+                if honke:
+                    # 本家風のみ、打数は音符に重ねず**上**に出す(顔が見えるように)。
+                    _draw_hits_above(draw, x, y, r_sm, hits, font_balloon)
+                else:
+                    draw.ellipse([x - 10, y - 10, x + 10, y + 10], fill="#ffffff", outline="#000000", width=1)
+                    draw.text((x - (3 if hits < 10 else 6), y - 7), str(hits), fill="#000000", font=font_balloon)
         else:
             if nt in '12345679':
                 fill_c = {"1": "#f44336", "2": "#29b6f6", "3": "#f44336", "4": "#29b6f6", "5": "#fcdb38",
