@@ -2292,12 +2292,11 @@ class ChartPreviewWidget(QWidget):
                 painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
             painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
-            # 音符の色には合わせず、地色に対して読みやすい中立色で描く。
-            # 本家素材の帯は明るい灰色(#8C8C8E)なので、そのときは濃い色にする
-            # — テーマの fg(明色)のままだと地に溶けて読めない。
+            # 音符の色には合わせない。本家素材の帯(灰色)のときは本家と同じ白。
+            # 素材が無いときはテーマの中立色(fg)。
             # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
             # 音符には SE 文字を残さない。
-            painter.setPen(QColor("#1a1a1a") if self._skin_lane_sub is not None
+            painter.setPen(QColor("#ffffff") if self._skin_lane_sub is not None
                            else self._color("fg"))
             fy = int(band_bottom + footer_h / 2.0)
             for i in range(hi - 1, lo - 1, -1):
