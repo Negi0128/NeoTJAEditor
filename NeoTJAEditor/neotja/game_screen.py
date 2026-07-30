@@ -46,14 +46,17 @@ FOOTER_Y, FOOTER_H = 676, 44
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
 # 0.8 倍で置く(1.6 倍にしたら6桁がパネルからはみ出した)。
-SCORE_RIGHT, SCORE_Y = 182, 206      # スコアは右詰め
+SCORE_RIGHT, SCORE_Y = 182, 193      # スコアは右詰め
 SCORE_SCALE = 0.9
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
 SCORE_ADVANCE = 0.76
-COURSE_SYM_POS = (26, 232)           # コース記号(おに 等)
+COURSE_SYM_POS = (26, 241)           # コース記号(おに 等)
 DRUM_POS = (200, 196)                # 太鼓 120x133
-NAMEPLATE_POS = (-10, 296)           # 1P 銘板(素材の左余白ぶん外へ出す)
+NAMEPLATE_POS = (-20, 296)           # 1P 銘板(素材の左余白ぶん外へ出す)
+# コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
+# 少し左へずらす。
+COMBO_X_OFF = -11
 COMBO_Y_OFF = 24                     # 太鼓の上端からコンボ数字までの距離
 COMBO_TEXT_Y_OFF = 62                # 同 「コンボ」文字まで
 COMBO_SCALE = 0.95
@@ -207,7 +210,7 @@ class GameScreenWidget(QWidget):
                 step = sheet.width() / 10 * COMBO_SCALE * COMBO_ADVANCE
                 dw = drum.width() if drum is not None else 120
                 # 太鼓の中心に対して左右対称に置く。
-                right = dx + dw // 2 + int(step * len(str(combo))) // 2
+                right = dx + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
                 self._draw_digits(p, sheet, combo, right=right, advance=COMBO_ADVANCE,
                                   y=dy + COMBO_Y_OFF, scale=COMBO_SCALE)
             ct = self._skin.get("combo_text")
