@@ -60,9 +60,9 @@ NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ�
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
 COMBO_X_OFF = 0
-COMBO_Y_OFF = 17                     # 太鼓の上端からコンボ数字までの距離
+COMBO_Y_OFF = 19                     # 太鼓の上端からコンボ数字までの距離
 COMBO_TEXT_Y_OFF = 65                # 同 「コンボ」文字まで
-COMBO_TEXT_X_OFF = 1                 # 「コンボ」文字の左右微調整
+COMBO_TEXT_X_OFF = 3                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
 COMBO_ADVANCE = 0.80
 # Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
