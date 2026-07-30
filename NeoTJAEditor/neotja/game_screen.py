@@ -95,8 +95,21 @@ LANE_FRAME_POS = (LANE_X - 2, LANE_Y - 56)
 # 枠のうち「レーンを囲う部分」(y=56 以降)は上の位置で固定。上の黒帯だけは
 # 独立して上下できるようにする — 帯とゲージが重なって潰れるのを避けるため。
 # 帯だけ下げてもレーンの窓は動かないので、レーンとの1px合わせは崩れない。
-FRAME_TOP_BAND = 56          # 素材のうち上の黒帯はここまで
-FRAME_TOP_Y_OFF = 6          # 黒帯だけ下へずらす量
+# 素材の y=48..55 はレーン箱の上辺(黒枠)なので、ここは動かしてはいけない。
+# 動かしてよいのは魂ゲージを囲う箱(y=0..47)だけ。
+FRAME_TOP_BAND = 48          # 素材のうち「ゲージの箱」はここまで
+FRAME_TOP_X_OFF = 5          # ゲージの箱だけ右へずらす量
+FRAME_TOP_Y_OFF = 1          # ゲージの箱だけ下へずらす量
+
+# 背景の絵(祭りの風景/下段/フッター)はまだ入れない。無地で出す。
+SHOW_BACKGROUND = False
+
+# 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
+# ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
+# この2つは画面側(親)が描く。判定円の真上、魂ゲージの左に収まる位置。
+HUD_POP_BOTTOM = LANE_Y - 4      # 「良」「連打数」の下端
+JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ(レーン側と同じ)
+JUDGE_POP_SEC = 0.34             # ポップの持続(レーン側と同じ)
 
 
 class GameScreenWidget(QWidget):
@@ -275,6 +288,49 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(SOUL_POS[0], SOUL_POS[1], soul,
                          0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
 
+    def _draw_lane_readouts(self, p, now, recent):
+        """レーンの上に出す2つの読み出し — 連打数と判定文字「良」。
+
+        レーンのウィジェットは帯ぴったりの高さしか無く、自分の外へは描けない
+        ので、ここ(親)が代わりに描く。連打中は本家と同じく打数を優先し、
+        「良」は出さない。"""
+        jx = LANE_X + JUDGE_X_IN_LANE
+        try:
+            count = self.chart_preview.live_tap_count(now)
+        except Exception:  # noqa: BLE001
+            count = None
+        if count is not None:
+            p.setPen(QColor("#ffd24a"))
+            f = p.font()
+            f.setPointSize(22)
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(jx - 100, HUD_POP_BOTTOM - 34, 200, 34,
+                       Qt.AlignHCenter | Qt.AlignBottom, str(count))
+            return
+
+        if recent is None:
+            return
+        elapsed = recent[0]
+        if not (0.0 <= elapsed < JUDGE_POP_SEC):
+            return
+        jp = elapsed / JUDGE_POP_SEC
+        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
+        p.setOpacity(max(0.0, 1.0 - jp))
+        spr = self.chart_preview.judge_sprite()
+        if spr is not None:
+            p.drawPixmap(int(jx - spr.width() / 2),
+                         int(HUD_POP_BOTTOM - spr.height() - rise), spr)
+        else:
+            p.setPen(QColor("#f5c518"))
+            f = p.font()
+            f.setPointSize(20)
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(int(jx - 40), int(HUD_POP_BOTTOM - 26 - rise), 80, 26,
+                       Qt.AlignCenter, "良")
+        p.setOpacity(1.0)
+
     def set_compact(self, compact: bool):
         compact = bool(compact)
         if compact == self._compact:
@@ -295,14 +351,14 @@ class GameScreenWidget(QWidget):
         p.fillRect(self.rect(), QColor("#0d1117"))
 
         # --- 上部背景 (0..188 が見える範囲) ---
-        bg = self._skin.get("bg_top")
+        bg = self._skin.get("bg_top") if SHOW_BACKGROUND else None
         if bg is not None:
             # 素材(1280x316)を 188px で切ると絵が途中で断ち切られるので、
             # 丸ごと描いて下端(188 以降)はレーン一式で隠す。地面の線が
             # レーンの上に来るので、本家と同じ「奥行きのある」見え方になる。
             p.drawPixmap(0, 0, bg)
 
-        if not self._compact:
+        if not self._compact and SHOW_BACKGROUND:
             # --- 下部背景 (360..720) ---
             bd = self._skin.get("bg_down")
             if bd is not None:
@@ -324,10 +380,11 @@ class GameScreenWidget(QWidget):
         frame = self._skin.get("lane_frame")
         if frame is not None:
             fx, fy = LANE_FRAME_POS
-            # 上の黒帯(素材の y=0..FRAME_TOP_BAND)だけ FRAME_TOP_Y_OFF ぶん下げる。
-            p.drawPixmap(fx, fy + FRAME_TOP_Y_OFF, frame,
+            # 魂ゲージを囲う箱(素材の y=0..FRAME_TOP_BAND)だけ独立して動かす。
+            p.drawPixmap(fx + FRAME_TOP_X_OFF, fy + FRAME_TOP_Y_OFF, frame,
                          0, 0, frame.width(), FRAME_TOP_BAND)
-            # レーンを囲う部分は動かさない(透明窓がレーンと1px合わせなので)。
+            # レーンを囲う部分(上辺・左右・下辺)は動かさない。透明窓がレーンと
+            # 1px 合わせなので、ここを動かすとレーンとずれる。
             p.drawPixmap(fx, fy + FRAME_TOP_BAND, frame,
                          0, FRAME_TOP_BAND, frame.width(),
                          frame.height() - FRAME_TOP_BAND)
@@ -348,6 +405,7 @@ class GameScreenWidget(QWidget):
         total = max(1, self.chart_preview.total_notes())
         self._draw_left_panel(p, combo, score, recent)
         self._draw_gauge(p, combo / total)
+        self._draw_lane_readouts(p, now, recent)
 
         p.end()
         # レーン本体は子ウィジェット(ChartPreviewWidget)が自分で描く。

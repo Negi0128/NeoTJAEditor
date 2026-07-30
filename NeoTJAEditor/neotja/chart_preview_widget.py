@@ -514,6 +514,16 @@ class ChartPreviewWidget(QWidget):
     def total_notes(self) -> int:
         return len(self._note_times)
 
+    def live_tap_count(self, now=None):
+        """連打の数え上げ / 風船・くす玉の残り打数。区間外は None。
+        本家レイアウトではレーンの上に余白が無く、この読み出しを画面側
+        (game_screen.py)が描くので、そこから呼べるように公開する。"""
+        return self._live_top_count(self._current_chart_time() if now is None else now)
+
+    def judge_sprite(self):
+        """判定文字「良」の絵 (skin/Judge.png の上段)。無ければ None。"""
+        return self._skin_judge_good
+
     def _recent_hit(self, now: float):
         """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
         判定エフェクト(しぶき・「良」・コンボ演出)はこれだけから描ける。
@@ -2333,6 +2343,11 @@ class ChartPreviewWidget(QWidget):
             pen = QPen(self._color("accent"), 3)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
-            painter.drawRect(1, 1, w - 2, h - 2)
+            if self._hide_lane_combo:
+                # 本家レイアウトでは余白が透けているので、そこに枠を引くと
+                # 宙に浮いて見える。レーン箱そのものを囲う。
+                painter.drawRect(1, band_top + 1, lane_w - 2, band_h + footer_h - 2)
+            else:
+                painter.drawRect(1, 1, w - 2, h - 2)
 
         painter.end()
