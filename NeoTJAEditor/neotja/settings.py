@@ -20,6 +20,8 @@ def default_settings() -> dict:
             **{k: {"name": f"シミュレータ{k}", "path": ""} for k in ("F2", "F3")},
         },
         "custom_shortcuts": {str(i): "" for i in range(10)},
+        # 動画書き出しの保存先(空 = 前回使った場所 / TJA と同じフォルダ)。
+        "record_output_dir": "",
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,

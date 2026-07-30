@@ -379,6 +379,7 @@ class MainWindow(QMainWindow):
             waveform_stereo=self.config_data.get("waveform_stereo", True),
             waveform_stereo_cb=self._save_waveform_stereo,
             se_text_enabled=self.config_data.get("se_text_enabled", True),
+            record_cb=self.open_video_recorder,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
@@ -584,7 +585,6 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
         tm.addSeparator()
-        tm.addAction("動画を書き出す", self.open_video_recorder)
         tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
         tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
@@ -1941,11 +1941,20 @@ class MainWindow(QMainWindow):
             content, cursor_line, self._preview_course_override,
             branch_level=self._preview_branch_level,
         )
+        # 保存先の既定: 環境設定の「動画の保存先」→ 前回使った場所 → TJA と同じ
+        # フォルダ、の順で最初に見つかった実在するものを使う。
+        out_dir = ""
+        for cand in (self.config_data.get("record_output_dir", ""),
+                     os.path.dirname(self.current_file) if self.current_file else ""):
+            if cand and os.path.isdir(cand):
+                out_dir = cand
+                break
+        if not out_dir:
+            out_dir = os.path.expanduser("~")
         from neotja.dialogs.record_dialog import RecordDialog
         RecordDialog(
             self, preview_data, self.preview_dock.spin_offset.value(), wave,
-            self.preview_dock.duration_seconds(),
-            os.path.dirname(self.current_file) if self.current_file else os.path.expanduser("~"),
+            self.preview_dock.duration_seconds(), out_dir,
         ).exec()
 
     def open_scroll_splitter(self):

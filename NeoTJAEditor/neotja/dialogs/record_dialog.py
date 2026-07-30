@@ -13,12 +13,13 @@ import time
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
-    QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
+    QPushButton, QVBoxLayout,
 )
 
 from neotja import recorder
+from neotja import settings as settings_mod
 from neotja.theme import COLORS
 
 # step() 1回あたりに使う時間の目安。絵を描くのは GUI スレッドでしかできないので
@@ -26,15 +27,17 @@ from neotja.theme import COLORS
 # 戻る。16ms = 60fps 1コマぶんで、これなら操作の引っかかりは体感できない。
 _SLICE_SEC = 0.016
 
-# 出力は固定。曲の頭から終わりまで / 1080p / 120fps。
-FPS = 120
-CANVAS = "1080p"
-# レーンは 908px 幅しかないので、そのまま 1920px へ引き伸ばすとぼやける。
-# 2倍の細かさで描いてから縮めることで 1080p でも輪郭が立つ。
-SUPERSAMPLE = 2
-# 1080p120 は枚数が多いので、エンコード側は medium より速い preset にする
-# (crf は据え置きなので見た目の劣化はほぼ無く、待ち時間だけ縮む)。
-X264_PRESET = "fast"
+# 画質は2択。範囲は常に「曲の頭から終わりまで」で固定。
+#   supersample: レーンは 908px 幅しかないので、そのまま引き伸ばすとぼやける。
+#     この倍率で細かく描いてから縮小するため、輪郭が立つ。
+#   所要目安: 曲の長さに対する倍率(実測から)。ダイアログの案内に使う。
+QUALITY_PRESETS = [
+    ("60 fps / 720p（速い）",  {"fps": 60,  "canvas": "720p",  "supersample": 2,
+                               "preset": "medium", "time_factor": 0.6}),
+    ("120 fps / 1080p（高画質）", {"fps": 120, "canvas": "1080p", "supersample": 2,
+                                "preset": "fast",   "time_factor": 1.9}),
+]
+DEFAULT_QUALITY = 1        # 既定は 120fps/1080p
 
 
 class RecordDialog(QDialog):
@@ -79,11 +82,17 @@ class RecordDialog(QDialog):
 
         form = QFormLayout()
 
-        # 出力は固定(曲全体 / 1080p / 120fps)。選ばせない代わりに、何が
-        # 出てくるのかはここに書いておく。
-        fixed = QLabel(f"曲全体（0 〜 {song_seconds:.1f} 秒）  1080p (1920×1080)  120 fps")
-        fixed.setStyleSheet("font-weight: bold;")
-        form.addRow("出力", fixed)
+        # 範囲は常に曲全体(選ばせない)。画質だけ選べる。
+        rng = QLabel(f"曲全体（0 〜 {song_seconds:.1f} 秒）")
+        rng.setStyleSheet("font-weight: bold;")
+        form.addRow("範囲", rng)
+
+        self.cb_quality = QComboBox()
+        for label, cfgq in QUALITY_PRESETS:
+            self.cb_quality.addItem(label, cfgq)
+        self.cb_quality.setCurrentIndex(DEFAULT_QUALITY)
+        self.cb_quality.currentIndexChanged.connect(self._update_estimate)
+        form.addRow("画質", self.cb_quality)
 
         self.chk_hit = QCheckBox("打音(ドン/カッ)を入れる")
         self.chk_hit.setChecked(True)
@@ -99,12 +108,8 @@ class RecordDialog(QDialog):
 
         layout.addLayout(form)
 
-        # 1080p120 は 1秒あたり 120枚。実測でおよそ曲の長さの2倍かかるので、
-        # 「あと何分待つのか」を先に出しておく(進捗にも残り時間が出る)。
-        self.lbl_status = QLabel(
-            "画面を録画するのではなく1コマずつ描き直すので、書き出し中に\n"
-            "アプリを操作しても出来上がりには影響しません。\n"
-            f"1080p/120fps は枚数が多く、目安で {song_seconds * 2 / 60:.0f} 分ほどかかります。")
+        self.lbl_status = QLabel()
+        self._update_estimate()
         self.lbl_status.setStyleSheet(f"color: {COLORS['fg_dim']};")
         layout.addWidget(self.lbl_status)
 
@@ -124,6 +129,17 @@ class RecordDialog(QDialog):
         base = os.path.splitext(os.path.basename(self._mw.current_file or "chart"))[0]
         course = self._preview.get("course_key") or ""
         return f"{base}{('_' + course) if course else ''}.mp4"
+
+    def _update_estimate(self):
+        """選んだ画質での所要目安を出す。実測(曲の長さ×係数)からのざっくり値で、
+        書き出しが始まれば進捗側に実測の残り時間が出る。"""
+        factor = self.cb_quality.currentData().get("time_factor", 1.0)
+        est = self._song_seconds * factor
+        est_text = f"{est / 60:.0f} 分" if est >= 90 else f"{est:.0f} 秒"
+        self.lbl_status.setText(
+            "画面を録画するのではなく1コマずつ描き直すので、書き出し中に\n"
+            "アプリを操作しても出来上がりには影響しません。\n"
+            f"この画質だと目安で {est_text} ほどかかります。")
 
     def _browse(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -149,6 +165,10 @@ class RecordDialog(QDialog):
             return
 
         cfg = self._mw.config_data
+        q = self.cb_quality.currentData()
+        # 次に開いたときも同じ場所が出るよう、保存先のフォルダを覚える。
+        cfg["record_output_dir"] = os.path.dirname(out)
+        settings_mod.save_settings(cfg)
         self._widget = recorder.make_offline_widget(
             self._preview, self._offset, cfg.get("se_text_enabled", True))
 
@@ -170,7 +190,8 @@ class RecordDialog(QDialog):
                 preview_data=self._preview, offset=self._offset, song_path=self._song,
                 # 曲の頭から終わりまで。end_sec=None で音源そのものの長さになる。
                 start_sec=0.0, end_sec=None,
-                fps=FPS, canvas=CANVAS, supersample=SUPERSAMPLE, preset=X264_PRESET,
+                fps=q["fps"], canvas=q["canvas"],
+                supersample=q["supersample"], preset=q["preset"],
                 don_path=cfg.get("hit_sound_don_path", "") or "",
                 ka_path=cfg.get("hit_sound_ka_path", "") or "",
                 sfx_volume=float(cfg.get("sfx_volume", 0.7)),

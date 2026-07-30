@@ -205,6 +205,30 @@ class SettingsDialog(QDialog):
         form.addRow("カツ音源(WAV)", ka_row)
 
         form.addRow(QLabel("未指定なら内蔵の合成音が鳴ります。"))
+
+        # 動画書き出し(えぬいーさん次郎の録画ボタン)の保存先の既定。
+        # 未指定なら「前回使った場所 → TJA と同じフォルダ」が使われる。
+        self.rec_dir_edit = QLineEdit(cfg.get("record_output_dir", ""))
+        self.rec_dir_edit.setReadOnly(True)
+        rec_browse_btn = QPushButton("参照...")
+        rec_clear_btn = QPushButton("クリア")
+
+        def browse_rec_dir():
+            p = QFileDialog.getExistingDirectory(
+                self, "動画の保存先フォルダを選択", self.rec_dir_edit.text())
+            if p:
+                self.rec_dir_edit.setText(p)
+        rec_browse_btn.clicked.connect(browse_rec_dir)
+        rec_clear_btn.clicked.connect(lambda: self.rec_dir_edit.setText(""))
+
+        rec_row = QWidget()
+        rec_row_layout = QHBoxLayout(rec_row)
+        rec_row_layout.setContentsMargins(0, 0, 0, 0)
+        rec_row_layout.addWidget(self.rec_dir_edit, 1)
+        rec_row_layout.addWidget(rec_browse_btn)
+        rec_row_layout.addWidget(rec_clear_btn)
+        form.addRow("動画の保存先", rec_row)
+        form.addRow(QLabel("未指定ならTJAと同じフォルダが既定になります。"))
         return w
 
     def _save(self):
@@ -230,6 +254,7 @@ class SettingsDialog(QDialog):
         cfg["se_text_enabled"] = self.se_text_check.isChecked()
         cfg["note_input_sound"] = self.note_input_sound_check.isChecked()
 
+        cfg["record_output_dir"] = self.rec_dir_edit.text()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         self.accept()

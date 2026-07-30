@@ -340,7 +340,7 @@ class PreviewDock(QDockWidget):
                  course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None,
                  audio_backend="mixer", sfx_volume_cb=None,
                  waveform_stereo=True, waveform_stereo_cb=None,
-                 se_text_enabled=True):
+                 se_text_enabled=True, record_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         self.waveform_stereo_cb = waveform_stereo_cb
@@ -356,6 +356,8 @@ class PreviewDock(QDockWidget):
         self.course_select_cb = course_select_cb
         self.branch_select_cb = branch_select_cb
         self.game_preview_changed_cb = game_preview_changed_cb
+        # レーン上の録画ボタンから呼ぶ(動画書き出しダイアログを開く)。
+        self.record_cb = record_cb
 
         # 再生バックエンドの選択(settings.json の audio_backend、既定 "mixer")。
         # "mixer": sounddevice の単一ソフトウェアミキサー(曲+打音+メトロノームを
@@ -514,16 +516,30 @@ class PreviewDock(QDockWidget):
         )
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
-        # モード切替トグルボタン(キーと併用)。レーン右上隅に浮かせ、どのモード
-        # でも常に見えるようにする。現在モード名を短く表示。フォーカスは奪わない
-        # (Space/Tab/PgUp/PgDn はレーンに保持)。
-        self._mode_names = ["非表示", "作譜", "情報"]
-        self.mode_button = QPushButton(self._mode_names[0], self.chart_preview)
-        self.mode_button.setFocusPolicy(Qt.NoFocus)
-        self.mode_button.setToolTip("下部パネルの表示切替(Tab)")
-        self.mode_button.resize(96, 26)
-        self.mode_button.move(int(ChartPreviewWidget.LANE_WIDTH) - 96 - 8, 6)
+        # レーン右上に並べる3つのボタン。右から「モード切替」「コース」「録画」。
+        # どれもフォーカスは奪わない(Space/Tab/PgUp/PgDn の操作対象はレーンの
+        # ままにする)。録画は通常再生モードのときだけ出す — 作譜/情報モードは
+        # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
+        self._mode_names = ["通常再生", "作譜", "情報"]
+        right = int(ChartPreviewWidget.LANE_WIDTH) - 8
+
+        self.mode_button = self._lane_button(self._mode_names[0], 96,
+                                             "下部パネルの表示切替(Tab)")
+        right -= 96
+        self.mode_button.move(right, 6)
         self.mode_button.clicked.connect(self.cycle_bottom_mode)
+
+        self.course_button = self._lane_button("コース: -", 150,
+                                               "クリックでコース切替(シミュ・録画の両方に反映)")
+        right -= 150 + 6
+        self.course_button.move(right, 6)
+        self.course_button.clicked.connect(self.chart_preview.cycle_course)
+
+        self.record_button = self._lane_button("● 録画", 84,
+                                               "いま選んでいるコースを動画に書き出す")
+        right -= 84 + 6
+        self.record_button.move(right, 6)
+        self.record_button.clicked.connect(self._on_record_clicked)
 
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -743,12 +759,34 @@ class PreviewDock(QDockWidget):
         for wf in self._waveforms():
             wf.refresh_theme()
 
+    def _lane_button(self, text, width, tooltip):
+        """レーンの上に浮かせる小さなボタン。フォーカスを取らないので、
+        押したあとも Space/Tab/PgUp/PgDn はレーンに効いたまま。"""
+        b = QPushButton(text, self.chart_preview)
+        b.setFocusPolicy(Qt.NoFocus)
+        b.setToolTip(tooltip)
+        b.resize(width, 26)
+        return b
+
+    def _on_record_clicked(self):
+        if self.record_cb:
+            self.record_cb()
+
+    def _set_lane_course_label(self, label, color):
+        """レーン上のコースボタンの表示を、いま映しているコースに合わせる。
+        情報バーのコースボタンと同じ内容(あちらは情報モードでしか見えない)。"""
+        self.course_button.setText(f"コース: {label or '-'}")
+        if color:
+            self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
+
     def cycle_bottom_mode(self):
-        """非表示(0)→作譜(1)→情報(2)→非表示… と循環。Tab キー(chart_preview)と
-        モードトグルボタンの両方から呼ばれる。"""
+        """通常再生(0)→作譜(1)→情報(2)→通常再生… と循環。Tab キー
+        (chart_preview)とモードトグルボタンの両方から呼ばれる。"""
         idx = (self.bottom_stack.currentIndex() + 1) % 3
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
+        # 録画ボタンは通常再生モード専用。
+        self.record_button.setVisible(idx == 0)
 
     def _on_speed_slider_changed(self, value: int):
         # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の
@@ -818,6 +856,8 @@ class PreviewDock(QDockWidget):
             self.info_bar.set_course_info(
                 preview_data.get("course_label"), preview_data.get("course_color"), preview_data.get("level"),
             )
+            self._set_lane_course_label(preview_data.get("course_label"),
+                                        preview_data.get("course_color"))
             self.info_bar.set_branch_info(preview_data.get("branch_level"), preview_data.get("has_branches"))
         self.info_bar.set_static_info(headers["title"], headers["subtitle"], course_stats)
         self._sync_title_page(headers["title"], headers["subtitle"])
@@ -1054,6 +1094,7 @@ class PreviewDock(QDockWidget):
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
+        self._set_lane_course_label(data.get("course_label"), data.get("course_color"))
         self.info_bar.set_branch_info(data.get("branch_level"), data.get("has_branches"))
         self.info_bar.set_static_info(self.title_label.text(), self._editor_subtitle, course_stats)
         self._sync_title_page(self.title_label.text(), self._editor_subtitle)
