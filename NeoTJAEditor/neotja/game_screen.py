@@ -43,6 +43,25 @@ JUDGE_X_IN_LANE = 81           # レーン左端から判定円の中心まで
 BG_DOWN_Y, BG_DOWN_H = 360, 360
 FOOTER_Y, FOOTER_H = 676, 44
 
+# --- 左パネルの中身(本家スクショから採った位置) ----------------------
+# 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
+# 0.8 倍で置く(1.6 倍にしたら6桁がパネルからはみ出した)。
+SCORE_RIGHT, SCORE_Y = 182, 192      # スコアは右詰め
+SCORE_SCALE = 0.8
+COURSE_SYM_POS = (26, 232)           # コース記号(おに 等)
+DRUM_POS = (200, 196)                # 太鼓 120x133
+NAMEPLATE_POS = (4, 296)             # 1P 銘板
+COMBO_Y_OFF = 24                     # 太鼓の上端からコンボ数字までの距離
+COMBO_TEXT_Y_OFF = 62                # 同 「コンボ」文字まで
+COMBO_SCALE = 0.95
+# コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
+COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
+# 太鼓が光る時間(叩いた瞬間からの秒数)。本家もごく短い。
+DRUM_GLOW_SEC = 0.09
+
+# --- 魂ゲージ ------------------------------------------------------------
+GAUGE_POS = (490, 150)   # 700x68。本家スクショでゲージ帯が始まる位置
+
 
 class GameScreenWidget(QWidget):
     """1280x720(または上半分だけの 1280x360)の画面を組み立てる。
@@ -56,6 +75,9 @@ class GameScreenWidget(QWidget):
         self.chart_preview = chart_preview
         self._compact = bool(compact)
         self._skin = {}
+        self._score_timeline = None
+        self._course_key = None
+        self._course_sym = None
         self._load_skin()
 
         chart_preview.setParent(self)
@@ -83,12 +105,120 @@ class GameScreenWidget(QWidget):
             ("footer", "Footer.png"),
             ("panel", "Taiko_Background.png"),
             ("lane_frame", "Taiko_Frame.png"),
+            ("drum", os.path.join("Combo", "Base.png")),
+            ("drum_don", os.path.join("Combo", "Don.png")),
+            ("drum_ka", os.path.join("Combo", "Ka.png")),
+            ("combo_white", os.path.join("Combo", "Digits.png")),
+            ("combo_silver", os.path.join("Combo", "DigitsSilver.png")),
+            ("combo_gold", os.path.join("Combo", "DigitsGold.png")),
+            ("combo_text", os.path.join("Combo", "Text.png")),
+            ("score_digits", "Score_Plate.png"),
+            ("nameplate", "NamePlate.png"),
+            ("gauge", "Gauge.png"),
+            ("gauge_base", "Gauge_Base.png"),
         ):
             path = os.path.join(base, rel)
             if os.path.exists(path):
                 pm = QPixmap(path)
                 if not pm.isNull():
                     self._skin[key] = pm
+
+    def set_chart(self, preview_data: dict, course_key=None):
+        """譜面が変わったときに呼ぶ。スコアの配点をここで決めておく
+        (毎フレーム計算しないで済むよう、時刻→点数の表を先に作る)。"""
+        from neotja.score import ScoreTimeline
+
+        self._score_timeline = ScoreTimeline(preview_data or {})
+        self._course_key = course_key or (preview_data or {}).get("course_key")
+        self._course_sym = None
+        if self._course_key:
+            # コース記号は Easy/Normal/Hard/Oni/Edit の5種。
+            name = {"easy": "Easy", "normal": "Normal", "hard": "Hard",
+                    "oni": "Oni", "edit": "Edit", "tower": "Oni",
+                    "ura": "Oni"}.get(str(self._course_key).lower())
+            if name:
+                path = os.path.join(str(settings_mod.skin_dir()), "CourseSymbol", name + ".png")
+                if os.path.exists(path):
+                    pm = QPixmap(path)
+                    self._course_sym = pm if not pm.isNull() else None
+        self.update()
+
+    # ------------------------------------------------------------------
+    def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
+                     right=None, left=None, y=0, scale=1.0):
+        """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。"""
+        if sheet is None:
+            return
+        cw, ch = sheet.width() / cols, sheet.height() / rows
+        w, h = cw * scale, ch * scale
+        s = str(int(value))
+        x = (right - w * len(s)) if right is not None else (left or 0)
+        for c in s:
+            i = int(c)
+            p.drawPixmap(QRect(int(x), int(y), int(w) + 1, int(h) + 1), sheet,
+                         QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
+            x += w
+
+    def _draw_left_panel(self, p, combo, score, recent):
+        """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
+        # --- スコア(右詰め) ---
+        self._draw_digits(p, self._skin.get("score_digits"), score,
+                          cols=10, rows=3, row=0,
+                          right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE)
+
+        # --- コース記号 ---
+        if self._course_sym is not None:
+            p.drawPixmap(COURSE_SYM_POS[0], COURSE_SYM_POS[1], self._course_sym)
+
+        # --- 太鼓 ---
+        drum = self._skin.get("drum")
+        dx, dy = DRUM_POS
+        if drum is not None:
+            p.drawPixmap(dx, dy, drum)
+            # 叩いた瞬間だけ、その音符の色で光らせる(面=赤 / 縁=水色)。
+            if recent is not None:
+                elapsed, char, _n = recent
+                if 0.0 <= elapsed < DRUM_GLOW_SEC:
+                    glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
+                    if glow is not None:
+                        # 叩いた直後がいちばん明るく、すぐ消える。
+                        p.setOpacity(max(0.0, 1.0 - elapsed / DRUM_GLOW_SEC))
+                        p.drawPixmap(dx, dy, glow)
+                        p.setOpacity(1.0)
+
+        # --- コンボ(太鼓の上に重ねる) ---
+        if combo > 0:
+            key = ("combo_gold" if combo >= COMBO_GOLD_AT else
+                   "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
+            sheet = self._skin.get(key)
+            if sheet is not None:
+                cw = sheet.width() / 10 * COMBO_SCALE
+                dw = drum.width() if drum is not None else 120
+                # 太鼓の中心に対して左右対称に置く。
+                right = dx + dw // 2 + int(cw * len(str(combo))) // 2
+                self._draw_digits(p, sheet, combo, right=right,
+                                  y=dy + COMBO_Y_OFF, scale=COMBO_SCALE)
+            ct = self._skin.get("combo_text")
+            if ct is not None and drum is not None:
+                p.drawPixmap(dx + drum.width() // 2 - ct.width() // 2,
+                             dy + COMBO_TEXT_Y_OFF, ct)
+
+        # --- 銘板 ---
+        np_ = self._skin.get("nameplate")
+        if np_ is not None:
+            p.drawPixmap(NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_)
+
+    def _draw_gauge(self, p, ratio):
+        """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
+        base = self._skin.get("gauge_base")
+        fill = self._skin.get("gauge")
+        gx, gy = GAUGE_POS
+        if base is not None:
+            p.drawPixmap(gx, gy, base)
+        if fill is not None:
+            wpx = int(fill.width() * max(0.0, min(1.0, ratio)))
+            if wpx > 0:
+                p.drawPixmap(gx, gy, fill, 0, 0, wpx, fill.height())
 
     def set_compact(self, compact: bool):
         compact = bool(compact)
@@ -141,6 +271,18 @@ class GameScreenWidget(QWidget):
         p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
         p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
                    QColor(0, 0, 0, 220))
+
+        # --- HUD(スコア・コンボ・太鼓・ゲージ) ---
+        # 現在値はレーン側が持っているものをそのまま使う。HUD 用に別のカウントを
+        # 持たないので、シークしても再生を止めてもズレようがない。
+        try:
+            now, combo, recent = self.chart_preview.game_state()
+        except Exception:  # noqa: BLE001
+            now, combo, recent = 0.0, 0, None
+        score = self._score_timeline.at(now) if self._score_timeline else 0
+        total = max(1, self.chart_preview.total_notes())
+        self._draw_left_panel(p, combo, score, recent)
+        self._draw_gauge(p, combo / total)
 
         p.end()
         # レーン本体は子ウィジェット(ChartPreviewWidget)が自分で描く。

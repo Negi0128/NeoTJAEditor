@@ -496,6 +496,20 @@ class ChartPreviewWidget(QWidget):
         progress = min(1.0, elapsed / cls.HIT_ANIM_DURATION)
         return (cls.HIT_FLY_DX * progress, -cls.HIT_FLY_DY * progress)
 
+    def game_state(self):
+        """本家レイアウト(game_screen.py)がHUDを描くのに要る現在値をまとめて返す。
+
+        戻り値: (譜面時刻, コンボ数, 直近ヒット or None)
+        直近ヒットは (判定線を通過してからの秒数, 音符の文字, コンボ番号)。
+        レーン側が既に持っている情報をそのまま渡すだけなので、HUD 用に
+        別途カウントを持たずに済み、シークしてもズレない。"""
+        now = self._current_chart_time()
+        combo = bisect.bisect_right(self._note_times, now)
+        return now, combo, self._recent_hit(now)
+
+    def total_notes(self) -> int:
+        return len(self._note_times)
+
     def _recent_hit(self, now: float):
         """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
         判定エフェクト(しぶき・「良」・コンボ演出)はこれだけから描ける。
