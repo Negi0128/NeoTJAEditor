@@ -21,7 +21,7 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 
 import os
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
@@ -142,6 +142,24 @@ class GameScreenWidget(QWidget):
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+        # レーンが update() しても、Qt が塗り直すのはレーンの矩形だけ。
+        # スコア・コンボ・太鼓・魂ゲージ・「良」はどれもレーンの外にあるので、
+        # 放っておくと一度描かれたきり止まって見える。ここで毎フレーム
+        # 塗り直す。レーンに重ならない2つの矩形だけを指定して、レーンを
+        # 二重に描かせない。
+        self._hud_timer = QTimer(self)
+        self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
+        self._hud_timer.timeout.connect(self._tick_hud)
+        self._hud_timer.start()
+
+    def _tick_hud(self):
+        if not self.isVisible():
+            return
+        # 上の帯: 魂ゲージ・魂・黒枠・「良」・連打数
+        self.update(0, 0, SCREEN_W, LANE_Y)
+        # 左パネル: スコア・コース記号・太鼓・コンボ・銘板
+        self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
 
     # ------------------------------------------------------------------
     def _load_skin(self):
