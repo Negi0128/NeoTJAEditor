@@ -1966,27 +1966,35 @@ class ChartPreviewWidget(QWidget):
         painter.setClipRect(0, band_top, lane_w, band_h)
 
         # レーンの地。スキンに素材があればそれを敷く(本家と同じ色になる)。
-        # ゴーゴー中は専用の地に差し替える — 本家も地の絵ごと変わる。
-        in_gogo = any(g0 <= now <= g1 for g0, g1 in self._gogo_regions)
-        lane_bg = self._skin_lane_gogo if in_gogo else self._skin_lane_main
-        if lane_bg is not None:
-            painter.drawPixmap(QRectF(0, band_top, lane_w, band_h), lane_bg,
-                               QRectF(lane_bg.rect()))
+        skinned = self._skin_lane_main is not None
+        if skinned:
+            painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
+                               self._skin_lane_main,
+                               QRectF(self._skin_lane_main.rect()))
         else:
             painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
 
-        # Real Taiko no Tatsujin flashes the whole play field, triggered the
-        # instant a gogo region's start/end crosses the judgment line - not a
-        # colored block that travels across the lane like a note would.
-        if any(g0 <= now <= g1 for g0, g1 in self._gogo_regions):
-            painter.fillRect(self.rect(), GOGO_TINT)
+        # ゴーゴー。本家の素材は「半透明の赤(左が濃く右へ薄れる)」なので、
+        # 地に差し替えるのではなく地の上に重ねる。素材が無いときだけ、
+        # 従来どおり画面全体を一色で染める。
+        in_gogo = any(g0 <= now <= g1 for g0, g1 in self._gogo_regions)
+        if in_gogo:
+            if self._skin_lane_gogo is not None:
+                painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
+                                   self._skin_lane_gogo,
+                                   QRectF(self._skin_lane_gogo.rect()))
+            else:
+                painter.fillRect(self.rect(), GOGO_TINT)
 
-        painter.setPen(QPen(self._color("border"), 2))
-        painter.drawLine(0, band_top, lane_w, band_top)
-        painter.drawLine(0, band_bottom, lane_w, band_bottom)
-        painter.drawLine(lane_w, band_top, lane_w, band_bottom)
-        painter.setPen(QPen(self._color("border"), 1, Qt.DashLine))
-        painter.drawLine(0, int(mid_y), lane_w, int(mid_y))
+        # 枠線と中央の破線は自前で描いていたもの。素材を敷いているときは
+        # 黒枠(Taiko_Frame)が外周を担当するし、本家に破線は無いので描かない。
+        if not skinned:
+            painter.setPen(QPen(self._color("border"), 2))
+            painter.drawLine(0, band_top, lane_w, band_top)
+            painter.drawLine(0, band_bottom, lane_w, band_bottom)
+            painter.drawLine(lane_w, band_top, lane_w, band_bottom)
+            painter.setPen(QPen(self._color("border"), 1, Qt.DashLine))
+            painter.drawLine(0, int(mid_y), lane_w, int(mid_y))
 
         t_past, t_future = self._visible_window(now, lane_w, judge_x)
 
@@ -2205,41 +2213,43 @@ class ChartPreviewWidget(QWidget):
         # widget), so this panel is combo-only now.
         # 本家レイアウト(game_screen.py)ではコンボは左パネルの太鼓の上に出す
         # ので、レーンの中には描かない。単体表示のときだけ従来どおり出す。
-        if self._hide_lane_combo:
-            painter.setClipping(False)
-            return
-        combo = bisect.bisect_right(self._note_times, now)
-        panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
-        panel_x = self.PANEL_INSET
-        panel_w = panel_right - panel_x
-        painter.setPen(QPen(self._color("accent"), 2))
-        painter.setBrush(QBrush(self._color("surface")))
-        painter.drawRect(int(panel_x), band_top, int(panel_w), band_h)
+        # 打音表記帯はコンボ表示の有無に関係なく描くので、ここで return しては
+        # いけない(以前は return していて、本家レイアウトのときだけ帯が丸ごと
+        # 消えていた)。コンボのパネルだけを飛ばす。
+        if not self._hide_lane_combo:
+            combo = bisect.bisect_right(self._note_times, now)
+            panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
+            panel_x = self.PANEL_INSET
+            panel_w = panel_right - panel_x
+            painter.setPen(QPen(self._color("accent"), 2))
+            painter.setBrush(QBrush(self._color("surface")))
+            painter.drawRect(int(panel_x), band_top, int(panel_w), band_h)
 
-        painter.setPen(self._color("fg_dim"))
-        painter.setFont(self._font(9))
-        painter.drawText(int(panel_x), band_top + 6, int(panel_w), 18, Qt.AlignCenter, "コンボ")
-        # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
-        # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
-        pop = 1.0
-        if combo > 0:
-            ce = now - self._note_times[combo - 1]
-            if 0.0 <= ce < self.COMBO_POP_DURATION:
-                pop = 1.0 + 0.14 * (1.0 - ce / self.COMBO_POP_DURATION)
-        num_h = band_h - 28
-        num_cx = panel_x + panel_w / 2.0
-        num_cy = band_top + 24 + num_h / 2.0
-        painter.setPen(self._color("fg_bright"))
-        painter.setFont(self._font(22, True))
-        if pop > 1.0:
-            painter.save()
-            painter.translate(num_cx, num_cy)
-            painter.scale(pop, pop)
-            painter.drawText(int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h),
-                             Qt.AlignCenter, str(combo))
-            painter.restore()
-        else:
-            painter.drawText(int(panel_x), band_top + 24, int(panel_w), num_h, Qt.AlignCenter, str(combo))
+            painter.setPen(self._color("fg_dim"))
+            painter.setFont(self._font(9))
+            painter.drawText(int(panel_x), band_top + 6, int(panel_w), 18, Qt.AlignCenter, "コンボ")
+            # コンボ数字はヒットのたびにポップ(拡大→等倍)する。直近ヒットからの
+            # 経過で倍率を出すステートレス方式なので、シークでも余計な状態を持たない。
+            pop = 1.0
+            if combo > 0:
+                ce = now - self._note_times[combo - 1]
+                if 0.0 <= ce < self.COMBO_POP_DURATION:
+                    pop = 1.0 + 0.14 * (1.0 - ce / self.COMBO_POP_DURATION)
+            num_h = band_h - 28
+            num_cx = panel_x + panel_w / 2.0
+            num_cy = band_top + 24 + num_h / 2.0
+            painter.setPen(self._color("fg_bright"))
+            painter.setFont(self._font(22, True))
+            if pop > 1.0:
+                painter.save()
+                painter.translate(num_cx, num_cy)
+                painter.scale(pop, pop)
+                painter.drawText(int(-panel_w / 2.0), int(-num_h / 2.0), int(panel_w), int(num_h),
+                                 Qt.AlignCenter, str(combo))
+                painter.restore()
+            else:
+                painter.drawText(int(panel_x), band_top + 24, int(panel_w), num_h,
+                                 Qt.AlignCenter, str(combo))
 
         painter.setClipRect(self.rect())
 
@@ -2255,22 +2265,30 @@ class ChartPreviewWidget(QWidget):
         # containing window re-fits, rather than the window permanently
         # carrying 26 px of empty strip.
         if self._se_text_enabled:
+            # ここまでは音符帯にクリップしたままなので、帯の地を描く前に
+            # 打音表記帯の範囲へ切り替える(そうしないと丸ごと切り落とされる)。
+            painter.setClipRect(0, band_bottom, lane_w, footer_h)
             # 打音表記帯の地。こちらもスキン素材があれば使う。
             if self._skin_lane_sub is not None:
-                painter.drawPixmap(QRectF(0, band_bottom + 1, lane_w, footer_h - 1),
+                # 素材の高さ(26px)ぶんぴったり敷く。1px 空けると譜面レーンとの
+                # 間に隙間の線が出て、本家の「地続き」の見え方にならない。
+                painter.drawPixmap(QRectF(0, band_bottom, lane_w, footer_h),
                                    self._skin_lane_sub,
                                    QRectF(self._skin_lane_sub.rect()))
             else:
                 painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
-            painter.setPen(QPen(self._color("border"), 2))
-            painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
-            painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
+                painter.setPen(QPen(self._color("border"), 2))
+                painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
+                painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
             painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
-            # 音符の色には合わせず、地色に対して読みやすい中立色(fg)で描く。
+            # 音符の色には合わせず、地色に対して読みやすい中立色で描く。
+            # 本家素材の帯は明るい灰色(#8C8C8E)なので、そのときは濃い色にする
+            # — テーマの fg(明色)のままだと地に溶けて読めない。
             # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
             # 音符には SE 文字を残さない。
-            painter.setPen(self._color("fg"))
+            painter.setPen(QColor("#1a1a1a") if self._skin_lane_sub is not None
+                           else self._color("fg"))
             fy = int(band_bottom + footer_h / 2.0)
             for i in range(hi - 1, lo - 1, -1):
                 t = self._note_times[i]

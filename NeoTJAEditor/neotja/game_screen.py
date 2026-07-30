@@ -71,7 +71,20 @@ COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 DRUM_GLOW_SEC = 0.09
 
 # --- 魂ゲージ ------------------------------------------------------------
-GAUGE_POS = (490, 150)   # 700x68。本家スクショでゲージ帯が始まる位置
+# Gauge.png / Gauge_Base.png は 700x68 だが、ゲージ本体は上の 44px だけ。
+# 残り(y=44..67)は使い回しの「クリア」文字が左下に詰め込まれているだけなので
+# 切り捨てる。本体の形は「y=0..17 は x=547 から(クリア圏の背の高い部分)、
+# y=18..43 は x=1 から(通常圏)」という段付き。
+GAUGE_BAR_H = 44
+# 黒枠(Taiko_Frame)の上帯も同じ段付きで、背の高い側が枠の x=715 から始まる。
+# 段の位置を合わせると 枠左端331 + 715 - 547 = 499 がゲージの左端になる。
+GAUGE_POS = (499, 144)
+# 背の高い側(クリア圏)の始まり。ここまで溜まると魂が光る。
+GAUGE_CLEAR_RATIO = 547.0 / 697.0
+# 魂の文字 (Soul.png 80x160 = 80x80 が2段。上段=通常 / 下段=クリア)。
+# ゲージ右端(499+697=1196)と枠の右端(331+950=1281)の間、85px の窓に収める。
+SOUL_CELL = 80
+SOUL_POS = (1198, 126)
 
 # レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
 # 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
@@ -139,6 +152,7 @@ class GameScreenWidget(QWidget):
             ("nameplate", "NamePlate.png"),
             ("gauge", "Gauge.png"),
             ("gauge_base", "Gauge_Base.png"),
+            ("soul", "Soul.png"),
         ):
             path = os.path.join(base, rel)
             if os.path.exists(path):
@@ -247,12 +261,19 @@ class GameScreenWidget(QWidget):
         base = self._skin.get("gauge_base")
         fill = self._skin.get("gauge")
         gx, gy = GAUGE_POS
+        ratio = max(0.0, min(1.0, ratio))
         if base is not None:
-            p.drawPixmap(gx, gy, base)
+            p.drawPixmap(gx, gy, base, 0, 0, base.width(), GAUGE_BAR_H)
         if fill is not None:
-            wpx = int(fill.width() * max(0.0, min(1.0, ratio)))
+            wpx = int(fill.width() * ratio)
             if wpx > 0:
-                p.drawPixmap(gx, gy, fill, 0, 0, wpx, fill.height())
+                p.drawPixmap(gx, gy, fill, 0, 0, wpx, GAUGE_BAR_H)
+        # 魂の文字。ゲージの右端に置き、クリア圏まで溜まったら光る段に変える。
+        soul = self._skin.get("soul")
+        if soul is not None:
+            row = 1 if ratio >= GAUGE_CLEAR_RATIO else 0
+            p.drawPixmap(SOUL_POS[0], SOUL_POS[1], soul,
+                         0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
 
     def set_compact(self, compact: bool):
         compact = bool(compact)
