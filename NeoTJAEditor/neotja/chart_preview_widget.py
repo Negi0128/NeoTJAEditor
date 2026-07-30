@@ -1514,6 +1514,9 @@ class ChartPreviewWidget(QWidget):
     # SENotes.png は 12 段。上から ドン / ド / コ / カッ / カ / ドン(大) /
     # カッ(大) / 連打 / ー / ーっ‼ / 連打(大) / ふうせん。
     SE_SPRITE_ROWS = 12
+    # 帯の高さに対する打音文字の倍率。段には字の上下に余白があるので、
+    # 1.0 より大きくしても字そのものは帯に収まる。
+    SE_SPRITE_SCALE = 1.2
     SE_SPRITE_INDEX = {"ドン": 0, "ド": 1, "コ": 2, "カッ": 3, "カ": 4,
                        "れんだ": 7, "ふうせん": 11, "くすだま": 11}
     SE_SPRITE_INDEX_BIG = {"ドン": 5, "カッ": 6, "れんだ": 10}
@@ -2350,7 +2353,7 @@ class ChartPreviewWidget(QWidget):
                 painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
                 painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
         if self._se_text_enabled and self._note_se:
-            painter.setClipRect(0, band_bottom + 1, lane_w, footer_h - 1)
+            painter.setClipRect(0, band_bottom, lane_w, footer_h)
             # 音符の色には合わせない。本家素材の帯(灰色)のときは本家と同じ白。
             # 素材が無いときはテーマの中立色(fg)。
             # 判定枠に重なって叩いた瞬間(t <= now)にラベルは消す - 通り過ぎた
@@ -2372,11 +2375,13 @@ class ChartPreviewWidget(QWidget):
                 x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
                 spr = self._se_sprite_for(label, big)
                 if spr is not None:
-                    # 素材の1段を帯の高さに合わせて縮め、音符の x に中心をそろえる。
-                    k = footer_h / spr.height()
-                    sw, sh = spr.width() * k, footer_h
-                    painter.drawPixmap(QRectF(x - sw / 2.0, band_bottom, sw, sh),
-                                       spr, QRectF(spr.rect()))
+                    # 素材の1段を帯の高さに合わせ、音符の x に中心をそろえる。
+                    # 倍率をかけたぶんは帯の上下中央に置く(段の余白に吸われる)。
+                    sh = footer_h * self.SE_SPRITE_SCALE
+                    sw = spr.width() * (sh / spr.height())
+                    painter.drawPixmap(
+                        QRectF(x - sw / 2.0, band_bottom + (footer_h - sh) / 2.0, sw, sh),
+                        spr, QRectF(spr.rect()))
                     continue
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
                 st = self._se_static_text(label, size)

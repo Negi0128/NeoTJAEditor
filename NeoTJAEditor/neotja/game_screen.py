@@ -59,9 +59,9 @@ COMBO_ANCHOR = (200, 196)
 NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ出す)
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
-COMBO_X_OFF = -3
+COMBO_X_OFF = 0
 COMBO_Y_OFF = 17                     # 太鼓の上端からコンボ数字までの距離
-COMBO_TEXT_Y_OFF = 60                # 同 「コンボ」文字まで
+COMBO_TEXT_Y_OFF = 65                # 同 「コンボ」文字まで
 COMBO_TEXT_X_OFF = 1                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
 COMBO_ADVANCE = 0.80
@@ -126,9 +126,9 @@ JUDGE_POP_SEC = 0.34             # ポップの持続
 # 2段目(橙)を使う — 本家も加算分だけ色が違う。
 SCORE_GAIN_SEC = 0.5             # 出てから消えるまで
 SCORE_GAIN_RISE = 16.0           # 昇る高さ
-SCORE_GAIN_SCALE = 0.82
+SCORE_GAIN_SCALE = 0.902
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
-SCORE_GAIN_Y_OFF = -6            # スコアの上端からさらに上へ
+SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
 OVERLAY_RECT = (-120, 130, 240, 110)   # (dx, y, w, h) dx は判定円中心からの左端
