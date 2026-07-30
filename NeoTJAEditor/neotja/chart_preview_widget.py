@@ -360,6 +360,10 @@ class ChartPreviewWidget(QWidget):
         self._se_static_cache = {}
         # 直近に渡されたプレビューデータ(set_lane_geometry の組み直し用)。
         self._preview_data_cache = None
+        # レーンの地と打音表記帯の素材(あれば自前の塗りより優先して使う)。
+        self._skin_lane_main = self._load_skin_pixmap("Lane_Main.png")
+        self._skin_lane_gogo = self._load_skin_pixmap("Lane_GoGo.png")
+        self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1486,6 +1490,15 @@ class ChartPreviewWidget(QWidget):
             self._start_scroll_anim(target)
             self._seek_seconds_cb(target)
 
+    @staticmethod
+    def _load_skin_pixmap(name):
+        """skin/<name> を読む。無ければ None(呼び出し側が自前描画へ落とす)。"""
+        path = os.path.join(str(settings_mod.skin_dir()), name)
+        if not os.path.exists(path):
+            return None
+        pm = QPixmap(path)
+        return None if pm.isNull() else pm
+
     def set_lane_geometry(self, lane_width, lane_height, judge_x,
                           top_margin=0, bottom_margin=0):
         """レーンの寸法を本家(TNDE)の実測値へ差し替える。
@@ -1952,7 +1965,15 @@ class ChartPreviewWidget(QWidget):
         # window size or per-note speed.
         painter.setClipRect(0, band_top, lane_w, band_h)
 
-        painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
+        # レーンの地。スキンに素材があればそれを敷く(本家と同じ色になる)。
+        # ゴーゴー中は専用の地に差し替える — 本家も地の絵ごと変わる。
+        in_gogo = any(g0 <= now <= g1 for g0, g1 in self._gogo_regions)
+        lane_bg = self._skin_lane_gogo if in_gogo else self._skin_lane_main
+        if lane_bg is not None:
+            painter.drawPixmap(QRectF(0, band_top, lane_w, band_h), lane_bg,
+                               QRectF(lane_bg.rect()))
+        else:
+            painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
 
         # Real Taiko no Tatsujin flashes the whole play field, triggered the
         # instant a gogo region's start/end crosses the judgment line - not a
@@ -2234,7 +2255,13 @@ class ChartPreviewWidget(QWidget):
         # containing window re-fits, rather than the window permanently
         # carrying 26 px of empty strip.
         if self._se_text_enabled:
-            painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
+            # 打音表記帯の地。こちらもスキン素材があれば使う。
+            if self._skin_lane_sub is not None:
+                painter.drawPixmap(QRectF(0, band_bottom + 1, lane_w, footer_h - 1),
+                                   self._skin_lane_sub,
+                                   QRectF(self._skin_lane_sub.rect()))
+            else:
+                painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
             painter.setPen(QPen(self._color("border"), 2))
             painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
             painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
