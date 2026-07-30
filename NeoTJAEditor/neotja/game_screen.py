@@ -22,7 +22,7 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import os
 
 from PySide6.QtCore import Qt, QRect, QTimer
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
@@ -66,8 +66,10 @@ COMBO_TEXT_X_OFF = 3                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
 COMBO_ADVANCE = 0.80
 # Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
-# 中身は y=26..98 に収まっているので、そこを2等分して片方だけ描く。
-COMBO_TEXT_BAND = (26, 98)
+# 実測では y=26..48 と y=76..98 で、間に空きがある。中身の範囲を単純に
+# 2等分すると金色側だけ十数px下へずれるので、素材から不透明な帯を実際に
+# 測って使う(_measure_combo_text_bands)。測れなかったときの保険がこれ。
+COMBO_TEXT_BAND_FALLBACK = ((26, 23), (76, 23))   # ((y, 高さ), ...)
 # コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
 COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 # 太鼓が光る時間(叩いた瞬間からの秒数)。本家もごく短い。
@@ -271,6 +273,38 @@ class GameScreenWidget(QWidget):
                 pm = QPixmap(path)
                 if not pm.isNull():
                     self._skin[key] = pm
+        self._combo_text_bands = self._measure_combo_text_bands()
+
+    def _measure_combo_text_bands(self):
+        """Combo/Text.png の「コンボ」2つ(通常色/金色)の縦位置を測る。
+
+        戻り値は ((y, 高さ), (y, 高さ))。素材の上下に余白があり、2つの間にも
+        空きがあるので、範囲を等分するのではなく不透明な行のかたまりを
+        そのまま拾う。拾えなければ実測値の定数へ落とす。"""
+        ct = self._skin.get("combo_text")
+        if ct is None:
+            return COMBO_TEXT_BAND_FALLBACK
+        try:
+            import numpy as np
+            img = ct.toImage().convertToFormat(QImage.Format_RGBA8888)
+            w, h = img.width(), img.height()
+            a = np.frombuffer(memoryview(img.constBits()), dtype=np.uint8)
+            a = a.reshape(h, img.bytesPerLine() // 4, 4)[:, :w, 3]
+            rows = a.max(axis=1) > 16
+            runs, start = [], None
+            for y in range(h):
+                if rows[y] and start is None:
+                    start = y
+                elif not rows[y] and start is not None:
+                    runs.append((start, y - start))
+                    start = None
+            if start is not None:
+                runs.append((start, h - start))
+            if len(runs) >= 2:
+                return (runs[0], runs[1])
+        except Exception:  # noqa: BLE001
+            pass
+        return COMBO_TEXT_BAND_FALLBACK
 
     def set_chart(self, preview_data: dict, course_key=None):
         """譜面が変わったときに呼ぶ。スコアの配点をここで決めておく
@@ -382,11 +416,11 @@ class GameScreenWidget(QWidget):
                                   y=cy0 + COMBO_Y_OFF, scale=COMBO_SCALE)
             ct = self._skin.get("combo_text")
             if ct is not None:
-                # 素材には「コンボ」が縦に2つ入っているので、片方だけを切り出す。
-                # 上段=通常色 / 下段=金 とみなし、数字の色に合わせる。
-                y0, y1 = COMBO_TEXT_BAND
-                band = (y1 - y0) // 2
-                src_y = y0 + (band if combo >= COMBO_GOLD_AT else 0)
+                # 素材には「コンボ」が縦に2つ入っている。上段=通常色 /
+                # 下段=金 とみなし、数字の色に合わせて片方だけを切り出す。
+                # 位置は実測した帯を使うので、どちらの色でも同じ場所に出る。
+                bands = getattr(self, "_combo_text_bands", COMBO_TEXT_BAND_FALLBACK)
+                src_y, band = bands[1] if combo >= COMBO_GOLD_AT else bands[0]
                 p.drawPixmap(QRect(cx0 + dw // 2 - ct.width() // 2 + COMBO_TEXT_X_OFF,
                                    cy0 + COMBO_TEXT_Y_OFF, ct.width(), band),
                              ct, QRect(0, src_y, ct.width(), band))
