@@ -108,8 +108,15 @@ class ChartPreviewWidget(QWidget):
     JUDGE_X = 200.0            # fixed pixel offset - not a ratio of widget width, so it never moves on resize
     LOOKAHEAD_BEATS = 4.0      # one full 4/4 measure ahead
     LANE_WIDTH = JUDGE_X + LOOKAHEAD_BEATS * BASE_PIXELS_PER_BEAT  # fixed total box width, independent of the widget/window size
-    NOTE_R_SMALL = 28
-    NOTE_R_BIG = 38
+    # 音符の半径。スキン(Notes.png)を使うときは素材の透明な余白ごと
+    # この直径へ縮めるため、見た目の円は半径より一回り小さく出る。本家の
+    # キャプチャと 1:1 で並べて、円の直径が実測 62px に見えるまで上げた値。
+    NOTE_R_SMALL = 38
+    NOTE_R_BIG = 52
+    # 判定円。本家(TNDE)のキャプチャ実測値: 外径 106px(半径53)、内側の輪は
+    # 半径35。音符がこの内側にすっぽり入る比率になっている。
+    JUDGE_RING_R = 53
+    JUDGE_RING_R_INNER = 35
     LANE_HEIGHT = NOTE_R_BIG * 2 + 30  # fixed box height too, so resizing the window can't stretch it vertically either
     TOP_MARGIN = 56    # room above the lane box for the live roll/balloon count readout
     # 打音表記 (SE text) strip, directly under the note band and inside the
@@ -344,6 +351,10 @@ class ChartPreviewWidget(QWidget):
         # (the pen does that) - but _font()/_color() above are still the
         # single source of both, so nothing here reads COLORS directly.
         self._se_static_cache = {}
+        # 直近に渡されたプレビューデータ(set_lane_geometry の組み直し用)。
+        self._preview_data_cache = None
+        # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
+        self._hide_lane_combo = False
         self._se_static_family = None
 
         self._timer = QTimer(self)
@@ -973,6 +984,8 @@ class ChartPreviewWidget(QWidget):
         notes/rolls/balloons/kusudamas/gogo_regions/bar_times/bpm_changes/
         measure_changes/scroll_changes/course_key/course_label/course_color/
         level/available_courses."""
+        # 寸法を差し替えた(set_lane_geometry)ときに組み直せるよう控えておく。
+        self._preview_data_cache = data
         notes = sorted(data.get("notes") or [], key=lambda n: n[0])
         self._note_times = [n[0] for n in notes]
         self._note_chars = [n[1] for n in notes]
@@ -1451,6 +1464,36 @@ class ChartPreviewWidget(QWidget):
         else:
             self._start_scroll_anim(target)
             self._seek_seconds_cb(target)
+
+    def set_lane_geometry(self, lane_width, lane_height, judge_x,
+                          top_margin=0, bottom_margin=0):
+        """レーンの寸法を本家(TNDE)の実測値へ差し替える。
+
+        描画コードは一貫して self.LANE_WIDTH / self.JUDGE_X … と参照している
+        ので、インスタンス側に同名の属性を置けばクラス定数より優先され、
+        描画ロジックには一行も手を入れずに寸法だけ入れ替えられる。
+
+        本家の実測値 (1280x720 のキャプチャより):
+            レーン本体 947x130 / 判定円は左端から 81px / 打音表記帯 26px
+        従来の単体表示(908x106, 判定円 200px)はクラス定数のままなので、
+        この呼び出しをしない限り今までと同じ見た目で動く。"""
+        self.LANE_WIDTH = float(lane_width)
+        self.LANE_HEIGHT = int(lane_height)
+        self.JUDGE_X = float(judge_x)
+        self.TOP_MARGIN = int(top_margin)
+        self.BOTTOM_MARGIN = int(bottom_margin)
+        se = self.SE_FOOTER_HEIGHT
+        self.WIDGET_HEIGHT = top_margin + self.LANE_HEIGHT + se + bottom_margin
+        self.WIDGET_HEIGHT_NO_SE = top_margin + self.LANE_HEIGHT + bottom_margin
+        self.setFixedSize(int(self.LANE_WIDTH), self.widget_height())
+        self._rebuild_draw_cache()
+        self.update()
+
+    def _rebuild_draw_cache(self):
+        """寸法を変えたあとに、寸法依存の下準備をやり直す。"""
+        self._se_static_cache.clear()
+        if self._preview_data_cache is not None:
+            self.set_preview_data(self._preview_data_cache)
 
     def set_offset(self, offset: float):
         self._offset = offset
@@ -1935,8 +1978,12 @@ class ChartPreviewWidget(QWidget):
 
         # --- judgment ring (drawn BEFORE notes/rolls so they pass over it,
         # like notes crossing the drum face in the real game). ---
-        judge_r = self.NOTE_R_BIG + 5
-        judge_r_inner = self.NOTE_R_SMALL
+        # 本家(TNDE)のキャプチャ実測: 外側の輪が半径53、内側の輪が半径35で、
+        # 音符(直径52)がちょうど内側に収まる大きさ。従来は NOTE_R_BIG+5(=43)
+        # と小さく、そのぶん音符が痩せて見えていた。JUDGE_RING_R を持たせて
+        # おき、本家レイアウト以外でも同じ比率になるようにする。
+        judge_r = self.JUDGE_RING_R
+        judge_r_inner = self.JUDGE_RING_R_INNER
         painter.setPen(QPen(self._color("fg_bright"), 3))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
@@ -2114,6 +2161,11 @@ class ChartPreviewWidget(QWidget):
         #
         # Course/level moved below the lane (see the info bar under the
         # widget), so this panel is combo-only now.
+        # 本家レイアウト(game_screen.py)ではコンボは左パネルの太鼓の上に出す
+        # ので、レーンの中には描かない。単体表示のときだけ従来どおり出す。
+        if self._hide_lane_combo:
+            painter.setClipping(False)
+            return
         combo = bisect.bisect_right(self._note_times, now)
         panel_right = max(self.PANEL_INSET + 80, judge_x - judge_r - self.PANEL_GAP)
         panel_x = self.PANEL_INSET
