@@ -103,11 +103,18 @@ class ChartPreviewWidget(QWidget):
     # PeepoDrumKit の拡張レーン(広い窓)は 1 拍 = GameWorldSpaceDistancePerLane
     # Beat(356) を多めに見せて詰まって見えるので、こちらも 4 拍ぶん見せて
     # 177px/拍 に詰める(レーンの総ピクセル幅は 200+4*177 で従来とほぼ同じ)。
-    BASE_PIXELS_PER_BEAT = 177.0
+    # 本家(TNDE)のスクリーンショット実測: 16分の隣接間隔がどこも 60px
+    # (連打の切れ目も 358px≒6個ぶん / 298px≒5個ぶん と、60px の格子に
+    # ぴったり乗っていた)。よって 1拍 = 60*4 = 240px。
+    # 以前は 177px で、本家の 74% しかなく音符が詰まって見えていた。
+    BASE_PIXELS_PER_BEAT = 240.0
     WINDOW_REF_BPM = 60.0  # lower bound used only to size the visible-time window (see _visible_window)
     JUDGE_X = 200.0            # fixed pixel offset - not a ratio of widget width, so it never moves on resize
     LOOKAHEAD_BEATS = 4.0      # one full 4/4 measure ahead
-    LANE_WIDTH = JUDGE_X + LOOKAHEAD_BEATS * BASE_PIXELS_PER_BEAT  # fixed total box width, independent of the widget/window size
+    # 単体表示(本家レイアウトを使わないとき)のレーン幅。1拍を広げても窓の
+    # 大きさが変わらないよう、従来どおりの実寸で固定しておく。本家レイアウトの
+    # ときは set_lane_geometry() が 947 に差し替える。
+    LANE_WIDTH = 908.0
     # 音符の半径。スキン(Notes.png)を使うときは素材の透明な余白ごと
     # この直径へ縮めるため、見た目の円は半径より一回り小さく出る。本家の
     # キャプチャと 1:1 で並べて、円の直径が実測 62px に見えるまで上げた値。
