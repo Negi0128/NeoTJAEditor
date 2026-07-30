@@ -46,7 +46,7 @@ FOOTER_Y, FOOTER_H = 676, 44
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
 # 0.8 倍で置く(1.6 倍にしたら6桁がパネルからはみ出した)。
-SCORE_RIGHT, SCORE_Y = 178, 199      # スコアは右詰め
+SCORE_RIGHT, SCORE_Y = 178, 198      # スコアは右詰め
 SCORE_SCALE = 1.02
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
@@ -58,7 +58,8 @@ NAMEPLATE_POS = (-25, 296)           # 1P 銘板(素材の左余白ぶん外へ�
 # 少し左へずらす。
 COMBO_X_OFF = -5
 COMBO_Y_OFF = 17                     # 太鼓の上端からコンボ数字までの距離
-COMBO_TEXT_Y_OFF = 58                # 同 「コンボ」文字まで
+COMBO_TEXT_Y_OFF = 55                # 同 「コンボ」文字まで
+COMBO_TEXT_X_OFF = 1                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 1.06                   # 本家は太鼓の面いっぱいに大きい
 COMBO_ADVANCE = 0.80
 # Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
@@ -220,7 +221,7 @@ class GameScreenWidget(QWidget):
                 y0, y1 = COMBO_TEXT_BAND
                 band = (y1 - y0) // 2
                 src_y = y0 + (band if combo >= COMBO_GOLD_AT else 0)
-                p.drawPixmap(QRect(dx + drum.width() // 2 - ct.width() // 2,
+                p.drawPixmap(QRect(dx + drum.width() // 2 - ct.width() // 2 + COMBO_TEXT_X_OFF,
                                    dy + COMBO_TEXT_Y_OFF, ct.width(), band),
                              ct, QRect(0, src_y, ct.width(), band))
 
