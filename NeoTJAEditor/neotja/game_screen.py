@@ -73,6 +73,13 @@ DRUM_GLOW_SEC = 0.09
 # --- 魂ゲージ ------------------------------------------------------------
 GAUGE_POS = (490, 150)   # 700x68。本家スクショでゲージ帯が始まる位置
 
+# レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
+# 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
+# よって窓をレーン(y=192)に合わせると frame_y = 192-56 = 136。横は 951 が
+# レーン947 + 左右2pxの縁なので frame_x = 333-2 = 331。
+# 上端(y=0..55)がゲージの載る黒帯、下端(y=220..)がレーン下の縁になる。
+LANE_FRAME_POS = (LANE_X - 2, LANE_Y - 56)
+
 
 class GameScreenWidget(QWidget):
     """1280x720(または上半分だけの 1280x360)の画面を組み立てる。
@@ -286,15 +293,18 @@ class GameScreenWidget(QWidget):
         else:
             p.fillRect(QRect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H), QColor("#8c1d1d"))
 
-        # レーン枠(Taiko_Frame 951x224)は、どの位置に合わせるのかを実測できて
-        # いないので今は描かない。当て推量で置いたら画面の真ん中に黒い帯が
-        # 浮いてしまったため、根拠が取れるまで出さない方針にする。
-        # 代わりに、レーンの上下に細い境界線だけ引いて締める。
-        p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
-        p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
-                   QColor(0, 0, 0, 220))
+        # --- レーンと魂ゲージを囲む黒枠 ---
+        # 素材そのもの。中の窓は透明なのでレーン(子ウィジェット)がそのまま見える。
+        frame = self._skin.get("lane_frame")
+        if frame is not None:
+            p.drawPixmap(LANE_FRAME_POS[0], LANE_FRAME_POS[1], frame)
+        else:
+            p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
+            p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
+                       QColor(0, 0, 0, 220))
 
         # --- HUD(スコア・コンボ・太鼓・ゲージ) ---
+        # ゲージは黒枠の上端に載るので、枠を描いたあとに描く。
         # 現在値はレーン側が持っているものをそのまま使う。HUD 用に別のカウントを
         # 持たないので、シークしても再生を止めてもズレようがない。
         try:

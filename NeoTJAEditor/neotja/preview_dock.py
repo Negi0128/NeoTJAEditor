@@ -221,7 +221,11 @@ class GamePreviewWindow(QWidget):
 
     closed = Signal()
 
-    def __init__(self, chart_preview: ChartPreviewWidget, bottom_widget: QWidget, parent=None, pause_cb=None):
+    def __init__(self, chart_preview, bottom_widget: QWidget, parent=None, pause_cb=None,
+                 lane_widget: ChartPreviewWidget = None):
+        """chart_preview には、レーン単体(ChartPreviewWidget)でも本家レイアウト
+        (GameScreenWidget)でも渡せる。後者のときは lane_widget に中のレーンを
+        渡すこと(打音表記のオン/オフで高さが変わる通知を受けるため)。"""
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("えぬいーさん次郎")
         # アプリのテーマに関わらず窓全体をダーク基調に固定する。ウィジェット
@@ -230,6 +234,7 @@ class GamePreviewWindow(QWidget):
         self.setStyleSheet(theme.build_qss(theme.THEMES["dark"]))
         self._pause_cb = pause_cb
         self._chart_preview = chart_preview
+        self._lane = lane_widget if lane_widget is not None else chart_preview
         self._bottom_widget = bottom_widget
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -239,18 +244,21 @@ class GamePreviewWindow(QWidget):
         self._refit()
         # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
         # 窓の固定サイズも取り直す。
-        chart_preview.heightChanged.connect(self._on_preview_height_changed)
+        self._lane.heightChanged.connect(self._on_preview_height_changed)
 
     def _refit(self):
         # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
         # モード切替のたびに窓がガタつくので、呼び出し側で最も高いページに合わせて
         # 固定済み。その固定高さ(=minimumHeight)を使って窓サイズも一定に保つ。
-        h = self._chart_preview.widget_height()
-        self._chart_preview.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), h)
-        self.setFixedSize(
-            int(ChartPreviewWidget.LANE_WIDTH),
-            h + self._bottom_widget.minimumHeight(),
-        )
+        top = self._chart_preview
+        if hasattr(top, "is_compact"):
+            # 本家レイアウト(GameScreenWidget)は自分で固定サイズを持っている。
+            w, h = top.width(), top.height()
+        else:
+            h = top.widget_height()
+            w = int(ChartPreviewWidget.LANE_WIDTH)
+            top.setFixedSize(w, h)
+        self.setFixedSize(w, h + self._bottom_widget.minimumHeight())
 
     def _on_preview_height_changed(self, _h):
         self._refit()
@@ -511,8 +519,14 @@ class PreviewDock(QDockWidget):
         bp.addWidget(self._build_speed_row())
         self._bottom_panel.setFixedHeight(self._bottom_panel.sizeHint().height())
 
+        # 本家レイアウト: レーンを 1280x360 の画面へ組み込む(背景・左パネル・
+        # スコア・コンボ・太鼓・魂ゲージはこちらが描く)。レーン自体の描画は
+        # ChartPreviewWidget のままで、寸法だけ本家に合わせて差し替わる。
+        from neotja.game_screen import GameScreenWidget
+        self.game_screen = GameScreenWidget(self.chart_preview, compact=True)
         self.game_preview_window = GamePreviewWindow(
-            self.chart_preview, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
+            self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
+            lane_widget=self.chart_preview,
         )
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
@@ -521,7 +535,7 @@ class PreviewDock(QDockWidget):
         # ままにする)。録画は通常再生モードのときだけ出す — 作譜/情報モードは
         # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
         self._mode_names = ["通常再生", "作譜", "情報"]
-        right = int(ChartPreviewWidget.LANE_WIDTH) - 8
+        right = self.game_screen.width() - 8
 
         self.mode_button = self._lane_button(self._mode_names[0], 96,
                                              "下部パネルの表示切替(Tab)")
@@ -762,7 +776,9 @@ class PreviewDock(QDockWidget):
     def _lane_button(self, text, width, tooltip):
         """レーンの上に浮かせる小さなボタン。フォーカスを取らないので、
         押したあとも Space/Tab/PgUp/PgDn はレーンに効いたまま。"""
-        b = QPushButton(text, self.chart_preview)
+        # 画面(GameScreenWidget)の子にする。レーンの子にすると本家レイアウトでは
+        # レーンが x=333 から始まるぶんだけボタンが右へずれてしまう。
+        b = QPushButton(text, self.game_screen)
         b.setFocusPolicy(Qt.NoFocus)
         b.setToolTip(tooltip)
         b.resize(width, 26)
@@ -858,6 +874,7 @@ class PreviewDock(QDockWidget):
             )
             self._set_lane_course_label(preview_data.get("course_label"),
                                         preview_data.get("course_color"))
+            self.game_screen.set_chart(preview_data, preview_data.get("course_key"))
             self.info_bar.set_branch_info(preview_data.get("branch_level"), preview_data.get("has_branches"))
         self.info_bar.set_static_info(headers["title"], headers["subtitle"], course_stats)
         self._sync_title_page(headers["title"], headers["subtitle"])
@@ -1095,6 +1112,7 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
         self._set_lane_course_label(data.get("course_label"), data.get("course_color"))
+        self.game_screen.set_chart(data, data.get("course_key"))
         self.info_bar.set_branch_info(data.get("branch_level"), data.get("has_branches"))
         self.info_bar.set_static_info(self.title_label.text(), self._editor_subtitle, course_stats)
         self._sync_title_page(self.title_label.text(), self._editor_subtitle)
