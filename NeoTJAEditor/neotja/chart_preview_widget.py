@@ -271,6 +271,9 @@ class ChartPreviewWidget(QWidget):
         self._pos_sec = 0.0
         self._pos_wall = _time.monotonic()
         self._playing = False
+        # 録画(オフライン描画)中に外から与えられる表示時刻。None なら通常どおり
+        # monotonic 時計で外挿する。begin_offline_render() を参照。
+        self._render_time = None
         # 再生速度倍率(作譜モード。0.25〜1.0)。1.0=等速。再生中の外挿
         # (_current_audio_time / set_playback の予測)にこの倍率を掛けて、
         # 低速再生でスクロール・打音が同じ倍率で遅くなるようにする。
@@ -1455,6 +1458,32 @@ class ChartPreviewWidget(QWidget):
         self.update()
         self._push_realtime_info()
 
+    # ------------------------------------------------------------------
+    # オフライン描画(録画用) — neotja/recorder.py から使う
+    # ------------------------------------------------------------------
+    def begin_offline_render(self):
+        """表示時刻を「外から与える」モードに入る。
+
+        通常このウィジェットは monotonic 時計から現在位置を外挿して描くため、
+        描画にかかった時間ぶんだけ絵が進んでしまい、1コマずつ書き出す用途には
+        使えない。このモードでは set_render_time() で指定した時刻だけを見て
+        描くので、何ms かかっても出来上がりは必ず同じになる(=コマ落ちしない)。
+
+        あわせて録画に写ってはいけないもの/意味の無いものを止める:
+        実測fps表示、小節移動のトゥイーン、再描画タイマー。"""
+        self._render_time = 0.0
+        self._show_fps = False
+        self._animating = False
+        self._timer.stop()
+
+    def set_render_time(self, seconds: float):
+        """オフライン描画モードでの表示時刻(音源時間の秒)。"""
+        self._render_time = float(seconds)
+
+    def end_offline_render(self):
+        """通常の(時計で進む)描画に戻す。"""
+        self._render_time = None
+
     def set_playback(self, position_seconds: float, playing: bool):
         now_wall = _time.monotonic()
         # During a stopped/paused scroll tween the audio.seek() we issued fires
@@ -1490,6 +1519,9 @@ class ChartPreviewWidget(QWidget):
         self._push_realtime_info()
 
     def _current_audio_time(self) -> float:
+        # 録画中は外から与えられた時刻がすべて(begin_offline_render 参照)。
+        if self._render_time is not None:
+            return self._render_time
         if self._animating:
             elapsed = _time.monotonic() - self._anim_start_wall
             if elapsed >= self.SCROLL_ANIM_SEC:

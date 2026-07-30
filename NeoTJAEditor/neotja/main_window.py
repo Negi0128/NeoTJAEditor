@@ -6,7 +6,7 @@ import sys
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QTimer, QByteArray
+from PySide6.QtCore import Qt, QTimer, QByteArray, QThread, Signal
 from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from neotja import measure_edit
 from neotja import settings as settings_mod
+from neotja.analysis_worker import AnalysisWorker
 from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
 from neotja.find_replace import FindReplaceBar
 from neotja.editor_widget import TJAEditor
@@ -145,6 +146,11 @@ class MainWindow(QMainWindow):
     # 普通の譜面は数 ms なので、これまでどおり解析と同時に更新される。
     PREVIEW_DEFER_SEC = 0.08
 
+    # ワーカースレッドへ「保留中のジョブを処理しろ」と伝えるための合図。
+    # キュー接続なので、emit した時点では何も起きず、向こうのイベント
+    # ループが回ったときに AnalysisWorker.process() が呼ばれる。
+    analysis_requested = Signal()
+
     def __init__(self, app):
         super().__init__()
         self.app = app
@@ -174,6 +180,11 @@ class MainWindow(QMainWindow):
         # 超える重い譜面のときだけ、解析パスとプレビューを別々のタイミングに
         # 分けて、打鍵を止めたときの停止時間を一度あたり半分にする。
         self._preview_build_sec = 0.0
+        # 構文ハイライト側の反映にかかった秒数(内訳を見るためだけの控え)。
+        self._highlight_apply_sec = 0.0
+        # 重い譜面のとき、ワーカーが用意したプレビュー結果を一旦ここへ置いて
+        # 120ms 後に貼る。置いてある間に内容が変わったら捨てる。
+        self._pending_preview = None
         self._heavy_timer = QTimer(self)
         self._heavy_timer.setSingleShot(True)
         self._heavy_timer.timeout.connect(self._heavy_tasks)
@@ -191,6 +202,22 @@ class MainWindow(QMainWindow):
         self._metronome_timer = QTimer(self)
         self._metronome_timer.setSingleShot(True)
         self._metronome_timer.timeout.connect(self._update_metronome_schedule)
+
+        # 解析をGUIスレッドの外へ。数万行の譜面では解析+プレビュー組み立てで
+        # 650ms かかり、そのあいだウィンドウが完全に無反応になっていた。
+        # 計算だけを向こうへ渡し、画面への反映はこちらで行う(ウィジェットを
+        # 別スレッドから触ると即クラッシュするため、境界は analysis_worker.py
+        # 側のコメントどおり厳守)。
+        # 依頼には通し番号を振り、返ってきたときに最新でなければ捨てる。
+        # 打鍵中は内容がどんどん変わるので、古い結果を貼ると画面が巻き戻る。
+        self._analysis_job_id = 0
+        self._analysis_inflight = 0     # 0 = 走っていない
+        self._analysis_thread = QThread(self)
+        self._analysis_worker = AnalysisWorker(self.analyzer)
+        self._analysis_worker.moveToThread(self._analysis_thread)
+        self.analysis_requested.connect(self._analysis_worker.process, Qt.QueuedConnection)
+        self._analysis_worker.finished.connect(self._on_analysis_done, Qt.QueuedConnection)
+        self._analysis_thread.start()
 
         self.resize(1280, 820)
         # .tja/.txt をウィンドウにドラッグして開けるようにする(dropEvent)。
@@ -557,6 +584,7 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
         tm.addSeparator()
+        tm.addAction("動画を書き出す", self.open_video_recorder)
         tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
         tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
@@ -695,6 +723,12 @@ class MainWindow(QMainWindow):
         # 取り消す。入力中に 300ms の停止が割り込むのを防ぐため(次の解析パスが
         # 改めて予約し直す)。
         self._preview_timer.stop()
+        # 走行中の解析も同じ理由で取り消す。内容が変わった以上その結果は
+        # 古く、貼ると画面が一瞬前の状態へ巻き戻る。600ms 静まれば
+        # _heavy_tasks が新しい内容で投げ直す。貼るのを待たせていた
+        # プレビュー結果も同じ理由で捨てる。
+        self._pending_preview = None
+        self._cancel_analysis()
 
     # ------------------------------------------------------------------
     # タイトル / 最近使ったファイル / ウィンドウ状態 (クイックウィン群)
@@ -777,12 +811,161 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
 
     def _force_update(self):
+        """解析とプレビュー更新を今すぐ・同期でやり切る。開く/保存/一括編集など
+        「戻ってきた時点で解析が終わっている」ことを前提にした呼び出し元が多い
+        ので、ここだけはワーカーへ回さない。走りかけの非同期ジョブは結果が
+        古くなるため取り消す。"""
         self._heavy_timer.stop()
         self._preview_timer.stop()
-        self._heavy_tasks()
+        # 待たせてあるワーカーの結果は、いまここで作り直す内容より古い。
+        self._pending_preview = None
+        self._cancel_analysis()
+        self._heavy_tasks_sync()
         self._preview_tick()
 
+    # -- 非同期パス(デバウンス経由) -------------------------------------
+    def _shutdown_analysis_thread(self):
+        """解析スレッドを畳む。何度呼んでも安全(閉じる経路が複数あるため)。"""
+        th = getattr(self, "_analysis_thread", None)
+        if th is None or not th.isRunning():
+            return
+        self._analysis_worker.drop_pending()
+        th.quit()
+        if not th.wait(5000):
+            # 5 秒待っても終わらないのは想定外。ここで terminate せずに
+            # 放置すると終了時にクラッシュするので、状況を残して打ち切る。
+            print("AnalysisWorker thread did not stop in 5s; terminating", file=sys.stderr)
+            th.terminate()
+            th.wait(1000)
+
+    def _cancel_analysis(self):
+        """保留中/実行中の解析ジョブの結果を捨てる。まだ始まっていなければ
+        本当に捨てられ、既に走っていれば計算自体は止まらないが、返ってきた
+        時点で番号が合わずに _on_analysis_done で落ちる。"""
+        self._analysis_worker.drop_pending()
+        self._analysis_job_id += 1
+        self._analysis_inflight = 0
+
+    def _request_analysis(self, kind):
+        """解析をワーカースレッドへ依頼する。
+        kind="full"    … 内容が変わった(コース解析・ハイライト・索引・プレビュー)
+        kind="preview" … 内容は同じで、カーソルの居るコースや分岐だけが変わった
+        """
+        self._analysis_job_id += 1
+        self._analysis_inflight = self._analysis_job_id
+        self._analysis_worker.submit(self._analysis_job_id, {
+            "kind": kind,
+            "content": self.editor.toPlainText(),
+            "cursor_line": self.editor.textCursor().blockNumber() + 1,
+            "course_override": self._preview_course_override,
+            "branch_level": self._preview_branch_level,
+            "duration": self.preview_dock.duration_seconds(),
+        })
+        self.analysis_requested.emit()
+
     def _heavy_tasks(self):
+        """打鍵デバウンス(600ms)の着地点。計算はワーカーへ投げるだけなので
+        ここでは止まらない。自動保存は解析結果に依存しないので、待たずに
+        今やる(以前は解析の後ろに置いていたため、非同期化すると保存だけが
+        遅れることになる)。"""
+        self._request_analysis("full")
+        self._auto_save_tick()
+
+    def _on_analysis_done(self, job_id, result):
+        """ワーカーの結果を画面へ反映する(GUIスレッド)。ウィジェットに触るのは
+        必ずここ以降。番号が最新でなければ、内容が変わったあとの古い結果なので
+        捨てる(貼ると画面が一瞬巻き戻る)。"""
+        if job_id != self._analysis_job_id:
+            return
+        self._analysis_inflight = 0
+
+        err = result.get("error")
+        if err:
+            if err != self._last_heavy_error:
+                self._last_heavy_error = err
+                self.statusBar().showMessage(f"解析中にエラーが発生しました: {err}", 8000)
+            return
+        self._last_heavy_error = None
+
+        try:
+            self._apply_analysis_result(result)
+        except Exception as e:  # noqa: BLE001
+            # 反映側で転んでも自動保存や編集を巻き込まない(従来と同じ扱い)。
+            traceback.print_exc()
+            sig = f"{type(e).__name__}: {e}"
+            if sig != self._last_heavy_error:
+                self._last_heavy_error = sig
+                self.statusBar().showMessage(f"解析結果の反映中にエラーが発生しました: {sig}", 8000)
+
+    def _apply_analysis_result(self, result):
+        """計算済みの結果を画面へ貼る。ここは GUI スレッドなので、この所要時間が
+        そのまま「操作が効かない時間」になる。だから貼る作業も
+          (1) 構文ハイライト/サイドバー/索引
+          (2) プレビュー(えぬいーさん次郎/情報/打音)
+        の二つに分け、重い譜面では (2) を少し後ろへ回して一度の停止を半分にする。
+        軽い譜面(下の PREVIEW_DEFER_SEC 未満)はこれまでどおり一度に貼る。"""
+        content = self.editor.toPlainText()
+        cursor_line = result["cursor_line"]
+
+        if result["kind"] == "full":
+            t0 = time.perf_counter()
+            self.courses_info = result["courses_info"]
+            self._refresh_sidebar(content)
+            data = result["highlight"]
+            self.editor.highlight_data = data
+            self.editor.invalid_lines = data.invalid_lines
+            self._global_warnings = data.global_warnings
+            self.highlighter.apply_data(data)
+            self.editor.gutter.update()
+            # ステータスバーが使う「行 -> 小節/時刻」索引。
+            self._cursor_index = result["cursor_index"]
+            self._update_status()
+            self._highlight_apply_sec = time.perf_counter() - t0
+
+            payload = (content, result["clicks"], result["preview"], cursor_line)
+            if self._preview_build_sec > self.PREVIEW_DEFER_SEC:
+                self._pending_preview = payload
+                self._preview_timer.start(120)
+                return
+            self._apply_preview_payload(payload)
+        else:
+            # プレビューだけの差し替えは元から軽い(貼るだけ)ので分割しない。
+            t0 = time.perf_counter()
+            self.preview_dock.set_metronome_clicks(result["clicks"])
+            self.preview_dock.set_preview_data(
+                result["preview"], self._find_course_stats(result["preview"].get("course_key")),
+            )
+            self._preview_build_sec = time.perf_counter() - t0
+            self._settle_preview_key(cursor_line)
+
+    def _apply_preview_payload(self, payload):
+        """プレビュー側の反映本体。_apply_analysis_result から直接、または
+        重い譜面のときは _preview_tick から少し遅れて呼ばれる。"""
+        content, clicks, preview, cursor_line = payload
+        t0 = time.perf_counter()
+        self.preview_dock.refresh_from_content(
+            content, self.current_file, clicks, preview,
+            self._find_course_stats(preview.get("course_key")),
+        )
+        self._preview_build_sec = time.perf_counter() - t0
+        self._settle_preview_key(cursor_line)
+
+    def _settle_preview_key(self, cursor_line):
+        # 組み立てた条件を控える。この直後にカーソル移動で走る
+        # _update_metronome_schedule が、同じ条件なら丸ごと省けるようにする。
+        self._preview_key = self._current_preview_key(cursor_line)
+        # ジョブを投げてから結果が返るまでにカーソルが別のコースへ移っていたら、
+        # いま貼ったプレビューはもう古いので取り直す。ここから直接
+        # _request_analysis() を呼ぶと「反映 -> 依頼 -> 反映」がイベントループを
+        # 埋め尽くして他の処理が一切通らなくなるため、必ず 150ms のデバウンスを
+        # 挟んで _update_metronome_schedule 経由にする(あちらの鍵の一致判定で
+        # 空振りなら何も起きない)。
+        now_line = self.editor.textCursor().blockNumber() + 1
+        if self._current_preview_key(now_line) != self._preview_key:
+            self._metronome_timer.start(150)
+
+    # -- 同期パス(_force_update 専用) -----------------------------------
+    def _heavy_tasks_sync(self):
         content = self.editor.toPlainText()
         # 解析/プレビュー更新のどこかで想定外の例外が出ても、自動保存まで
         # 道連れにしない。以前は解析が一度でも例外を投げると、この後ろにある
@@ -813,26 +996,20 @@ class MainWindow(QMainWindow):
         # ステータスバーが使う「行 -> 小節/時刻」索引をここで作り直す。
         self._cursor_index = self.analyzer.build_cursor_index(content)
         self._update_status()
-        # プレビューは「編集中(未保存)の内容」をそのまま映す。打鍵の
-        # デバウンス(600ms)後にこの _heavy_analysis が走り、ライブの
-        # エディタ内容からプレビューを組み直すので、保存しなくても即反映される。
-        #
-        # ただし数万行の譜面ではプレビューの組み立てだけで 300ms 近くかかり、
-        # ハイライト側と合わせて打鍵を止めるたびに 0.6 秒固まっていた。前回
-        # 組むのに時間がかかったときだけ、ここでは組まずに少し後ろへ回して
-        # 一度の停止時間を半分にする(普通の譜面は数 ms なので従来どおり即時)。
-        if self._preview_build_sec > self.PREVIEW_DEFER_SEC:
-            self._preview_timer.start(350)
-        else:
-            self._preview_tick()
 
     def _preview_tick(self):
-        """プレビュー組み立て(遅延実行の入口)。所要時間を控えて、次回この処理を
-        後ろへ回すかどうかの判断に使う。解析側と同じく、例外が出ても自動保存や
-        編集を巻き込まないようここで受け止める。"""
+        """プレビュー反映(遅延実行の入口)。ワーカーの結果が待たされている
+        ときはそれを貼るだけ。そうでなければ(_force_update の同期経路)ここで
+        組み立てから行う。解析側と同じく、例外が出ても自動保存や編集を
+        巻き込まないようここで受け止める。"""
         self._preview_timer.stop()
+        payload = self._pending_preview
+        self._pending_preview = None
         t0 = time.perf_counter()
         try:
+            if payload is not None:
+                self._apply_preview_payload(payload)
+                return
             self._refresh_preview()
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
@@ -896,7 +1073,11 @@ class MainWindow(QMainWindow):
         # 作り直すのでここでは何もしない。打鍵はカーソルも動かすため、これが無いと
         # 「150ms 後にここで組み直し → 600ms 後に解析パスでもう一度」と、重い譜面で
         # 同じ 200ms 超の処理を二度払っていた。
-        if self._heavy_timer.isActive() or self._preview_timer.isActive():
+        # 解析ジョブが走行中/予約済みなら、そちらが同じものを作り直すので
+        # ここでは何もしない(走行中のジョブは、終わったあとにカーソルが
+        # 移っていれば _apply_analysis_result が取り直してくれる)。
+        if (self._heavy_timer.isActive() or self._preview_timer.isActive()
+                or self._analysis_inflight):
             return
 
         cursor_line = self.editor.textCursor().blockNumber() + 1
@@ -905,18 +1086,11 @@ class MainWindow(QMainWindow):
         # 長さ」だけ。同じコース内でカーソルを動かしているあいだは出力が
         # まったく同じなので、数万行の譜面で 240ms かかる再構築を丸ごと省く。
         # (方向キーを押しっぱなしにすると固まる主因がこれだった)
-        key = self._current_preview_key(cursor_line)
-        if key == self._preview_key:
+        if self._current_preview_key(cursor_line) == self._preview_key:
             return
-        self._preview_key = key
-
-        content = self.editor.toPlainText()
-        clicks = self.analyzer.build_metronome_clicks(content, cursor_line, self.preview_dock.duration_seconds())
-        self.preview_dock.set_metronome_clicks(clicks)
-        preview_data = self.analyzer.build_preview_timeline(
-            content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
-        )
-        self.preview_dock.set_preview_data(preview_data, self._find_course_stats(preview_data.get("course_key")))
+        # 組み直しは 240ms かかるのでワーカーへ。_preview_key はここでは進めず、
+        # 結果を貼るときに更新する(途中で失敗しても取り直しが効くように)。
+        self._request_analysis("preview")
 
     def _refresh_sidebar(self, content):
         lines = content.split('\n')
@@ -1398,6 +1572,11 @@ class MainWindow(QMainWindow):
             for attr in ("_bpm_detect_worker", "_update_check_worker",
                          "_update_download_worker", "_new_project_chart_gen_worker"):
                 detach_worker(getattr(self, attr, None))
+            # 解析スレッドは常駐なので必ずここで畳む。走行中のジョブは最長でも
+            # 1 パスぶん(数百 ms)で終わるので、その完了を待ってから抜ける。
+            # 待たずに破棄すると "QThread: Destroyed while thread is still
+            # running" でプロセスごと落ちる。
+            self._shutdown_analysis_thread()
             event.accept()
         else:
             event.ignore()
@@ -1741,6 +1920,33 @@ class MainWindow(QMainWindow):
     def open_help(self):
         from neotja.dialogs.help_window import HelpWindow
         HelpWindow(self).exec()
+
+    def open_video_recorder(self):
+        """えぬいーさん次郎の画面を動画(mp4)として書き出す。
+
+        書き出すのは「いまプレビューで見ているコース/分岐」。画面キャプチャでは
+        なく1コマずつ描き直すので、書き出し中にアプリを触っても影響しない。"""
+        content = self.editor.toPlainText()
+        if not self.courses_info:
+            QMessageBox.warning(self, "動画を書き出す", "有効なコースが見つかりません。")
+            return
+        wave = self.preview_dock.wave_path()
+        if not wave or not os.path.exists(wave):
+            QMessageBox.warning(
+                self, "動画を書き出す",
+                "音源(WAVE)が見つかりません。TJA の WAVE: を確認してください。")
+            return
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        preview_data = self.analyzer.build_preview_timeline(
+            content, cursor_line, self._preview_course_override,
+            branch_level=self._preview_branch_level,
+        )
+        from neotja.dialogs.record_dialog import RecordDialog
+        RecordDialog(
+            self, preview_data, self.preview_dock.spin_offset.value(), wave,
+            self.preview_dock.duration_seconds(),
+            os.path.dirname(self.current_file) if self.current_file else os.path.expanduser("~"),
+        ).exec()
 
     def open_scroll_splitter(self):
         cursor, txt = self._get_selection()

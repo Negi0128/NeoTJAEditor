@@ -957,6 +957,11 @@ class PreviewDock(QDockWidget):
     def duration_seconds(self) -> float:
         return self._duration_ms / 1000.0
 
+    def wave_path(self):
+        """いま読み込んでいる音源(WAVE)のフルパス。未読込なら None。
+        動画書き出しが同じ音源を自前でデコードするのに使う。"""
+        return self._current_wave_path
+
     def _on_playing_changed(self, playing):
         self.btn_play.setText("一時停止" if playing else "再生")
         self.chart_preview.set_playback(self.audio.position() / 1000.0, playing)
