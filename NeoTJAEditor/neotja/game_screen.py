@@ -46,14 +46,21 @@ FOOTER_Y, FOOTER_H = 676, 44
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
 # 0.8 倍で置く(1.6 倍にしたら6桁がパネルからはみ出した)。
-SCORE_RIGHT, SCORE_Y = 182, 192      # スコアは右詰め
-SCORE_SCALE = 0.8
+SCORE_RIGHT, SCORE_Y = 182, 206      # スコアは右詰め
+SCORE_SCALE = 0.9
+# 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
+# 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
+SCORE_ADVANCE = 0.76
 COURSE_SYM_POS = (26, 232)           # コース記号(おに 等)
 DRUM_POS = (200, 196)                # 太鼓 120x133
-NAMEPLATE_POS = (4, 296)             # 1P 銘板
+NAMEPLATE_POS = (-10, 296)           # 1P 銘板(素材の左余白ぶん外へ出す)
 COMBO_Y_OFF = 24                     # 太鼓の上端からコンボ数字までの距離
 COMBO_TEXT_Y_OFF = 62                # 同 「コンボ」文字まで
 COMBO_SCALE = 0.95
+COMBO_ADVANCE = 0.80
+# Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
+# 中身は y=26..98 に収まっているので、そこを2等分して片方だけ描く。
+COMBO_TEXT_BAND = (26, 98)
 # コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
 COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 # 太鼓が光る時間(叩いた瞬間からの秒数)。本家もごく短い。
@@ -145,25 +152,30 @@ class GameScreenWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
-                     right=None, left=None, y=0, scale=1.0):
-        """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。"""
+                     right=None, left=None, y=0, scale=1.0, advance=1.0):
+        """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。
+
+        advance は「次の字までどれだけ送るか」を1文字枠に対する割合で指定する。
+        シートの1枠には字の左右に余白が入っているため、1.0 のまま送ると
+        本家より字間が空いて間延びして見える。"""
         if sheet is None:
             return
         cw, ch = sheet.width() / cols, sheet.height() / rows
         w, h = cw * scale, ch * scale
+        step = w * advance
         s = str(int(value))
-        x = (right - w * len(s)) if right is not None else (left or 0)
+        x = (right - step * len(s)) if right is not None else (left or 0)
         for c in s:
             i = int(c)
             p.drawPixmap(QRect(int(x), int(y), int(w) + 1, int(h) + 1), sheet,
                          QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
-            x += w
+            x += step
 
     def _draw_left_panel(self, p, combo, score, recent):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
         self._draw_digits(p, self._skin.get("score_digits"), score,
-                          cols=10, rows=3, row=0,
+                          cols=10, rows=3, row=0, advance=SCORE_ADVANCE,
                           right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE)
 
         # --- コース記号 ---
@@ -192,16 +204,22 @@ class GameScreenWidget(QWidget):
                    "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
             sheet = self._skin.get(key)
             if sheet is not None:
-                cw = sheet.width() / 10 * COMBO_SCALE
+                step = sheet.width() / 10 * COMBO_SCALE * COMBO_ADVANCE
                 dw = drum.width() if drum is not None else 120
                 # 太鼓の中心に対して左右対称に置く。
-                right = dx + dw // 2 + int(cw * len(str(combo))) // 2
-                self._draw_digits(p, sheet, combo, right=right,
+                right = dx + dw // 2 + int(step * len(str(combo))) // 2
+                self._draw_digits(p, sheet, combo, right=right, advance=COMBO_ADVANCE,
                                   y=dy + COMBO_Y_OFF, scale=COMBO_SCALE)
             ct = self._skin.get("combo_text")
             if ct is not None and drum is not None:
-                p.drawPixmap(dx + drum.width() // 2 - ct.width() // 2,
-                             dy + COMBO_TEXT_Y_OFF, ct)
+                # 素材には「コンボ」が縦に2つ入っているので、片方だけを切り出す。
+                # 上段=通常色 / 下段=金 とみなし、数字の色に合わせる。
+                y0, y1 = COMBO_TEXT_BAND
+                band = (y1 - y0) // 2
+                src_y = y0 + (band if combo >= COMBO_GOLD_AT else 0)
+                p.drawPixmap(QRect(dx + drum.width() // 2 - ct.width() // 2,
+                                   dy + COMBO_TEXT_Y_OFF, ct.width(), band),
+                             ct, QRect(0, src_y, ct.width(), band))
 
         # --- 銘板 ---
         np_ = self._skin.get("nameplate")
