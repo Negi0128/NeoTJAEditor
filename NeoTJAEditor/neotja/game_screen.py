@@ -71,7 +71,7 @@ COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 DRUM_GLOW_SEC = 0.09
 
 # --- 魂ゲージ ------------------------------------------------------------
-GAUGE_POS = (490, 156)   # 700x68。黒枠のくぼみに載る高さ
+GAUGE_POS = (490, 150)   # 700x68。本家スクショでゲージ帯が始まる位置
 
 # レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
 # 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
@@ -79,6 +79,11 @@ GAUGE_POS = (490, 156)   # 700x68。黒枠のくぼみに載る高さ
 # レーン947 + 左右2pxの縁なので frame_x = 333-2 = 331。
 # 上端(y=0..55)がゲージの載る黒帯、下端(y=220..)がレーン下の縁になる。
 LANE_FRAME_POS = (LANE_X - 2, LANE_Y - 56)
+# 枠のうち「レーンを囲う部分」(y=56 以降)は上の位置で固定。上の黒帯だけは
+# 独立して上下できるようにする — 帯とゲージが重なって潰れるのを避けるため。
+# 帯だけ下げてもレーンの窓は動かないので、レーンとの1px合わせは崩れない。
+FRAME_TOP_BAND = 56          # 素材のうち上の黒帯はここまで
+FRAME_TOP_Y_OFF = 6          # 黒帯だけ下へずらす量
 
 
 class GameScreenWidget(QWidget):
@@ -297,7 +302,14 @@ class GameScreenWidget(QWidget):
         # 素材そのもの。中の窓は透明なのでレーン(子ウィジェット)がそのまま見える。
         frame = self._skin.get("lane_frame")
         if frame is not None:
-            p.drawPixmap(LANE_FRAME_POS[0], LANE_FRAME_POS[1], frame)
+            fx, fy = LANE_FRAME_POS
+            # 上の黒帯(素材の y=0..FRAME_TOP_BAND)だけ FRAME_TOP_Y_OFF ぶん下げる。
+            p.drawPixmap(fx, fy + FRAME_TOP_Y_OFF, frame,
+                         0, 0, frame.width(), FRAME_TOP_BAND)
+            # レーンを囲う部分は動かさない(透明窓がレーンと1px合わせなので)。
+            p.drawPixmap(fx, fy + FRAME_TOP_BAND, frame,
+                         0, FRAME_TOP_BAND, frame.width(),
+                         frame.height() - FRAME_TOP_BAND)
         else:
             p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
