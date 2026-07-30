@@ -11,9 +11,40 @@ from neotja.tja_image_export import generate_chart_image, load_sprites
 
 
 class ChartGraphicsView(QGraphicsView):
+    """ホイールで拡大縮小できる表示。倍率には上限/下限を設ける。
+
+    以前は無制限に scale() していたため、縮小しすぎて画像が点のように消えたり、
+    拡大しすぎて位置を見失ったりした。等倍(1.0)を基準に MIN_ZOOM〜MAX_ZOOM の
+    範囲でしか変化しないようにする。"""
+
+    MIN_ZOOM = 0.25     # これ以上は縮小しない
+    MAX_ZOOM = 4.0      # これ以上は拡大しない
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._zoom = 1.0
+
+    def reset_zoom(self):
+        """新しい画像を表示したときに倍率を等倍へ戻す。"""
+        self.resetTransform()
+        self._zoom = 1.0
+
     def wheelEvent(self, event):
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        new_zoom = self._zoom * factor
+        # 範囲外なら、範囲の端までに切り詰めて適用する(端で止まる)。
+        if new_zoom > self.MAX_ZOOM:
+            factor = self.MAX_ZOOM / self._zoom
+            new_zoom = self.MAX_ZOOM
+        elif new_zoom < self.MIN_ZOOM:
+            factor = self.MIN_ZOOM / self._zoom
+            new_zoom = self.MIN_ZOOM
+        if abs(factor - 1.0) < 1e-9:
+            event.accept()
+            return
+        self._zoom = new_zoom
         self.scale(factor, factor)
+        event.accept()
 
 
 class _ImagePreviewBase(QDialog):
@@ -99,6 +130,7 @@ class _ImagePreviewBase(QDialog):
             self.scene.clear()
             self.scene.addPixmap(pixmap)
             self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
+            self.view.reset_zoom()   # 再生成のたびに等倍へ戻す(倍率が残らない)
             self.lbl_status.hide()
             self.view.show()
             self.btn_save.setEnabled(True)

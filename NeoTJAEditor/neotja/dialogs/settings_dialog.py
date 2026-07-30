@@ -1,8 +1,8 @@
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from neotja import settings as settings_mod
@@ -13,15 +13,21 @@ class SettingsDialog(QDialog):
         super().__init__(parent or main_window)
         self.main_window = main_window
         self.setWindowTitle("環境設定")
-        self.resize(640, 760)
+        # 画面に収まる高さにする。以前は 760px 固定だったので、画面の小さい環境や
+        # 表示スケールが大きい環境ではダイアログが画面からはみ出し、下端の
+        # 「保存して適用」ボタンが押せなかった。利用可能な画面高の 88% を上限にし、
+        # 中身は下の QScrollArea でスクロールさせる(ボタンは常に見える)。
+        avail = QGuiApplication.primaryScreen().availableGeometry()
+        self.resize(min(640, max(480, avail.width() - 80)),
+                    min(760, max(420, int(avail.height() * 0.88))))
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
         layout.addWidget(tabs, 1)
 
-        tabs.addTab(self._build_run_tab(), "シミュレータ起動")
-        tabs.addTab(self._build_shortcuts_tab(), "ショートカット")
-        tabs.addTab(self._build_editor_tab(), "エディタ・ツール")
+        tabs.addTab(self._scrollable(self._build_run_tab()), "シミュレータ起動")
+        tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
+        tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
 
         btn_row = QHBoxLayout()
         btn_reset = QPushButton("初期化")
@@ -34,6 +40,16 @@ class SettingsDialog(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(btn_save)
         layout.addLayout(btn_row)
+
+    @staticmethod
+    def _scrollable(inner: QWidget) -> QScrollArea:
+        """タブの中身をスクロール可能にする。項目が増えてもダイアログが縦に
+        伸び続けず、下端のボタンが画面外へ押し出されない。"""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.NoFrame)
+        area.setWidget(inner)
+        return area
 
     def _build_run_tab(self):
         w = QWidget()
