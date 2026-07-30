@@ -2,7 +2,7 @@ import bisect
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
     QStaticText,
@@ -364,6 +364,8 @@ class ChartPreviewWidget(QWidget):
         self._skin_lane_main = self._load_skin_pixmap("Lane_Main.png")
         self._skin_lane_gogo = self._load_skin_pixmap("Lane_GoGo.png")
         self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
+        # 打音表記の文字も素材で描く(自前のフォント描きは細くて本家と違う)。
+        self._skin_se = self._load_se_sprites()
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1509,6 +1511,61 @@ class ChartPreviewWidget(QWidget):
         pm = QPixmap(path)
         return None if pm.isNull() else pm
 
+    # SENotes.png は 12 段。上から ドン / ド / コ / カッ / カ / ドン(大) /
+    # カッ(大) / 連打 / ー / ーっ‼ / 連打(大) / ふうせん。
+    SE_SPRITE_ROWS = 12
+    SE_SPRITE_INDEX = {"ドン": 0, "ド": 1, "コ": 2, "カッ": 3, "カ": 4,
+                       "れんだ": 7, "ふうせん": 11, "くすだま": 11}
+    SE_SPRITE_INDEX_BIG = {"ドン": 5, "カッ": 6, "れんだ": 10}
+
+    def _load_se_sprites(self):
+        """skin/SENotes.png を1段ずつ切り出して返す(無ければ None)。
+
+        段の高さは一定だが字幅は段ごとに違うので、左右だけ実際の字の幅に
+        詰めて切る。こうすると音符の x に中心をそろえて置ける。縦は段の
+        高さのまま残すので、どの段も同じ大きさで並ぶ。"""
+        path = os.path.join(str(settings_mod.skin_dir()), "SENotes.png")
+        if not os.path.exists(path):
+            return None
+        img = QImage(path)
+        if img.isNull() or img.height() < self.SE_SPRITE_ROWS:
+            return None
+        try:
+            import numpy as np
+        except Exception:  # noqa: BLE001
+            return None
+        img = img.convertToFormat(QImage.Format_RGBA8888)
+        w, h = img.width(), img.height()
+        ptr = img.constBits()
+        arr = np.frombuffer(memoryview(ptr), dtype=np.uint8)
+        arr = arr.reshape(h, img.bytesPerLine() // 4, 4)[:, :w, :]
+        alpha = arr[:, :, 3]
+        rh = h // self.SE_SPRITE_ROWS
+        out = []
+        base = QPixmap.fromImage(img)
+        for r in range(self.SE_SPRITE_ROWS):
+            cols = alpha[r * rh:(r + 1) * rh].max(axis=0) > 16
+            xs = np.flatnonzero(cols)
+            if xs.size == 0:
+                out.append(None)
+                continue
+            x0, x1 = int(xs[0]), int(xs[-1])
+            out.append(base.copy(QRect(x0, r * rh, x1 - x0 + 1, rh)))
+        return out
+
+    def _se_sprite_for(self, label, big):
+        """ラベル(と大音符かどうか)から SENotes.png の1枚を選ぶ。"""
+        if not self._skin_se:
+            return None
+        idx = None
+        if big:
+            idx = self.SE_SPRITE_INDEX_BIG.get(label)
+        if idx is None:
+            idx = self.SE_SPRITE_INDEX.get(label)
+        if idx is None or idx >= len(self._skin_se):
+            return None
+        return self._skin_se[idx]
+
     def set_lane_geometry(self, lane_width, lane_height, judge_x,
                           top_margin=0, bottom_margin=0):
         """レーンの寸法を本家(TNDE)の実測値へ差し替える。
@@ -2312,9 +2369,17 @@ class ChartPreviewWidget(QWidget):
                     continue
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
+                x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
+                spr = self._se_sprite_for(label, big)
+                if spr is not None:
+                    # 素材の1段を帯の高さに合わせて縮め、音符の x に中心をそろえる。
+                    k = footer_h / spr.height()
+                    sw, sh = spr.width() * k, footer_h
+                    painter.drawPixmap(QRectF(x - sw / 2.0, band_bottom, sw, sh),
+                                       spr, QRectF(spr.rect()))
+                    continue
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
                 st = self._se_static_text(label, size)
-                x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
                 painter.setFont(self._font(size, True))
                 sz = st.size()
                 painter.drawStaticText(int(x - sz.width() / 2.0),

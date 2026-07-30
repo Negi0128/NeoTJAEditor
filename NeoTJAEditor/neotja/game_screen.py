@@ -52,13 +52,16 @@ SCORE_SCALE = 1.02
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
 SCORE_ADVANCE = 0.76
 COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
-DRUM_POS = (200, 196)                # 太鼓 120x133
+DRUM_POS = (203, 199)                # 太鼓 120x133
+# コンボの数字と「コンボ」文字は太鼓の上に載るが、太鼓だけを動かしたときに
+# 一緒に動いてほしくないので、位置の基準は別に持つ。
+COMBO_ANCHOR = (200, 196)
 NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ出す)
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
-COMBO_X_OFF = -5
+COMBO_X_OFF = -3
 COMBO_Y_OFF = 17                     # 太鼓の上端からコンボ数字までの距離
-COMBO_TEXT_Y_OFF = 58                # 同 「コンボ」文字まで
+COMBO_TEXT_Y_OFF = 60                # 同 「コンボ」文字まで
 COMBO_TEXT_X_OFF = 1                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
 COMBO_ADVANCE = 0.80
@@ -98,6 +101,11 @@ LANE_FRAME_POS = (LANE_X - 2, LANE_Y - 56)
 # 素材の y=48..55 はレーン箱の上辺(黒枠)なので、ここは動かしてはいけない。
 # 動かしてよいのは魂ゲージを囲う箱(y=0..47)だけ。
 FRAME_TOP_BAND = 48          # 素材のうち「ゲージの箱」はここまで
+# 素材の y=190..214 の x=0 に、打音表記帯と同じ灰色 (140,140,142) の列が
+# 1px だけ入っている。本家は帯が枠の内側ぎりぎりまで来るので繋がるが、
+# こちらは帯がレーンと同じ x=333 から始まるため、この1pxだけが黒の中に
+# 浮いて「何かが重なっている」ように見える。その列は描かない。
+FRAME_SLIVER_Y0, FRAME_SLIVER_Y1 = 190, 215
 FRAME_TOP_X_OFF = 5          # ゲージの箱だけ右へずらす量
 FRAME_TOP_Y_OFF = 1          # ゲージの箱だけ下へずらす量
 
@@ -112,6 +120,15 @@ JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶ
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
 JUDGE_POP_SEC = 0.34             # ポップの持続
+
+# --- スコアの加算表示 ----------------------------------------------------
+# 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
+# 2段目(橙)を使う — 本家も加算分だけ色が違う。
+SCORE_GAIN_SEC = 0.5             # 出てから消えるまで
+SCORE_GAIN_RISE = 16.0           # 昇る高さ
+SCORE_GAIN_SCALE = 0.82
+SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
+SCORE_GAIN_Y_OFF = -6            # スコアの上端からさらに上へ
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
 OVERLAY_RECT = (-120, 130, 240, 110)   # (dx, y, w, h) dx は判定円中心からの左端
@@ -296,12 +313,32 @@ class GameScreenWidget(QWidget):
                          QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
             x += step
 
-    def _draw_left_panel(self, p, combo, score, recent):
+    def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
         self._draw_digits(p, self._skin.get("score_digits"), score,
                           cols=10, rows=3, row=0, advance=SCORE_ADVANCE,
                           right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE)
+
+        # --- スコアの加算分(スコアの上へ浮かんで消える) ---
+        if self._score_timeline is not None:
+            ev = self._score_timeline.last_event(now)
+            if ev is not None:
+                et, gain = ev
+                el = now - et
+                if 0.0 <= el < SCORE_GAIN_SEC and gain > 0:
+                    q = el / SCORE_GAIN_SEC
+                    rise = SCORE_GAIN_RISE * (1.0 - (1.0 - q) ** 2)
+                    sheet = self._skin.get("score_digits")
+                    if sheet is not None:
+                        gh = sheet.height() / 3 * SCORE_GAIN_SCALE
+                        p.setOpacity(max(0.0, 1.0 - q))
+                        self._draw_digits(p, sheet, gain, cols=10, rows=3,
+                                          row=SCORE_GAIN_ROW, advance=SCORE_ADVANCE,
+                                          right=SCORE_RIGHT,
+                                          y=int(SCORE_Y - gh + SCORE_GAIN_Y_OFF - rise),
+                                          scale=SCORE_GAIN_SCALE)
+                        p.setOpacity(1.0)
 
         # --- コース記号 ---
         if self._course_sym is not None:
@@ -329,26 +366,29 @@ class GameScreenWidget(QWidget):
                         p.setOpacity(1.0)
 
         # --- コンボ(太鼓の上に重ねる) ---
+        # 位置の基準は太鼓ではなく COMBO_ANCHOR。太鼓だけを動かしても
+        # コンボが一緒に動かないようにするため。
+        cx0, cy0 = COMBO_ANCHOR
+        dw = drum.width() if drum is not None else 120
         if combo > 0:
             key = ("combo_gold" if combo >= COMBO_GOLD_AT else
                    "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
             sheet = self._skin.get(key)
             if sheet is not None:
                 step = sheet.width() / 10 * COMBO_SCALE * COMBO_ADVANCE
-                dw = drum.width() if drum is not None else 120
-                # 太鼓の中心に対して左右対称に置く。
-                right = dx + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
+                # 基準の中心に対して左右対称に置く。
+                right = cx0 + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
                 self._draw_digits(p, sheet, combo, right=right, advance=COMBO_ADVANCE,
-                                  y=dy + COMBO_Y_OFF, scale=COMBO_SCALE)
+                                  y=cy0 + COMBO_Y_OFF, scale=COMBO_SCALE)
             ct = self._skin.get("combo_text")
-            if ct is not None and drum is not None:
+            if ct is not None:
                 # 素材には「コンボ」が縦に2つ入っているので、片方だけを切り出す。
                 # 上段=通常色 / 下段=金 とみなし、数字の色に合わせる。
                 y0, y1 = COMBO_TEXT_BAND
                 band = (y1 - y0) // 2
                 src_y = y0 + (band if combo >= COMBO_GOLD_AT else 0)
-                p.drawPixmap(QRect(dx + drum.width() // 2 - ct.width() // 2 + COMBO_TEXT_X_OFF,
-                                   dy + COMBO_TEXT_Y_OFF, ct.width(), band),
+                p.drawPixmap(QRect(cx0 + dw // 2 - ct.width() // 2 + COMBO_TEXT_X_OFF,
+                                   cy0 + COMBO_TEXT_Y_OFF, ct.width(), band),
                              ct, QRect(0, src_y, ct.width(), band))
 
         # --- 銘板 ---
@@ -447,9 +487,14 @@ class GameScreenWidget(QWidget):
                          0, 0, frame.width(), FRAME_TOP_BAND)
             # レーンを囲う部分(上辺・左右・下辺)は動かさない。透明窓がレーンと
             # 1px 合わせなので、ここを動かすとレーンとずれる。
+            # ただし y=190..214 の左端1pxだけは打音表記帯の色が入っていて、
+            # こちらの帯とは繋がらず浮いて見えるので、その帯だけ x=1 から描く。
+            s0, s1 = FRAME_SLIVER_Y0, FRAME_SLIVER_Y1
+            fw = frame.width()
             p.drawPixmap(fx, fy + FRAME_TOP_BAND, frame,
-                         0, FRAME_TOP_BAND, frame.width(),
-                         frame.height() - FRAME_TOP_BAND)
+                         0, FRAME_TOP_BAND, fw, s0 - FRAME_TOP_BAND)
+            p.drawPixmap(fx + 1, fy + s0, frame, 1, s0, fw - 1, s1 - s0)
+            p.drawPixmap(fx, fy + s1, frame, 0, s1, fw, frame.height() - s1)
         else:
             p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
@@ -465,7 +510,7 @@ class GameScreenWidget(QWidget):
             now, combo, recent = 0.0, 0, None
         score = self._score_timeline.at(now) if self._score_timeline else 0
         total = max(1, self.chart_preview.total_notes())
-        self._draw_left_panel(p, combo, score, recent)
+        self._draw_left_panel(p, combo, score, recent, now)
         self._draw_gauge(p, combo / total)
         self._draw_lane_readouts(p, now, recent)
 

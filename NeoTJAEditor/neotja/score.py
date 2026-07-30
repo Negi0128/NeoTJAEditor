@@ -110,6 +110,17 @@ class ScoreTimeline:
         step = (end - start) / hits
         return [(start + step * i, ROLL_HIT_SCORE) for i in range(hits)]
 
+    def last_event(self, seconds: float):
+        """その時刻までに入った直近の加算 (加算した時刻, 点)。まだ何も
+        入っていなければ None。加算分をスコアの上へ浮かべる表示に使う。"""
+        if not self._times:
+            return None
+        i = bisect.bisect_right(self._times, float(seconds))
+        if i <= 0:
+            return None
+        gain = self._cum[i - 1] - (self._cum[i - 2] if i >= 2 else 0)
+        return self._times[i - 1], gain
+
     def at(self, seconds: float) -> int:
         """その譜面時刻までに入っているスコア。"""
         if not self._times:
