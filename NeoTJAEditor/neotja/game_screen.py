@@ -58,9 +58,9 @@ NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ�
 # 少し左へずらす。
 COMBO_X_OFF = -5
 COMBO_Y_OFF = 17                     # 太鼓の上端からコンボ数字までの距離
-COMBO_TEXT_Y_OFF = 55                # 同 「コンボ」文字まで
+COMBO_TEXT_Y_OFF = 58                # 同 「コンボ」文字まで
 COMBO_TEXT_X_OFF = 1                 # 「コンボ」文字の左右微調整
-COMBO_SCALE = 1.06                   # 本家は太鼓の面いっぱいに大きい
+COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
 COMBO_ADVANCE = 0.80
 # Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
 # 中身は y=26..98 に収まっているので、そこを2等分して片方だけ描く。
@@ -107,9 +107,58 @@ SHOW_BACKGROUND = False
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
 # ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
 # この2つは画面側(親)が描く。判定円の真上、魂ゲージの左に収まる位置。
-HUD_POP_BOTTOM = LANE_Y - 4      # 「良」「連打数」の下端
-JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ(レーン側と同じ)
-JUDGE_POP_SEC = 0.34             # ポップの持続(レーン側と同じ)
+TAP_COUNT_BOTTOM = LANE_Y - 4    # 連打数の下端
+JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
+JUDGE_SCALE = 1.05               # 「良」の拡大率
+JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
+JUDGE_POP_SEC = 0.34             # ポップの持続
+# 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
+# レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
+OVERLAY_RECT = (-120, 130, 240, 110)   # (dx, y, w, h) dx は判定円中心からの左端
+
+
+class _JudgeOverlay(QWidget):
+    """判定文字「良」だけを描く、レーンより手前の板。
+
+    「良」はレーンに少しかぶる位置に出したいが、親(画面)は子(レーン)より
+    先に描かれるので、親に描くとレーンに隠れてしまう。レーンの兄弟として
+    重ねることで手前に出す。背景は塗らない(下のレーン・黒枠が透ける)。
+    """
+
+    def __init__(self, screen):
+        super().__init__(screen)
+        self._screen = screen
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        recent = self._screen.judge_pop()
+        if recent is None:
+            return
+        elapsed = recent[0]
+        if not (0.0 <= elapsed < JUDGE_POP_SEC):
+            return
+        spr = self._screen.chart_preview.judge_sprite()
+        jp = elapsed / JUDGE_POP_SEC
+        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setOpacity(max(0.0, 1.0 - jp))
+        cx = self.width() // 2
+        bottom = JUDGE_BOTTOM - self.y() - rise
+        if spr is not None:
+            w = int(spr.width() * JUDGE_SCALE)
+            h = int(spr.height() * JUDGE_SCALE)
+            p.drawPixmap(QRect(int(cx - w / 2), int(bottom - h), w, h), spr)
+        else:
+            p.setPen(QColor("#f5c518"))
+            f = p.font()
+            f.setPointSize(int(20 * JUDGE_SCALE))
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(int(cx - 40), int(bottom - 26), 80, 26, Qt.AlignCenter, "良")
+        p.end()
 
 
 class GameScreenWidget(QWidget):
@@ -148,18 +197,33 @@ class GameScreenWidget(QWidget):
         # 放っておくと一度描かれたきり止まって見える。ここで毎フレーム
         # 塗り直す。レーンに重ならない2つの矩形だけを指定して、レーンを
         # 二重に描かせない。
+        # 「良」はレーンにかぶるので、レーンより手前の板に描く。
+        ox, oy, ow, oh = OVERLAY_RECT
+        self._judge_overlay = _JudgeOverlay(self)
+        self._judge_overlay.setGeometry(LANE_X + JUDGE_X_IN_LANE + ox, oy, ow, oh)
+        self._judge_overlay.raise_()
+
         self._hud_timer = QTimer(self)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
         self._hud_timer.timeout.connect(self._tick_hud)
         self._hud_timer.start()
 
+    def judge_pop(self):
+        """直近ヒット (経過秒, 音符の文字, コンボ番号)。オーバーレイ用。"""
+        try:
+            return self.chart_preview.game_state()[2]
+        except Exception:  # noqa: BLE001
+            return None
+
     def _tick_hud(self):
         if not self.isVisible():
             return
-        # 上の帯: 魂ゲージ・魂・黒枠・「良」・連打数
+        # 上の帯: 魂ゲージ・魂・黒枠・連打数
         self.update(0, 0, SCREEN_W, LANE_Y)
         # 左パネル: スコア・コース記号・太鼓・コンボ・銘板
         self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
+        # 「良」の板(レーンの手前)
+        self._judge_overlay.update()
 
     # ------------------------------------------------------------------
     def _load_skin(self):
@@ -250,13 +314,18 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(dx, dy, drum)
             # 叩いた瞬間だけ、その音符の色で光らせる(面=赤 / 縁=水色)。
             if recent is not None:
-                elapsed, char, _n = recent
+                elapsed, char, n = recent
                 if 0.0 <= elapsed < DRUM_GLOW_SEC:
                     glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
                     if glow is not None:
+                        # 本家は両面同時ではなく片面ずつ。音符ごとに
+                        # 左→右→左…と交互に光らせる。
+                        gw, gh = glow.width(), glow.height()
+                        half = gw // 2
+                        sx = 0 if (n % 2 == 0) else half
                         # 叩いた直後がいちばん明るく、すぐ消える。
                         p.setOpacity(max(0.0, 1.0 - elapsed / DRUM_GLOW_SEC))
-                        p.drawPixmap(dx, dy, glow)
+                        p.drawPixmap(dx + sx, dy, glow, sx, 0, gw - half, gh)
                         p.setOpacity(1.0)
 
         # --- コンボ(太鼓の上に重ねる) ---
@@ -307,47 +376,22 @@ class GameScreenWidget(QWidget):
                          0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
 
     def _draw_lane_readouts(self, p, now, recent):
-        """レーンの上に出す2つの読み出し — 連打数と判定文字「良」。
-
-        レーンのウィジェットは帯ぴったりの高さしか無く、自分の外へは描けない
-        ので、ここ(親)が代わりに描く。連打中は本家と同じく打数を優先し、
-        「良」は出さない。"""
-        jx = LANE_X + JUDGE_X_IN_LANE
+        """連打・風船の打数。レーンの上、判定円の真上に出す。
+        (「良」はレーンにかぶるので _JudgeOverlay が手前に描く)"""
         try:
             count = self.chart_preview.live_tap_count(now)
         except Exception:  # noqa: BLE001
             count = None
-        if count is not None:
-            p.setPen(QColor("#ffd24a"))
-            f = p.font()
-            f.setPointSize(22)
-            f.setBold(True)
-            p.setFont(f)
-            p.drawText(jx - 100, HUD_POP_BOTTOM - 34, 200, 34,
-                       Qt.AlignHCenter | Qt.AlignBottom, str(count))
+        if count is None:
             return
-
-        if recent is None:
-            return
-        elapsed = recent[0]
-        if not (0.0 <= elapsed < JUDGE_POP_SEC):
-            return
-        jp = elapsed / JUDGE_POP_SEC
-        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
-        p.setOpacity(max(0.0, 1.0 - jp))
-        spr = self.chart_preview.judge_sprite()
-        if spr is not None:
-            p.drawPixmap(int(jx - spr.width() / 2),
-                         int(HUD_POP_BOTTOM - spr.height() - rise), spr)
-        else:
-            p.setPen(QColor("#f5c518"))
-            f = p.font()
-            f.setPointSize(20)
-            f.setBold(True)
-            p.setFont(f)
-            p.drawText(int(jx - 40), int(HUD_POP_BOTTOM - 26 - rise), 80, 26,
-                       Qt.AlignCenter, "良")
-        p.setOpacity(1.0)
+        jx = LANE_X + JUDGE_X_IN_LANE
+        p.setPen(QColor("#ffd24a"))
+        f = p.font()
+        f.setPointSize(22)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(jx - 100, TAP_COUNT_BOTTOM - 34, 200, 34,
+                   Qt.AlignHCenter | Qt.AlignBottom, str(count))
 
     def set_compact(self, compact: bool):
         compact = bool(compact)

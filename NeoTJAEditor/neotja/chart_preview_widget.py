@@ -2191,7 +2191,9 @@ class ChartPreviewWidget(QWidget):
             # 判定文字「良」: 判定枠の上にポップし、上へ昇りながらフェード。
             # 上マージンへはみ出すので、この文字だけレーンクリップを一時解除して
             # 描き(本家でも判定文字はレーン枠の上に出る)、直後にクリップを戻す。
-            if 0.0 <= h_elapsed < self.JUDGE_POP_DURATION:
+            # 本家レイアウトでは判定文字は画面側(game_screen.py)がレーンの上へ
+            # 重ねて描く。ここで描くとレーン上端で切れて下端だけ残ってしまう。
+            if not self._hide_lane_combo and 0.0 <= h_elapsed < self.JUDGE_POP_DURATION:
                 jp = h_elapsed / self.JUDGE_POP_DURATION      # 0..1
                 rise = 13.0 * (1.0 - (1.0 - jp) ** 2)         # ease-out で上昇(控えめ)
                 painter.setClipRect(self.rect())
@@ -2338,15 +2340,12 @@ class ChartPreviewWidget(QWidget):
         # theme already gives the text editor (QPlainTextEdit:focus), so
         # whichever of the two panes has keyboard focus - and therefore
         # receives Space/Q/PgUp/PgDn - is visually obvious at a glance.
-        if self.hasFocus():
+        # 本家レイアウトでは出さない(本家に無いものなので)。単体のレーン
+        # 表示のときだけ、どちらのペインがキー入力を受けるかの目印として残す。
+        if self.hasFocus() and not self._hide_lane_combo:
             pen = QPen(self._color("accent"), 3)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
-            if self._hide_lane_combo:
-                # 本家レイアウトでは余白が透けているので、そこに枠を引くと
-                # 宙に浮いて見える。レーン箱そのものを囲う。
-                painter.drawRect(1, band_top + 1, lane_w - 2, band_h + footer_h - 2)
-            else:
-                painter.drawRect(1, 1, w - 2, h - 2)
+            painter.drawRect(1, 1, w - 2, h - 2)
 
         painter.end()
