@@ -13,9 +13,9 @@ import time
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+    QVBoxLayout,
 )
 
 from neotja import recorder
@@ -25,6 +25,16 @@ from neotja.theme import COLORS
 # (recorder.VideoRecording の説明を参照)、この長さだけ描いてはイベントループへ
 # 戻る。16ms = 60fps 1コマぶんで、これなら操作の引っかかりは体感できない。
 _SLICE_SEC = 0.016
+
+# 出力は固定。曲の頭から終わりまで / 1080p / 120fps。
+FPS = 120
+CANVAS = "1080p"
+# レーンは 908px 幅しかないので、そのまま 1920px へ引き伸ばすとぼやける。
+# 2倍の細かさで描いてから縮めることで 1080p でも輪郭が立つ。
+SUPERSAMPLE = 2
+# 1080p120 は枚数が多いので、エンコード側は medium より速い preset にする
+# (crf は据え置きなので見た目の劣化はほぼ無く、待ち時間だけ縮む)。
+X264_PRESET = "fast"
 
 
 class RecordDialog(QDialog):
@@ -59,6 +69,7 @@ class RecordDialog(QDialog):
         # 音源そのものに聞き直す。
         if song_seconds <= 0.0:
             song_seconds = recorder.probe_song_seconds(song_path)
+        self._song_seconds = song_seconds
 
         layout = QVBoxLayout(self)
         course = self._preview.get("course_label") or self._preview.get("course_key") or "-"
@@ -68,34 +79,11 @@ class RecordDialog(QDialog):
 
         form = QFormLayout()
 
-        self.sp_start = QDoubleSpinBox()
-        self.sp_start.setRange(0.0, max(0.0, song_seconds))
-        self.sp_start.setDecimals(2)
-        self.sp_start.setSuffix(" 秒")
-        self.sp_end = QDoubleSpinBox()
-        self.sp_end.setRange(0.0, max(0.0, song_seconds))
-        self.sp_end.setDecimals(2)
-        self.sp_end.setSuffix(" 秒")
-        self.sp_end.setValue(max(0.0, song_seconds))
-        rng = QHBoxLayout()
-        rng.addWidget(self.sp_start)
-        rng.addWidget(QLabel("〜"))
-        rng.addWidget(self.sp_end)
-        btn_all = QPushButton("曲全体")
-        btn_all.clicked.connect(self._select_all_range)
-        rng.addWidget(btn_all)
-        form.addRow("範囲", rng)
-
-        self.cb_size = QComboBox()
-        self.cb_size.addItem("720p (1280×720)", "720p")
-        self.cb_size.addItem("1080p (1920×1080)", "1080p")
-        self.cb_size.addItem("レーンそのまま (908×212)", "native")
-        form.addRow("画面サイズ", self.cb_size)
-
-        self.cb_fps = QComboBox()
-        self.cb_fps.addItem("60 fps", 60)
-        self.cb_fps.addItem("30 fps", 30)
-        form.addRow("フレームレート", self.cb_fps)
+        # 出力は固定(曲全体 / 1080p / 120fps)。選ばせない代わりに、何が
+        # 出てくるのかはここに書いておく。
+        fixed = QLabel(f"曲全体（0 〜 {song_seconds:.1f} 秒）  1080p (1920×1080)  120 fps")
+        fixed.setStyleSheet("font-weight: bold;")
+        form.addRow("出力", fixed)
 
         self.chk_hit = QCheckBox("打音(ドン/カッ)を入れる")
         self.chk_hit.setChecked(True)
@@ -111,9 +99,12 @@ class RecordDialog(QDialog):
 
         layout.addLayout(form)
 
+        # 1080p120 は 1秒あたり 120枚。実測でおよそ曲の長さの2倍かかるので、
+        # 「あと何分待つのか」を先に出しておく(進捗にも残り時間が出る)。
         self.lbl_status = QLabel(
             "画面を録画するのではなく1コマずつ描き直すので、書き出し中に\n"
-            "アプリを操作しても出来上がりには影響しません。")
+            "アプリを操作しても出来上がりには影響しません。\n"
+            f"1080p/120fps は枚数が多く、目安で {song_seconds * 2 / 60:.0f} 分ほどかかります。")
         self.lbl_status.setStyleSheet(f"color: {COLORS['fg_dim']};")
         layout.addWidget(self.lbl_status)
 
@@ -134,10 +125,6 @@ class RecordDialog(QDialog):
         course = self._preview.get("course_key") or ""
         return f"{base}{('_' + course) if course else ''}.mp4"
 
-    def _select_all_range(self):
-        self.sp_start.setValue(0.0)
-        self.sp_end.setValue(self.sp_end.maximum())
-
     def _browse(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "動画の保存先", self.ed_path.text(), "MP4 動画 (*.mp4)")
@@ -153,8 +140,8 @@ class RecordDialog(QDialog):
         if not out.lower().endswith(".mp4"):
             out += ".mp4"
             self.ed_path.setText(out)
-        if self.sp_end.value() - self.sp_start.value() < 0.5:
-            QMessageBox.warning(self, "動画を書き出す", "範囲が短すぎます。")
+        if self._song_seconds < 1.0:
+            QMessageBox.warning(self, "動画を書き出す", "音源の長さが取得できませんでした。")
             return
         if os.path.exists(out) and QMessageBox.question(
                 self, "動画を書き出す",
@@ -181,8 +168,9 @@ class RecordDialog(QDialog):
             self._rec = recorder.VideoRecording(
                 self._widget, out,
                 preview_data=self._preview, offset=self._offset, song_path=self._song,
-                start_sec=self.sp_start.value(), end_sec=self.sp_end.value(),
-                fps=self.cb_fps.currentData(), canvas=self.cb_size.currentData(),
+                # 曲の頭から終わりまで。end_sec=None で音源そのものの長さになる。
+                start_sec=0.0, end_sec=None,
+                fps=FPS, canvas=CANVAS, supersample=SUPERSAMPLE, preset=X264_PRESET,
                 don_path=cfg.get("hit_sound_don_path", "") or "",
                 ka_path=cfg.get("hit_sound_ka_path", "") or "",
                 sfx_volume=float(cfg.get("sfx_volume", 0.7)),
@@ -249,8 +237,7 @@ class RecordDialog(QDialog):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
 
     def _set_running(self, running):
-        for wdg in (self.sp_start, self.sp_end, self.cb_size, self.cb_fps,
-                    self.chk_hit, self.ed_path):
+        for wdg in (self.chk_hit, self.ed_path):
             wdg.setEnabled(not running)
         self.bar.setVisible(running)
         self.bar.setValue(0)

@@ -219,7 +219,7 @@ class VideoRecording:
     def __init__(self, widget, out_path, *, preview_data, offset, song_path,
                  start_sec=0.0, end_sec=None, fps=60, canvas="720p",
                  don_path="", ka_path="", song_volume=0.8, sfx_volume=0.9,
-                 hit_sounds=True, crf=18):
+                 hit_sounds=True, crf=18, supersample=1, preset="medium"):
         song = decode_song_pcm(song_path)
         song_sec = song.shape[0] / float(SAMPLE_RATE) if song.shape[0] else 0.0
         if end_sec is None:
@@ -252,18 +252,24 @@ class VideoRecording:
         if w <= 0 or h <= 0:
             _cleanup(self._tmp_dir)
             raise RecordingError("描画用ウィジェットの大きさが未設定です。")
-        vf = _video_filter(CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"]), w, h)
+        # レーンは 908px 幅しかないので、1080p などへ引き伸ばすとぼやける。
+        # 描くときの解像度だけ ss 倍にして(=文字も円も細かく描き直される)、
+        # ffmpeg 側で目的の大きさへ縮小する。レイアウトは論理座標のままなので
+        # 見た目の配置は 1 倍のときと 1px も変わらない。
+        ss = max(1, int(supersample))
+        pw, ph = w * ss, h * ss
+        vf = _video_filter(CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"]), pw, ph)
 
         cmd = [
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-            "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{w}x{h}",
+            "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{pw}x{ph}",
             "-r", str(fps), "-i", "-",
             "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
         ]
         if vf:
             cmd += ["-vf", vf]
         cmd += [
-            "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-shortest", "-movflags", "+faststart",
@@ -277,7 +283,10 @@ class VideoRecording:
             _cleanup(self._tmp_dir)
             raise RecordingError(f"ffmpeg を起動できませんでした: {e}") from e
 
-        self._img = QImage(w, h, QImage.Format_RGBA8888)
+        # devicePixelRatio を上げると、Qt は同じ論理座標のまま ss 倍の細かさで
+        # 描いてくれる(円も文字も本当に高精細になる。単なる拡大ではない)。
+        self._img = QImage(pw, ph, QImage.Format_RGBA8888)
+        self._img.setDevicePixelRatio(ss)
         widget.begin_offline_render()
 
     def step(self, max_frames=8) -> bool:
