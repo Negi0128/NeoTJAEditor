@@ -139,11 +139,15 @@ ROLL_NUM_CENTER = (398, 96)      # 数字のかたまりの中心
 # --- 風船・くす玉(白い吹き出し) ------------------------------------------
 # 11_Balloon/Balloon.png 200x160。中身は x13..186 / y3..154 で、左下に尻尾。
 # 数字は連打と同じ Number_Roll.png を使う。どんちゃんは描かない。
-BALLOON_SCALE = 0.62
-BALLOON_CENTER_X = 398           # 吹き出しの中心 x
-BALLOON_BOTTOM = 160             # 吹き出し(尻尾の先)の下端 y
+BALLOON_SCALE = 0.93             # 0.62 の 1.5 倍
+BALLOON_CENTER_X = 408           # 吹き出しの中心 x
+BALLOON_BOTTOM = 165             # 吹き出し(尻尾の先)の下端 y
 BALLOON_NUM_SCALE = 0.60
-BALLOON_NUM_CENTER = (398, 108)  # 数字のかたまりの中心
+# 数字は吹き出しの楕円の中心に置く。素材(200x160)のうち下の尖りは尻尾なので
+# 中心には含めず、楕円だけの中心 (100, 64) を基準にする。こうしておくと
+# 吹き出しを拡大・移動しても数字が置いていかれない。
+BALLOON_NUM_ANCHOR = (100, 64)
+BALLOON_NUM_OFF = (0, 0)         # そこからの微調整 (右, 下)
 
 TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
 JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
@@ -524,12 +528,16 @@ class GameScreenWidget(QWidget):
                 bw, bh = bl.width() * BALLOON_SCALE, bl.height() * BALLOON_SCALE
                 p.drawPixmap(QRect(int(BALLOON_CENTER_X - bw / 2),
                                    int(BALLOON_BOTTOM - bh), int(bw), int(bh)), bl)
+                bx0 = BALLOON_CENTER_X - bw / 2.0
+                by0 = BALLOON_BOTTOM - bh
+                ncx = bx0 + BALLOON_NUM_ANCHOR[0] * BALLOON_SCALE + BALLOON_NUM_OFF[0]
+                ncy = by0 + BALLOON_NUM_ANCHOR[1] * BALLOON_SCALE + BALLOON_NUM_OFF[1]
                 nw, nh = ROLL_NUM_CELL
                 gw, gh = nw * BALLOON_NUM_SCALE, nh * BALLOON_NUM_SCALE
                 step = gw * ROLL_NUM_ADVANCE
                 text = str(int(count))
-                x = BALLOON_NUM_CENTER[0] - step * len(text) / 2.0
-                y = BALLOON_NUM_CENTER[1] - gh / 2.0
+                x = ncx - step * len(text) / 2.0
+                y = ncy - gh / 2.0
                 for c in text:
                     p.drawPixmap(QRect(int(x), int(y), int(gw) + 1, int(gh) + 1),
                                  num, QRect(int(c) * nw, 0, nw, nh))
