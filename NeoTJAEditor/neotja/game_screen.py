@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from neotja import gauge as gauge_mod
 from neotja import settings as settings_mod
 from neotja.chart_preview_widget import ChartPreviewWidget
 
@@ -84,8 +85,10 @@ GAUGE_BAR_H = 44
 # 黒枠(Taiko_Frame)の上帯も同じ段付きで、背の高い側が枠の x=715 から始まる。
 # 段の位置を合わせると 枠左端331 + 715 - 547 = 499 がゲージの左端になる。
 GAUGE_POS = (499, 144)
-# 背の高い側(クリア圏)の始まり。ここまで溜まると魂が光る。
-GAUGE_CLEAR_RATIO = 547.0 / 697.0
+# クリア(ノルマ)の位置。本家は内部10000点中8000点＝80%。素材の段差
+# (背の高いクリア圏の始まり)は実測 547/697 = 78.5% とわずかに手前だが、
+# 魂が光るかどうかはゲームの規則どおり 80% で判定する。
+GAUGE_CLEAR_RATIO = gauge_mod.CLEAR_RATIO
 # 魂の文字 (Soul.png 80x160 = 80x80 が2段。上段=通常 / 下段=クリア)。
 # ゲージ右端(499+697=1196)と枠の右端(331+950=1281)の間、85px の窓に収める。
 SOUL_CELL = 80
@@ -193,6 +196,7 @@ class GameScreenWidget(QWidget):
         self._compact = bool(compact)
         self._skin = {}
         self._score_timeline = None
+        self._gauge = None
         self._course_key = None
         self._course_sym = None
         self._load_skin()
@@ -335,6 +339,8 @@ class GameScreenWidget(QWidget):
         from neotja.score import ScoreTimeline
 
         self._score_timeline = ScoreTimeline(preview_data or {})
+        # 魂ゲージの伸び方(おに基準)。譜面が決まればランクが決まる。
+        self._gauge = gauge_mod.GaugeModel(preview_data or {})
         self._course_key = course_key or (preview_data or {}).get("course_key")
         self._course_sym = None
         if self._course_key:
@@ -566,9 +572,11 @@ class GameScreenWidget(QWidget):
         except Exception:  # noqa: BLE001
             now, combo, recent = 0.0, 0, None
         score = self._score_timeline.at(now) if self._score_timeline else 0
-        total = max(1, self.chart_preview.total_notes())
+        # 魂ゲージは「叩いた数 × ランク / 10000」。音符数で決まるランクが
+        # 1個あたりの点なので、譜面の7割半ばで入魂して以降は満タンのまま
+        # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
         self._draw_left_panel(p, combo, score, recent, now)
-        self._draw_gauge(p, combo / total)
+        self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0)
         self._draw_lane_readouts(p, now, recent)
 
         p.end()
