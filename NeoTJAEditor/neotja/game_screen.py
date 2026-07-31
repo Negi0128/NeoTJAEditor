@@ -154,9 +154,9 @@ SOUL_BURST_SCALE = 1.0
 # 1280 換算で幅 120px 前後。素材の絵は 231px 幅なので約 0.52 倍で置く。
 ROLL_FAN_CELL = (334, 204)
 ROLL_FAN_FRAMES = 5
-ROLL_FAN_SCALE = 1.04            # 0.52 の 2 倍
+ROLL_FAN_SCALE = 0.884           # 0.52 の 1.7 倍
 ROLL_FAN_CENTER_X = 398          # 扇の中心 x
-ROLL_FAN_BOTTOM = 152            # 扇の下端 y
+ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
 ROLL_NUM_SCALE = 0.60
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
