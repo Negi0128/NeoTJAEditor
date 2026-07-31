@@ -273,13 +273,20 @@ class MixerCore:
         ntimes = len(times)
         while cursor < ntimes and times[cursor] < block_end_time:
             et = times[cursor]
-            if et >= block_start_time and enabled:
+            if et >= block_start_time and enabled and frames > 0:
                 # 出力フレーム k の音声時間は (read_pos + inc*k)/song_sr。これを
                 # et について解くと k = (et - block_start_time)*device_sr/rate。
                 offset = int(round((et - block_start_time) * self.device_sr / self.rate))
-                if 0 <= offset < frames:
-                    pcm = self.bank["click"] if is_metro else self.bank.get(kinds[cursor], None)
-                    self._spawn(pcm, offset, is_metro)
+                # ブロックの終端ちょうどに来たイベントは、丸めで offset が
+                # frames になる(ループ条件 et < block_end_time は浮動小数の
+                # 都合で通ってしまう)。以前はこれを範囲外として捨てていたため、
+                # ブロック長の倍数の時刻に置かれた打音だけが 1曲に十数個
+                # 無音になっていた。ここに来た時点で「このブロックのイベント」
+                # なのは確定なので、端へ寄せて必ず鳴らす。ずれても最大1サンプル
+                # (48kHz で 0.02ms)で、聴いて分かる差にはならない。
+                offset = min(frames - 1, max(0, offset))
+                pcm = self.bank["click"] if is_metro else self.bank.get(kinds[cursor], None)
+                self._spawn(pcm, offset, is_metro)
             cursor += 1
         setattr(self, cursor_attr, cursor)
 
