@@ -549,32 +549,38 @@ class ChartPreviewWidget(QWidget):
 
     # 連打が終わったあと、扇を出しておく時間。叩き終わった打数を見せる。
     ROLL_HOLD_SEC = 1.0
+    # そのうち最後の何秒かけて薄くしながら消すか。
+    ROLL_FADE_SEC = 0.1
 
     def live_tap_state(self, now=None):
         """(打数, 種別) を返す。何も出さないときは (None, None)。
 
-        種別は "roll"(連打) か "balloon"(風船・くす玉)。本家は連打が金の扇、
-        風船が吹き出しと見た目が別なので、画面側が描き分けられるようにする。
+        戻り値は (打数, 種別, 濃さ)。種別は "roll"(連打) か "balloon"
+        (風船・くす玉)。本家は連打が金の扇、風船が吹き出しと見た目が別なので、
+        画面側が描き分けられるようにする。
 
         連打は区間を過ぎても ROLL_HOLD_SEC のあいだ最終打数を出しておく。
         ただし次の連打・風船が始まるまで — 次が来たらそちらが優先で、
-        前の打数が残って「風船の脇に連打の数が出ている」ようにはしない。"""
+        前の打数が残って「風船の脇に連打の数が出ている」ようにはしない。
+        自然に消えるときだけ最後の ROLL_FADE_SEC で薄くする(次が来て
+        入れ替わるときは薄くしない — 一瞬なので、かえって目につく)。"""
         t = self._current_chart_time() if now is None else now
         for r in self._rolls:
             if r[0] <= t <= r[1]:
-                return self._live_top_count(t), "roll"
+                return self._live_top_count(t), "roll", 1.0
         for spans in (self._balloons, self._kusudamas):
             for sp in spans:
                 if sp[0] <= t < sp[1]:
-                    return self._live_top_count(t), "balloon"
+                    return self._live_top_count(t), "balloon", 1.0
         held = self._held_roll(t)
         if held is not None:
-            return held, "roll"
-        return None, None
+            count, alpha = held
+            return count, "roll", alpha
+        return None, None, 0.0
 
     def _held_roll(self, now):
-        """直前に終わった連打の最終打数。出す時間を過ぎている / 次の区間が
-        始まっているなら None。"""
+        """直前に終わった連打の (最終打数, 濃さ)。出す時間を過ぎている /
+        次の区間が始まっているなら None。"""
         if not self._rolls:
             return None
         last = None
@@ -582,14 +588,24 @@ class ChartPreviewWidget(QWidget):
             if r[1] > now:
                 break
             last = r
-        if last is None or now - last[1] >= self.ROLL_HOLD_SEC:
+        if last is None:
             return None
+        stop = last[1] + self.ROLL_HOLD_SEC
+        faded = True          # 時間切れで自然に消えるのか
         # 次に始まる区間(連打・風船・くす玉)より前でだけ出す。
         starts = [sp[0] for sp in self._live_spans]
         i = bisect.bisect_right(starts, last[1])
-        if i < len(starts) and now >= starts[i]:
+        if i < len(starts) and starts[i] < stop:
+            stop = starts[i]
+            faded = False     # 入れ替わりなので薄くしない
+        if now >= stop:
             return None
-        return int(last[-1])
+        alpha = 1.0
+        if faded and self.ROLL_FADE_SEC > 0:
+            left = stop - now
+            if left < self.ROLL_FADE_SEC:
+                alpha = max(0.0, left / self.ROLL_FADE_SEC)
+        return int(last[-1]), alpha
 
 
     def judge_sprite(self):

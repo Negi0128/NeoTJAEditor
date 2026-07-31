@@ -163,7 +163,7 @@ ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 # 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
 # しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
 ROLL_NUM_ANCHOR = (167, 96)
-ROLL_NUM_OFF = (5, 0)            # (右, 下)
+ROLL_NUM_OFF = (-2, -4)          # (右, 下)
 
 # --- 風船・くす玉(白い吹き出し) ------------------------------------------
 # 11_Balloon/Balloon.png 200x160。中身は x13..186 / y3..154 で、左下に尻尾。
@@ -619,11 +619,22 @@ class GameScreenWidget(QWidget):
         """連打・風船の打数を、本家と同じ金の扇で出す。
         (「良」はレーンにかぶるので _JudgeOverlay が手前に描く)"""
         try:
-            count, kind = self.chart_preview.live_tap_state(now)
+            count, kind, alpha = self.chart_preview.live_tap_state(now)
         except Exception:  # noqa: BLE001
-            count, kind = None, None
-        if count is None:
+            count, kind, alpha = None, None, 0.0
+        if count is None or alpha <= 0.0:
             return
+        # 消え際だけ薄くする。扇と数字をまとめて薄くしたいので、
+        # この関数の描画すべてに掛ける。
+        p.save()
+        p.setOpacity(alpha)
+        try:
+            self._draw_tap_readout(p, count, kind)
+        finally:
+            p.restore()
+
+    def _draw_tap_readout(self, p, count, kind):
+        """連打の扇 / 風船の吹き出しを描く(濃さは呼び出し側が設定済み)。"""
 
         num = self._skin.get("roll_num")
         # --- 風船・くす玉: 白い吹き出しに残り打数 ---
