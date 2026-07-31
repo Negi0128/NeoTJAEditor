@@ -155,10 +155,10 @@ SOUL_BURST_SCALE = 1.0
 ROLL_FAN_CELL = (334, 204)
 ROLL_FAN_FRAMES = 5
 ROLL_FAN_SCALE = 0.884           # 0.52 の 1.7 倍
-ROLL_FAN_CENTER_X = 398          # 扇の中心 x
+ROLL_FAN_CENTER_X = 413          # 扇の中心 x
 ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
-ROLL_NUM_SCALE = 0.60
+ROLL_NUM_SCALE = 0.90            # 0.60 の 1.5 倍
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 # 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
 # しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
@@ -672,6 +672,9 @@ class GameScreenWidget(QWidget):
                      fan, QRect(frame * cw, 0, cw, ch))
 
         # 打数。専用の数字シート(0..9 が横に10個)を中央そろえで。
+        # 0 のときは数字を出さない(開き始めた扇だけ見せる)。
+        if int(count) <= 0:
+            return
         fx0 = ROLL_FAN_CENTER_X - dw / 2.0
         fy0 = ROLL_FAN_BOTTOM - dh
         ncx = fx0 + ROLL_NUM_ANCHOR[0] * ROLL_FAN_SCALE + ROLL_NUM_OFF[0]
