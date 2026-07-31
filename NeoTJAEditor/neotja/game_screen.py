@@ -126,7 +126,7 @@ SHOW_BACKGROUND = False
 GOGO_SPLASH_CELL = (230, 460)
 GOGO_SPLASH_FRAMES = 30
 GOGO_SPLASH_FRAME_SEC = 1.0 / 30.0
-GOGO_SPLASH_SCALE = 0.55
+GOGO_SPLASH_SCALE = 0.825        # 0.55 の 1.5 倍
 GOGO_SPLASH_BOTTOM = LANE_Y + LANE_H   # 火花の足元をレーン下端に置く
 
 # 魂ゲージが満タン(入魂)のあいだ、ゲージが虹色に変わる。
@@ -189,7 +189,7 @@ SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
-OVERLAY_RECT = (-130, 88, 260, 250)    # (dx, y, w, h) dx は判定円中心からの左端
+OVERLAY_RECT = (-130, 0, 260, 338)     # (dx, y, w, h) dx は判定円中心からの左端
 
 
 class _JudgeOverlay(QWidget):
@@ -210,9 +210,7 @@ class _JudgeOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # ゴーゴー開始の火花(GoGoSplash)は判定枠まわりがうるさくなるので
-        # 出さない。素材と描画関数は残してあるので、戻すならここを
-        # 呼び直すだけでよい。
+        self._screen.draw_gogo_splash(p, self.x(), self.y())
         recent = self._screen.judge_pop()
         if recent is None:
             p.end()
