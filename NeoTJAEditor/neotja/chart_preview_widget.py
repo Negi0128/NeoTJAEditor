@@ -1616,7 +1616,7 @@ class ChartPreviewWidget(QWidget):
     # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png)。7コマのループ。
     # 素材の絵は 234x192 と判定円(108)より大きいので縮めて置く。
     GOGO_FIRE_FRAME_SEC = 1.0 / 15.0
-    GOGO_FIRE_FIT = 1.5    # 1.0 = 大音符の判定枠ぴったり
+    GOGO_FIRE_FIT = 2.25   # 1.0 = 大音符の判定枠ぴったり
     GOGO_FIRE_CELL = (360, 370)
     GOGO_FIRE_OFF = (0, 0)
     BALLOON_CELL = 280
