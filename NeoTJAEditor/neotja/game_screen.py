@@ -51,7 +51,11 @@ SCORE_RIGHT, SCORE_Y = 178, 198      # スコアは右詰め
 SCORE_SCALE = 1.02
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
-SCORE_ADVANCE = 0.76
+SCORE_ADVANCE = 0.73
+# Score_Plate.png は文字ごとに上下がそろっていない。実測すると 5 と 6 だけ
+# セル内で 1px 上に寄っている(他は y=1..30、5/6 は y=0..29)。数字ごとに
+# 下げ量を持たせて揃える。
+SCORE_DIGIT_Y_OFF = {5: 2}
 COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
 DRUM_POS = (203, 199)                # 太鼓 120x133
 # コンボの数字と「コンボ」文字は太鼓の上に載るが、太鼓だけを動かしたときに
@@ -474,7 +478,8 @@ class GameScreenWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
-                     right=None, left=None, y=0, scale=1.0, advance=1.0):
+                     right=None, left=None, y=0, scale=1.0, advance=1.0,
+                     y_offsets=None):
         """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。
 
         advance は「次の字までどれだけ送るか」を1文字枠に対する割合で指定する。
@@ -489,7 +494,8 @@ class GameScreenWidget(QWidget):
         x = (right - step * len(s)) if right is not None else (left or 0)
         for c in s:
             i = int(c)
-            p.drawPixmap(QRect(int(x), int(y), int(w) + 1, int(h) + 1), sheet,
+            dy = (y_offsets or {}).get(i, 0)
+            p.drawPixmap(QRect(int(x), int(y) + dy, int(w) + 1, int(h) + 1), sheet,
                          QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
             x += step
 
@@ -498,7 +504,8 @@ class GameScreenWidget(QWidget):
         # --- スコア(右詰め) ---
         self._draw_digits(p, self._skin.get("score_digits"), score,
                           cols=10, rows=3, row=0, advance=SCORE_ADVANCE,
-                          right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE)
+                          right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE,
+                          y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
         if self._score_timeline is not None:
@@ -517,7 +524,8 @@ class GameScreenWidget(QWidget):
                                           row=SCORE_GAIN_ROW, advance=SCORE_ADVANCE,
                                           right=SCORE_RIGHT,
                                           y=int(SCORE_Y - gh + SCORE_GAIN_Y_OFF - rise),
-                                          scale=SCORE_GAIN_SCALE)
+                                          scale=SCORE_GAIN_SCALE,
+                                          y_offsets=SCORE_DIGIT_Y_OFF)
                         p.setOpacity(1.0)
 
         # --- コース記号 ---
