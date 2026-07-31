@@ -890,6 +890,7 @@ class PreviewDock(QDockWidget):
             self._current_wave_path = None
             self.status_label.setText("先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
             self.btn_play.setEnabled(False)
+            self.chart_preview.set_loading(False)
             return
 
         wave_path = os.path.join(os.path.dirname(current_file), wave)
@@ -909,10 +910,12 @@ class PreviewDock(QDockWidget):
         if not os.path.exists(wave_path):
             self.status_label.setText(f"音源ファイルが見つかりません: {wave}")
             self.btn_play.setEnabled(False)
+            self.chart_preview.set_loading(False)
             return
 
         self.status_label.setText("音源を読み込み中...")
         self.btn_play.setEnabled(False)
+        self.chart_preview.set_loading(True)
         self.audio.load(wave_path)
         self._start_waveform_decode(wave_path)
 
@@ -980,6 +983,9 @@ class PreviewDock(QDockWidget):
         if path != self._current_wave_path:
             return
         self.status_label.setText(f"波形の読み込みに失敗しました: {msg}")
+        # ミキサー経路ではデコードが LoadedMedia の出どころなので、失敗したら
+        # ここで幕を降ろさないと「Loading Now」が出たままになる。
+        self.chart_preview.set_loading(False)
 
     # ------------------------------------------------------------------
     # Playback
@@ -1040,12 +1046,15 @@ class PreviewDock(QDockWidget):
         Status = QMediaPlayer.MediaStatus
         if status in (Status.LoadingMedia, Status.NoMedia):
             self.btn_play.setEnabled(False)
+            self.chart_preview.set_loading(True)
             self.status_label.setText("音源を読み込み中...")
         elif status == Status.InvalidMedia:
             self.btn_play.setEnabled(False)
+            self.chart_preview.set_loading(False)
             self.status_label.setText("音源を再生できません(未対応の形式など)。")
         elif status in (Status.LoadedMedia, Status.BufferedMedia, Status.EndOfMedia):
             self.btn_play.setEnabled(True)
+            self.chart_preview.set_loading(False)
             if self.status_label.text() == "音源を読み込み中...":
                 self.status_label.setText("")
 

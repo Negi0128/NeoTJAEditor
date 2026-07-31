@@ -22,7 +22,7 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import os
 
 from PySide6.QtCore import Qt, QRect, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QImage,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,
                            QPainter, QPixmap)
 from PySide6.QtWidgets import QWidget
 
@@ -56,7 +56,7 @@ SCORE_ADVANCE = 0.73
 # Score_Plate.png は文字ごとに上下がそろっていない。実測すると 5 と 6 だけ
 # セル内で 1px 上に寄っている(他は y=1..30、5/6 は y=0..29)。数字ごとに
 # 下げ量を持たせて揃える。
-SCORE_DIGIT_Y_OFF = {5: 2, 6: 2}
+SCORE_DIGIT_Y_OFF = {5: 1, 6: 1}
 COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
 DRUM_POS = (203, 199)                # 太鼓 120x133
 # コンボの数字と「コンボ」文字は太鼓の上に載るが、太鼓だけを動かしたときに
@@ -196,9 +196,10 @@ JUDGE_POP_SEC = 0.34             # ポップの持続
 TITLE_FONT_FILE = "Kanteiryu.otf"
 TITLE_FONT_FALLBACKS = ("FOT-大江戸勘亭流 Std E", "FOT-OedoKtr Std E",
                         "DFPKanteiryu-XB", "DFP勘亭流")
-TITLE_RECT = (620, 14, 640, 52)   # 右詰めで収める枠 (x, y, w, h)
-TITLE_SIZE = 34                   # 収まらなければ自動で小さくする
-TITLE_SIZE_MIN = 18
+TITLE_RECT = (620, 14, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
+TITLE_SIZE = 34                   # 大きさは曲名の長さによらず一定
+# 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
+TITLE_LEFT_LIMIT = 8
 TITLE_COLOR = "#ffffff"
 TITLE_SHADOW = "#000000"
 
@@ -436,24 +437,22 @@ class GameScreenWidget(QWidget):
 
     def _draw_title(self, p):
         """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
-        長い曲名は枠に収まるまで自動で小さくする。"""
+        大きさは一定。長い曲名は縮めず、右端を揃えたまま左へ伸ばす。"""
         if not self._title:
             return
         x, y, w, h = TITLE_RECT
         f = QFont(self._title_family) if self._title_family else QFont()
-        size = TITLE_SIZE
-        while size > TITLE_SIZE_MIN:
-            f.setPixelSize(size)
-            if QFontMetrics(f).horizontalAdvance(self._title) <= w:
-                break
-            size -= 1
-        f.setPixelSize(size)
+        f.setPixelSize(TITLE_SIZE)
         p.setFont(f)
+        # 右端は固定。左へはみ出せるよう、枠の左端を画面左まで広げておく
+        # (右詰めなので、収まる曲名の見た目は変わらない)。
+        left = TITLE_LEFT_LIMIT
+        rect_w = x + w - left
         flags = Qt.AlignRight | Qt.AlignVCenter
         p.setPen(QColor(TITLE_SHADOW))
-        p.drawText(QRect(x + 2, y + 2, w, h), flags, self._title)
+        p.drawText(QRect(left + 2, y + 2, rect_w, h), flags, self._title)
         p.setPen(QColor(TITLE_COLOR))
-        p.drawText(QRect(x, y, w, h), flags, self._title)
+        p.drawText(QRect(left, y, rect_w, h), flags, self._title)
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""

@@ -325,6 +325,8 @@ class ChartPreviewWidget(QWidget):
         # the F1 hit-sound ON/OFF feedback, which otherwise has no visible
         # effect at all on a silent passage.
         self._toast_text = ""
+        # 音源の読み込み中はレーンに幕を出す(この間は再生できない)。
+        self._loading = False
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._clear_toast)
@@ -548,6 +550,10 @@ class ChartPreviewWidget(QWidget):
         return None
 
     # 連打が終わったあと、扇を出しておく時間。叩き終わった打数を見せる。
+    # 音源読み込み中にレーンへ出す幕。
+    LOADING_TEXT = "Loading Now"
+    LOADING_FONT_SIZE = 34
+
     ROLL_HOLD_SEC = 1.0
     # そのうち最後の何秒かけて薄くしながら消すか。
     ROLL_FADE_SEC = 0.1
@@ -1330,6 +1336,16 @@ class ChartPreviewWidget(QWidget):
     def set_playback_rate(self, rate: float):
         """再生速度倍率(0.25〜2.0)を設定。再生中の時間外挿に使う。"""
         self._playback_rate = max(0.25, min(2.0, rate))
+
+    def set_loading(self, loading: bool):
+        """音源の読み込み中(=再生できない)かどうか。レーンに幕を出す。"""
+        loading = bool(loading)
+        if loading == self._loading:
+            return
+        self._loading = loading
+        self.update()
+        if self.parent() is not None:
+            self.parent().update()
 
     def show_toast(self, text: str, seconds: float = 3.0):
         """レーン左上に text を seconds 秒だけ表示する。"""
@@ -2699,5 +2715,20 @@ class ChartPreviewWidget(QWidget):
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(1, 1, w - 2, h - 2)
+
+        # 音源を読み込んでいるあいだは再生できないので、レーンにそう出す。
+        # 譜面の上に暗幕を敷いてから字を置く(下に音符が透けていると、
+        # 動いていないのか読み込み中なのか分からない)。
+        if self._loading:
+            painter.setClipRect(0, band_top, lane_w, band_h)
+            painter.fillRect(0, band_top, int(lane_w), band_h, QColor(0, 0, 0, 170))
+            painter.setPen(QColor(0, 0, 0, 200))
+            painter.setFont(self._font(self.LOADING_FONT_SIZE, True))
+            painter.drawText(2, band_top + 2, int(lane_w), band_h,
+                             Qt.AlignCenter, self.LOADING_TEXT)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(0, band_top, int(lane_w), band_h,
+                             Qt.AlignCenter, self.LOADING_TEXT)
+            painter.setClipRect(self.rect())
 
         painter.end()
