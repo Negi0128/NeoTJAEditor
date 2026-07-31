@@ -1585,7 +1585,14 @@ class ChartPreviewWidget(QWidget):
     # 5コマ目は4コマ目と同じ絵のアルファ半分＝消え際なので、そのまま使う。
     HIT_EXP_CELL = 260
     HIT_EXP_FRAMES = 5
-    HIT_EXP_FRAME_SEC = 0.025      # 5コマで約 0.125 秒。本家も同じくらい短い
+    # コマ送りが速いほど「弾ける」感じが強くなる。0.025 だと 40fps 相当で
+    # 動きがきつかったので、60fps で1コマ2フレーム相当まで緩めた。
+    HIT_EXP_FRAME_SEC = 0.033      # 5コマで約 0.167 秒
+    # 全体の濃さ。素材そのままの全不透明だと音符ごとに強く光って目が疲れる。
+    HIT_EXP_OPACITY = 0.80
+    # 終わり際は濃さを落としてなめらかに消す(最後のコマで急に消えると
+    # 瞬いて見える)。ここから先を線形に 0 へ。
+    HIT_EXP_FADE_FROM = 0.55       # 0..1 のうちどこからフェードを始めるか
     HIT_EXP_ROWS = (0, 1, 2, 3)    # 小炎, 小銀, 大炎, 大銀
 
     def _load_explosion_sprites(self):
@@ -1615,8 +1622,16 @@ class ChartPreviewWidget(QWidget):
         fire, silver = (2, 3) if char in NOTE_BIG else (0, 1)
         c = self.HIT_EXP_CELL
         x, y = int(judge_x - c / 2), int(mid_y - c / 2)
+        # 終わり際だけ濃さを落とす。素材の5コマ目も半透明だが、それだけだと
+        # 段が粗くて瞬いて見えるので、時間で連続に落とす。
+        q = elapsed / span
+        op = self.HIT_EXP_OPACITY
+        if q > self.HIT_EXP_FADE_FROM:
+            op *= max(0.0, 1.0 - (q - self.HIT_EXP_FADE_FROM) / (1.0 - self.HIT_EXP_FADE_FROM))
+        painter.setOpacity(op)
         painter.drawPixmap(x, y, self._skin_explosion[fire][f])
         painter.drawPixmap(x, y, self._skin_explosion[silver][f])
+        painter.setOpacity(1.0)
 
     def _se_sprite_for(self, label, big):
         """ラベル(と大音符かどうか)から SENotes.png の1枚を選ぶ。"""
