@@ -370,6 +370,12 @@ class ChartPreviewWidget(QWidget):
         self._skin_explosion = self._load_explosion_sprites()
         # 判定円。Notes.png の左上1コマ目がそれ(音符ではない)。
         self._skin_judge_ring = self._load_judge_ring()
+        # 風船が膨らんで割れるまで (Breaking_0..5.png)。
+        self._skin_balloon_seq = [self._load_skin_pixmap('Breaking_%d.png' % i) for i in range(6)]
+        if any(b is None for b in self._skin_balloon_seq):
+            self._skin_balloon_seq = None
+        # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png 360x370 が7コマ)。
+        self._skin_gogo_fire = self._load_sheet('GoGoFire.png', 7, 360, 370)
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1594,6 +1600,21 @@ class ChartPreviewWidget(QWidget):
     JUDGE_RING_CELL = 130
     JUDGE_RING_SPRITE_CX = 63.5
 
+    # 風船 (Breaking_0..5.png 各 280x280)。6枚とも結び目が x=11 で固定、
+    # 絵の縦中心は 141.5 で一定。よって「セル内の (20, 141.5) を判定円に
+    # 合わせる」と、結び目を判定円に留めたまま右へ膨らむ。
+    BALLOON_CELL = 280
+    BALLOON_ANCHOR = (20.0, 141.5)
+    BALLOON_SPRITE_SCALE = 0.62      # 満タン(174px)がレーン(130px)に収まる大きさ
+    BALLOON_BURST_SEC = 0.18         # 割れたあと破片のコマを出す時間
+
+    def _load_sheet(self, name, cols, cw, ch):
+        """横1列のスプライトシートを cols 枚に切る。無ければ None。"""
+        sheet = self._load_skin_pixmap(name)
+        if sheet is None or sheet.width() < cw * cols or sheet.height() < ch:
+            return None
+        return [sheet.copy(QRect(i * cw, 0, cw, ch)) for i in range(cols)]
+
     def _load_judge_ring(self):
         """Notes.png の左上 130x130 を判定円として切り出す。無ければ None。"""
         sheet = self._load_skin_pixmap("Notes.png")
@@ -1904,6 +1925,17 @@ class ChartPreviewWidget(QWidget):
         if need <= 0:
             return end
         return min(end, start + need / self._roll_hit_speed)
+
+    def _draw_balloon_sprite(self, painter, judge_x, mid_y, frame):
+        """風船を1コマ描く。結び目(セル内 (20,141.5))を判定円に合わせる。"""
+        spr = self._skin_balloon_seq[max(0, min(5, int(frame)))]
+        if spr is None:
+            return
+        k = self.BALLOON_SPRITE_SCALE
+        ax, ay = self.BALLOON_ANCHOR
+        w = self.BALLOON_CELL * k
+        painter.drawPixmap(QRectF(judge_x - ax * k, mid_y - ay * k, w, w),
+                           spr, QRectF(spr.rect()))
 
     def _live_top_count(self, now):
         """上部読み出し(判定リングの右)に出す打数。連打・風船・くす玉で
@@ -2295,15 +2327,17 @@ class ChartPreviewWidget(QWidget):
         # 風船・くす玉: 終点バーは出さず、風船ノーツ1個だけを描く。区間に入る
         # 前は右から流れてきて、区間中(now が [start,end])は判定枠に固定する。
         # 固定されている間ずっと表示されるので、いつまで残っているか分かる。
+        # 割れたあとも少しだけ破片のコマを残す。
+        burst = self.BALLOON_BURST_SEC if self._skin_balloon_seq is not None else 0.0
         for b_start, b_end, sp0, sp1, b_hits in self._balloon_draw:
-            if now >= b_end:
+            if now >= b_end + burst:
                 continue
             x0 = judge_x + (b_start - now) * sp0
             if now < b_start and x0 > lane_w + rs:
                 continue
             draw_items.append((b_start, "balloon", (b_start, b_end, sp0, b_hits)))
         for k_start, k_end, sp0, sp1, k_hits in self._kusudama_draw:
-            if now >= k_end:
+            if now >= k_end + burst:
                 continue
             x0 = judge_x + (k_start - now) * sp0
             if now < k_start and x0 > lane_w + rs:
@@ -2335,7 +2369,16 @@ class ChartPreviewWidget(QWidget):
                 # 出すので、面には数字を描かない。区間中は判定枠に固定。
                 b_start, b_end, sp0, b_hits = payload
                 bx = judge_x if now >= b_start else judge_x + (b_start - now) * sp0
-                self._draw_balloon_note(painter, bx, mid_y)
+                if self._skin_balloon_seq is not None and now >= b_start:
+                    # 叩いている間は本家素材に差し替える。残り打数が減るほど
+                    # 膨らみ、割れると破片のコマになる。流れてくる間は顔つきの
+                    # 音符のままなので、絵が変わるのは判定枠に着いた一度だけ。
+                    span = max(1e-6, b_end - b_start)
+                    prog = min(1.0, max(0.0, (now - b_start) / span))
+                    f = 5 if now >= b_end else min(4, int(prog * 5))
+                    self._draw_balloon_sprite(painter, judge_x, mid_y, f)
+                else:
+                    self._draw_balloon_note(painter, bx, mid_y)
             else:  # note - approach, then fly off after crossing the line.
                 i = payload
                 t = self._note_times[i]
