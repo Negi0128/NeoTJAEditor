@@ -227,6 +227,20 @@ class GameScreenWidget(QWidget):
         self._hud_timer.timeout.connect(self._tick_hud)
         self._hud_timer.start()
 
+    # --- 録画(オフライン描画)用の受け渡し ---------------------------------
+    # 録画側は「1つのウィジェットに時刻を渡して render() する」だけの作りに
+    # してある。画面ごと録るときも同じ扱いにできるよう、時刻の出し入れは
+    # レーンへそのまま流す。HUD はレーンの現在値から描くので、これだけで
+    # スコアもコンボも魂ゲージも録画に乗る。
+    def begin_offline_render(self):
+        self.chart_preview.begin_offline_render()
+
+    def set_render_time(self, seconds):
+        self.chart_preview.set_render_time(seconds)
+
+    def end_offline_render(self):
+        self.chart_preview.end_offline_render()
+
     def judge_pop(self):
         """直近ヒット (経過秒, 音符の文字, コンボ番号)。オーバーレイ用。"""
         try:

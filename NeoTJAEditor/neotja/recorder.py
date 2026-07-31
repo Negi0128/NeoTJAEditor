@@ -70,22 +70,27 @@ def probe_song_seconds(path: str) -> float:
 
 
 def make_offline_widget(preview_data, offset, se_text_enabled=True):
-    """録画専用の ChartPreviewWidget を画面外に1つ作る。
+    """録画専用の画面を1つ、画面外に組み立てる。
 
-    実機のゲーム窓と同じ固定サイズ(LANE_WIDTH × widget_height)にする。
-    レイアウトに載せない裸のウィジェットは幅が 0 のままなので、ここで明示的に
-    大きさを与えないと真っ白な動画ができてしまう。
+    返すのは本家レイアウトの GameScreenWidget(1280x720)。中にレーンが
+    入っていて、スコア・コンボ・太鼓・魂ゲージ・判定文字もそのまま乗る。
+    時刻の出し入れ(begin_offline_render / set_render_time /
+    end_offline_render)は画面側がレーンへ流してくれるので、録画側の手順は
+    レーン1枚を録っていたときと変わらない。
 
     利用者が今見ているウィジェットを使い回さないのは、録画中に表示が
     書き換わってしまうため(録画は再生位置を勝手に動かす)。"""
     from neotja.chart_preview_widget import ChartPreviewWidget
+    from neotja.game_screen import GameScreenWidget
 
+    data = preview_data or {}
     cp = ChartPreviewWidget()
     cp.set_se_text_enabled(bool(se_text_enabled))
-    cp.set_preview_data(preview_data or {})
+    cp.set_preview_data(data)
     cp.set_offset(offset)
-    cp.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), cp.widget_height())
-    return cp
+    gs = GameScreenWidget(cp, compact=False)
+    gs.set_chart(data, data.get("course_key"))
+    return gs
 
 
 class RecordingCancelled(Exception):
