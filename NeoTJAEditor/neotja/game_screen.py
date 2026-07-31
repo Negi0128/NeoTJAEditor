@@ -158,12 +158,12 @@ ROLL_FAN_SCALE = 0.884           # 0.52 の 1.7 倍
 ROLL_FAN_CENTER_X = 413          # 扇の中心 x
 ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
-ROLL_NUM_SCALE = 0.90            # 0.60 の 1.5 倍
+ROLL_NUM_SCALE = 0.81            # 1.5倍(0.90)からさらに 90%
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 # 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
 # しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
 ROLL_NUM_ANCHOR = (167, 96)
-ROLL_NUM_OFF = (0, 0)            # (右, 下)
+ROLL_NUM_OFF = (5, 0)            # (右, 下)
 
 # --- 風船・くす玉(白い吹き出し) ------------------------------------------
 # 11_Balloon/Balloon.png 200x160。中身は x13..186 / y3..154 で、左下に尻尾。
@@ -663,9 +663,11 @@ class GameScreenWidget(QWidget):
                        Qt.AlignHCenter | Qt.AlignBottom, str(count))
             return
 
-        # 扇は叩くほど開く。最後のコマ(「連打!!」付き)で止める。
+        # 「連打!!」の札は最後のコマにしか入っていない。1打でも入ったら
+        # 数字と一緒に出したいので、開く途中のコマは使わず一気に開く。
+        # (0打のあいだだけ閉じた扇)
         cw, ch = ROLL_FAN_CELL
-        frame = max(0, min(ROLL_FAN_FRAMES - 1, int(count)))
+        frame = ROLL_FAN_FRAMES - 1 if int(count) >= 1 else 0
         dw, dh = cw * ROLL_FAN_SCALE, ch * ROLL_FAN_SCALE
         p.drawPixmap(QRect(int(ROLL_FAN_CENTER_X - dw / 2),
                            int(ROLL_FAN_BOTTOM - dh), int(dw), int(dh)),
