@@ -12,6 +12,7 @@ from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, So
 from neotja.worker_util import detach_worker
 from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import ChartPreviewWidget
+from neotja.tja_analyzer import balloon_pop_spans
 from neotja import theme
 from neotja.theme import COLORS
 
