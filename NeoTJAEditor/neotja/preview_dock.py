@@ -847,8 +847,13 @@ class PreviewDock(QDockWidget):
         if preview_data is not None:
             self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in preview_data.get("notes", [])]
             self._editor_notes += _roll_tick_notes(preview_data.get("rolls", []), bpm_index=3)
-            self._editor_notes += _roll_tick_notes(preview_data.get("balloons", []), bpm_index=2)
-            self._editor_notes += _roll_tick_notes(preview_data.get("kusudamas", []), bpm_index=2)
+            # 風船は「割れる時刻」まででしか鳴らさない。表示(レーン)と
+            # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
+            _spd = preview_data.get("roll_hit_speed", 45)
+            self._editor_notes += _roll_tick_notes(
+                balloon_pop_spans(preview_data.get("balloons", []), _spd), bpm_index=2)
+            self._editor_notes += _roll_tick_notes(
+                balloon_pop_spans(preview_data.get("kusudamas", []), _spd), bpm_index=2)
             self._preview_notes = list(preview_data.get("notes", []))
             self._preview_spans = (list(preview_data.get("rolls", [])),
                                    list(preview_data.get("balloons", [])),
@@ -1095,8 +1100,13 @@ class PreviewDock(QDockWidget):
         data = data or {}
         self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
         self._editor_notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
-        self._editor_notes += _roll_tick_notes(data.get("balloons", []), bpm_index=2)
-        self._editor_notes += _roll_tick_notes(data.get("kusudamas", []), bpm_index=2)
+        # 風船は「割れる時刻」まででしか鳴らさない。表示(レーン)と
+        # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
+        _spd = data.get("roll_hit_speed", 45)
+        self._editor_notes += _roll_tick_notes(
+            balloon_pop_spans(data.get("balloons", []), _spd), bpm_index=2)
+        self._editor_notes += _roll_tick_notes(
+            balloon_pop_spans(data.get("kusudamas", []), _spd), bpm_index=2)
         self._preview_notes = list(data.get("notes", []))
         self._preview_spans = (list(data.get("rolls", [])),
                                list(data.get("balloons", [])),

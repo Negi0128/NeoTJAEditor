@@ -210,7 +210,9 @@ class _JudgeOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        self._screen.draw_gogo_splash(p, self.x(), self.y())
+        # ゴーゴー開始の火花(GoGoSplash)は判定枠まわりがうるさくなるので
+        # 出さない。素材と描画関数は残してあるので、戻すならここを
+        # 呼び直すだけでよい。
         recent = self._screen.judge_pop()
         if recent is None:
             p.end()

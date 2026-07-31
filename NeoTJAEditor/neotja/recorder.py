@@ -147,8 +147,11 @@ def hit_schedule_from_preview(preview_data: dict, offset: float):
     data = preview_data or {}
     notes = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
     notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
-    notes += _roll_tick_notes(data.get("balloons", []), bpm_index=2)
-    notes += _roll_tick_notes(data.get("kusudamas", []), bpm_index=2)
+    # 風船は割れる時刻まで(表示と同じ切り詰め)。
+    from neotja.tja_analyzer import balloon_pop_spans
+    spd = data.get("roll_hit_speed", 45)
+    notes += _roll_tick_notes(balloon_pop_spans(data.get("balloons", []), spd), bpm_index=2)
+    notes += _roll_tick_notes(balloon_pop_spans(data.get("kusudamas", []), spd), bpm_index=2)
 
     pairs = sorted((t - offset, "don" if c in "13" else "ka") for t, c, _bpm in notes)
     return [p[0] for p in pairs], [p[1] for p in pairs]

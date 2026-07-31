@@ -5,6 +5,30 @@ from neotja.se_text import compute_note_se_labels
 from neotja.theme import COLORS
 
 
+def balloon_pop_spans(spans, roll_hit_speed):
+    """風船・くす玉の区間を「叩ききって割れる時刻」で切り詰めて返す。
+
+    本家は指定打数を叩ききった瞬間に割れるので、TJA の区間([7]〜[8])を
+    そのまま使うと必ず区間の終わりまで残ってしまう。設定の連打秒速で
+    必要打数を割った時間で終わらせる。叩ききれないほど短い区間なら
+    区間の終わりのまま。
+
+    表示(レーン)と打音(スケジュール)の両方がこれを通ることが大事で、
+    片方だけに掛けると「数字は 0 なのに音がまだ鳴る」ようにズレる。
+    スコアの配点(score.py)は秒速に依存させたくないので、あちらは生の
+    区間のまま使う。"""
+    speed = max(1.0, float(roll_hit_speed or 45))
+    out = []
+    for sp in spans or []:
+        sp = tuple(sp)
+        need = int(sp[-1]) if len(sp) > 1 else 0
+        end = float(sp[1])
+        if need > 0:
+            end = min(end, float(sp[0]) + need / speed)
+        out.append((sp[0], end) + sp[2:])
+    return out
+
+
 class TJACourseAnalyzer:
     DIFF = {"0": "Easy", "Easy": "Easy", "1": "Normal", "Normal": "Normal",
             "2": "Hard", "Hard": "Hard", "3": "Oni", "Oni": "Oni", "4": "Edit", "Edit": "Edit"}

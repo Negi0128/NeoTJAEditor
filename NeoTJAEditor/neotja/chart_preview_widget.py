@@ -376,6 +376,7 @@ class ChartPreviewWidget(QWidget):
             self._skin_balloon_seq = None
         # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png 360x370 が7コマ)。
         self._skin_gogo_fire = self._load_sheet('GoGoFire.png', 7, 360, 370)
+        self._skin_gogo_fire = self._crop_frames(self._skin_gogo_fire)
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1079,14 +1080,9 @@ class ChartPreviewWidget(QWidget):
         # 風船・くす玉が割れる秒速(環境設定の連打秒速)。区間の終わりまで
         # 引き延ばすのではなく、この速さで叩いて必要打数に達した時点で割れる。
         self._roll_hit_speed = max(1.0, float(data.get("roll_hit_speed", 45) or 45))
-        self._balloons = [
-            tuple(b[:1]) + (self._balloon_pop_time(b[0], b[1], b[-1]),) + tuple(b[2:])
-            for b in self._balloons
-        ]
-        self._kusudamas = [
-            tuple(k[:1]) + (self._balloon_pop_time(k[0], k[1], k[-1]),) + tuple(k[2:])
-            for k in self._kusudamas
-        ]
+        from neotja.tja_analyzer import balloon_pop_spans
+        self._balloons = balloon_pop_spans(self._balloons, self._roll_hit_speed)
+        self._kusudamas = balloon_pop_spans(self._kusudamas, self._roll_hit_speed)
         # (start, end, hits) view combining all three span types, used only
         # for the live/held combo-count readout - independent of the rolls/
         # balloons/kusudamas lists above since those keep their full
@@ -1617,12 +1613,12 @@ class ChartPreviewWidget(QWidget):
     # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png)。7コマのループ。
     # 素材の絵は 234x192 と判定円(108)より大きいので縮めて置く。
     GOGO_FIRE_FRAME_SEC = 1.0 / 15.0
-    GOGO_FIRE_SCALE = 0.55
+    GOGO_FIRE_FIT = 1.0    # 1.0 = 大音符の判定枠ぴったり
     GOGO_FIRE_OFF = (0, -6)
     BALLOON_CELL = 280
     BALLOON_ANCHOR = (20.0, 141.5)
     BALLOON_SPRITE_SCALE = 0.62      # 満タン(174px)がレーン(130px)に収まる大きさ
-    BALLOON_BURST_SEC = 0.18         # 割れたあと破片のコマを出す時間
+    BALLOON_BURST_SEC = 0.07         # 割れたあと破片のコマを出す時間
 
     def _load_sheet(self, name, cols, cw, ch):
         """横1列のスプライトシートを cols 枚に切る。無ければ None。"""
@@ -1630,6 +1626,36 @@ class ChartPreviewWidget(QWidget):
         if sheet is None or sheet.width() < cw * cols or sheet.height() < ch:
             return None
         return [sheet.copy(QRect(i * cw, 0, cw, ch)) for i in range(cols)]
+
+    def _crop_frames(self, frames):
+        """コマ列を「全コマの中身の和集合」で切り直す。
+
+        素材のセルは中身より大きく、しかもコマごとに位置が違う。和集合で
+        切っておくと、置く側は「切った絵の中心を判定円に合わせる」だけで
+        済み、コマ間の揺れもそのまま残る。"""
+        if not frames:
+            return frames
+        try:
+            import numpy as np
+        except Exception:  # noqa: BLE001
+            return frames
+        x0 = y0 = 10 ** 9
+        x1 = y1 = -1
+        for pm in frames:
+            img = pm.toImage().convertToFormat(QImage.Format_RGBA8888)
+            w, h = img.width(), img.height()
+            a = np.frombuffer(memoryview(img.constBits()), dtype=np.uint8)
+            a = a.reshape(h, img.bytesPerLine() // 4, 4)[:, :w, 3]
+            xs = np.flatnonzero(a.max(axis=0) > 16)
+            ys = np.flatnonzero(a.max(axis=1) > 16)
+            if xs.size == 0:
+                continue
+            x0 = min(x0, int(xs[0])); x1 = max(x1, int(xs[-1]))
+            y0 = min(y0, int(ys[0])); y1 = max(y1, int(ys[-1]))
+        if x1 < x0:
+            return frames
+        r = QRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+        return [pm.copy(r) for pm in frames]
 
     def _load_judge_ring(self):
         """Notes.png の左上 130x130 を判定円として切り出す。無ければ None。"""
@@ -1929,18 +1955,6 @@ class ChartPreviewWidget(QWidget):
         # extra candidates bisected in (all clipped to the box anyway).
         speed = self._min_vis_speed
         return now - judge_x / speed, now + (w - judge_x) / speed
-
-    def _balloon_pop_time(self, start, end, hits):
-        """風船が割れる時刻。設定の秒速で必要打数を叩ききった時点。
-
-        叩ききれないほど短い区間なら、区間の終わり(TJA の 8)で打ち切る。
-        本家も「指定打数を叩ききった瞬間に割れる」ので、区間いっぱい残る
-        のは叩ききれなかったときだけになる。"""
-        start, end = float(start), float(end)
-        need = max(0, int(hits))
-        if need <= 0:
-            return end
-        return min(end, start + need / self._roll_hit_speed)
 
     def _draw_balloon_sprite(self, painter, judge_x, mid_y, frame):
         """風船を1コマ描く。結び目(セル内 (20,141.5))を判定円に合わせる。"""
@@ -2310,7 +2324,9 @@ class ChartPreviewWidget(QWidget):
             # 下の自前リングに落ちる。
             fr = self._skin_gogo_fire[int(now / self.GOGO_FIRE_FRAME_SEC)
                                       % len(self._skin_gogo_fire)]
-            k = self.GOGO_FIRE_SCALE * (0.92 + 0.16 * gogo_env)
+            # 大音符の判定枠(外輪の直径 = JUDGE_RING_R*2)に横幅を合わせる。
+            k = (2.0 * self.JUDGE_RING_R * self.GOGO_FIRE_FIT / fr.width()
+                 * (0.92 + 0.16 * gogo_env))
             fw, fh = fr.width() * k, fr.height() * k
             # 素材は不透明に近いフラットな橙のシルエットなので、そのまま置くと
             # 判定円を塗りつぶした塊になる。判定円と同じく**加算合成**にすると
