@@ -120,7 +120,23 @@ SHOW_BACKGROUND = False
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
 # ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
 # この2つは画面側(親)が描く。判定円の真上、魂ゲージの左に収まる位置。
-TAP_COUNT_BOTTOM = LANE_Y - 4    # 連打数の下端
+# --- 連打数(金の扇) ------------------------------------------------------
+# 11_Balloon/Roll.png 1670x204 = 334x204 が5コマ。閉じた状態から開いていき、
+# 最後のコマだけ「連打!!」の札が付く。数字は専用シート
+# 11_Balloon/Number_Roll.png 630x75 = 63x75 が10文字(0..9)。
+# 本家キャプチャ(1333px幅)で扇はおよそ x345..470 / y25..150 に見えたので、
+# 1280 換算で幅 120px 前後。素材の絵は 231px 幅なので約 0.52 倍で置く。
+ROLL_FAN_CELL = (334, 204)
+ROLL_FAN_FRAMES = 5
+ROLL_FAN_SCALE = 0.52
+ROLL_FAN_CENTER_X = 398          # 扇の中心 x
+ROLL_FAN_BOTTOM = 152            # 扇の下端 y
+ROLL_NUM_CELL = (63, 75)
+ROLL_NUM_SCALE = 0.60
+ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
+ROLL_NUM_CENTER = (398, 96)      # 数字のかたまりの中心
+
+TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
 JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
@@ -294,6 +310,8 @@ class GameScreenWidget(QWidget):
             ("gauge", "Gauge.png"),
             ("gauge_base", "Gauge_Base.png"),
             ("soul", "Soul.png"),
+            ("roll_fan", "Roll.png"),
+            ("roll_num", "Number_Roll.png"),
         ):
             path = os.path.join(base, rel)
             if os.path.exists(path):
@@ -479,7 +497,7 @@ class GameScreenWidget(QWidget):
                          0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
 
     def _draw_lane_readouts(self, p, now, recent):
-        """連打・風船の打数。レーンの上、判定円の真上に出す。
+        """連打・風船の打数を、本家と同じ金の扇で出す。
         (「良」はレーンにかぶるので _JudgeOverlay が手前に描く)"""
         try:
             count = self.chart_preview.live_tap_count(now)
@@ -487,14 +505,40 @@ class GameScreenWidget(QWidget):
             count = None
         if count is None:
             return
-        jx = LANE_X + JUDGE_X_IN_LANE
-        p.setPen(QColor("#ffd24a"))
-        f = p.font()
-        f.setPointSize(22)
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(jx - 100, TAP_COUNT_BOTTOM - 34, 200, 34,
-                   Qt.AlignHCenter | Qt.AlignBottom, str(count))
+
+        fan = self._skin.get("roll_fan")
+        num = self._skin.get("roll_num")
+        if fan is None or num is None:
+            # 素材が無い環境では従来どおり文字で出す。
+            jx = LANE_X + JUDGE_X_IN_LANE
+            p.setPen(QColor("#ffd24a"))
+            f = p.font()
+            f.setPointSize(22)
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(jx - 100, TAP_COUNT_BOTTOM - 34, 200, 34,
+                       Qt.AlignHCenter | Qt.AlignBottom, str(count))
+            return
+
+        # 扇は叩くほど開く。最後のコマ(「連打!!」付き)で止める。
+        cw, ch = ROLL_FAN_CELL
+        frame = max(0, min(ROLL_FAN_FRAMES - 1, int(count)))
+        dw, dh = cw * ROLL_FAN_SCALE, ch * ROLL_FAN_SCALE
+        p.drawPixmap(QRect(int(ROLL_FAN_CENTER_X - dw / 2),
+                           int(ROLL_FAN_BOTTOM - dh), int(dw), int(dh)),
+                     fan, QRect(frame * cw, 0, cw, ch))
+
+        # 打数。専用の数字シート(0..9 が横に10個)を中央そろえで。
+        nw, nh = ROLL_NUM_CELL
+        gw, gh = nw * ROLL_NUM_SCALE, nh * ROLL_NUM_SCALE
+        step = gw * ROLL_NUM_ADVANCE
+        text = str(int(count))
+        x = ROLL_NUM_CENTER[0] - step * len(text) / 2.0
+        y = ROLL_NUM_CENTER[1] - gh / 2.0
+        for c in text:
+            p.drawPixmap(QRect(int(x), int(y), int(gw) + 1, int(gh) + 1),
+                         num, QRect(int(c) * nw, 0, nw, nh))
+            x += step
 
     def set_compact(self, compact: bool):
         compact = bool(compact)
