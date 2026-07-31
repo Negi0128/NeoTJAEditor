@@ -120,6 +120,30 @@ SHOW_BACKGROUND = False
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
 # ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
 # この2つは画面側(親)が描く。判定円の真上、魂ゲージの左に収まる位置。
+# --- ゴーゴー / 魂MAX の演出 --------------------------------------------
+# GoGoSplash.png 6900x460 = 230x460 が30コマ。下から吹き上がる金色の火花で、
+# ゴーゴーが始まった瞬間に一度だけ流れる(ループしない)。下端中央アンカー。
+GOGO_SPLASH_CELL = (230, 460)
+GOGO_SPLASH_FRAMES = 30
+GOGO_SPLASH_FRAME_SEC = 1.0 / 30.0
+GOGO_SPLASH_SCALE = 0.55
+GOGO_SPLASH_BOTTOM = LANE_Y + LANE_H   # 火花の足元をレーン下端に置く
+
+# 魂ゲージが満タン(入魂)のあいだ、ゲージが虹色に変わる。
+# Rainbow/<コース>/0..11.png 696x44。マスクがゲージ本体と dx=0,dy=0 で一致
+# するので、ゲージと同じ位置にそのまま重ねるだけでよい。
+GAUGE_RAINBOW_FRAMES = 12
+GAUGE_RAINBOW_FRAME_SEC = 1.0 / 20.0
+
+# 1P_Explosion.png 3240x180 = 180x180 が18コマ。先頭2コマは完全に透明。
+# 12個の丸が輪になって広がるワンショット。中心アンカー。
+# クリア(ノルマ)に到達した瞬間、魂の文字の後ろで開く。
+SOUL_BURST_CELL = 180
+SOUL_BURST_FRAMES = 18
+SOUL_BURST_FIRST = 2
+SOUL_BURST_FRAME_SEC = 1.0 / 30.0
+SOUL_BURST_SCALE = 1.0
+
 # --- 連打数(金の扇) ------------------------------------------------------
 # 11_Balloon/Roll.png 1670x204 = 334x204 が5コマ。閉じた状態から開いていき、
 # 最後のコマだけ「連打!!」の札が付く。数字は専用シート
@@ -165,7 +189,7 @@ SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
-OVERLAY_RECT = (-120, 130, 240, 110)   # (dx, y, w, h) dx は判定円中心からの左端
+OVERLAY_RECT = (-130, 88, 260, 250)    # (dx, y, w, h) dx は判定円中心からの左端
 
 
 class _JudgeOverlay(QWidget):
@@ -184,17 +208,20 @@ class _JudgeOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._screen.draw_gogo_splash(p, self.x(), self.y())
         recent = self._screen.judge_pop()
         if recent is None:
+            p.end()
             return
         elapsed = recent[0]
         if not (0.0 <= elapsed < JUDGE_POP_SEC):
+            p.end()
             return
         spr = self._screen.chart_preview.judge_sprite()
         jp = elapsed / JUDGE_POP_SEC
         rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.setOpacity(max(0.0, 1.0 - jp))
         cx = self.width() // 2
         bottom = JUDGE_BOTTOM - self.y() - rise
@@ -226,6 +253,7 @@ class GameScreenWidget(QWidget):
         self._skin = {}
         self._score_timeline = None
         self._gauge = None
+        self._clear_time = None
         self._course_key = None
         self._course_sym = None
         self._load_skin()
@@ -283,6 +311,34 @@ class GameScreenWidget(QWidget):
     def end_offline_render(self):
         self.chart_preview.end_offline_render()
 
+    def draw_gogo_splash(self, p, ox, oy):
+        """ゴーゴーが始まった瞬間の金色の火花。オーバーレイ(レーンより手前)
+        から呼ぶ。ox/oy はそのオーバーレイの左上。"""
+        sheet = self._skin.get("gogo_splash")
+        if sheet is None:
+            return
+        try:
+            now = self.chart_preview.game_state()[0]
+            regions = self.chart_preview.gogo_regions()
+        except Exception:  # noqa: BLE001
+            return
+        span = GOGO_SPLASH_FRAMES * GOGO_SPLASH_FRAME_SEC
+        f = None
+        for g0, _g1 in regions:
+            el = now - g0
+            if 0.0 <= el < span:
+                f = int(el / GOGO_SPLASH_FRAME_SEC)
+                break
+        if f is None:
+            return
+        cw, ch = GOGO_SPLASH_CELL
+        k = GOGO_SPLASH_SCALE
+        dw, dh = cw * k, ch * k
+        cx = LANE_X + JUDGE_X_IN_LANE
+        p.drawPixmap(QRect(int(cx - dw / 2 - ox), int(GOGO_SPLASH_BOTTOM - dh - oy),
+                           int(dw), int(dh)),
+                     sheet, QRect(min(f, GOGO_SPLASH_FRAMES - 1) * cw, 0, cw, ch))
+
     def judge_pop(self):
         """直近ヒット (経過秒, 音符の文字, コンボ番号)。オーバーレイ用。"""
         try:
@@ -326,6 +382,8 @@ class GameScreenWidget(QWidget):
             ("roll_fan", "Roll.png"),
             ("roll_num", "Number_Roll.png"),
             ("balloon", "Balloon.png"),
+            ("gogo_splash", "GoGoSplash.png"),
+            ("soul_burst", "SoulExplosion.png"),
         ):
             path = os.path.join(base, rel)
             if os.path.exists(path):
@@ -333,6 +391,21 @@ class GameScreenWidget(QWidget):
                 if not pm.isNull():
                     self._skin[key] = pm
         self._combo_text_bands = self._measure_combo_text_bands()
+        self._gauge_rainbow = self._load_gauge_rainbow()
+
+    def _load_gauge_rainbow(self):
+        """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
+        base = os.path.join(str(settings_mod.skin_dir()), "GaugeRainbow")
+        out = []
+        for i in range(GAUGE_RAINBOW_FRAMES):
+            path = os.path.join(base, "%d.png" % i)
+            if not os.path.exists(path):
+                return None
+            pm = QPixmap(path)
+            if pm.isNull():
+                return None
+            out.append(pm)
+        return out
 
     def _measure_combo_text_bands(self):
         """Combo/Text.png の「コンボ」2つ(通常色/金色)の縦位置を測る。
@@ -373,6 +446,12 @@ class GameScreenWidget(QWidget):
         self._score_timeline = ScoreTimeline(preview_data or {})
         # 魂ゲージの伸び方(おに基準)。譜面が決まればランクが決まる。
         self._gauge = gauge_mod.GaugeModel(preview_data or {})
+        # クリアに届く音符の時刻。魂のバーストをそこから流す。毎フレーム
+        # 探さずに済むよう譜面が決まった時点で1回だけ求めておく。
+        try:
+            self._clear_time = self.chart_preview.note_time(self._gauge.notes_to_clear)
+        except Exception:  # noqa: BLE001
+            self._clear_time = None
         self._course_key = course_key or (preview_data or {}).get("course_key")
         self._course_sym = None
         if self._course_key:
@@ -491,7 +570,7 @@ class GameScreenWidget(QWidget):
         if np_ is not None:
             p.drawPixmap(NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_)
 
-    def _draw_gauge(self, p, ratio):
+    def _draw_gauge(self, p, ratio, now):
         """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
         base = self._skin.get("gauge_base")
         fill = self._skin.get("gauge")
@@ -503,6 +582,26 @@ class GameScreenWidget(QWidget):
             wpx = int(fill.width() * ratio)
             if wpx > 0:
                 p.drawPixmap(gx, gy, fill, 0, 0, wpx, GAUGE_BAR_H)
+        # 入魂(満タン)のあいだはゲージが虹色になる。素材のマスクがゲージ本体と
+        # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
+        if ratio >= 1.0 and self._gauge_rainbow:
+            i = int(now / GAUGE_RAINBOW_FRAME_SEC) % len(self._gauge_rainbow)
+            p.drawPixmap(gx, gy, self._gauge_rainbow[i])
+
+        # クリア(ノルマ)に届いた瞬間、魂の文字の後ろで輪が開く。
+        burst = self._skin.get("soul_burst")
+        if burst is not None and self._clear_time is not None:
+            el = now - self._clear_time
+            n = SOUL_BURST_FRAMES - SOUL_BURST_FIRST
+            if 0.0 <= el < n * SOUL_BURST_FRAME_SEC:
+                f = SOUL_BURST_FIRST + int(el / SOUL_BURST_FRAME_SEC)
+                c = SOUL_BURST_CELL
+                d = c * SOUL_BURST_SCALE
+                cx = SOUL_POS[0] + SOUL_CELL / 2.0
+                cy = SOUL_POS[1] + SOUL_CELL / 2.0
+                p.drawPixmap(QRect(int(cx - d / 2), int(cy - d / 2), int(d), int(d)),
+                             burst, QRect(f * c, 0, c, c))
+
         # 魂の文字。ゲージの右端に置き、クリア圏まで溜まったら光る段に変える。
         soul = self._skin.get("soul")
         if soul is not None:
@@ -658,7 +757,7 @@ class GameScreenWidget(QWidget):
         # 1個あたりの点なので、譜面の7割半ばで入魂して以降は満タンのまま
         # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
         self._draw_left_panel(p, combo, score, recent, now)
-        self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0)
+        self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
         self._draw_lane_readouts(p, now, recent)
 
         p.end()

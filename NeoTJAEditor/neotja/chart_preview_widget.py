@@ -532,6 +532,17 @@ class ChartPreviewWidget(QWidget):
         (game_screen.py)が描くので、そこから呼べるように公開する。"""
         return self._live_top_count(self._current_chart_time() if now is None else now)
 
+    def gogo_regions(self):
+        """ゴーゴー区間 [(start, end), ...]。画面側の演出用。"""
+        return self._gogo_regions
+
+    def note_time(self, index):
+        """index 番目(1始まり)の音符の譜面時刻。範囲外は None。"""
+        i = int(index) - 1
+        if 0 <= i < len(self._note_times):
+            return self._note_times[i]
+        return None
+
     def live_tap_state(self, now=None):
         """(打数, 種別) を返す。区間外は (None, None)。
 
@@ -1603,6 +1614,11 @@ class ChartPreviewWidget(QWidget):
     # 風船 (Breaking_0..5.png 各 280x280)。6枚とも結び目が x=11 で固定、
     # 絵の縦中心は 141.5 で一定。よって「セル内の (20, 141.5) を判定円に
     # 合わせる」と、結び目を判定円に留めたまま右へ膨らむ。
+    # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png)。7コマのループ。
+    # 素材の絵は 234x192 と判定円(108)より大きいので縮めて置く。
+    GOGO_FIRE_FRAME_SEC = 1.0 / 15.0
+    GOGO_FIRE_SCALE = 0.55
+    GOGO_FIRE_OFF = (0, -6)
     BALLOON_CELL = 280
     BALLOON_ANCHOR = (20.0, 141.5)
     BALLOON_SPRITE_SCALE = 0.62      # 満タン(174px)がレーン(130px)に収まる大きさ
@@ -2289,7 +2305,24 @@ class ChartPreviewWidget(QWidget):
         # NOTE: the lane-zoom half of getGogoZoomAmount (tAttLane) is
         # deliberately not ported - the lane's proportions are fixed.
         gogo_env = self.gogo_pulse(now)
-        if gogo_env > 0.0:
+        if gogo_env > 0.0 and self._skin_gogo_fire is not None:
+            # 本家の炎(7コマのループ)を判定円に重ねる。素材が無いときだけ
+            # 下の自前リングに落ちる。
+            fr = self._skin_gogo_fire[int(now / self.GOGO_FIRE_FRAME_SEC)
+                                      % len(self._skin_gogo_fire)]
+            k = self.GOGO_FIRE_SCALE * (0.92 + 0.16 * gogo_env)
+            fw, fh = fr.width() * k, fr.height() * k
+            # 素材は不透明に近いフラットな橙のシルエットなので、そのまま置くと
+            # 判定円を塗りつぶした塊になる。判定円と同じく**加算合成**にすると
+            # 地の上で光って見え、下の判定円も透ける。
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode_Plus)
+            painter.setOpacity(min(1.0, 0.45 + 0.35 * gogo_env))
+            painter.drawPixmap(QRectF(judge_x - fw / 2.0 + self.GOGO_FIRE_OFF[0],
+                                      mid_y - fh / 2.0 + self.GOGO_FIRE_OFF[1],
+                                      fw, fh), fr, QRectF(fr.rect()))
+            painter.restore()
+        elif gogo_env > 0.0:
             glow_r = int(judge_r + 4 + 11 * gogo_env)
             painter.setOpacity(0.18 + 0.55 * gogo_env)
             painter.setPen(QPen(self._color("don"), 2.0 + 5.0 * gogo_env))
