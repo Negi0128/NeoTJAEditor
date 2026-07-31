@@ -5,6 +5,16 @@ from neotja.se_text import compute_note_se_labels
 from neotja.theme import COLORS
 
 
+def _header_value(content, key):
+    """TJA のヘッダ(例 TITLE:)の値を返す。無ければ空文字。"""
+    prefix = key + ":"
+    for line in (content or "").splitlines():
+        t = line.strip()
+        if t.upper().startswith(prefix):
+            return t[len(prefix):].strip()
+    return ""
+
+
 def balloon_pop_spans(spans, roll_hit_speed):
     """風船・くす玉の区間を「叩ききって割れる時刻」で切り詰めて返す。
 
@@ -753,6 +763,7 @@ class TJACourseAnalyzer:
         empty = {
             "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [], "bar_times": [],
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
+            "title": _header_value(content, "TITLE"),
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
             "course_key": None, "course_label": "", "course_color": COLORS["fg_bright"],
             "level": None, "available_courses": [], "has_branches": False, "branch_level": branch_level,
@@ -1003,6 +1014,8 @@ class TJACourseAnalyzer:
             # 風船が割れるまでの時間を出すのに使う秒間打数(環境設定の連打秒速)。
             # 譜面と一緒に持たせておくと、描く側が設定を読み直さずに済む。
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
+            # 曲名(録画画面の右上に出す)。ヘッダは曲に1つなので素直に拾う。
+            "title": _header_value(content, "TITLE"),
             "bar_times": [(float(t), float(bpm_), float(sc), bool(vis)) for t, bpm_, sc, vis in bar_times],
             "bpm_changes": [(float(t), float(v)) for t, v in bpm_changes],
             "measure_changes": [(float(t), int(num), int(den)) for t, num, den in measure_changes],

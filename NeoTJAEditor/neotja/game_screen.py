@@ -22,7 +22,8 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import os
 
 from PySide6.QtCore import Qt, QRect, QTimer
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QImage,
+                           QPainter, QPixmap)
 from PySide6.QtWidgets import QWidget
 
 from neotja import gauge as gauge_mod
@@ -55,7 +56,7 @@ SCORE_ADVANCE = 0.73
 # Score_Plate.png は文字ごとに上下がそろっていない。実測すると 5 と 6 だけ
 # セル内で 1px 上に寄っている(他は y=1..30、5/6 は y=0..29)。数字ごとに
 # 下げ量を持たせて揃える。
-SCORE_DIGIT_Y_OFF = {5: 2}
+SCORE_DIGIT_Y_OFF = {5: 2, 6: 2}
 COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
 DRUM_POS = (203, 199)                # 太鼓 120x133
 # コンボの数字と「コンボ」文字は太鼓の上に載るが、太鼓だけを動かしたときに
@@ -187,6 +188,19 @@ JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶ
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
 JUDGE_POP_SEC = 0.34             # ポップの持続
+
+# --- 曲名(録画のときだけ、画面の右上) ------------------------------------
+# 勘亭流。DFP勘亭流(DynaFont)はこの環境に無かったので、TNDE が同梱している
+# FOT-大江戸勘亭流(Fontworks)を使う。skin/Kanteiryu.otf があればそれを読み、
+# 無ければ入っていそうな家族名を順に当たり、それも駄目なら既定のフォント。
+TITLE_FONT_FILE = "Kanteiryu.otf"
+TITLE_FONT_FALLBACKS = ("FOT-大江戸勘亭流 Std E", "FOT-OedoKtr Std E",
+                        "DFPKanteiryu-XB", "DFP勘亭流")
+TITLE_RECT = (620, 14, 640, 52)   # 右詰めで収める枠 (x, y, w, h)
+TITLE_SIZE = 34                   # 収まらなければ自動で小さくする
+TITLE_SIZE_MIN = 18
+TITLE_COLOR = "#ffffff"
+TITLE_SHADOW = "#000000"
 
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
@@ -402,6 +416,44 @@ class GameScreenWidget(QWidget):
                     self._skin[key] = pm
         self._combo_text_bands = self._measure_combo_text_bands()
         self._gauge_rainbow = self._load_gauge_rainbow()
+        self._title = ""
+        self._title_family = self._load_title_font()
+
+    def _load_title_font(self):
+        """曲名用の勘亭流を読む。skin/ の .otf を優先し、無ければ入って
+        いそうな家族名を当たる。どれも無ければ None(既定のフォントで描く)。"""
+        path = os.path.join(str(settings_mod.skin_dir()), TITLE_FONT_FILE)
+        if os.path.exists(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+            if fams:
+                return fams[0]
+        have = set(QFontDatabase.families())
+        for fam in TITLE_FONT_FALLBACKS:
+            if fam in have:
+                return fam
+        return None
+
+    def _draw_title(self, p):
+        """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
+        長い曲名は枠に収まるまで自動で小さくする。"""
+        if not self._title:
+            return
+        x, y, w, h = TITLE_RECT
+        f = QFont(self._title_family) if self._title_family else QFont()
+        size = TITLE_SIZE
+        while size > TITLE_SIZE_MIN:
+            f.setPixelSize(size)
+            if QFontMetrics(f).horizontalAdvance(self._title) <= w:
+                break
+            size -= 1
+        f.setPixelSize(size)
+        p.setFont(f)
+        flags = Qt.AlignRight | Qt.AlignVCenter
+        p.setPen(QColor(TITLE_SHADOW))
+        p.drawText(QRect(x + 2, y + 2, w, h), flags, self._title)
+        p.setPen(QColor(TITLE_COLOR))
+        p.drawText(QRect(x, y, w, h), flags, self._title)
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
@@ -456,6 +508,7 @@ class GameScreenWidget(QWidget):
         self._score_timeline = ScoreTimeline(preview_data or {})
         # 魂ゲージの伸び方(おに基準)。譜面が決まればランクが決まる。
         self._gauge = gauge_mod.GaugeModel(preview_data or {})
+        self._title = (preview_data or {}).get("title") or ""
         # クリアに届く音符の時刻。魂のバーストをそこから流す。毎フレーム
         # 探さずに済むよう譜面が決まった時点で1回だけ求めておく。
         try:
@@ -747,6 +800,10 @@ class GameScreenWidget(QWidget):
             ft = self._skin.get("footer")
             if ft is not None:
                 p.drawPixmap(0, FOOTER_Y, ft)
+
+        # --- 曲名(録画の 1280x720 のときだけ。通常再生の窓では出さない) ---
+        if not self._compact:
+            self._draw_title(p)
 
         # --- 左パネル (0,188 - 333x176) ---
         panel = self._skin.get("panel")
