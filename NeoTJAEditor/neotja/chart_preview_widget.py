@@ -376,7 +376,10 @@ class ChartPreviewWidget(QWidget):
             self._skin_balloon_seq = None
         # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png 360x370 が7コマ)。
         self._skin_gogo_fire = self._load_sheet('GoGoFire.png', 7, 360, 370)
-        self._skin_gogo_fire = self._crop_frames(self._skin_gogo_fire)
+        # 切った矩形の原点を覚えておく。中身で切ると絵の重心が変わるので、
+        # 置くときは「切る前のセル中心」を基準に戻す(そうしないと判定円から
+        # ずれる)。大きさだけ中身の幅で決める。
+        self._skin_gogo_fire, self._gogo_fire_org = self._crop_frames(self._skin_gogo_fire)
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1614,7 +1617,8 @@ class ChartPreviewWidget(QWidget):
     # 素材の絵は 234x192 と判定円(108)より大きいので縮めて置く。
     GOGO_FIRE_FRAME_SEC = 1.0 / 15.0
     GOGO_FIRE_FIT = 1.0    # 1.0 = 大音符の判定枠ぴったり
-    GOGO_FIRE_OFF = (0, -6)
+    GOGO_FIRE_CELL = (360, 370)
+    GOGO_FIRE_OFF = (0, 0)
     BALLOON_CELL = 280
     BALLOON_ANCHOR = (20.0, 141.5)
     BALLOON_SPRITE_SCALE = 0.62      # 満タン(174px)がレーン(130px)に収まる大きさ
@@ -1634,11 +1638,11 @@ class ChartPreviewWidget(QWidget):
         切っておくと、置く側は「切った絵の中心を判定円に合わせる」だけで
         済み、コマ間の揺れもそのまま残る。"""
         if not frames:
-            return frames
+            return frames, (0, 0)
         try:
             import numpy as np
         except Exception:  # noqa: BLE001
-            return frames
+            return frames, (0, 0)
         x0 = y0 = 10 ** 9
         x1 = y1 = -1
         for pm in frames:
@@ -1653,9 +1657,9 @@ class ChartPreviewWidget(QWidget):
             x0 = min(x0, int(xs[0])); x1 = max(x1, int(xs[-1]))
             y0 = min(y0, int(ys[0])); y1 = max(y1, int(ys[-1]))
         if x1 < x0:
-            return frames
+            return frames, (0, 0)
         r = QRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
-        return [pm.copy(r) for pm in frames]
+        return [pm.copy(r) for pm in frames], (x0, y0)
 
     def _load_judge_ring(self):
         """Notes.png の左上 130x130 を判定円として切り出す。無ければ None。"""
@@ -2328,14 +2332,19 @@ class ChartPreviewWidget(QWidget):
             k = (2.0 * self.JUDGE_RING_R * self.GOGO_FIRE_FIT / fr.width()
                  * (0.92 + 0.16 * gogo_env))
             fw, fh = fr.width() * k, fr.height() * k
+            # 切る前のセル中心(180,185)が判定円に来るように置く。切った矩形の
+            # 中心に合わせると、炎が右上に伸びている絵なので位置がずれる。
+            ox, oy = self._gogo_fire_org
+            ax = (self.GOGO_FIRE_CELL[0] / 2.0 - ox) * k
+            ay = (self.GOGO_FIRE_CELL[1] / 2.0 - oy) * k
             # 素材は不透明に近いフラットな橙のシルエットなので、そのまま置くと
             # 判定円を塗りつぶした塊になる。判定円と同じく**加算合成**にすると
             # 地の上で光って見え、下の判定円も透ける。
             painter.save()
             painter.setCompositionMode(QPainter.CompositionMode_Plus)
             painter.setOpacity(min(1.0, 0.45 + 0.35 * gogo_env))
-            painter.drawPixmap(QRectF(judge_x - fw / 2.0 + self.GOGO_FIRE_OFF[0],
-                                      mid_y - fh / 2.0 + self.GOGO_FIRE_OFF[1],
+            painter.drawPixmap(QRectF(judge_x - ax + self.GOGO_FIRE_OFF[0],
+                                      mid_y - ay + self.GOGO_FIRE_OFF[1],
                                       fw, fh), fr, QRectF(fr.rect()))
             painter.restore()
         elif gogo_env > 0.0:
