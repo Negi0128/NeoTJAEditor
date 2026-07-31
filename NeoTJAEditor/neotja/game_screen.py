@@ -225,7 +225,16 @@ class GameScreenWidget(QWidget):
         self._hud_timer = QTimer(self)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
         self._hud_timer.timeout.connect(self._tick_hud)
+        # 動かすのは表示されているあいだだけ。録画用の画面はずっと非表示の
+        # まま render() されるだけなので、そこでタイマーを回す意味がない。
+
+    def showEvent(self, event):
+        super().showEvent(event)
         self._hud_timer.start()
+
+    def hideEvent(self, event):
+        self._hud_timer.stop()
+        super().hideEvent(event)
 
     # --- 録画(オフライン描画)用の受け渡し ---------------------------------
     # 録画側は「1つのウィジェットに時刻を渡して render() する」だけの作りに
