@@ -136,6 +136,15 @@ ROLL_NUM_SCALE = 0.60
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 ROLL_NUM_CENTER = (398, 96)      # 数字のかたまりの中心
 
+# --- 風船・くす玉(白い吹き出し) ------------------------------------------
+# 11_Balloon/Balloon.png 200x160。中身は x13..186 / y3..154 で、左下に尻尾。
+# 数字は連打と同じ Number_Roll.png を使う。どんちゃんは描かない。
+BALLOON_SCALE = 0.62
+BALLOON_CENTER_X = 398           # 吹き出しの中心 x
+BALLOON_BOTTOM = 160             # 吹き出し(尻尾の先)の下端 y
+BALLOON_NUM_SCALE = 0.60
+BALLOON_NUM_CENTER = (398, 108)  # 数字のかたまりの中心
+
 TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
 JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
 JUDGE_SCALE = 1.05               # 「良」の拡大率
@@ -312,6 +321,7 @@ class GameScreenWidget(QWidget):
             ("soul", "Soul.png"),
             ("roll_fan", "Roll.png"),
             ("roll_num", "Number_Roll.png"),
+            ("balloon", "Balloon.png"),
         ):
             path = os.path.join(base, rel)
             if os.path.exists(path):
@@ -500,15 +510,35 @@ class GameScreenWidget(QWidget):
         """連打・風船の打数を、本家と同じ金の扇で出す。
         (「良」はレーンにかぶるので _JudgeOverlay が手前に描く)"""
         try:
-            count = self.chart_preview.live_tap_count(now)
+            count, kind = self.chart_preview.live_tap_state(now)
         except Exception:  # noqa: BLE001
-            count = None
+            count, kind = None, None
         if count is None:
             return
 
-        fan = self._skin.get("roll_fan")
         num = self._skin.get("roll_num")
-        if fan is None or num is None:
+        # --- 風船・くす玉: 白い吹き出しに残り打数 ---
+        if kind == "balloon":
+            bl = self._skin.get("balloon")
+            if bl is not None and num is not None:
+                bw, bh = bl.width() * BALLOON_SCALE, bl.height() * BALLOON_SCALE
+                p.drawPixmap(QRect(int(BALLOON_CENTER_X - bw / 2),
+                                   int(BALLOON_BOTTOM - bh), int(bw), int(bh)), bl)
+                nw, nh = ROLL_NUM_CELL
+                gw, gh = nw * BALLOON_NUM_SCALE, nh * BALLOON_NUM_SCALE
+                step = gw * ROLL_NUM_ADVANCE
+                text = str(int(count))
+                x = BALLOON_NUM_CENTER[0] - step * len(text) / 2.0
+                y = BALLOON_NUM_CENTER[1] - gh / 2.0
+                for c in text:
+                    p.drawPixmap(QRect(int(x), int(y), int(gw) + 1, int(gh) + 1),
+                                 num, QRect(int(c) * nw, 0, nw, nh))
+                    x += step
+                return
+            # 素材が無ければ下の文字表示へ落とす。
+
+        fan = self._skin.get("roll_fan")
+        if kind == "balloon" or fan is None or num is None:
             # 素材が無い環境では従来どおり文字で出す。
             jx = LANE_X + JUDGE_X_IN_LANE
             p.setPen(QColor("#ffd24a"))

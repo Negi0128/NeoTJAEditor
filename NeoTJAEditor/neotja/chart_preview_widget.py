@@ -526,6 +526,22 @@ class ChartPreviewWidget(QWidget):
         (game_screen.py)が描くので、そこから呼べるように公開する。"""
         return self._live_top_count(self._current_chart_time() if now is None else now)
 
+    def live_tap_state(self, now=None):
+        """(打数, 種別) を返す。区間外は (None, None)。
+
+        種別は "roll"(連打) か "balloon"(風船・くす玉)。本家は連打が金の扇、
+        風船が吹き出しと見た目が別なので、画面側が描き分けられるようにする。"""
+        t = self._current_chart_time() if now is None else now
+        for r in self._rolls:
+            if r[0] <= t <= r[1]:
+                return self._live_top_count(t), "roll"
+        for spans in (self._balloons, self._kusudamas):
+            for sp in spans:
+                if sp[0] <= t < sp[1]:
+                    return self._live_top_count(t), "balloon"
+        return None, None
+
+
     def judge_sprite(self):
         """判定文字「良」の絵 (skin/Judge.png の上段)。無ければ None。"""
         return self._skin_judge_good
