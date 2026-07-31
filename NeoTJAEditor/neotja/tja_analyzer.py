@@ -728,6 +728,7 @@ class TJACourseAnalyzer:
 
         empty = {
             "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [], "bar_times": [],
+            "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
             "course_key": None, "course_label": "", "course_color": COLORS["fg_bright"],
             "level": None, "available_courses": [], "has_branches": False, "branch_level": branch_level,
@@ -975,6 +976,9 @@ class TJACourseAnalyzer:
             "balloons": out_balloons,
             "kusudamas": out_kusudamas,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
+            # 風船が割れるまでの時間を出すのに使う秒間打数(環境設定の連打秒速)。
+            # 譜面と一緒に持たせておくと、描く側が設定を読み直さずに済む。
+            "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "bar_times": [(float(t), float(bpm_), float(sc), bool(vis)) for t, bpm_, sc, vis in bar_times],
             "bpm_changes": [(float(t), float(v)) for t, v in bpm_changes],
             "measure_changes": [(float(t), int(num), int(den)) for t, num, den in measure_changes],

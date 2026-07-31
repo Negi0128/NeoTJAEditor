@@ -1059,6 +1059,17 @@ class ChartPreviewWidget(QWidget):
         # want "just balloons" (info-bar balloon count, etc.) don't need to
         # filter it back out.
         self._kusudamas = sorted(data.get("kusudamas") or [], key=lambda k: k[0])
+        # 風船・くす玉が割れる秒速(環境設定の連打秒速)。区間の終わりまで
+        # 引き延ばすのではなく、この速さで叩いて必要打数に達した時点で割れる。
+        self._roll_hit_speed = max(1.0, float(data.get("roll_hit_speed", 45) or 45))
+        self._balloons = [
+            tuple(b[:1]) + (self._balloon_pop_time(b[0], b[1], b[-1]),) + tuple(b[2:])
+            for b in self._balloons
+        ]
+        self._kusudamas = [
+            tuple(k[:1]) + (self._balloon_pop_time(k[0], k[1], k[-1]),) + tuple(k[2:])
+            for k in self._kusudamas
+        ]
         # (start, end, hits) view combining all three span types, used only
         # for the live/held combo-count readout - independent of the rolls/
         # balloons/kusudamas lists above since those keep their full
@@ -1881,6 +1892,18 @@ class ChartPreviewWidget(QWidget):
         # extra candidates bisected in (all clipped to the box anyway).
         speed = self._min_vis_speed
         return now - judge_x / speed, now + (w - judge_x) / speed
+
+    def _balloon_pop_time(self, start, end, hits):
+        """風船が割れる時刻。設定の秒速で必要打数を叩ききった時点。
+
+        叩ききれないほど短い区間なら、区間の終わり(TJA の 8)で打ち切る。
+        本家も「指定打数を叩ききった瞬間に割れる」ので、区間いっぱい残る
+        のは叩ききれなかったときだけになる。"""
+        start, end = float(start), float(end)
+        need = max(0, int(hits))
+        if need <= 0:
+            return end
+        return min(end, start + need / self._roll_hit_speed)
 
     def _live_top_count(self, now):
         """上部読み出し(判定リングの右)に出す打数。連打・風船・くす玉で
