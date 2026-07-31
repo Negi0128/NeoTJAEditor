@@ -366,6 +366,10 @@ class ChartPreviewWidget(QWidget):
         self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
         # 打音表記の文字も素材で描く(自前のフォント描きは細くて本家と違う)。
         self._skin_se = self._load_se_sprites()
+        # 叩いた瞬間の火花。
+        self._skin_explosion = self._load_explosion_sprites()
+        # 判定円。Notes.png の左上1コマ目がそれ(音符ではない)。
+        self._skin_judge_ring = self._load_judge_ring()
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         self._se_static_family = None
@@ -1556,6 +1560,64 @@ class ChartPreviewWidget(QWidget):
             out.append(base.copy(QRect(x0, r * rh, x1 - x0 + 1, rh)))
         return out
 
+    # --- 判定円 (skin/Notes.png の左上1コマ目) -----------------------------
+    # Notes.png は 130px グリッドのシートで、**列0は音符ではなく判定円**。
+    # 1コマ 130x130 の中で、円の中心はコマの幾何中心(64.5)ではなく 63.5。
+    # 実測: 外輪 r=53(線3px) / 内輪 r=35(線3px) / 中央の塗り r=26。
+    JUDGE_RING_CELL = 130
+    JUDGE_RING_SPRITE_CX = 63.5
+
+    def _load_judge_ring(self):
+        """Notes.png の左上 130x130 を判定円として切り出す。無ければ None。"""
+        sheet = self._load_skin_pixmap("Notes.png")
+        if sheet is None:
+            return None
+        c = self.JUDGE_RING_CELL
+        if sheet.width() < c or sheet.height() < c:
+            return None
+        return sheet.copy(QRect(0, 0, c, c))
+
+    # --- 叩いた瞬間の火花 (skin/HitExplosion.png) -------------------------
+    # 1820x1040 = 260x260 のセルが 7列x4行。ただし中身があるのは左5列だけで、
+    # 右2列は完全な空白。行の意味は「面/縁」ではなく2層構成:
+    #   0行=小音符の炎 / 1行=小音符の銀   2行=大音符の炎 / 3行=大音符の銀
+    # 銀は炎の上に重ねて1つの絵になる(銀の形は炎にほぼ内包される)。
+    # 5コマ目は4コマ目と同じ絵のアルファ半分＝消え際なので、そのまま使う。
+    HIT_EXP_CELL = 260
+    HIT_EXP_FRAMES = 5
+    HIT_EXP_FRAME_SEC = 0.025      # 5コマで約 0.125 秒。本家も同じくらい短い
+    HIT_EXP_ROWS = (0, 1, 2, 3)    # 小炎, 小銀, 大炎, 大銀
+
+    def _load_explosion_sprites(self):
+        """HitExplosion.png を 4行x5コマに切り出す。無ければ None。"""
+        sheet = self._load_skin_pixmap("HitExplosion.png")
+        if sheet is None:
+            return None
+        c = self.HIT_EXP_CELL
+        if sheet.width() < c * self.HIT_EXP_FRAMES or sheet.height() < c * 4:
+            return None
+        return [[sheet.copy(QRect(f * c, r * c, c, c))
+                 for f in range(self.HIT_EXP_FRAMES)] for r in range(4)]
+
+    def _draw_hit_explosion(self, painter, now, judge_x, mid_y):
+        """判定円の位置に火花を出す。音符帯にクリップされたまま呼ぶこと
+        (音符より先に描いて、音符が上に来るようにする)。"""
+        if not self._skin_explosion:
+            return
+        recent = self._recent_hit(now)
+        if recent is None:
+            return
+        elapsed, char, _n = recent
+        span = self.HIT_EXP_FRAME_SEC * self.HIT_EXP_FRAMES
+        if not (0.0 <= elapsed < span):
+            return
+        f = min(self.HIT_EXP_FRAMES - 1, int(elapsed / self.HIT_EXP_FRAME_SEC))
+        fire, silver = (2, 3) if char in NOTE_BIG else (0, 1)
+        c = self.HIT_EXP_CELL
+        x, y = int(judge_x - c / 2), int(mid_y - c / 2)
+        painter.drawPixmap(x, y, self._skin_explosion[fire][f])
+        painter.drawPixmap(x, y, self._skin_explosion[silver][f])
+
     def _se_sprite_for(self, label, big):
         """ラベル(と大音符かどうか)から SENotes.png の1枚を選ぶ。"""
         if not self._skin_se:
@@ -2056,6 +2118,10 @@ class ChartPreviewWidget(QWidget):
             else:
                 painter.fillRect(self.rect(), GOGO_TINT)
 
+        # 叩いた瞬間の火花。地の上・音符の下に置く(本家も音符が上に来る)。
+        # 音符帯へのクリップが効いているので、260px の絵は帯の高さで切れる。
+        self._draw_hit_explosion(painter, now, judge_x, mid_y)
+
         # 枠線と中央の破線は自前で描いていたもの。素材を敷いているときは
         # 黒枠(Taiko_Frame)が外周を担当するし、本家に破線は無いので描かない。
         if not skinned:
@@ -2104,10 +2170,24 @@ class ChartPreviewWidget(QWidget):
         # おき、本家レイアウト以外でも同じ比率になるようにする。
         judge_r = self.JUDGE_RING_R
         judge_r_inner = self.JUDGE_RING_R_INNER
-        painter.setPen(QPen(self._color("fg_bright"), 3))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r), judge_r * 2, judge_r * 2)
-        painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner), judge_r_inner * 2, judge_r_inner * 2)
+        if self._skin_judge_ring is not None:
+            # 本家の判定円は Notes.png の左上1コマ目に入っている。しかも
+            # **加算合成**で描かれている — レーンの地色に素材の値を足すと、
+            # 本家キャプチャの画素と1の位まで一致する。通常のアルファ合成で
+            # 描くと本家より暗い灰色の塊になってしまう。
+            spr = self._skin_judge_ring
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode_Plus)
+            painter.drawPixmap(int(judge_x - self.JUDGE_RING_SPRITE_CX),
+                               int(mid_y - self.JUDGE_RING_SPRITE_CX), spr)
+            painter.restore()
+        else:
+            painter.setPen(QPen(self._color("fg_bright"), 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(int(judge_x - judge_r), int(mid_y - judge_r),
+                                judge_r * 2, judge_r * 2)
+            painter.drawEllipse(int(judge_x - judge_r_inner), int(mid_y - judge_r_inner),
+                                judge_r_inner * 2, judge_r_inner * 2)
 
         # --- GOGO judgment-ring pulse ------------------------------------
         # PeepoDrumKit pulses a flame sprite centered on the hit circle with
@@ -2235,7 +2315,9 @@ class ChartPreviewWidget(QWidget):
             h_big = h_char in NOTE_BIG
             h_base = self.NOTE_R_BIG if h_big else self.NOTE_R_SMALL
             # ヒットしぶき: 判定枠から外へ広がって消える閃光リング + 内側フラッシュ。
-            if 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
+            # これは本家の火花(HitExplosion.png)が無いときの代用なので、
+            # 素材があるときは描かない — 二重に出て濁って見えるため。
+            if self._skin_explosion is None and 0.0 <= h_elapsed < self.HIT_BURST_DURATION:
                 bp = h_elapsed / self.HIT_BURST_DURATION      # 0..1
                 ring_r = int(h_base + 6 + 34 * bp)
                 painter.setBrush(Qt.NoBrush)
