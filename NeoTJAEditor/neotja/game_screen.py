@@ -154,13 +154,16 @@ SOUL_BURST_SCALE = 1.0
 # 1280 換算で幅 120px 前後。素材の絵は 231px 幅なので約 0.52 倍で置く。
 ROLL_FAN_CELL = (334, 204)
 ROLL_FAN_FRAMES = 5
-ROLL_FAN_SCALE = 0.52
+ROLL_FAN_SCALE = 1.04            # 0.52 の 2 倍
 ROLL_FAN_CENTER_X = 398          # 扇の中心 x
 ROLL_FAN_BOTTOM = 152            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
 ROLL_NUM_SCALE = 0.60
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
-ROLL_NUM_CENTER = (398, 96)      # 数字のかたまりの中心
+# 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
+# しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
+ROLL_NUM_ANCHOR = (167, 96)
+ROLL_NUM_OFF = (0, 0)            # (右, 下)
 
 # --- 風船・くす玉(白い吹き出し) ------------------------------------------
 # 11_Balloon/Balloon.png 200x160。中身は x13..186 / y3..154 で、左下に尻尾。
@@ -669,12 +672,16 @@ class GameScreenWidget(QWidget):
                      fan, QRect(frame * cw, 0, cw, ch))
 
         # 打数。専用の数字シート(0..9 が横に10個)を中央そろえで。
+        fx0 = ROLL_FAN_CENTER_X - dw / 2.0
+        fy0 = ROLL_FAN_BOTTOM - dh
+        ncx = fx0 + ROLL_NUM_ANCHOR[0] * ROLL_FAN_SCALE + ROLL_NUM_OFF[0]
+        ncy = fy0 + ROLL_NUM_ANCHOR[1] * ROLL_FAN_SCALE + ROLL_NUM_OFF[1]
         nw, nh = ROLL_NUM_CELL
         gw, gh = nw * ROLL_NUM_SCALE, nh * ROLL_NUM_SCALE
         step = gw * ROLL_NUM_ADVANCE
         text = str(int(count))
-        x = ROLL_NUM_CENTER[0] - step * len(text) / 2.0
-        y = ROLL_NUM_CENTER[1] - gh / 2.0
+        x = ncx - step * len(text) / 2.0
+        y = ncy - gh / 2.0
         for c in text:
             p.drawPixmap(QRect(int(x), int(y), int(gw) + 1, int(gh) + 1),
                          num, QRect(int(c) * nw, 0, nw, nh))
