@@ -123,6 +123,8 @@ SHOW_BACKGROUND = False
 # --- ゴーゴー / 魂MAX の演出 --------------------------------------------
 # GoGoSplash.png 6900x460 = 230x460 が30コマ。下から吹き上がる金色の火花で、
 # ゴーゴーが始まった瞬間に一度だけ流れる(ループしない)。下端中央アンカー。
+# 判定枠まわりがうるさくなるので既定では出さない。True にすれば戻る。
+SHOW_GOGO_SPLASH = False
 GOGO_SPLASH_CELL = (230, 460)
 GOGO_SPLASH_FRAMES = 30
 GOGO_SPLASH_FRAME_SEC = 1.0 / 30.0
@@ -189,7 +191,8 @@ SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
-OVERLAY_RECT = (-130, 0, 260, 338)     # (dx, y, w, h) dx は判定円中心からの左端
+OVERLAY_RECT = ((-130, 0, 260, 338) if SHOW_GOGO_SPLASH
+                else (-130, 88, 260, 250))   # (dx, y, w, h) dx は判定円中心からの左端
 
 
 class _JudgeOverlay(QWidget):
@@ -314,7 +317,7 @@ class GameScreenWidget(QWidget):
     def draw_gogo_splash(self, p, ox, oy):
         """ゴーゴーが始まった瞬間の金色の火花。オーバーレイ(レーンより手前)
         から呼ぶ。ox/oy はそのオーバーレイの左上。"""
-        sheet = self._skin.get("gogo_splash")
+        sheet = self._skin.get("gogo_splash") if SHOW_GOGO_SPLASH else None
         if sheet is None:
             return
         try:
