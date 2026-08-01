@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -196,3 +197,20 @@ def skin_sound_paths():
     don = _first_existing(d, ("don.wav", "dong.wav", "Don.wav", "Dong.wav"))
     ka = _first_existing(d, ("ka.wav", "katsu.wav", "Ka.wav", "Katsu.wav"))
     return don, ka
+
+
+def effective_hit_sound_paths(cfg):
+    """(don, ka) actually used for hit sounds: the user's own files if both
+    exist, else the skin pack's, else ("", "") meaning the built-in synth.
+
+    Playback and the video export must agree on this - reading the config
+    alone would give the recording the synth whenever the sound comes from a
+    skin pack, which is not what the user hears while editing."""
+    cfg_don = (cfg or {}).get("hit_sound_don_path", "") or ""
+    cfg_ka = (cfg or {}).get("hit_sound_ka_path", "") or ""
+    if cfg_don and cfg_ka and os.path.exists(cfg_don) and os.path.exists(cfg_ka):
+        return cfg_don, cfg_ka
+    skin_don, skin_ka = skin_sound_paths()
+    if skin_don and skin_ka:
+        return skin_don, skin_ka
+    return cfg_don, cfg_ka

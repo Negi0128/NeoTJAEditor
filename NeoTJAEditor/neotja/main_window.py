@@ -388,14 +388,10 @@ class MainWindow(QMainWindow):
         # precedence: dropping in a pack is a deliberate "use this" and should
         # win over a previously auto-detected 太鼓さん次郎 path. An explicit
         # user-set path still wins over both (handled below / in autodetect).
+        don, ka = settings_mod.effective_hit_sound_paths(self.config_data)
+        self.preview_dock.set_hit_sound_files(don, ka)
         skin_don, skin_ka = settings_mod.skin_sound_paths()
-        cfg_don = self.config_data.get("hit_sound_don_path", "")
-        cfg_ka = self.config_data.get("hit_sound_ka_path", "")
-        has_user_paths = (cfg_don and os.path.exists(cfg_don)) and (cfg_ka and os.path.exists(cfg_ka))
-        if skin_don and skin_ka and not has_user_paths:
-            self.preview_dock.set_hit_sound_files(skin_don, skin_ka)
-        else:
-            self.preview_dock.set_hit_sound_files(cfg_don, cfg_ka)
+        if not (skin_don and skin_ka) or (don, ka) != (skin_don, skin_ka):
             self._maybe_autodetect_hit_sounds()
         # No close/float/move features: the dock itself always stays docked
         # and visible. Its collapse/expand toggle lives in the status bar

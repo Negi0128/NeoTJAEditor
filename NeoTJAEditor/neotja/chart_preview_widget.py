@@ -360,6 +360,9 @@ class ChartPreviewWidget(QWidget):
         # (the pen does that) - but _font()/_color() above are still the
         # single source of both, so nothing here reads COLORS directly.
         self._se_static_cache = {}
+        # 打音表記スプライトを帯の高さへ縮小したもののキャッシュ((label,big,帯高)->QPixmap)。
+        # 帯の高さが変わるときに捨てる。
+        self._se_scaled_cache = {}
         # 直近に渡されたプレビューデータ(set_lane_geometry の組み直し用)。
         self._preview_data_cache = None
         # レーンの地と打音表記帯の素材(あれば自前の塗りより優先して使う)。
@@ -1238,8 +1241,10 @@ class ChartPreviewWidget(QWidget):
     # 再生速度 -/+:    z / ↓  と  c / ↑
     # チェックポイント: p(タップでトグル / 押しながら小節移動で最寄りへジャンプ)
     # ※アンカー(Q)は廃止。チェックポイントで代替。
-    _KEY_PREV = frozenset((Qt.Key_D, Qt.Key_S, Qt.Key_PageDown, Qt.Key_Right))
-    _KEY_NEXT = frozenset((Qt.Key_K, Qt.Key_L, Qt.Key_PageUp, Qt.Key_Left))
+    # ←/→ は画面の向きどおり(← が戻る、→ が進む)。d/s・k/l は太鼓の
+    # 左打面/右打面の並びに合わせてあるので、そちらは入れ替えない。
+    _KEY_PREV = frozenset((Qt.Key_D, Qt.Key_S, Qt.Key_PageDown, Qt.Key_Left))
+    _KEY_NEXT = frozenset((Qt.Key_K, Qt.Key_L, Qt.Key_PageUp, Qt.Key_Right))
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1577,12 +1582,17 @@ class ChartPreviewWidget(QWidget):
         self._push_realtime_info()
 
     def seek_relative_measure(self, direction: int):
-        # 小節を1つ前後へ。再生中は現在の再生位置の小節を基準に、停止/一時停止
-        # 中はカレント小節を基準に隣へ動く。
-        if self._state == "playing":
-            base = self._nav_idx_at_or_before(self._current_audio_time())
-        else:
+        """小節を1つ前後へ。基準は常に「いま譜面が見えている位置」。
+
+        以前は再生中以外を _current_idx(最後に小節移動/ジャンプした位置)基準に
+        していた。_current_idx は再生中に更新されないので、5小節目で止めて→
+        再開→最後まで流して止める、と _current_idx は 5 のままになり、そこから
+        小節移動が始まってしまっていた。トゥイーン中(連打で送っている最中)だけは
+        表示位置が目標へ向かう途中なので、そのときだけ _current_idx を使う。"""
+        if self._animating:
             base = self._current_idx
+        else:
+            base = self._nav_idx_at_or_before(self._current_audio_time())
         self._seek_to_nav_idx(base + direction)
 
     def seek_to_first_measure(self):
@@ -1788,6 +1798,25 @@ class ChartPreviewWidget(QWidget):
         painter.drawPixmap(x, y, self._skin_explosion[silver][f])
         painter.setOpacity(1.0)
 
+    def _se_scaled(self, label, big, footer_h):
+        """打音表記スプライトを帯の高さに合わせて縮小したものを返す(キャッシュ)。
+
+        倍率は footer_h * SE_SPRITE_SCALE で固定なので、毎フレーム変倍する
+        必要はない。帯の高さが変わる set_lane_geometry / set_se_text_enabled で
+        キャッシュを捨てる。"""
+        key = (label, bool(big), int(footer_h))
+        pm = self._se_scaled_cache.get(key)
+        if pm is None:
+            spr = self._se_sprite_for(label, big)
+            if spr is None:
+                return None
+            sh = footer_h * self.SE_SPRITE_SCALE
+            sw = spr.width() * (sh / spr.height())
+            pm = spr.scaled(max(1, int(round(sw))), max(1, int(round(sh))),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            self._se_scaled_cache[key] = pm
+        return pm
+
     def _se_sprite_for(self, label, big):
         """ラベル(と大音符かどうか)から SENotes.png の1枚を選ぶ。"""
         if not self._skin_se:
@@ -1816,6 +1845,8 @@ class ChartPreviewWidget(QWidget):
         self.LANE_WIDTH = float(lane_width)
         self.LANE_HEIGHT = int(lane_height)
         self.JUDGE_X = float(judge_x)
+        # 帯の高さが変わりうるので、事前スケール済み打音スプライトは捨てる。
+        self._se_scaled_cache = {}
         self.TOP_MARGIN = int(top_margin)
         self.BOTTOM_MARGIN = int(bottom_margin)
         se = self.SE_FOOTER_HEIGHT
@@ -2218,7 +2249,10 @@ class ChartPreviewWidget(QWidget):
 
         # 実測fps(paintEvent 間隔のEMA)。左上に小さく出す。実際にフレームが
         # 出ているかの目安 - 表示がカクつく時に「何fps出ているか」を可視化する。
-        if self._show_fps:
+        # 本家レイアウト(GameScreenWidget の中)では TOP_MARGIN=0 なので、この
+        # fps 文字も下の打数も**画面外**にしか描けない。文字列組み立てと
+        # drawText、さらに _live_top_count の全span走査ごと丸ごと省く。
+        if self._show_fps and band_top > 0:
             wall = _time.monotonic()
             if self._fps_last_wall is not None:
                 dt = wall - self._fps_last_wall
@@ -2237,7 +2271,7 @@ class ChartPreviewWidget(QWidget):
         # the same position and design. Must be drawn before the lane clip
         # below (that clip starts at band_top, so top-margin text would
         # otherwise be clipped away).
-        roll_count = self._live_top_count(now)
+        roll_count = self._live_top_count(now) if band_top > 0 else None
         if roll_count is not None:
             judge_r_top = self.NOTE_R_BIG + 5
             painter.setPen(self._color("roll"))
@@ -2290,7 +2324,10 @@ class ChartPreviewWidget(QWidget):
         # ゴーゴー。本家の素材は「半透明の赤(左が濃く右へ薄れる)」なので、
         # 地に差し替えるのではなく地の上に重ねる。素材が無いときだけ、
         # 従来どおり画面全体を一色で染める。
-        in_gogo = any(g0 <= now <= g1 for g0, g1 in self._gogo_regions)
+        # 全区間の線形走査をやめ、開始時刻列(_gogo_starts)の bisect で
+        # 「now 以前に始まった最後の区間」だけを見る(gogo_pulse と同じ手法)。
+        _gi = bisect.bisect_right(self._gogo_starts, now) - 1
+        in_gogo = (_gi >= 0 and now <= self._gogo_regions[_gi][1])
         if in_gogo:
             if self._skin_lane_gogo is not None:
                 painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
@@ -2659,6 +2696,10 @@ class ChartPreviewWidget(QWidget):
             painter.setPen(QColor("#ffffff") if self._skin_lane_sub is not None
                            else self._color("fg"))
             fy = int(band_bottom + footer_h / 2.0)
+            # 事前スケール済みスプライトの貼り付け y(帯の上下中央)。ループ内で
+            # 毎回計算しないよう1回だけ求める。
+            _sh = footer_h * self.SE_SPRITE_SCALE
+            se_y = band_bottom + (footer_h - _sh) / 2.0
             for i in range(hi - 1, lo - 1, -1):
                 t = self._note_times[i]
                 if t <= now:
@@ -2671,15 +2712,15 @@ class ChartPreviewWidget(QWidget):
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
                 x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                spr = self._se_sprite_for(label, big)
+                spr = self._se_scaled(label, big, footer_h)
                 if spr is not None:
-                    # 素材の1段を帯の高さに合わせ、音符の x に中心をそろえる。
-                    # 倍率をかけたぶんは帯の上下中央に置く(段の余白に吸われる)。
-                    sh = footer_h * self.SE_SPRITE_SCALE
-                    sw = spr.width() * (sh / spr.height())
-                    painter.drawPixmap(
-                        QRectF(x - sw / 2.0, band_bottom + (footer_h - sh) / 2.0, sw, sh),
-                        spr, QRectF(spr.rect()))
+                    # 帯の高さは固定なので倍率も定数。以前は音符1つごとに
+                    # QRectF->QRectF の変倍 blit をしていた(可視音符ぶん毎フレーム)。
+                    # 事前に縮小したものを等倍で貼るだけにする。
+                    # 位置は小数のまま(サブピクセル)。整数へ丸めるとスクロール中に
+                    # 文字がカクつき、元の見た目と変わってしまう。拡大縮小だけを
+                    # 事前に済ませ、貼る位置の滑らかさは元のままにする。
+                    painter.drawPixmap(QPointF(x - spr.width() / 2.0, se_y), spr)
                     continue
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
                 st = self._se_static_text(label, size)
@@ -2693,16 +2734,19 @@ class ChartPreviewWidget(QWidget):
         # ring in the bottom margin - same bisect-over-bar_times approach as
         # seek_relative_measure, so "current measure" always agrees with
         # what PgUp/PgDn/wheel navigation would jump from.
-        if self._bar_times:
-            measure_idx = min(len(self._bar_times), bisect.bisect_right(self._bar_times, now))
-            measure_text = f"{measure_idx}/{len(self._bar_times)}"
-        else:
-            measure_text = "-"
-        painter.setPen(self._color("fg_dim"))
-        painter.setFont(self._font(12, True))
-        box_w = 160
-        painter.drawText(int(judge_x - box_w / 2), footer_bottom + 2, box_w, self.BOTTOM_MARGIN - 4,
-                          Qt.AlignCenter, measure_text)
+        # 下マージンが無いレイアウト(本家画面)では画面外なので、f文字列と
+        # drawText ごと省く。
+        if self.BOTTOM_MARGIN > 0:
+            if self._bar_times:
+                measure_idx = min(len(self._bar_times), bisect.bisect_right(self._bar_times, now))
+                measure_text = f"{measure_idx}/{len(self._bar_times)}"
+            else:
+                measure_text = "-"
+            painter.setPen(self._color("fg_dim"))
+            painter.setFont(self._font(12, True))
+            box_w = 160
+            painter.drawText(int(judge_x - box_w / 2), footer_bottom + 2, box_w,
+                             self.BOTTOM_MARGIN - 4, Qt.AlignCenter, measure_text)
 
         # Focus indicator: matches the accent-colored :focus border the QSS
         # theme already gives the text editor (QPlainTextEdit:focus), so

@@ -31,13 +31,28 @@ _SLICE_SEC = 0.016
 #   supersample: レーンは 908px 幅しかないので、そのまま引き伸ばすとぼやける。
 #     この倍率で細かく描いてから縮小するため、輪郭が立つ。
 #   所要目安: 曲の長さに対する倍率(実測から)。ダイアログの案内に使う。
+# supersample は「出力解像度と同じ画素数で描く」値にしてある(720p は等倍、
+# 1080p は 1.5 倍 = 1920x1080)。以前は両方 2 倍で描いてから ffmpeg 側で
+# lanczos 縮小しており、出力の 4 倍(720p)/1.8 倍(1080p)の画素を毎コマ描いて
+# 捨てていた。等倍にすると縮小フィルタ自体が不要になり、パイプに流す量も減る。
 QUALITY_PRESETS = [
-    ("60 fps / 720p（速い）",  {"fps": 60,  "canvas": "720p",  "supersample": 2,
-                               "preset": "medium", "time_factor": 0.6}),
-    ("120 fps / 1080p（高画質）", {"fps": 120, "canvas": "1080p", "supersample": 2,
-                                "preset": "fast",   "time_factor": 1.9}),
+    ("60 fps / 720p",  {"fps": 60,  "canvas": "720p",  "supersample": 1.0,
+                        "preset": "veryfast", "time_factor": 0.25}),
+    ("60 fps / 1080p", {"fps": 60, "canvas": "1080p", "supersample": 1.5,
+                        "preset": "veryfast", "time_factor": 0.45}),
+    ("120 fps / 1080p", {"fps": 120, "canvas": "1080p", "supersample": 1.5,
+                         "preset": "veryfast", "time_factor": 0.9}),
 ]
-DEFAULT_QUALITY = 1        # 既定は 120fps/1080p
+DEFAULT_QUALITY = 1        # 既定は 60fps/1080p(速度と画質のつり合いが良い)
+
+
+def _estimate_text(song_seconds, factor):
+    """その画質での所要時間の目安。速い/きれいといった言い回しではなく、
+    実際にどれだけ待つのかを分で出す(曲の長さで変わるので実行時に作る)。"""
+    est = max(0.0, song_seconds) * factor
+    if est < 60.0:
+        return "1分未満"
+    return "%d分" % round(est / 60.0)
 
 
 class RecordDialog(QDialog):
@@ -89,7 +104,8 @@ class RecordDialog(QDialog):
 
         self.cb_quality = QComboBox()
         for label, cfgq in QUALITY_PRESETS:
-            self.cb_quality.addItem(label, cfgq)
+            est = _estimate_text(song_seconds, cfgq.get("time_factor", 1.0))
+            self.cb_quality.addItem(f"{label}（出力 約{est}）", cfgq)
         self.cb_quality.setCurrentIndex(DEFAULT_QUALITY)
         self.cb_quality.currentIndexChanged.connect(self._update_estimate)
         form.addRow("画質", self.cb_quality)
@@ -134,12 +150,11 @@ class RecordDialog(QDialog):
         """選んだ画質での所要目安を出す。実測(曲の長さ×係数)からのざっくり値で、
         書き出しが始まれば進捗側に実測の残り時間が出る。"""
         factor = self.cb_quality.currentData().get("time_factor", 1.0)
-        est = self._song_seconds * factor
-        est_text = f"{est / 60:.0f} 分" if est >= 90 else f"{est:.0f} 秒"
+        est_text = _estimate_text(self._song_seconds, factor)
         self.lbl_status.setText(
             "画面を録画するのではなく1コマずつ描き直すので、書き出し中に\n"
             "アプリを操作しても出来上がりには影響しません。\n"
-            f"この画質だと目安で {est_text} ほどかかります。")
+            f"この画質だと目安で 約{est_text} ほどかかります。")
 
     def _browse(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -166,6 +181,9 @@ class RecordDialog(QDialog):
 
         cfg = self._mw.config_data
         q = self.cb_quality.currentData()
+        # 打音は再生と同じものを使う。設定の欄だけを見るとスキン同梱の打音が
+        # 拾えず、動画だけ内蔵音になってしまう。
+        rec_don, rec_ka = settings_mod.effective_hit_sound_paths(cfg)
         # 次に開いたときも同じ場所が出るよう、保存先のフォルダを覚える。
         cfg["record_output_dir"] = os.path.dirname(out)
         settings_mod.save_settings(cfg)
@@ -192,8 +210,8 @@ class RecordDialog(QDialog):
                 start_sec=0.0, end_sec=None,
                 fps=q["fps"], canvas=q["canvas"],
                 supersample=q["supersample"], preset=q["preset"],
-                don_path=cfg.get("hit_sound_don_path", "") or "",
-                ka_path=cfg.get("hit_sound_ka_path", "") or "",
+                don_path=rec_don,
+                ka_path=rec_ka,
                 sfx_volume=float(cfg.get("sfx_volume", 0.7)),
                 hit_sounds=self.chk_hit.isChecked(),
             )

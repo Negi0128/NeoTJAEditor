@@ -38,7 +38,10 @@ SCREEN_H_COMPACT = 360
 BG_TOP_H = 188            # 上部背景の高さ
 PANEL_X, PANEL_Y = 0, 188      # 左パネル(スコア/コンボ/太鼓/銘板)
 PANEL_W, PANEL_H = 333, 176
-LANE_X, LANE_Y = 333, 192      # レーン本体の左上
+# レーン本体の左上。Y は本家に合わせて 192 から 2px 下げた(要望)。判定枠・
+# 火花・判定文字「良」・打音表記・連打数・レーン枠・譜面ウィジェット本体は
+# すべてこの LANE_Y から導出しているので、ここを変えれば一緒に動く。
+LANE_X, LANE_Y = 333, 194
 LANE_W, LANE_H = 947, 130
 SE_STRIP_H = 26                # 打音表記帯(レーン本体の直下)
 JUDGE_X_IN_LANE = 81           # レーン左端から判定円の中心まで
@@ -89,7 +92,7 @@ DRUM_GLOW_SEC = 0.09
 GAUGE_BAR_H = 44
 # 黒枠(Taiko_Frame)の上帯も同じ段付きで、背の高い側が枠の x=715 から始まる。
 # 段の位置を合わせると 枠左端331 + 715 - 547 = 499 がゲージの左端になる。
-GAUGE_POS = (499, 144)
+GAUGE_POS = (499, 146)   # レーンと揃えて 144 から 2px 下げた(要望)
 # クリア(ノルマ)の位置。本家は内部10000点中8000点＝80%。素材の段差
 # (背の高いクリア圏の始まり)は実測 547/697 = 78.5% とわずかに手前だが、
 # 魂が光るかどうかはゲームの規則どおり 80% で判定する。
@@ -296,6 +299,13 @@ class GameScreenWidget(QWidget):
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        # 静的な下地(背景・左パネル・黒枠 等)を焼いたキャッシュ。None なら
+        # 次の paintEvent で作り直す。compact 切替やスキン再読込で捨てること。
+        self._static_layer = None
+        # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
+        self._digit_cache = {}
+        # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
+        self._judge_was_active = False
 
         # レーンが update() しても、Qt が塗り直すのはレーンの矩形だけ。
         # スコア・コンボ・太鼓・魂ゲージ・「良」はどれもレーンの外にあるので、
@@ -378,8 +388,15 @@ class GameScreenWidget(QWidget):
         self.update(0, 0, SCREEN_W, LANE_Y)
         # 左パネル: スコア・コース記号・太鼓・コンボ・銘板
         self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
-        # 「良」の板(レーンの手前)
-        self._judge_overlay.update()
+        # 「良」の板(レーンの手前)。判定ポップが出ていない間は中身が空なので、
+        # 毎フレーム更新する必要がない(半透明の子ウィジェットの再描画は親の
+        # 巻き込み再描画も呼ぶ)。消え際を残さないよう、「前フレームは出ていた」
+        # 場合だけもう1回だけ更新して消し込む。
+        recent = self.judge_pop()
+        active = bool(recent is not None and 0.0 <= recent[0] < JUDGE_POP_SEC)
+        if active or self._judge_was_active:
+            self._judge_overlay.update()
+        self._judge_was_active = active
 
     # ------------------------------------------------------------------
     def _load_skin(self):
@@ -544,12 +561,32 @@ class GameScreenWidget(QWidget):
         step = w * advance
         s = str(int(value))
         x = (right - step * len(s)) if right is not None else (left or 0)
+        # 0-9 を「切り出し済み・指定倍率へ縮小済み」でキャッシュしておく。倍率は
+        # どの呼び出しでも定数なので毎フレーム変倍する必要がない(スコア+コンボ+
+        # 連打数で1フレーム十数回の変倍 blit になっていた)。
+        glyphs = self._digit_glyphs(sheet, cols, rows, row, scale)
         for c in s:
             i = int(c)
             dy = (y_offsets or {}).get(i, 0)
-            p.drawPixmap(QRect(int(x), int(y) + dy, int(w) + 1, int(h) + 1), sheet,
-                         QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
+            p.drawPixmap(int(x), int(y) + dy, glyphs[i])
             x += step
+
+    def _digit_glyphs(self, sheet, cols, rows, row, scale):
+        """数字シートの1行を、指定倍率で縮小済みの 0-9 のリストにして返す。
+
+        描画サイズは従来の QRect(int(w)+1, int(h)+1) と同一にしてあるので
+        見た目は変わらない。素材もレイアウトも実行中に変わらないため使い回せる。"""
+        key = (id(sheet), cols, rows, row, round(float(scale), 4))
+        got = self._digit_cache.get(key)
+        if got is not None:
+            return got
+        cw, ch = sheet.width() / cols, sheet.height() / rows
+        dw, dh = int(cw * scale) + 1, int(ch * scale) + 1
+        out = [sheet.copy(QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
+               .scaled(dw, dh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+               for i in range(10)]
+        self._digit_cache[key] = out
+        return out
 
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
@@ -769,18 +806,36 @@ class GameScreenWidget(QWidget):
             return
         self._compact = compact
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
+        self._static_layer = None      # 高さが変わるので焼き直す
         self.update()
 
     def is_compact(self) -> bool:
         return self._compact
 
     # ------------------------------------------------------------------
-    def paintEvent(self, event):
-        p = QPainter(self)
+    def _build_static_layer(self):
+        """毎フレーム同じ絵になる部分(下地・上下背景・フッター・曲名・左パネル・
+        黒枠)を1枚のピクスマップに焼く。
+
+        これらは再生中いっさい変化しないのに、以前は毎フレーム 6〜7 回の
+        drawPixmap(うち 951x224 のアルファ付き黒枠を4分割)で描き直していた。
+        1回だけ焼いて以降は不透明な blit 1回にする(波形ウィジェットで音符を
+        ピクスマップ化したのと同じ手口)。compact 切替やスキン再読込のときは
+        _static_layer = None にして作り直させること。"""
+        # **不透明(RGB32)** の QImage に焼いてから QPixmap にする。QPixmap に
+        # 直接描くとアルファ付き(ARGB32_Premultiplied)になり、毎フレームの
+        # 貼り付けが SourceOver 合成になって、元の「必要な部分だけ数回 blit」
+        # より遅くなってしまう。不透明なら単純コピーで済む。
+        img = QImage(self.width(), self.height(), QImage.Format_RGB32)
+        img.fill(QColor("#0d1117"))
+        p = QPainter(img)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        h = self.height()
-        # スキンが無い環境でも「黒い箱」にならないよう下地は必ず塗る。
-        p.fillRect(self.rect(), QColor("#0d1117"))
+        self._paint_static(p)
+        p.end()
+        return QPixmap.fromImage(img)
+
+    def _paint_static(self, p):
+        """静的部分の描画本体(キャッシュ作成時に1回だけ呼ばれる)。"""
 
         # --- 上部背景 (0..188 が見える範囲) ---
         bg = self._skin.get("bg_top") if SHOW_BACKGROUND else None
@@ -833,6 +888,14 @@ class GameScreenWidget(QWidget):
             p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
                        QColor(0, 0, 0, 220))
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        # 静的な下地は1枚のキャッシュを貼るだけ(初回のみ作る)。
+        if self._static_layer is None or self._static_layer.size() != self.size():
+            self._static_layer = self._build_static_layer()
+        p.drawPixmap(0, 0, self._static_layer)
 
         # --- HUD(スコア・コンボ・太鼓・ゲージ) ---
         # ゲージは黒枠の上端に載るので、枠を描いたあとに描く。

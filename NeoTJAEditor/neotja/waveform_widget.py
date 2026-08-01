@@ -409,13 +409,38 @@ class WaveformWidget(QWidget):
     # ------------------------------------------------------------------
     # Interaction
     # ------------------------------------------------------------------
+    # ホイール1目盛りで動かす量(表示幅に対する割合)。
+    SCROLL_FRAC = 0.15
+
     def wheelEvent(self, event):
-        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
+        """ホイール = 移動、Alt+ホイール = 拡大縮小。
+
+        以前はホイールがそのまま拡大縮小だったが、波形は「見たい所へ動かす」
+        操作のほうが圧倒的に多いので、素のホイールを移動に割り当てる。"""
+        up = event.angleDelta().y() > 0
+        if not (event.modifiers() & Qt.AltModifier):
+            span = self._visible_span()
+            step = span * self.SCROLL_FRAC * (-1 if up else 1)
+            if self._follow_window:
+                # 追従モードの view_start は再生位置から決まるので、動かすのは
+                # 再生位置そのもの(= シーク)。
+                self.seekRequested.emit(
+                    max(0.0, min(self.position_sec + step,
+                                 self.duration if self.duration > 0 else self.position_sec + step)))
+            else:
+                self.view_start = max(0.0, min(self.view_start + step,
+                                               max(0.0, self.duration - span)))
+                self.update()
+            event.accept()
+            return
+
+        factor = 1.25 if up else 1 / 1.25
         if self._follow_window:
             # 追従モードでは窓幅そのものを増減(上スクロールで拡大表示=窓を狭く)。
             self._follow_window = max(1.0, min(self._follow_window / factor, 60.0))
             self.set_position(self.position_sec)  # 追従位置を取り直して即反映
             self.update()
+            event.accept()
             return
         old_span = self._visible_span()
         mouse_sec = self._x_to_sec(event.position().x())
@@ -424,6 +449,7 @@ class WaveformWidget(QWidget):
         self.view_start = mouse_sec - (mouse_sec - self.view_start) * (new_span / old_span if old_span else 1)
         self.view_start = max(0.0, min(self.view_start, max(0.0, self.duration - new_span)))
         self.update()
+        event.accept()
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)

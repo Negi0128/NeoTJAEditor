@@ -1,5 +1,5 @@
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QGraphicsScene, QGraphicsView, QHBoxLayout,
@@ -11,7 +11,8 @@ from neotja.tja_image_export import generate_chart_image, load_sprites
 
 
 class ChartGraphicsView(QGraphicsView):
-    """ホイールで拡大縮小できる表示。倍率には上限/下限を設ける。
+    """Alt+ホイールで拡大縮小できる表示(素のホイールはスクロール)。倍率には
+    上限/下限を設ける。
 
     以前は無制限に scale() していたため、縮小しすぎて画像が点のように消えたり、
     拡大しすぎて位置を見失ったりした。等倍(1.0)を基準に MIN_ZOOM〜MAX_ZOOM の
@@ -30,6 +31,11 @@ class ChartGraphicsView(QGraphicsView):
         self._zoom = 1.0
 
     def wheelEvent(self, event):
+        # ホイールは素直にスクロール、拡大縮小は Alt+ホイール。譜面画像は縦に
+        # 長いので、見たい所まで送る操作のほうが拡大縮小より多い。
+        if not (event.modifiers() & Qt.AltModifier):
+            super().wheelEvent(event)
+            return
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         new_zoom = self._zoom * factor
         # 範囲外なら、範囲の端までに切り詰めて適用する(端で止まる)。

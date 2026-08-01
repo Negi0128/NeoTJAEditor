@@ -206,6 +206,10 @@ def _video_filter(canvas, src_w, src_h, bg="0x0d1117"):
             return None
         return f"pad={w}:{h}:0:0:color={bg}"
     w, h = canvas
+    if (w, h) == (src_w, src_h):
+        # 描画解像度と出力解像度が同じならスケール不要。フィルタグラフごと
+        # 省くと lanczos のコストが完全に消える。
+        return None
     return (f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={bg}")
 
@@ -264,13 +268,22 @@ class VideoRecording:
         # 描くときの解像度だけ ss 倍にして(=文字も円も細かく描き直される)、
         # ffmpeg 側で目的の大きさへ縮小する。レイアウトは論理座標のままなので
         # 見た目の配置は 1 倍のときと 1px も変わらない。
-        ss = max(1, int(supersample))
-        pw, ph = w * ss, h * ss
+        # supersample は小数も許す。1080p を ss=1.5 (1280x720 -> 1920x1080) の
+        # ように「出力と同じ画素数」で描ければ、ffmpeg 側の lanczos 縮小が丸ごと
+        # 不要になり、パイプに流すデータ量も大きく減る(整数丸めだと 2 倍固定に
+        # なってしまい、出力の4倍を描いて捨てていた)。
+        ss = max(1.0, float(supersample))
+        pw, ph = int(round(w * ss)), int(round(h * ss))
+        pw += pw & 1
+        ph += ph & 1
         vf = _video_filter(CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"]), pw, ph)
 
         cmd = [
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
             "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{pw}x{ph}",
+            # 入力キューを深くしておくと、こちらの書き込みとエンコードが
+            # 重なりやすくなる(既定は浅くて待ちが生じる)。
+            "-thread_queue_size", "64",
             "-r", str(fps), "-i", "-",
             "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
         ]
@@ -295,6 +308,11 @@ class VideoRecording:
         # 描いてくれる(円も文字も本当に高精細になる。単なる拡大ではない)。
         self._img = QImage(pw, ph, QImage.Format_RGBA8888)
         self._img.setDevicePixelRatio(ss)
+        # 描画側(GameScreenWidget / ChartPreviewWidget)は毎フレーム全面を塗る
+        # (WA_OpaquePaintEvent + paintEvent 冒頭の fillRect)ので、毎コマの
+        # fill(0) は不要。ただし ss が小数のとき端に 1px 塗り残る可能性がある
+        # ので、最初の1回だけ塗って未初期化メモリを避ける。
+        self._img.fill(0)
         widget.begin_offline_render()
 
     def step(self, max_frames=8) -> bool:
@@ -306,7 +324,6 @@ class VideoRecording:
         end = min(self.frame + max(1, int(max_frames)), self.total_frames)
         while self.frame < end:
             self.widget.set_render_time(self.start_sec + self.frame / float(self.fps))
-            self._img.fill(0)
             self.widget.render(self._img)
             try:
                 self._proc.stdin.write(self._img.constBits())
