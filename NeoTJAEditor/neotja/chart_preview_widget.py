@@ -624,9 +624,15 @@ class ChartPreviewWidget(QWidget):
     def _recent_hit(self, now: float):
         """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
         判定エフェクト(しぶき・「良」・コンボ演出)はこれだけから描ける。
-        まだ1つも叩いていなければ None。"""
+        まだ1つも叩いていなければ None。
+
+        f/j のリード再生中は、開始位置より前の音符は隠している。その音符で
+        火花・「良」・太鼓の色が動くと、何も無いところが光って見えるので、
+        隠している間はヒット自体を無かったことにする。"""
         i = bisect.bisect_right(self._note_times, now) - 1
         if i < 0:
+            return None
+        if self._reveal_time is not None and self._note_times[i] < self._reveal_time:
             return None
         return (now - self._note_times[i], self._note_chars[i], i + 1)
 
@@ -770,6 +776,9 @@ class ChartPreviewWidget(QWidget):
         if now > prev:
             lo = bisect.bisect_right(self._pop_times, prev)
             hi = bisect.bisect_right(self._pop_times, now)
+            # リード再生中は開始位置より前の風船を隠しているので、破裂音も出さない。
+            if self._reveal_time is not None:
+                lo = max(lo, bisect.bisect_left(self._pop_times, self._reveal_time))
             if hi > lo:
                 self._pop_sound.play()
 

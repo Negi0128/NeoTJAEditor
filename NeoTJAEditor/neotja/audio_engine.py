@@ -757,6 +757,10 @@ class HitSoundEngine(QObject):
         self._raw_notes = []
         self._offset = 0.0
         self._playback_rate = 1.0
+        # f/j のリード再生用。この音声時刻より前の音符は、スケジュールを進めた
+        # まま発音だけ飛ばす(set_mute_before 参照)。
+        self._mute_before = None
+        self._note_plain_times = []   # 補正なしの音声時刻(mute 判定用)
 
         self.sound_don = QSoundEffect(self)
         self.sound_ka = QSoundEffect(self)
@@ -806,11 +810,15 @@ class HitSoundEngine(QObject):
         # they should.
         r = self._playback_rate
         pairs = sorted(
-            (t - self._offset + self._compensation_for_bpm(bpm) * r, c in "13")
+            (t - self._offset + self._compensation_for_bpm(bpm) * r, c in "13", t - self._offset)
             for t, c, bpm in self._raw_notes
         )
         self._note_times = [p[0] for p in pairs]
         self._note_is_don = [p[1] for p in pairs]
+        # 補正前の音声時刻。mute の境目は「音符が判定線に来る時刻」で決めたい
+        # (補正込みの時刻で比べると、境目の1打が補正ぶんだけ手前に落ちて
+        # 黙ってしまう)。
+        self._note_plain_times = [p[2] for p in pairs]
         self._last_idx = None
         self._last_audio_time = None
 
@@ -818,6 +826,15 @@ class HitSoundEngine(QObject):
         self.enabled = enabled
         self._last_idx = None
         self._last_audio_time = None
+
+    def set_mute_before(self, audio_time):
+        """この音声時刻より前の音符だけ発音を飛ばす(None で解除)。
+
+        f/j のリード再生で使う。以前は set_enabled(False) でエンジンごと止めて
+        いたが、開始位置に着いてから戻すため、**開始位置ちょうどの1打目**まで
+        黙ってしまっていた。スケジュールの進行には手を触れず発音だけ抑えるので、
+        境目の1打がきちんと鳴る。"""
+        self._mute_before = None if audio_time is None else float(audio_time)
 
     # A seek/cursor-jump/measure-jump can move audio_time_sec by seconds in
     # a single tick, which used to make check_and_play below play every note
@@ -849,7 +866,10 @@ class HitSoundEngine(QObject):
         if jumped:
             self._last_idx = idx
         elif idx > self._last_idx:
+            mute = self._mute_before
             for i in range(self._last_idx, idx):
+                if mute is not None and self._note_plain_times[i] < mute:
+                    continue
                 (self.sound_don if self._note_is_don[i] else self.sound_ka).play()
             self._last_idx = idx
         elif idx < self._last_idx - self.JITTER_TOLERANCE:

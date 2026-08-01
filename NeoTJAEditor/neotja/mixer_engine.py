@@ -158,6 +158,9 @@ class MixerCore:
         self.metro_times = []
         self.hit_enabled = True
         self.metro_enabled = False
+        # f/j のリード再生用。この音声時刻より前の打音だけ、カーソルは進めた
+        # まま発音を飛ばす(_HitSoundAdapter.set_mute_before 参照)。
+        self.hit_mute_before = None
         self._hit_cursor = 0
         self._metro_cursor = 0
 
@@ -221,6 +224,8 @@ class MixerCore:
                 self._recompute_cursors()
             elif op == "hit_enabled":
                 self.hit_enabled = bool(cmd[1])
+            elif op == "hit_mute_before":
+                self.hit_mute_before = None if cmd[1] is None else float(cmd[1])
             elif op == "metro_enabled":
                 self.metro_enabled = bool(cmd[1])
             elif op == "sfx":
@@ -268,11 +273,14 @@ class MixerCore:
         self.voices.append([pcm, 0, is_metro, int(offset)])
 
     def _fire_events(self, times, kinds, cursor_attr, is_metro, enabled,
-                     block_start_time, block_end_time, frames):
+                     block_start_time, block_end_time, frames, mute_before=None):
         cursor = getattr(self, cursor_attr)
         ntimes = len(times)
         while cursor < ntimes and times[cursor] < block_end_time:
             et = times[cursor]
+            if mute_before is not None and et < mute_before:
+                cursor += 1
+                continue
             if et >= block_start_time and enabled and frames > 0:
                 # 出力フレーム k の音声時間は (read_pos + inc*k)/song_sr。これを
                 # et について解くと k = (et - block_start_time)*device_sr/rate。
@@ -352,7 +360,8 @@ class MixerCore:
             # イベントはカーソルを常に前進させる(無効でも消費)。有効なときだけ
             # 発音するので、途中で ON にしても溜まった打音がバーストしない。
             self._fire_events(self.hit_times, self.hit_kinds, "_hit_cursor", False,
-                              self.hit_enabled, block_start_time, block_end_time, frames)
+                              self.hit_enabled, block_start_time, block_end_time, frames,
+                              mute_before=self.hit_mute_before)
             self._fire_events(self.metro_times, None, "_metro_cursor", True,
                               self.metro_enabled, block_start_time, block_end_time, frames)
 
@@ -417,6 +426,17 @@ class _HitSoundAdapter:
     def set_enabled(self, enabled: bool):
         self.enabled = enabled
         self._engine.core.post(("hit_enabled", bool(enabled)))
+
+    def set_mute_before(self, audio_time):
+        """この音声時刻より前の打音だけ発音を飛ばす(None で解除)。
+
+        f/j のリード再生用。以前はリードの間 set_enabled(False) にして、開始
+        位置に着いた時点で戻していたが、ミキサーは打音をサンプル単位で先に
+        並べているので、戻すコマンドが届く頃には開始位置ちょうどの1打目を
+        通り過ぎており、その1打が鳴らなかった。再生を始める前に「ここより
+        前だけ黙らせる」と決めておけば、この取りこぼしが起きない。"""
+        self._engine.core.post(("hit_mute_before",
+                                None if audio_time is None else float(audio_time)))
 
     def set_playback_rate(self, rate: float):
         # ミキサーではスケジュールは音声時間のまま正しいので何もしない。

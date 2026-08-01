@@ -423,8 +423,6 @@ class PreviewDock(QDockWidget):
         self._preview_spans = ([], [], [])  # (rolls, balloons, kusudamas) 同上
         # 作譜モードの波形に描く命令注釈 (bpm/scroll/measure変化, gogo区間)
         self._preview_commands = ([], [], [], [])
-        # f/j リード再生で一時的に止めた打音の復帰用に、直前の enabled を控える。
-        self._fade_prev_hit_enabled = True
         # 作譜モードの波形グリッド用のクリック列 [(chart_time, is_measure)]。
         # メトロノーム用の build_metronome_clicks は小節途中の #BPMCHANGE を
         # 小節全体に一括適用するため build_preview_timeline の音符/小節時刻と
@@ -1157,16 +1155,24 @@ class PreviewDock(QDockWidget):
         隠す(隠すのは chart_preview 側)。開始位置に達したら _end_fadein で SE を
         元に戻す。音源はそのまま鳴らして「頭出しの助走」を聞かせる。"""
         start = max(0.0, measure_time - lead)
-        # リード中は打音を止める(音量ではなく enabled を切る=確実に元へ戻せる)。
-        self._fade_prev_hit_enabled = getattr(self.hit_sounds, "enabled", True)
-        self.hit_sounds.set_enabled(False)
+        # リード中は「開始位置より前の打音だけ」を黙らせる。以前は打音エンジン
+        # ごと enabled=False にして到達時に戻していたが、それだと開始位置
+        # ちょうどの1打目まで消えていた(戻すのが間に合わない)。ここで先に
+        # 境目を渡しておけば、助走ぶんだけ黙って1打目から鳴る。
+        self._set_hit_mute_before(measure_time)
         self.audio.seek(max(0, int(start * 1000)))
         self.audio.play()
 
     def _end_fadein(self):
         """リード表示の終わり(再生位置が開始位置に到達 or 操作でキャンセル)。
-        止めていた打音を元の状態に戻す。"""
-        self.hit_sounds.set_enabled(getattr(self, "_fade_prev_hit_enabled", True))
+        打音の抑制を解除する。"""
+        self._set_hit_mute_before(None)
+
+    def _set_hit_mute_before(self, audio_time):
+        """打音エンジン(ミキサー/レガシーどちらでも)に抑制の境目を伝える。"""
+        setter = getattr(self.hit_sounds, "set_mute_before", None)
+        if setter is not None:
+            setter(audio_time)
 
     def set_volume(self, volume: float):
         """Sets the initial volume (0.0-1.0) without triggering the save
