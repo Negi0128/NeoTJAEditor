@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 
 from neotja.easing import curve_value
+from neotja.measure_math import parse_measure_lines
 
 CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease-Out)", "S字 (Ease-In-Out)")
 
@@ -81,6 +82,9 @@ class HighSpeedDialog(QDialog):
         self.row_interval.setVisible("特定間隔" in mode)
         self._preview()
 
+    # ノーツ毎モードで #SCROLL を差し込む対象の文字(休符 0 と終端 8 は除く)。
+    _ACTIVE = "12345679"
+
     def _preview(self, *_):
         try:
             s = float(self.ed_start.text())
@@ -92,11 +96,12 @@ class HighSpeedDialog(QDialog):
         mode = self.cb_mode.currentText()
         curve = self.cb_curve.currentText()
         raw = self.txt_before.toPlainText().strip()
-        notes_str = "".join(c for c in raw if c in "0123456789,")
-
-        if not notes_str:
+        # 命令行(#BPMCHANGE 等)やコメントを落とさずに小節へ分ける。以前は
+        # raw から数字とカンマだけを拾っていたため、`#BPMCHANGE 180` の 180 が
+        # そのまま音符3個に化け、命令行自体も消えていた。
+        parsed = parse_measure_lines(raw)
+        if not any(m["type"] == "measure" and m["notes"] for m in parsed):
             return
-        out = []
 
         if "特定間隔" in mode:
             try:
@@ -104,56 +109,165 @@ class HighSpeedDialog(QDialog):
             except ValueError:
                 return
             try:
-                out_str = self._apply_interval_highspeed(raw, interval, s, e, curve, p)
-                self.txt_after.setPlainText(out_str)
-            except Exception as ex:
+                self.txt_after.setPlainText(
+                    self._render_interval(parsed, interval, s, e, curve, p))
+            except Exception as ex:  # noqa: BLE001
                 self.txt_after.setPlainText(f"エラー: {str(ex)}")
             return
 
         if "なめらか" in mode:
-            note_list = [c for c in notes_str if c != ","]
-            n = len(note_list)
-            if n == 0:
-                self.txt_after.setPlainText(notes_str)
-                return
-            ni = 0
-            for c in notes_str:
-                if c == ",":
-                    if out:
-                        out[-1] += ","
-                    continue
-                t = ni / (n - 1) if n > 1 else 0.0
-                y = curve_value(t, curve)
-                val = f"{s + (e - s) * y:.{p}f}"
-                out.append(f"#SCROLL {val}")
-                out.append(c)
-                ni += 1
+            def want(_ch):
+                return True
+        else:   # ノーツ毎
+            def want(ch):
+                return ch in self._ACTIVE
 
-        elif "ノーツ毎" in mode:
-            active_notes = [c for c in notes_str if c in "12345679"]
-            n = len(active_notes)
-            if n == 0:
-                self.txt_after.setPlainText(notes_str)
+        total = sum(1 for m in parsed if m["type"] == "measure"
+                    for ch in m["notes"] if want(ch))
+        if total == 0:
+            self.txt_after.setPlainText(raw)
+            return
+
+        def scroll_at(i):
+            t = i / (total - 1) if total > 1 else 0.0
+            return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
+
+        self.txt_after.setPlainText("\n".join(self._render(parsed, want, scroll_at)))
+
+    @staticmethod
+    def _render(parsed, want, scroll_at):
+        """want(ch) が真のスロットの直前に #SCROLL を入れて組み立てる。
+        小節の途中にあった命令行は元の位置のまま残す。"""
+        out = []
+        buf = ""
+
+        def flush():
+            nonlocal buf
+            if buf:
+                out.append(buf)
+                buf = ""
+
+        def append_tail(tail):
+            """カンマ/コメントは最後の**音符行**に付ける(命令行には付けない)。"""
+            nonlocal buf
+            if buf:
+                buf += tail
                 return
-            ni = 0
-            buffer = ""
-            for c in notes_str:
-                if c in "12345679":
-                    if buffer:
-                        out.append(buffer)
-                        buffer = ""
-                    t = ni / (n - 1) if n > 1 else 0.0
-                    y = curve_value(t, curve)
-                    val = f"{s + (e - s) * y:.{p}f}"
-                    out.append(f"#SCROLL {val}")
-                    buffer += c
+            for j in range(len(out) - 1, -1, -1):
+                sj = out[j].strip()
+                if sj and not sj.startswith("#") and not sj.startswith("//"):
+                    out[j] += tail
+                    return
+            out.append(tail)
+
+        ni = 0
+        for item in parsed:
+            if item["type"] == "keep":
+                flush()
+                out.append(item["text"])
+                continue
+            breaks = {}
+            for idx, line in item["breaks"]:
+                breaks.setdefault(idx, []).append(line)
+            notes = item["notes"]
+            for i, ch in enumerate(notes):
+                for line in breaks.get(i, ()):
+                    flush()
+                    out.append(line)
+                if want(ch):
+                    flush()
+                    out.append(scroll_at(ni))
                     ni += 1
+                    buf = ch
                 else:
-                    buffer += c
-            if buffer:
-                out.append(buffer)
+                    buf += ch
+            for idx, line in item["breaks"]:
+                if idx >= len(notes):
+                    flush()
+                    out.append(line)
+            tail = ("," if item["has_comma"] else "")
+            if item["comment"]:
+                tail += (" " if tail else "") + item["comment"]
+            if tail:
+                append_tail(tail)
+            flush()
+        return out
 
-        self.txt_after.setPlainText("\n".join(out))
+    @staticmethod
+    def _render_interval(parsed, interval, s, e, curve, p):
+        """小節を interval 個の塊に割り、塊ごとに #SCROLL を入れる。"""
+        if interval <= 0:
+            raise ValueError("分割間隔は1以上を指定してください。")
+        if not any(m["type"] == "measure" and m["has_comma"] for m in parsed):
+            raise ValueError("小節の終端（カンマ）が含まれていません。1小節以上を選択してください。")
+        # 塊の境目だけ #SCROLL を入れたいので、want は「塊の先頭かどうか」。
+        # 小節ごとに塊の大きさが変わるので、対象スロットを先に集めておく。
+        marks = set()
+        total = 0
+        for mi, item in enumerate(parsed):
+            if item["type"] != "measure" or not item["notes"]:
+                continue
+            length = len(item["notes"])
+            size = max(1, length // interval)
+            for i in range(0, length, size):
+                marks.add((mi, i))
+                total += 1
+
+        def scroll_at(i):
+            t = i / (total - 1) if total > 1 else 0.0
+            return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
+
+        # _render は want(ch) しか見ないので、位置で判定できるよう包み直す。
+        out = []
+        buf = ""
+        ni = 0
+        for mi, item in enumerate(parsed):
+            if item["type"] == "keep":
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(item["text"])
+                continue
+            breaks = {}
+            for idx, line in item["breaks"]:
+                breaks.setdefault(idx, []).append(line)
+            for i, ch in enumerate(item["notes"]):
+                for line in breaks.get(i, ()):
+                    if buf:
+                        out.append(buf)
+                        buf = ""
+                    out.append(line)
+                if (mi, i) in marks:
+                    if buf:
+                        out.append(buf)
+                        buf = ""
+                    out.append(scroll_at(ni))
+                    ni += 1
+                buf += ch
+            for idx, line in item["breaks"]:
+                if idx >= len(item["notes"]):
+                    if buf:
+                        out.append(buf)
+                        buf = ""
+                    out.append(line)
+            tail = ("," if item["has_comma"] else "")
+            if item["comment"]:
+                tail += (" " if tail else "") + item["comment"]
+            if tail:
+                if buf:
+                    buf += tail
+                else:
+                    for j in range(len(out) - 1, -1, -1):
+                        sj = out[j].strip()
+                        if sj and not sj.startswith("#") and not sj.startswith("//"):
+                            out[j] += tail
+                            break
+                    else:
+                        out.append(tail)
+            if buf:
+                out.append(buf)
+                buf = ""
+        return "\n".join(out)
 
     def _apply(self):
         t = self.txt_after.toPlainText().strip()

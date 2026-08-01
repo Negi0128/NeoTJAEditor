@@ -284,24 +284,42 @@ class WaveformWidget(QWidget):
     # ------------------------------------------------------------------
     # Coordinate mapping
     # ------------------------------------------------------------------
+    # 表示幅(秒)と「秒→x の倍率」のキャッシュ。どちらも窓幅・曲の長さ・ズーム
+    # ・ウィジェット幅だけで決まるのに、_sec_to_x が呼ばれるたびに計算し直して
+    # いた(作譜モードの波形は 1フレームで 95回ほど呼ぶ)。
+    _span_key = None
+    _span_val = 1.0
+    _xs_key = None
+    _xs_val = 0.0
+
     def _visible_span(self) -> float:
+        key = (self._follow_window, self.duration, self.zoom)
+        if key == self._span_key:
+            return self._span_val
         if self._follow_window:
             # 固定幅の窓。曲がそれより短ければ曲全体。
             if self.duration > 0:
-                return min(self._follow_window, self.duration)
-            return self._follow_window
-        if self.duration <= 0:
-            return 1.0
-        return self.duration / max(self.zoom, 0.0001)
+                val = min(self._follow_window, self.duration)
+            else:
+                val = self._follow_window
+        elif self.duration <= 0:
+            val = 1.0
+        else:
+            val = self.duration / max(self.zoom, 0.0001)
+        self._span_key = key
+        self._span_val = val
+        return val
 
     def _seconds_per_pixel(self) -> float:
         return self._visible_span() / max(1, self.width())
 
     def _sec_to_x(self, sec: float) -> int:
-        span = self._visible_span()
-        if span <= 0:
-            return 0
-        return int((sec - self.view_start) / span * self.width())
+        key = (self._follow_window, self.duration, self.zoom, self.width())
+        if key != self._xs_key:
+            span = self._visible_span()
+            self._xs_val = (self.width() / span) if span > 0 else 0.0
+            self._xs_key = key
+        return int((sec - self.view_start) * self._xs_val)
 
     def _x_to_sec(self, x: float) -> float:
         span = self._visible_span()

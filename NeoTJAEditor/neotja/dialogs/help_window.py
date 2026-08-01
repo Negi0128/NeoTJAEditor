@@ -1,6 +1,5 @@
-from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QListWidget, QSplitter, QTextBrowser, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QListWidget, QSplitter, QTextBrowser, QVBoxLayout
 
 from neotja.constants import VERSION
 from neotja.theme import COLORS
@@ -8,7 +7,7 @@ from neotja.theme import COLORS
 # このヘルプ本文が「どのバージョンの仕様に合わせて書かれたか」。
 # アプリを更新して仕様を変えたら、ヘルプを追記・修正したうえでこの値も上げること
 # (各ページの下部と「このヘルプについて」に表示される)。
-HELP_FOR_VERSION = "8.1.1"
+HELP_FOR_VERSION = "8.2.0"
 
 CHAPTERS = {
     "譜面の仕組み": (
@@ -153,10 +152,17 @@ CHAPTERS = {
     ),
     "ツール": (
         "メニュー「ツール」やツールバーから利用できる。\n\n"
-        "■ ハイスピ変換 / ノーツ間隔リサイズ\n"
-        "  選択範囲のスクロール速度やノーツ間隔を変換する。先に範囲を選択しておく。\n\n"
+        "■ ハイスピ変換\n"
+        "  選択範囲に #SCROLL を差し込んで、だんだん速く/遅くする。先に範囲を\n"
+        "  選択しておく。選択範囲に #BPMCHANGE などの命令行が混ざっていても、\n"
+        "  その行はそのまま残る。\n\n"
+        "■ ノーツ間隔リサイズ\n"
+        "  選択範囲の小節を、指定した分割数に書き直す。1小節は**カンマまで**なので、\n"
+        "  16分の小節を4文字×4行に分けて書いていても正しく1小節として扱う。\n"
+        "  小節の途中にある命令行(#SCROLL 等)は、同じ割合の位置へ戻す。\n\n"
         "■ ストロボ生成\n"
-        "  カーソル位置に、指定FPS・BPMで静止して見えるギミックを生成する。\n\n"
+        "  カーソル位置に、指定FPS・BPMで静止して見えるギミックを生成する。\n"
+        "  終わったあとの #MEASURE / #SCROLL は、カーソル手前の値へ戻す。\n\n"
         "■ あべこべ反転 (Ctrl+M)\n"
         "  選択範囲のドン(1,3)とカッ(2,4)を入れ替える。\n"
         "  命令行（#BPMCHANGE など）やヘッダ行の数値は書き換えない。\n\n"
@@ -213,7 +219,9 @@ CHAPTERS = {
     ),
     "エラー診断": (
         "■ 行番号の「!」マーク\n"
-        "  1小節の文字数が不正な行を警告する。\n\n"
+        "  1小節の分割数(数字の個数)が不自然な行を警告する。\n"
+        "  拍子(#MEASURE)を見たうえで判定するので、7/16 拍子の 28分割のような\n"
+        "  正しい書き方には付かない。5分割のような打ち間違いだけを拾う。\n\n"
         "■ 背景の黄色ハイライト\n"
         "  #SCROLL が空行やノーツを挟まずに連続して重複している箇所をハイライト。\n\n"
         "■ ステータスバー（画面下部）\n"

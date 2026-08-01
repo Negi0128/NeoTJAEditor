@@ -207,6 +207,9 @@ class ChartPreviewWidget(QWidget):
         self._note_chars = []
         self._note_bpms = []
         self._note_scrolls = []
+        # 音符/小節線の見かけ速度(px/秒)。_rebuild_min_vis_speed で作り直す。
+        self._note_speeds = []
+        self._bar_speeds = []
         # 打音表記: one syllable (or None) per note, precomputed by the
         # analyzer - see neotja/se_text.py. Never derived in paintEvent.
         self._note_se = []
@@ -1174,6 +1177,12 @@ class ChartPreviewWidget(QWidget):
         self._scroll_times = [c[0] for c in self._scroll_changes]
         self._rebuild_span_draw_data()
         self._rebuild_min_vis_speed()
+        # 風船の破裂音の走査位置は前の譜面のもの。持ち越すと、差し替え直後に
+        # 「前回見た時刻〜今」の区間を跨いだ扱いになって、割ってもいない風船の
+        # 破裂音が1回鳴ることがある。次のフレームで無音のまま取り直す。
+        self._last_pop_scan_t = None
+        prev_course = self._course_key
+        prev_branch = self._branch_level
         self._course_key = data.get("course_key")
         self._course_label = data.get("course_label") or ""
         self._course_color = data.get("course_color") or COLORS["fg_bright"]
@@ -1181,6 +1190,12 @@ class ChartPreviewWidget(QWidget):
         self._available_courses = data.get("available_courses") or []
         self._has_branches = bool(data.get("has_branches"))
         self._branch_level = data.get("branch_level") or "M"
+        # コース/分岐が切り替わったら、リード再生(f/j)の「ここまで隠す」は
+        # 前の譜面の時刻なので畳む。畳まないと別の譜面の音符が消えたままになり、
+        # 打音も抑制されたままになる。編集による差し替えでは畳まない
+        # (打っている最中のリードを毎回取り消してしまうため)。
+        if (prev_course, prev_branch) != (self._course_key, self._branch_level):
+            self._clear_reveal()
         # New nav targets after the timeline changed. This deliberately keeps
         # the current audio position (_pos_sec) untouched and only re-derives
         # which measure is "current" from it, so an edit/refresh never yanks
@@ -2035,13 +2050,18 @@ class ChartPreviewWidget(QWidget):
         don't approach from the right edge, and the span cull handles them by
         pixel extent anyway."""
         ref = self.BASE_PIXELS_PER_BEAT * self.WINDOW_REF_BPM / 60.0
+        # 音符ごとの見かけ速度は BPM と #SCROLL だけで決まる(等速モードでも
+        # 一括で 1.0 固定になるだけ)。毎フレーム 300〜400 回 _speed() を
+        # 呼んでいたので、ここで1本の配列にしておいて描画側は掛け算1つで済ます。
+        self._note_speeds = [self._speed(bpm, sc)
+                             for bpm, sc in zip(self._note_bpms, self._note_scrolls)]
+        self._bar_speeds = [self._speed(bpm, sc)
+                            for bpm, sc in zip(self._bar_bpms, self._bar_scrolls)]
         slowest = ref
-        for bpm, sc in zip(self._note_bpms, self._note_scrolls):
-            s = self._speed(bpm, sc)
+        for s in self._note_speeds:
             if 0.0 < s < slowest:
                 slowest = s
-        for bpm, sc in zip(self._bar_bpms, self._bar_scrolls):
-            s = self._speed(bpm, sc)
+        for s in self._bar_speeds:
             if 0.0 < s < slowest:
                 slowest = s
         self._min_vis_speed = slowest
@@ -2378,7 +2398,7 @@ class ChartPreviewWidget(QWidget):
             if not self._bar_visible[i]:
                 continue
             bt = self._bar_times[i]
-            x = judge_x + (bt - now) * self._speed(self._bar_bpms[i], self._bar_scrolls[i])
+            x = judge_x + (bt - now) * self._bar_speeds[i]
             is_cp = False
             if cps:
                 at = bt - self._offset
@@ -2508,8 +2528,24 @@ class ChartPreviewWidget(QWidget):
             if now < k_start and x0 > lane_w + rs:
                 continue
             draw_items.append((k_start, "kusudama", (k_start, k_end, sp0, k_hits)))
+        # 音符もレーンの外に出るものはここで落とす。可視の時間窓は「譜面で
+        # いちばん遅い見かけ速度」に合わせて広めに取ってあるので(_visible_window)、
+        # 速い譜面では窓に入る音符の 6〜9 割がレーンの外にいる。Qt のクリップに
+        # 任せると外の音符ぶんだけ drawPixmap と並べ替えが丸ごと無駄になる
+        # (実測: ある譜面で 1フレーム 177個の候補のうち可視は 8.8個)。
+        # x はここで一度だけ求め、描画側へ渡して二度計算しない。
+        rb = self.NOTE_R_BIG
         for i in range(lo, hi):
-            draw_items.append((self._note_times[i], "note", i))
+            t = self._note_times[i]
+            if t > now:
+                x = judge_x + (t - now) * self._note_speeds[i]
+                if x < -rb or x > lane_w + rb:
+                    continue
+                draw_items.append((t, "note", (i, x)))
+            else:
+                # 叩いた後の飛んでいく音符。位置は経過時間から別に決まるので
+                # ここでは落とさない(描画側で画面外なら飛ばす)。
+                draw_items.append((t, "note", (i, None)))
         # Latest first -> earliest drawn last -> earliest ends up on top.
         if reveal_t is not None:
             # 開始位置より前に始まる音符/連打/風船を隠す(z キーは各要素の時刻/
@@ -2545,7 +2581,7 @@ class ChartPreviewWidget(QWidget):
                 else:
                     self._draw_balloon_note(painter, bx, mid_y)
             else:  # note - approach, then fly off after crossing the line.
-                i = payload
+                i, pre_x = payload
                 t = self._note_times[i]
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
@@ -2564,8 +2600,7 @@ class ChartPreviewWidget(QWidget):
                     self._draw_note(painter, x, y, max(1, int(r * (1.0 - 0.25 * progress))), c, big)
                     painter.setOpacity(1.0)
                 else:
-                    x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
-                    self._draw_note(painter, x, mid_y, r, c, big)
+                    self._draw_note(painter, pre_x, mid_y, r, c, big)
 
         # --- 叩いた瞬間の判定エフェクト (本家風) --------------------------
         # 直近ヒット音符からの経過時間だけで、判定枠から広がるしぶきと「良」の
@@ -2720,7 +2755,11 @@ class ChartPreviewWidget(QWidget):
                     continue
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
-                x = judge_x + (t - now) * self._speed(self._note_bpms[i], self._note_scrolls[i])
+                x = judge_x + (t - now) * self._note_speeds[i]
+                # 音符と同じ理由でレーンの外は描かない(上の draw_items の説明)。
+                # 文字は音符より小さいので、音符の半径ぶん見ておけば足りる。
+                if x < -rb or x > lane_w + rb:
+                    continue
                 spr = self._se_scaled(label, big, footer_h)
                 if spr is not None:
                     # 帯の高さは固定なので倍率も定数。以前は音符1つごとに

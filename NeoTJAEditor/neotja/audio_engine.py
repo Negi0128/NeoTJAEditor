@@ -7,7 +7,7 @@ import tempfile
 import wave
 
 import numpy as np
-from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioDecoder, QAudioFormat, QAudioOutput, QMediaPlayer, QSoundEffect
 
 from neotja.waveform_data import WaveformMips
@@ -184,8 +184,13 @@ def _decode_audio_file_sync(path: str, timeout_ms: int = 20000):
     chunks = []
     sample_rate = [44100]
     error_holder = []
+    # 片付けたあとに遅れて届く bufferReady を弾く(WaveformDecodeWorker の
+    # 同じ箇所の説明を参照)。
+    alive = [True]
 
     def on_buffer_ready():
+        if not alive[0]:
+            return
         buf = decoder.read()
         fmt = buf.format()
         sample_rate[0] = fmt.sampleRate() or sample_rate[0]
@@ -196,6 +201,8 @@ def _decode_audio_file_sync(path: str, timeout_ms: int = 20000):
         loop.quit()
 
     def on_error(_err):
+        if not alive[0]:
+            return
         error_holder.append(decoder.errorString())
         loop.quit()
 
@@ -227,6 +234,7 @@ def _decode_audio_file_sync(path: str, timeout_ms: int = 20000):
     # detection finishes, and hit "PermissionError: [WinError 32] the
     # process cannot access the file" because the decoder was still holding
     # it open.
+    alive[0] = False
     try:
         decoder.stop()
         decoder.bufferReady.disconnect(on_buffer_ready)
@@ -395,8 +403,16 @@ class SongDecodeWorker(QThread):
         chunks = []
         sample_rate = [44100]
         error_holder = []
+        # QAudioDecoder は(Windows の Media Foundation バックエンドでは)自前の
+        # スレッドから bufferReady を出すため、接続は自動でキュー渡しになる。
+        # disconnect() は **すでにキューに積まれた呼び出しまでは取り消せない**
+        # ので、片付けたあとに 1発だけ遅れて slot が呼ばれ、そこで
+        # 「Internal C++ object already deleted」が出ていた。生存フラグで弾く。
+        alive = [True]
 
         def on_buffer_ready():
+            if not alive[0]:
+                return
             buf = decoder.read()
             fmt = buf.format()
             sample_rate[0] = fmt.sampleRate() or sample_rate[0]
@@ -407,6 +423,8 @@ class SongDecodeWorker(QThread):
             loop.quit()
 
         def on_error(_err):
+            if not alive[0]:
+                return
             error_holder.append(decoder.errorString())
             loop.quit()
 
@@ -418,6 +436,7 @@ class SongDecodeWorker(QThread):
 
         # Explicitly release the decoder / underlying file handle (Windows
         # Media Foundation), same rationale as _decode_audio_file_sync.
+        alive[0] = False
         try:
             decoder.stop()
             decoder.bufferReady.disconnect(on_buffer_ready)

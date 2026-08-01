@@ -3,11 +3,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
 from PySide6.QtCore import Qt, QTimer, QByteArray, QThread, Signal
-from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut, QTextCursor
+from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QProgressDialog, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar,
@@ -710,7 +711,11 @@ class MainWindow(QMainWindow):
         # OFFSET の裏書き戻しといったプログラム的な編集では増えないので、
         # 読み込み/保存直後に * が付いてしまうのを防げる。setWindowModified は
         # タイトル内の [*] プレースホルダを * / 空 に切り替える。
-        self.setWindowModified(bool(self.editor.modified_lines))
+        # setWindowModified は毎回呼ぶとウィンドウタイトルの組み立てが走るので
+        # (打鍵ごとに 0.2ms ほど)、状態が変わったときだけ呼ぶ。
+        dirty = bool(self.editor.modified_lines)
+        if dirty != self.isWindowModified():
+            self.setWindowModified(dirty)
         # On large real-world charts, one heavy pass (full re-highlight +
         # course analysis) can take 100ms+, so a longer debounce keeps it
         # from re-triggering on every short pause while actively typing.
@@ -1378,6 +1383,34 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, "情報", "ファイルがまだ保存されていません。")
 
+    @staticmethod
+    def _write_text_atomic(path: str, content: str, encoding: str):
+        """同じフォルダに一時ファイルを書いてから置き換える。
+
+        以前は元のファイルを直接 "w" で開いていた。open した瞬間に中身は
+        0バイトになるので、そのあとの書き込みが失敗すると(容量不足・
+        ウイルス対策ソフトの割り込み・電源断)**譜面が丸ごと消える**。
+        自動保存は編集中に何度も書くぶん、当たる機会もそれだけ多い。
+        os.replace は同一ドライブなら不可分なので、失敗しても元のファイルは
+        そのまま残る。"""
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".neotja_", suffix=".tmp", dir=d)
+        os.close(fd)
+        try:
+            # newline は既定のまま(Windows なら \n -> \r\n)。ここを変えると
+            # 保存のたびに改行コードが入れ替わってしまう。
+            with open(tmp, "w", encoding=encoding) as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
     def save_file(self):
         """上書き保存。cp932 で表せない文字が含まれる場合は書き込まず、何が
         問題かを知らせて利用者に判断してもらう。戻り値は「保存できたか」で、
@@ -1394,8 +1427,7 @@ class MainWindow(QMainWindow):
             if not self._confirm_non_cp932_save(bad):
                 return False
             try:
-                with open(self.current_file, "w", encoding="utf-8") as f:
-                    f.write(content)
+                self._write_text_atomic(self.current_file, content, "utf-8")
             except Exception as e:  # noqa: BLE001
                 QMessageBox.critical(self, "保存エラー", str(e))
                 return False
@@ -1411,8 +1443,7 @@ class MainWindow(QMainWindow):
         try:
             # ここに来た時点で cp932 で完全に表せることを確認済みなので、
             # errors は strict のままでよい(想定外は握りつぶさず例外にする)。
-            with open(self.current_file, "w", encoding="cp932") as f:
-                f.write(content)
+            self._write_text_atomic(self.current_file, content, "cp932")
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
             self._mark_saved()
@@ -1736,8 +1767,7 @@ class MainWindow(QMainWindow):
         # errors="replace" だと cp932 に無い文字(元ファイルのTITLE等に含まれる
         # 絵文字など)が無言で「?」に化けるので strict のまま書き、
         # 呼び出し側に UnicodeEncodeError として伝える。
-        with open(new_path, "w", encoding="cp932") as f:
-            f.write(new_content)
+        self._write_text_atomic(new_path, new_content, "cp932")
         return new_path
 
     def _save_ai_chart_variant(self, content: str, course_key: str, generated_body: str, base_path: str = None):
@@ -1780,7 +1810,7 @@ class MainWindow(QMainWindow):
         self.highlighter.rebuild_formats()
         self.highlighter.rehighlight()
         self.editor.gutter.update()
-        self.ruler.update()
+        self.ruler.refresh_theme()
         self.preview_dock.refresh_theme()
 
     def _show_about(self):
@@ -2016,13 +2046,30 @@ class MainWindow(QMainWindow):
             if match:
                 current_bpm = match.group(1)
                 break
+        # ストロボは #MEASURE を一時的に書き換えるので、終わったら元に戻す
+        # 必要がある。以前は 4/4 決め打ちで、3/4 等の曲でストロボを入れると
+        # そこから拍子が 4/4 に化けていた。カーソル手前の #MEASURE を拾う。
+        current_measure = "4/4"
+        for line in reversed(lines):
+            match = re.search(r"#MEASURE\s+(\d+\s*/\s*\d+)", line)
+            if match:
+                current_measure = match.group(1).replace(" ", "")
+                break
+        current_scroll = "1.000"
+        for line in reversed(lines):
+            match = re.search(r"#SCROLL\s+([0-9.]+)", line)
+            if match:
+                current_scroll = match.group(1)
+                break
 
         from neotja.dialogs.strobe_dialog import StrobeGeneratorDialog
 
         def apply(new_text):
             self.editor.insert_at_cursor(new_text + "\n")
             self._force_update()
-        StrobeGeneratorDialog(self, current_bpm, apply).exec()
+        StrobeGeneratorDialog(self, current_bpm, apply,
+                              restore_measure=current_measure,
+                              restore_scroll=current_scroll).exec()
 
     def open_settings(self):
         from neotja.dialogs.settings_dialog import SettingsDialog

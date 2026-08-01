@@ -1,3 +1,5 @@
+import re
+
 from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 
 from neotja.constants import VALID_MEASURE_COUNTS
@@ -45,6 +47,34 @@ def _add_band(data, sline, scol, eline, ecol_exclusive, tag):
         data.color_band_spans.setdefault(eline, []).append((0, ecol_exclusive, tag))
 
 
+def _measure_count_ok(count: int, num: int, den: int) -> bool:
+    """その小節の分割数が妥当か。**拍子(#MEASURE)を考慮する**。
+
+    VALID_MEASURE_COUNTS は 4/4 を前提にした一覧なので、そのまま当てると
+    7/16 拍子の 28分割(= 4/4 換算で 64分)のような正しい書き方まで「!」が
+    付いてしまう。実測: 公開されている譜面 25 本・3910 小節に当てると、
+    216 小節(16ファイル)で警告が出ていた —— 9/15/17/18/28/36/42/51/72/78
+    分割など、どれも拍子と合わせれば普通の書き方。警告が当たり前になると
+    本当の打ち間違いを見落とす。
+
+    そこで「素の分割数」か「4/4 に換算した分割数」のどちらかが一覧に
+    あれば良しとする。同じ 3910 小節で警告は 13 小節(6ファイル)まで
+    減り、5分割や 7/16 拍子の 29分割といった実際の打ち間違いは今までどおり
+    拾える。
+    """
+    if count <= 0:
+        return True
+    if count in VALID_MEASURE_COUNTS:
+        return True
+    if num <= 0 or den <= 0:
+        return True                      # 拍子が壊れている行は別の問題
+    # 4/4 換算の分割数 = count * den / num。割り切れないなら拍子に合っていない。
+    scaled, rem = divmod(count * den, num)
+    if rem:
+        return False
+    return scaled in VALID_MEASURE_COUNTS
+
+
 def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
     lines = content.split('\n')
     data = HighlightData()
@@ -80,6 +110,8 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
     m_lines = set()
     prev_line_is_scroll = False
     prev_scroll_line = None
+    # いまの拍子(#MEASURE)。分割数の妥当性は拍子によって変わる。
+    m_num, m_den = 4, 4
 
     for i, line in enumerate(lines, 1):
         s = line.strip()
@@ -87,6 +119,12 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
 
         if s.startswith("#"):
             data.cmd_lines.add(i)
+            if s.startswith("#START"):
+                m_num, m_den = 4, 4       # コースが変わったら拍子は 4/4 に戻る
+            elif s.startswith("#MEASURE"):
+                mm = re.search(r"(\d+)\s*/\s*(\d+)", s)
+                if mm and int(mm.group(2)) > 0 and int(mm.group(1)) > 0:
+                    m_num, m_den = int(mm.group(1)), int(mm.group(2))
             if s.startswith("#SCROLL"):
                 if prev_line_is_scroll:
                     data.warn_lines.add(prev_scroll_line)
@@ -122,7 +160,7 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
                     else:
                         spans.append((ci, ci + 1, tag))
                 if ch == ",":
-                    if m_count > 0 and m_count not in VALID_MEASURE_COUNTS:
+                    if m_count > 0 and not _measure_count_ok(m_count, m_num, m_den):
                         for ml in m_lines:
                             data.invalid_lines[ml] = m_count
                         data.invalid_lines[i] = m_count

@@ -339,10 +339,13 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     #     ずらして、打数が食い違わないようにする。
     # -------------------------------------------------------------
     balloon_skip = 0
-    if parsed_measures and (measure_from or measure_to):
+    # 0 は「指定なし」ではなく「範囲外の指定」。or で見ると 0 が falsy なので
+    # 0..0 を渡したときだけ絞り込みが丸ごと飛んで全体が出ていた。
+    if parsed_measures and (measure_from is not None or measure_to is not None):
         n_m = len(parsed_measures)
-        lo = max(1, int(measure_from or 1))
-        hi = min(n_m, int(measure_to or n_m))
+        lo = max(1, int(measure_from if measure_from is not None else 1))
+        hi = min(n_m, int(measure_to if measure_to is not None else n_m))
+        hi = max(1, hi)
         if lo > hi:
             lo, hi = hi, lo
         lo_i, hi_i = lo - 1, hi - 1

@@ -334,10 +334,31 @@ class TJACourseAnalyzer:
             return None
         a, b = target
         measure = 1
+        # 譜面分岐は「同じ小節の別案」なので、3系統ぶん数えてはいけない。
+        # #BRANCHSTART で頭を控え、系統が変わるたびそこへ戻し、分岐が閉じたら
+        # いちばん進んだところから続ける(プレビューは選んだ系統だけを数える
+        # ので、こうしないと分岐のある譜面で小節番号が何十もずれる)。
+        br_base = br_max = None
         for idx in range(a + 1, b):
             if idx >= line_no:
                 break
-            measure += lines[idx - 1].split("//")[0].count(",")
+            code = lines[idx - 1].split("//")[0]
+            s = code.strip()
+            if s.startswith("#"):
+                head = s.split()[0].split(",")[0]
+                if head == "#BRANCHSTART":
+                    if br_base is not None:      # #BRANCHEND を書かない譜面向け
+                        measure = max(br_max, measure)
+                    br_base = br_max = measure
+                elif head in ("#N", "#E", "#M") and br_base is not None:
+                    br_max = max(br_max, measure)
+                    measure = br_base
+                elif head == "#BRANCHEND" and br_base is not None:
+                    measure = max(br_max, measure)
+                    br_base = br_max = None
+                # 命令行のカンマは小節の区切りではない(`#BRANCHSTART r,-2,-1`)。
+                continue
+            measure += code.count(",")
         return measure
 
     def time_at_cursor(self, content: str, line_no: int):
@@ -392,6 +413,20 @@ class TJACourseAnalyzer:
                 elif t == "NOTE":
                     total_time += ((Decimal("240") * measure_val / curr_bpm) / n_len
                                    if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
+            if n_len == 0 and curr_bpm > 0:
+                # 数字が1つも無い小節(「,」だけの行)も1小節ぶんの時間を持つ。
+                # 上のループは NOTE ごとに足す作りなので、ここで足さないと
+                # その小節が丸ごと 0 秒になり、以降の時刻が小節ぶん手前へ
+                # ずれる(_analyze / build_preview_timeline は既に同じ手当てを
+                # している。ステータスバーの時刻と「カーソル位置から再生」だけが
+                # 数小節ずれていたのはこれが原因)。
+                total_time += Decimal("240") * measure_val / curr_bpm
+
+        # 譜面分岐の扱いは measure_at_cursor と同じ考え方(同じ小節の別案なので
+        # 3系統ぶん時間を足さない)。足していたため、分岐のある譜面では
+        # #BRANCHEND 以降の時刻が分岐区間の2倍ぶん先へずれていた
+        # (実測: 最終小節が 121.7秒の譜面で 186.9秒と出ていた)。
+        br_base_t = br_max_t = None
 
         for idx in range(a, b + 1):
             if idx == a or idx == b:
@@ -404,6 +439,23 @@ class TJACourseAnalyzer:
                 found = total_time
 
             if s.startswith("#"):
+                head = s.split()[0].split(",")[0]
+                if head == "#BRANCHSTART":
+                    if br_base_t is not None:
+                        total_time = max(br_max_t, total_time)
+                    br_base_t = br_max_t = total_time
+                    cur_events = []
+                    continue
+                if head in ("#N", "#E", "#M") and br_base_t is not None:
+                    br_max_t = max(br_max_t, total_time)
+                    total_time = br_base_t
+                    cur_events = []
+                    continue
+                if head == "#BRANCHEND" and br_base_t is not None:
+                    total_time = max(br_max_t, total_time)
+                    br_base_t = br_max_t = None
+                    cur_events = []
+                    continue
                 if s.startswith("#BPMCHANGE"):
                     try:
                         cur_events.append(("#BPMCHANGE", Decimal(s.split()[1])))
@@ -415,7 +467,11 @@ class TJACourseAnalyzer:
                         cur_events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
                 elif s.startswith("#DELAY"):
                     try:
-                        cur_events.append(("#DELAY", Decimal(s.split()[1])))
+                        # その場で足す。小節の終わり(カンマ)まで保留していたため、
+                        # #DELAY の直後の行にカーソルを置くと、待ち時間ぶん手前の
+                        # 時刻が返っていた(小節線・メトロノームは反映済みなので
+                        # そこだけ食い違っていた)。
+                        total_time += Decimal(s.split()[1])
                     except Exception:
                         pass
                 continue
@@ -482,6 +538,10 @@ class TJACourseAnalyzer:
             # 重く、数万行ぶん毎行やると索引作りが 3 割増しになる。
             time_f = 0.0
             time_d = total_time
+            # 譜面分岐(同じ小節の別案)を3系統ぶん数えない。詳しくは
+            # measure_at_cursor / time_at_cursor の同じ箇所の説明。
+            br_base_t = br_max_t = None
+            br_base_m = br_max_m = None
 
             for idx in range(a + 1, b):
                 raw = lines[idx - 1]
@@ -491,13 +551,37 @@ class TJACourseAnalyzer:
                     time_d = total_time
                     time_f = float(total_time)
                 index[idx] = (measure, time_f, course_ord)
-                if "," in code:
-                    measure += code.count(",")
                 s = code.strip()
+                # 命令行のカンマは小節の区切りではない(measure_at_cursor の
+                # 同じ箇所の説明を参照)。
+                if "," in code and not s.startswith("#"):
+                    measure += code.count(",")
                 if not s:
                     continue
 
                 if s[0] == "#":
+                    head = s.split()[0].split(",")[0]
+                    if head == "#BRANCHSTART":
+                        if br_base_t is not None:
+                            total_time = max(br_max_t, total_time)
+                            measure = max(br_max_m, measure)
+                        br_base_t = br_max_t = total_time
+                        br_base_m = br_max_m = measure
+                        cur_events = []
+                        continue
+                    if head in ("#N", "#E", "#M") and br_base_t is not None:
+                        br_max_t = max(br_max_t, total_time)
+                        br_max_m = max(br_max_m, measure)
+                        total_time = br_base_t
+                        measure = br_base_m
+                        cur_events = []
+                        continue
+                    if head == "#BRANCHEND" and br_base_t is not None:
+                        total_time = max(br_max_t, total_time)
+                        measure = max(br_max_m, measure)
+                        br_base_t = br_max_t = br_base_m = br_max_m = None
+                        cur_events = []
+                        continue
                     if s.startswith("#BPMCHANGE"):
                         try:
                             cur_events.append(("#BPMCHANGE", Decimal(s.split()[1])))
@@ -509,7 +593,8 @@ class TJACourseAnalyzer:
                             cur_events.append(("#MEASURE", Decimal(m.group(1)) / Decimal(m.group(2))))
                     elif s.startswith("#DELAY"):
                         try:
-                            cur_events.append(("#DELAY", Decimal(s.split()[1])))
+                            # time_at_cursor と同じくその場で足す(同じ箇所の説明)。
+                            total_time += Decimal(s.split()[1])
                         except Exception:
                             pass
                     continue
@@ -532,6 +617,10 @@ class TJACourseAnalyzer:
                             elif t == "NOTE":
                                 total_time += ((Decimal("240") * measure_val / curr_bpm) / n_len
                                                if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
+                        if n_len == 0 and curr_bpm > 0:
+                            # 数字の無い小節(「,」だけ)も1小節ぶんの時間を持つ。
+                            # time_at_cursor の同じ箇所の説明を参照。
+                            total_time += Decimal("240") * measure_val / curr_bpm
                         cur_events = []
 
             index[b] = (measure, float(total_time), course_ord)
@@ -626,11 +715,40 @@ class TJACourseAnalyzer:
                 target = next((cb for cb in course_bounds if cb[0] <= cursor_line <= cb[1]), None)
             a, b = target if target is not None else course_bounds[0]
 
+            # 譜面分岐は「同じ小節の別案」。3系統ぶん時間を積むと、分岐の
+            # あとのクリックが実際の小節線から大きくずれる(実測: 最終小節線が
+            # 121.7秒の譜面で 186.0秒)。分岐の頭を控え、系統が変わるたびそこへ
+            # 戻し、閉じたらいちばん進んだところから続ける。
+            # 打つクリックは最初の系統ぶんだけ残す(どの系統でも小節の割り方は
+            # 同じなので、これで小節の頭は正しい位置に来る)。
+            br_base_t = br_max_t = None
+            br_base_clicks = None
+
             for idx in range(a + 1, b):
                 s = lines[idx - 1].split("//")[0].strip()
                 if not s:
                     continue
                 if s.startswith("#"):
+                    head = s.split()[0].split(",")[0]
+                    if head == "#BRANCHSTART":
+                        if br_base_t is not None:
+                            total_time = max(br_max_t, total_time)
+                        br_base_t = br_max_t = total_time
+                        br_base_clicks = len(clicks)
+                        seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
+                        continue
+                    if head in ("#N", "#E", "#M") and br_base_t is not None:
+                        br_max_t = max(br_max_t, total_time)
+                        total_time = br_base_t
+                        # 2系統目以降のクリックは捨てる(同じ位置に重なるだけ)。
+                        del clicks[br_base_clicks:]
+                        seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
+                        continue
+                    if head == "#BRANCHEND" and br_base_t is not None:
+                        total_time = max(br_max_t, total_time)
+                        br_base_t = br_max_t = br_base_clicks = None
+                        seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
+                        continue
                     if s.startswith("#BPMCHANGE"):
                         try:
                             new_bpm = Decimal(s.split()[1])
@@ -722,9 +840,13 @@ class TJACourseAnalyzer:
         never parsed since nothing here switches branches dynamically. If a
         given #BRANCHSTART section doesn't define `branch_level` at all, that
         section simply contributes zero notes (no fallback to another level).
-        Commands (#BPMCHANGE/#MEASURE/#DELAY/#SCROLL/#GOGOSTART/#GOGOEND)
-        apply regardless of which branch they're nested under, since tempo
-        rarely if ever differs between branches in real charts.
+        Commands: #BPMCHANGE と #MEASURE だけは系統を問わず適用する(この2つが
+        系統ごとに違うと譜面そのものが成立しないので、取りこぼしへの保険)。
+        #DELAY / #SCROLL / #GOGOSTART / #GOGOEND / #BARLINEOFF / #BARLINEON は
+        いま選んでいる系統のものだけを効かせる。以前は全部を系統を問わず拾って
+        いたため、分岐の中に #DELAY があると待ち時間が系統の数だけ足され
+        (3系統なら3倍)、#SCROLL は最後の系統の値が勝ち、ゴーゴーは開始/終了が
+        3回ずつ入る、という食い違いが起きていた。
         Each note/roll/bar carries the BPM active when it occurred so the
         preview widget can space notes by beat (PeepoDrumKit-style: pixel
         speed scales with tempo) instead of a single fixed real-time scroll
@@ -839,22 +961,35 @@ class TJACourseAnalyzer:
                         events.append(("MEASURE", (Decimal(m.group(1)), Decimal(m.group(2)))))
                 elif s.startswith("#DELAY"):
                     try:
-                        events.append(("DELAY", Decimal(s.split()[1])))
+                        # #DELAY は「足す」命令なので、選んでいない系統のぶんまで
+                        # 拾うと分岐の数だけ待ち時間が増える(3系統なら3倍)。
+                        # 同じ理由で、見た目だけの #SCROLL / ゴーゴー / 小節線の
+                        # 表示切替も、いま流している系統のものだけを効かせる。
+                        # #BPMCHANGE と #MEASURE は系統をまたいで同じでないと
+                        # そもそも譜面が成立しないので、従来どおり系統を問わず
+                        # 適用する(取りこぼしへの保険)。
+                        if branch_active:
+                            events.append(("DELAY", Decimal(s.split()[1])))
                     except Exception:
                         pass
                 elif s.startswith("#SCROLL"):
                     try:
-                        events.append(("SCROLL", Decimal(s.split()[1])))
+                        if branch_active:
+                            events.append(("SCROLL", Decimal(s.split()[1])))
                     except Exception:
                         pass
                 elif s.startswith("#GOGOSTART"):
-                    events.append(("GOGOSTART", None))
+                    if branch_active:
+                        events.append(("GOGOSTART", None))
                 elif s.startswith("#GOGOEND"):
-                    events.append(("GOGOEND", None))
+                    if branch_active:
+                        events.append(("GOGOEND", None))
                 elif s.startswith("#BARLINEOFF"):
-                    events.append(("BARLINEOFF", None))
+                    if branch_active:
+                        events.append(("BARLINEOFF", None))
                 elif s.startswith("#BARLINEON"):
-                    events.append(("BARLINEON", None))
+                    if branch_active:
+                        events.append(("BARLINEON", None))
                 elif s.startswith("#BRANCHSTART"):
                     has_branches = True
                     branch_active = False  # nothing counts until the first #N/#E/#M

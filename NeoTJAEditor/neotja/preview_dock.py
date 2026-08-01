@@ -2,7 +2,7 @@ import math
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QPushButton,
     QSlider, QStackedWidget, QVBoxLayout, QWidget,
@@ -14,7 +14,6 @@ from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import ChartPreviewWidget
 from neotja.tja_analyzer import balloon_pop_spans
 from neotja import theme
-from neotja.theme import COLORS
 
 # えぬいーさん次郎(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
 # 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
@@ -382,7 +381,7 @@ class PreviewDock(QDockWidget):
                 self.metronome = self.audio.metronome
                 self.hit_sounds = self.audio.hit_sounds
                 self._mixer_active = True
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 import traceback
                 traceback.print_exc()
                 self._backend_notice = "ミキサー音声を初期化できなかったため従来方式に切り替えました。"

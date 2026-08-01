@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
@@ -9,9 +9,14 @@ CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease
 
 
 class StrobeGeneratorDialog(QDialog):
-    def __init__(self, main_window, initial_bpm, apply_cb, parent=None):
+    def __init__(self, main_window, initial_bpm, apply_cb, parent=None,
+                 restore_measure="4/4", restore_scroll="1.000"):
         super().__init__(parent or main_window)
         self.apply_cb = apply_cb
+        # ストロボの後に戻す拍子。呼び出し側がカーソル手前の #MEASURE を渡す
+        # (4/4 決め打ちだと 3/4 等の曲で拍子が化ける)。
+        self._restore_measure = restore_measure or "4/4"
+        self._restore_scroll = restore_scroll or "1.000"
         self.setWindowTitle("ストロボ生成")
         self.resize(600, 700)
 
@@ -125,8 +130,8 @@ class StrobeGeneratorDialog(QDialog):
             out.append("0,")
 
         out.append("// --- ストロボ終了 ---")
-        out.append("#MEASURE 4/4")
-        out.append("#SCROLL 1.000")
+        out.append(f"#MEASURE {self._restore_measure}")
+        out.append(f"#SCROLL {self._restore_scroll}")
 
         self.txt_after.setPlainText("\n".join(out))
 

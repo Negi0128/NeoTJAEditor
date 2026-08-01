@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, QRect, QSize, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor, QTextFormat
-from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget, QToolTip
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextCursor
+from PySide6.QtWidgets import QPlainTextEdit, QWidget, QToolTip
 
 from neotja.theme import COLORS
 
@@ -53,6 +53,19 @@ class TJAEditor(QPlainTextEdit):
     # ------------------------------------------------------------------
     # Font / metrics
     # ------------------------------------------------------------------
+    # フォントが変わるたびに増やす通し番号。文字幅/行番号欄の幅はフォントと
+    # 桁数でしか変わらないのに、打鍵のたびに QFontMetrics を作り直して測って
+    # いたので(1打鍵あたり4〜5回)、この番号をキーにして覚えておく。
+    _font_gen = 0
+
+    def setFont(self, font):
+        # 幅のキャッシュはここで必ず捨てる。Ctrl+ホイールの拡大縮小など
+        # set_mono_font を通らない経路があるため、入口を1つにまとめる。
+        self._font_gen += 1
+        self._char_w_cache = None
+        self._gutter_w_cache = None
+        super().setFont(font)
+
     def set_mono_font(self, family: str, size: int):
         f = QFont(family, size)
         f.setFixedPitch(True)
@@ -60,15 +73,28 @@ class TJAEditor(QPlainTextEdit):
         self.gutter.setFont(f)
         self._update_gutter_width(0)
 
+    _char_w_cache = None
+    _gutter_w_cache = None
+
     def char_width(self) -> float:
-        return QFontMetrics(self.font()).horizontalAdvance("0")
+        got = self._char_w_cache
+        if got is not None and got[0] == self._font_gen:
+            return got[1]
+        w = QFontMetrics(self.font()).horizontalAdvance("0")
+        self._char_w_cache = (self._font_gen, w)
+        return w
 
     # ------------------------------------------------------------------
     # Gutter (line numbers + checkpoint/invalid markers + dirty highlight)
     # ------------------------------------------------------------------
     def gutter_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
-        return 10 + self.fontMetrics().horizontalAdvance("9") * (digits + 2)
+        got = self._gutter_w_cache
+        if got is not None and got[0] == (digits, self._font_gen):
+            return got[1]
+        w = 10 + self.fontMetrics().horizontalAdvance("9") * (digits + 2)
+        self._gutter_w_cache = ((digits, self._font_gen), w)
+        return w
 
     def _update_gutter_width(self, _):
         self.setViewportMargins(self.gutter_width(), 0, 0, 0)
@@ -97,8 +123,12 @@ class TJAEditor(QPlainTextEdit):
         w = self.gutter.width()
 
         dirty_bg = QColor("#2d3000")
-        while block.isValid() and top <= event.rect().bottom():
-            if block.isVisible() and bottom >= event.rect().top():
+        # 色は行ごとに作らない(可視行ぶん毎回 QColor を2つ作っていた)。
+        col_err = QColor(COLORS["err"])
+        col_dim = QColor(COLORS["fg_dim"])
+        rect_top, rect_bottom = event.rect().top(), event.rect().bottom()
+        while block.isValid() and top <= rect_bottom:
+            if block.isVisible() and bottom >= rect_top:
                 line_no = block_number + 1
                 if line_no in self.modified_lines:
                     painter.fillRect(0, int(top), w, int(bottom - top), dirty_bg)
@@ -109,7 +139,7 @@ class TJAEditor(QPlainTextEdit):
                 if line_no in self.invalid_lines:
                     mark += "!"
 
-                painter.setPen(QColor(COLORS["err"]) if line_no in self.invalid_lines else QColor(COLORS["fg_dim"]))
+                painter.setPen(col_err if line_no in self.invalid_lines else col_dim)
                 text = f"{line_no:>3}{mark}"
                 painter.drawText(0, int(top), w - 6, int(bottom - top), Qt.AlignRight, text)
 

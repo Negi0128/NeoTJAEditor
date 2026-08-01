@@ -138,11 +138,29 @@ def load_settings() -> dict:
 
 
 def save_settings(config_data: dict) -> None:
+    """設定を保存する。一時ファイルに書いてから置き換えるので、書き込みの途中で
+    失敗しても settings.json が空や壊れた状態にはならない(そうなると次回起動で
+    設定が全部初期値へ戻ってしまう)。保存は音量スライダー等からも頻繁に
+    呼ばれるぶん、当たる機会も多い。"""
+    path = settings_path()
+    tmp = None
     try:
-        with open(settings_path(), "w", encoding="utf-8") as f:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=".neotja_cfg_", suffix=".tmp",
+                                   dir=str(Path(path).parent))
+        os.close(fd)
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+        tmp = None
     except Exception:
         pass
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def notes_png_path() -> Path:

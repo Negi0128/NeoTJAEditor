@@ -556,9 +556,8 @@ class GameScreenWidget(QWidget):
         本家より字間が空いて間延びして見える。"""
         if sheet is None:
             return
-        cw, ch = sheet.width() / cols, sheet.height() / rows
-        w, h = cw * scale, ch * scale
-        step = w * advance
+        cw = sheet.width() / cols
+        step = cw * scale * advance
         s = str(int(value))
         x = (right - step * len(s)) if right is not None else (left or 0)
         # 0-9 を「切り出し済み・指定倍率へ縮小済み」でキャッシュしておく。倍率は
@@ -576,7 +575,10 @@ class GameScreenWidget(QWidget):
 
         描画サイズは従来の QRect(int(w)+1, int(h)+1) と同一にしてあるので
         見た目は変わらない。素材もレイアウトも実行中に変わらないため使い回せる。"""
-        key = (id(sheet), cols, rows, row, round(float(scale), 4))
+        # QPixmap.cacheKey() は「その中身」に対する Qt の一意キー。id() だと
+        # 素材を読み直したときに同じアドレスが再利用されて、別のシートの
+        # キャッシュを引き当てる恐れがある。
+        key = (sheet.cacheKey(), cols, rows, row, round(float(scale), 4))
         got = self._digit_cache.get(key)
         if got is not None:
             return got
