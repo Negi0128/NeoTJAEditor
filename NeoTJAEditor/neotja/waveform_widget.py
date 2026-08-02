@@ -90,6 +90,8 @@ class WaveformWidget(QWidget):
         # だけを表示し、再生位置が窓内の FOLLOW_FRAC の位置に来るよう view_start
         # を動かす(スクロールする楽譜のような見え方)。ホイールで窓幅を変える。
         self._follow_window = None
+        # set_follow_window で渡された既定値。reset_zoom の戻り先。
+        self._follow_window_default = None
 
         self.stereo_view = True
         self.offset_mode = False
@@ -242,6 +244,21 @@ class WaveformWidget(QWidget):
         seconds に正の値を渡すとその秒数ぶんだけを表示して再生位置に追従、
         None/0 で従来のズーム表示に戻す。"""
         self._follow_window = float(seconds) if seconds and seconds > 0 else None
+        # 呼び出し側が決めた既定値を覚えておく(reset_zoom の戻り先)。
+        self._follow_window_default = self._follow_window
+        self.update()
+
+    def reset_zoom(self):
+        """表示倍率(または追従窓の幅)を既定へ戻す。
+
+        拡大縮小の修飾キーが環境の都合で効かず、片方向に振り切ったまま戻せなく
+        なることがあるので、修飾キー無しで必ず戻せる逃げ道を用意しておく。"""
+        if self._follow_window_default:
+            self._follow_window = self._follow_window_default
+            self.set_position(self.position_sec)
+        else:
+            self.zoom = 1.0
+            self.view_start = 0.0
         self.update()
 
     def set_position(self, seconds: float):
@@ -430,13 +447,19 @@ class WaveformWidget(QWidget):
     # ホイール1目盛りで動かす量(表示幅に対する割合)。
     SCROLL_FRAC = 0.15
 
+    # 拡大縮小の修飾キー。Alt だけだと Windows 側(メニュー起動・IME・マウス
+    # ユーティリティ)に取られて波形まで届かないことがあるので、横取りされにくい
+    # Ctrl でも同じことができるようにしてある。エディタの Ctrl+ホイール
+    # (フォントサイズ)とは別ウィジェットなので衝突しない。
+    ZOOM_MODIFIERS = Qt.AltModifier | Qt.ControlModifier
+
     def wheelEvent(self, event):
-        """ホイール = 移動、Alt+ホイール = 拡大縮小。
+        """ホイール = 移動、Alt(または Ctrl)+ホイール = 拡大縮小。
 
         以前はホイールがそのまま拡大縮小だったが、波形は「見たい所へ動かす」
         操作のほうが圧倒的に多いので、素のホイールを移動に割り当てる。"""
         up = event.angleDelta().y() > 0
-        if not (event.modifiers() & Qt.AltModifier):
+        if not (event.modifiers() & self.ZOOM_MODIFIERS):
             span = self._visible_span()
             step = span * self.SCROLL_FRAC * (-1 if up else 1)
             if self._follow_window:
@@ -506,6 +529,10 @@ class WaveformWidget(QWidget):
         if key == Qt.Key_Space:
             if self._toggle_play_cb:
                 self._toggle_play_cb()
+            return
+        if key in (Qt.Key_0, Qt.Key_Home):
+            # 拡大縮小の修飾キーが効かない環境でも、必ず既定に戻せるように。
+            self.reset_zoom()
             return
         super().keyPressEvent(event)
 

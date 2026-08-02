@@ -30,10 +30,14 @@ class ChartGraphicsView(QGraphicsView):
         self.resetTransform()
         self._zoom = 1.0
 
+    # 拡大縮小の修飾キー。Alt は Windows 側(メニュー起動・IME・マウスユーティ
+    # リティ)に取られて届かないことがあるので、Ctrl でも同じことができる。
+    ZOOM_MODIFIERS = Qt.AltModifier | Qt.ControlModifier
+
     def wheelEvent(self, event):
-        # ホイールは素直にスクロール、拡大縮小は Alt+ホイール。譜面画像は縦に
-        # 長いので、見たい所まで送る操作のほうが拡大縮小より多い。
-        if not (event.modifiers() & Qt.AltModifier):
+        # ホイールは素直にスクロール、拡大縮小は Alt(または Ctrl)+ホイール。
+        # 譜面画像は縦に長いので、見たい所まで送る操作のほうが拡大縮小より多い。
+        if not (event.modifiers() & self.ZOOM_MODIFIERS):
             super().wheelEvent(event)
             return
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
