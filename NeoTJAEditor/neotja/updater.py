@@ -172,6 +172,28 @@ def pop_update_error():
         return None
 
 
+def _is_same_image(pid: int, exe_path: str) -> bool:
+    """pid が exe_path と同じ実行ファイルのプロセスか。
+
+    onefile のブートローダ親を見分けるためだけに使う。判定できなければ False
+    (= 待ち対象にしない)。ここで誤って無関係な親を待つと、その親が終わるまで
+    更新が始まらなくなるので、疑わしいときは待たない側に倒す。"""
+    name = os.path.basename(exe_path)
+    if not name:
+        return False
+    try:
+        tasklist = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                "System32", "tasklist.exe")
+        out = subprocess.run(
+            [tasklist, "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.decode("cp932", errors="replace")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return name.lower() in out.lower()
+
+
 def apply_update(new_exe_path: str):
     """Self-replace pattern for a single-file PyInstaller exe: it can't
     overwrite itself while running, so a tiny batch script waits for this
@@ -184,18 +206,54 @@ def apply_update(new_exe_path: str):
     output discarded and its exit code ignored, so a failure silently relaunched
     the OLD exe and deleted the download: the update simply never happened and
     said nothing. Now it retries, and on give-up it keeps the download and
-    leaves a marker that the relaunched app reports via pop_update_error()."""
+    leaves a marker that the relaunched app reports via pop_update_error().
+
+    onefile ビルドは「ブートローダの親」と「実際に動く子」の2プロセスになる。
+    _MEIxxxxx への展開を持っているのは親で、終了時にそれを消すのも親。以前は
+    子の PID だけを待っていたので、親がまだ後片付けをしている最中に新しい exe を
+    起動していた。Windows は PID をすぐ再利用するうえ、_MEIxxxxx の名前は PID
+    由来なので、新プロセスが同じ名前のフォルダに展開してしまうと、直後に古い親の
+    後片付けがその中身を消してしまう。結果が
+    「Failed to load Python DLL ..._MEIxxxxx\\python39.dll」。
+    そこで親子ぶんの PID を両方待ち、さらに少し置いてから起動する。"""
     current_exe = sys.executable
     bat_path = os.path.join(tempfile.gettempdir(), "neotja_update.bat")
     marker = ERROR_MARKER_PATH
+    pids = [os.getpid()]
+    try:
+        ppid = os.getppid()
+        # 親が別物(エクスプローラ等)のときに巻き込まないよう、同じ exe から
+        # 起動された親のときだけ待ち対象にする。
+        if ppid and ppid != os.getpid() and _is_same_image(ppid, current_exe):
+            pids.append(ppid)
+    except OSError:
+        pass
+    # tasklist / find / timeout を裸で書くと PATH 次第で別物に解決される。
+    # Git for Windows が入っていると find は GNU find になり、PID を「ファイル
+    # 名」と解釈して必ず失敗する = 常に「プロセスはもう無い」と判定される。
+    # つまり待ちループが丸ごと空振りし、アプリが動いている真っ最中にコピーして
+    # 起動していた。timeout も同様に GNU coreutils 版になって即エラーで返るため、
+    # 再試行の間隔も入っていなかった。System32 の実体を絶対パスで呼ぶ。
+    # 待ちは timeout ではなく ping にする — timeout は本物でも標準入力が
+    # リダイレクトされていると "Input redirection is not supported" で落ちる。
+    sysdir = "%SystemRoot%\\System32"
+    def sleep_cmd(sec):
+        return f'{sysdir}\\ping.exe -n {sec + 1} 127.0.0.1 >nul 2>&1\r\n'
+
+    wait_block = "".join(
+        f'{sysdir}\\tasklist.exe /FI "PID eq {pid}" | {sysdir}\\find.exe "{pid}" >nul\r\n'
+        "if not errorlevel 1 goto waitmore\r\n"
+        for pid in pids
+    )
     bat_contents = (
         "@echo off\r\n"
         ":wait\r\n"
-        f'tasklist /FI "PID eq {os.getpid()}" | find "{os.getpid()}" >nul\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >nul 2>&1\r\n"
-        "  goto wait\r\n"
-        ")\r\n"
+        + wait_block +
+        "goto waitdone\r\n"
+        ":waitmore\r\n"
+        + sleep_cmd(1) +
+        "goto wait\r\n"
+        ":waitdone\r\n"
         # The handle on the exe can linger a moment past process exit, and AV
         # tends to hold the new file briefly - so don't give up on one attempt.
         "set NEOTJA_TRIES=0\r\n"
@@ -204,12 +262,16 @@ def apply_update(new_exe_path: str):
         f'copy /y "{new_exe_path}" "{current_exe}" >nul 2>&1\r\n'
         "if not errorlevel 1 goto copyok\r\n"
         "if %NEOTJA_TRIES% GEQ 10 goto copyfail\r\n"
-        "timeout /t 1 /nobreak >nul 2>&1\r\n"
+        + sleep_cmd(1) +
         "goto copyloop\r\n"
         "\r\n"
         ":copyok\r\n"
         f'del "{new_exe_path}" >nul 2>&1\r\n'
         f'del "{marker}" >nul 2>&1\r\n'
+        # 古いブートローダの _MEIxxxxx 後片付けは、プロセスが一覧から消えた
+        # あともわずかに続く。そこへ新プロセスを被せると展開したての DLL を
+        # 消されるので、少し置いてから起動する。
+        + sleep_cmd(3) +
         f'start "" "{current_exe}"\r\n'
         'del "%~f0"\r\n'
         "exit /b\r\n"
