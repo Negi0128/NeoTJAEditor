@@ -1310,15 +1310,6 @@ class ChartPreviewWidget(QWidget):
             self.seek_to_first_measure()
             return
         if key == Qt.Key_End:
-            # Shift 併用は「止めてから最終小節へ」。曲の最後を静止して見たいとき
-            # 用で、素の End(移動だけ、再生中なら再生継続)とは別にしてある。
-            if event.modifiers() & Qt.ShiftModifier:
-                self.pause()
-                # pause() の状態反映は playingChanged 経由で1拍遅れるので、
-                # ここで自分の状態も落としておく。そうしないと直後の移動が
-                # 「再生中の移動」と判定され、トゥイーンせずに飛んでしまう。
-                self._state = "paused"
-                self._playing = False
             self.seek_to_last_measure()
             return
         # 再生速度(z/↓ で遅く、c/↑ で速く)。
@@ -1628,12 +1619,25 @@ class ChartPreviewWidget(QWidget):
             base = self._nav_idx_at_or_before(self._current_audio_time())
         self._seek_to_nav_idx(base + direction)
 
+    def _pause_for_jump(self):
+        """曲頭/最終小節へ飛ぶ前に止める。
+
+        端へ飛ぶのは「そこを見たい」ときなので、鳴らしたまま飛ぶと結局すぐ
+        止めることになる。pause() の状態反映は playingChanged 経由で1拍遅れる
+        ため、自分の状態も同時に落とす — そうしないと直後の移動が「再生中の
+        移動」と判定され、トゥイーンせずに飛んでしまう。"""
+        self.pause()
+        self._state = "paused"
+        self._playing = False
+
     def seek_to_first_measure(self):
-        """Home: jump カレント to 0小節目(曲頭)."""
+        """Home: 一時停止して カレントを 0小節目(曲頭) へ。"""
+        self._pause_for_jump()
         self._seek_to_nav_idx(0)
 
     def seek_to_last_measure(self):
-        """End: jump カレント to the last measure."""
+        """End: 一時停止して カレントを最終小節へ。"""
+        self._pause_for_jump()
         self._seek_to_nav_idx(len(self._nav_points) - 1)
 
     def _seek_to_nav_idx(self, idx: int):
