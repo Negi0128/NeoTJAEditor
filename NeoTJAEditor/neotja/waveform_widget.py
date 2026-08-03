@@ -92,6 +92,10 @@ class WaveformWidget(QWidget):
         self._follow_window = None
         # set_follow_window で渡された既定値。reset_zoom の戻り先。
         self._follow_window_default = None
+        # 素のホイールで呼ぶ「小節を1つ動かす」処理(レーンの seek_relative_measure)。
+        # 繋がっていればホイールはレーンと同じ小節移動になり、向きもトゥイーンも
+        # レーン側の実装をそのまま使う。None なら従来どおり秒数で表示を動かす。
+        self._measure_step_cb = None
 
         self.stereo_view = True
         self.offset_mode = False
@@ -247,6 +251,10 @@ class WaveformWidget(QWidget):
         # 呼び出し側が決めた既定値を覚えておく(reset_zoom の戻り先)。
         self._follow_window_default = self._follow_window
         self.update()
+
+    def set_measure_step_cb(self, cb):
+        """素のホイールを「レーンの小節移動」に繋ぐ。cb は direction(+1/-1)。"""
+        self._measure_step_cb = cb
 
     def reset_zoom(self):
         """表示倍率(または追従窓の幅)を既定へ戻す。
@@ -457,11 +465,21 @@ class WaveformWidget(QWidget):
         """ホイール = 移動、Alt(または Ctrl)+ホイール = 拡大縮小。
 
         以前はホイールがそのまま拡大縮小だったが、波形は「見たい所へ動かす」
-        操作のほうが圧倒的に多いので、素のホイールを移動に割り当てる。"""
+        操作のほうが圧倒的に多いので、素のホイールを移動に割り当てる。
+
+        向きは譜面レーンに合わせる: 上に回すと先へ進む。以前は逆で、レーンの
+        上で回すのと波形の上で回すのとで譜面が反対に動いていた。"""
         up = event.angleDelta().y() > 0
         if not (event.modifiers() & self.ZOOM_MODIFIERS):
+            # レーンと繋がっているとき(作譜モードの波形)は、レーンの小節移動を
+            # そのまま呼ぶ。向きもトゥイーンもレーンと完全に同じになる — 秒数で
+            # シークしていた頃は、シークのたびに表示が飛んでかくかく動いていた。
+            if self._measure_step_cb is not None:
+                self._measure_step_cb(1 if up else -1)
+                event.accept()
+                return
             span = self._visible_span()
-            step = span * self.SCROLL_FRAC * (-1 if up else 1)
+            step = span * self.SCROLL_FRAC * (1 if up else -1)
             if self._follow_window:
                 # 追従モードの view_start は再生位置から決まるので、動かすのは
                 # 再生位置そのもの(= シーク)。
@@ -530,8 +548,9 @@ class WaveformWidget(QWidget):
             if self._toggle_play_cb:
                 self._toggle_play_cb()
             return
-        if key in (Qt.Key_0, Qt.Key_Home):
+        if key == Qt.Key_0:
             # 拡大縮小の修飾キーが効かない環境でも、必ず既定に戻せるように。
+            # Home は譜面レーンの「曲頭へ」なので、こちらでは横取りしない。
             self.reset_zoom()
             return
         super().keyPressEvent(event)

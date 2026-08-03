@@ -1310,6 +1310,15 @@ class ChartPreviewWidget(QWidget):
             self.seek_to_first_measure()
             return
         if key == Qt.Key_End:
+            # Shift 併用は「止めてから最終小節へ」。曲の最後を静止して見たいとき
+            # 用で、素の End(移動だけ、再生中なら再生継続)とは別にしてある。
+            if event.modifiers() & Qt.ShiftModifier:
+                self.pause()
+                # pause() の状態反映は playingChanged 経由で1拍遅れるので、
+                # ここで自分の状態も落としておく。そうしないと直後の移動が
+                # 「再生中の移動」と判定され、トゥイーンせずに飛んでしまう。
+                self._state = "paused"
+                self._playing = False
             self.seek_to_last_measure()
             return
         # 再生速度(z/↓ で遅く、c/↑ で速く)。

@@ -700,6 +700,9 @@ class PreviewDock(QDockWidget):
         self._wire_waveform(self.game_waveform, sync_stereo=False)
         self.game_waveform.set_stereo_view(False)     # 既定=合成
         self.game_waveform.set_follow_window(6.0)      # 既定の表示幅(秒)。ホイールで変更可
+        # 素のホイールはレーンと同じ「小節移動」にする。向き(上=先へ)も、移動の
+        # トゥイーンも、レーンの上で回したときと完全に同じになる。
+        self.game_waveform.set_measure_step_cb(self.chart_preview.seek_relative_measure)
         # 波形の描画域(wh)は従来どおりにしつつ、命令帯を高くした分だけ全体を
         # 高くする(命令ラベルの見切れ対策)。下部パネルには余白があるので窓
         # サイズは変わらない。
