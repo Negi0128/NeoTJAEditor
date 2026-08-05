@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from neotja import measure_edit
+from neotja import note_edit
 from neotja import settings as settings_mod
 from neotja.analysis_worker import AnalysisWorker
 from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
@@ -381,6 +382,8 @@ class MainWindow(QMainWindow):
             waveform_stereo_cb=self._save_waveform_stereo,
             se_text_enabled=self.config_data.get("se_text_enabled", True),
             record_cb=self.open_video_recorder,
+            note_edit_cb=self._apply_note_edit,
+            config_data=self.config_data,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
@@ -1689,6 +1692,53 @@ class MainWindow(QMainWindow):
         self.editor.modified_lines.add(nc.blockNumber() + 1)
         self.setWindowModified(True)
         self._force_update()
+
+    def _apply_note_edit(self, m_index, slot, grid, char):
+        """作譜モードで音符が置かれた。テキストへ書き戻す。
+
+        _measure_op と同じく QTextCursor で1回置換するので Undo も1操作。
+        ただし **_force_update() は呼ばない** — ここを同期にすると1音置く
+        たびに全文再解析(大譜面で 600ms 前後)が走って打ち込みにならない。
+        呼ばなければ textChanged の 600ms デバウンスに乗り、手が止まってから
+        まとめて解析される。それまでの見た目は編集ペインが暫定表示で埋める。"""
+        text = self.editor.toPlainText()
+        course_key = (self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = self.analyzer.course_line_range(text, course_key) if course_key else None
+        body = note_edit.course_body_span(text, rng)
+        if body is None:
+            self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
+            return
+        result = note_edit.set_slot(text, body, m_index, slot, grid, char)
+        if result is None:
+            return          # 変化なし / 置けない位置
+        start, end, replacement, cursor = result
+        tc = self.editor.textCursor()
+        tc.beginEditBlock()
+        tc.setPosition(start)
+        tc.setPosition(end, QTextCursor.KeepAnchor)
+        tc.insertText(replacement)
+        tc.endEditBlock()
+        # プログラム編集なので dirty と自動保存の対象を明示的に立てる。
+        # エディタのカーソルは動かさない — 打ち込み中に本文が飛ぶと使いづらい。
+        block = self.editor.document().findBlock(min(start, len(text)))
+        self.editor.modified_lines.add(block.blockNumber() + 1)
+        self.setWindowModified(True)
+        # 置いた音の打音を鳴らす(エディタで数字を打ったときと同じ音)。
+        if self.config_data.get("note_input_sound", True):
+            kind = self._NOTE_INPUT_SOUND_KIND.get(char)
+            hit_sounds = getattr(self.preview_dock, "hit_sounds", None)
+            if kind is not None and hit_sounds is not None:
+                hit_sounds.play_once(kind)
+
+    def _course_key_at_cursor(self, text):
+        """カーソル行が属するコース。プレビューが見ているコースと同じ規則。"""
+        hit = self._cursor_index.get(self.editor.textCursor().blockNumber() + 1)
+        if hit is not None and self.courses_info:
+            idx = hit[2]
+            if idx is not None and 0 <= idx < len(self.courses_info):
+                return self.courses_info[idx].get("key")
+        return self.courses_info[0].get("key") if self.courses_info else None
 
     # ------------------------------------------------------------------
     # BPM/OFFSET auto-detect (experimental)

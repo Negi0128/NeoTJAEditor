@@ -580,6 +580,21 @@ class WaveformWidget(QWidget):
     # 見切れないだけの高さを確保する。
     CMD_STRIP_H = 56
 
+    def _strip_rects(self):
+        """上から順に「波形 / 譜面(音符) / 命令」の3段の縦位置。
+
+        戻り値 (波形の高さ, 譜面帯の上端, 譜面帯の高さ, 譜面帯の下端,
+        命令帯の高さ)。譜面/命令帯は該当データがあるときだけ確保する
+        (ドック側の波形は音符を渡さないので従来どおり波形だけになる)。
+
+        paintEvent の中で数えていたものを切り出しただけ。作譜モードの
+        サブクラスがグリッドやカーソルを同じ帯へ重ねるために要る。"""
+        h = self.height()
+        note_strip = self.NOTE_STRIP_H if (self._note_audio or self._span_audio) else 0
+        cmd_strip = self.CMD_STRIP_H if (self._cmd_audio or self._checkpoint_audio) else 0
+        wh = h - note_strip - cmd_strip
+        return (wh, wh, note_strip, wh + note_strip, cmd_strip)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         w = self.width()
@@ -589,13 +604,7 @@ class WaveformWidget(QWidget):
         t0 = self.view_start
         t1 = t0 + self._visible_span()
 
-        # 上から順に「波形 / 譜面(音符) / 命令」の3段。譜面/命令帯は該当データが
-        # あるときだけ確保する(ドック側の波形は音符を渡さないので従来どおり)。
-        note_strip = self.NOTE_STRIP_H if (self._note_audio or self._span_audio) else 0
-        cmd_strip = self.CMD_STRIP_H if (self._cmd_audio or self._checkpoint_audio) else 0
-        wh = h - note_strip - cmd_strip
-        note_top = wh
-        note_bottom = wh + note_strip
+        wh, note_top, note_strip, note_bottom, cmd_strip = self._strip_rects()
 
         mips = self.mips
         stereo = bool(mips and mips.n_channels >= 2 and self.stereo_view)

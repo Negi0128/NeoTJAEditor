@@ -18,6 +18,7 @@ from neotja import theme
 # えぬいーさん次郎(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
 # 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
 _DARK = theme.THEMES["dark"]
+from neotja.chart_edit_widget import ChartEditWaveform
 from neotja.waveform_widget import WaveformWidget
 
 
@@ -348,9 +349,13 @@ class PreviewDock(QDockWidget):
                  course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None,
                  audio_backend="mixer", sfx_volume_cb=None,
                  waveform_stereo=True, waveform_stereo_cb=None,
-                 se_text_enabled=True, record_cb=None):
+                 se_text_enabled=True, record_cb=None, note_edit_cb=None,
+                 config_data=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
+        # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
+        self.note_edit_cb = note_edit_cb
+        self.config_data = config_data if config_data is not None else {}
         self.waveform_stereo_cb = waveform_stereo_cb
         self._waveform_stereo = bool(waveform_stereo)
         # 打音表記の表示可否(settings.json の se_text_enabled)。
@@ -497,17 +502,21 @@ class PreviewDock(QDockWidget):
         # 先頭(index 0)が起動時の既定表示になるので、既定を「非表示」にし、
         # Tab/トグルは 非表示→作譜→情報→… と循環する。非表示でも「今どの曲を
         # 見ているか」は分かるように曲名・サブタイトルだけは残す。
-        self._sakufu_page = self._build_sakufu_page()
+        self._wave_page = self._build_wave_page()
+        self._edit_page = self._build_edit_page()
         self._title_page = self._build_title_page()
         self.bottom_stack = QStackedWidget()
         self.bottom_stack.addWidget(self._title_page)   # 0 非表示(曲名のみ)
-        self.bottom_stack.addWidget(self._sakufu_page)  # 1 作譜
-        self.bottom_stack.addWidget(self.info_bar)      # 2 情報
+        self.bottom_stack.addWidget(self._wave_page)    # 1 音声波形(見るだけ)
+        self.bottom_stack.addWidget(self._edit_page)    # 2 作譜(音符を置ける)
+        self.bottom_stack.addWidget(self.info_bar)      # 3 情報
 
         # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
         # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
         # ページに合わせてスタックの高さを固定する。
-        bottom_h = max(self.info_bar.minimumHeight(), self._sakufu_page.sizeHint().height())
+        bottom_h = max(self.info_bar.minimumHeight(),
+                       self._wave_page.sizeHint().height(),
+                       self._edit_page.sizeHint().height())
         self.bottom_stack.setFixedHeight(bottom_h)
         self._bottom_panel = QWidget()
         bp = QVBoxLayout(self._bottom_panel)
@@ -532,7 +541,7 @@ class PreviewDock(QDockWidget):
         # どれもフォーカスは奪わない(Space/Tab/PgUp/PgDn の操作対象はレーンの
         # ままにする)。録画は通常再生モードのときだけ出す — 作譜/情報モードは
         # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
-        self._mode_names = ["通常再生", "作譜", "情報"]
+        self._mode_names = ["通常再生", "音声波形", "作譜", "情報"]
         right = self.game_screen.width() - 8
 
         self.mode_button = self._lane_button(self._mode_names[0], 96,
@@ -683,10 +692,10 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # Bottom-panel mode switching + playback speed (フェーズ3)
     # ------------------------------------------------------------------
-    def _build_sakufu_page(self) -> QWidget:
-        """作譜モードのページ: 波形表示(ドック側 self.waveform と同じ配線の
-        もう1つの WaveformWidget)。速度スライダーは全モード共通なので
-        _build_speed_row 側にある。"""
+    def _build_wave_page(self) -> QWidget:
+        """音声波形モードのページ: 波形表示(ドック側 self.waveform と同じ配線の
+        もう1つの WaveformWidget)。見るだけで編集はしない。速度スライダーは
+        全モード共通なので _build_speed_row 側にある。"""
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(10, 8, 10, 8)
@@ -715,6 +724,36 @@ class PreviewDock(QDockWidget):
         v.addWidget(self.game_waveform)
         v.addStretch()
         return page
+
+    def _build_edit_page(self) -> QWidget:
+        """作譜モードのページ: 音声波形と同じ見た目に、グリッドと編集カーソルを
+        重ねて音符を置けるようにしたもの。配線は音声波形ページと同じで、
+        キー入力と noteEdited だけが増える。"""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(8)
+
+        self.chart_edit = ChartEditWaveform(toggle_play_cb=self.audio.toggle_play_pause)
+        self._wire_waveform(self.chart_edit, sync_stereo=False)
+        self.chart_edit.set_stereo_view(False)
+        self.chart_edit.set_follow_window(6.0)
+        # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
+        self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
+        self.chart_edit.setFixedHeight(170)
+        self.chart_edit.set_legend_visible(
+            bool(self.config_data.get("chart_edit_legend", True))
+            if hasattr(self, "config_data") else True)
+        self.chart_edit.noteEdited.connect(self._on_note_edited)
+        v.addWidget(self.chart_edit)
+        v.addStretch()
+        return page
+
+    def _on_note_edited(self, m_index, slot, grid, char):
+        """編集ペインで音符が置かれた。テキストへの書き戻しは MainWindow の
+        担当(エディタと Undo を持っているのは向こう)なので、そのまま渡す。"""
+        if self.note_edit_cb is not None:
+            self.note_edit_cb(m_index, slot, grid, char)
 
     def _build_title_page(self) -> QWidget:
         """非表示モードのページ: 情報カードは出さず、曲名とサブタイトルだけを
@@ -796,14 +835,23 @@ class PreviewDock(QDockWidget):
         if color:
             self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
 
+    #: 下部パネルのページ番号。増減したらここだけ見ればよいように名前を付ける。
+    MODE_TITLE, MODE_WAVE, MODE_EDIT, MODE_INFO = 0, 1, 2, 3
+
     def cycle_bottom_mode(self):
-        """通常再生(0)→作譜(1)→情報(2)→通常再生… と循環。Tab キー
-        (chart_preview)とモードトグルボタンの両方から呼ばれる。"""
-        idx = (self.bottom_stack.currentIndex() + 1) % 3
+        """通常再生→音声波形→作譜→情報→… と循環。Tab キー(chart_preview)と
+        モードトグルボタンの両方から呼ばれる。"""
+        idx = (self.bottom_stack.currentIndex() + 1) % self.bottom_stack.count()
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
-        self.record_button.setVisible(idx == 0)
+        self.record_button.setVisible(idx == self.MODE_TITLE)
+        # 作譜モードのときだけ、キー入力を受けるのは編集ペイン。ほかのモードでは
+        # レーンへ返す(Space/小節移動が今までどおり効くように)。
+        if idx == self.MODE_EDIT:
+            self.chart_edit.setFocus(Qt.OtherFocusReason)
+        else:
+            self.chart_preview.setFocus(Qt.OtherFocusReason)
 
     def _on_speed_slider_changed(self, value: int):
         # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の
@@ -867,9 +915,20 @@ class PreviewDock(QDockWidget):
 
         self.waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
         self._set_game_grid(headers["bpm"], self.spin_offset.value())
-        self.game_waveform.set_notes(self._preview_notes)  # 作譜モード: 波形の下に譜面
+        self.game_waveform.set_notes(self._preview_notes)  # 音声波形: 波形の下に譜面
         self.game_waveform.set_spans(*self._preview_spans)
         self.game_waveform.set_commands(*self._preview_commands)
+        # 作譜モードの編集ペインにも同じものを流す。加えて小節の開始時刻を渡す
+        # (カーソルの住所計算に要る)。正式な解析が届いたので暫定表示は捨てる。
+        self.chart_edit.set_notes(self._preview_notes)
+        self.chart_edit.set_spans(*self._preview_spans)
+        self.chart_edit.set_commands(*self._preview_commands)
+        if preview_data is not None:
+            # 小節時刻が無いと編集カーソルの住所が決まらない。preview_data が
+            # 来ていないときは前回の値を残す(消すとカーソルが死ぬ)。
+            self.chart_edit.set_bar_times(preview_data.get("bar_times", []),
+                                          self.spin_offset.value())
+        self.chart_edit.clear_pending()
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
@@ -1125,9 +1184,16 @@ class PreviewDock(QDockWidget):
                                   list(data.get("scroll_changes", [])),
                                   list(data.get("measure_changes", [])),
                                   list(data.get("gogo_regions", [])))
-        self.game_waveform.set_notes(self._preview_notes)  # 作譜モード: 波形の下に譜面
+        self.game_waveform.set_notes(self._preview_notes)  # 音声波形: 波形の下に譜面
         self.game_waveform.set_spans(*self._preview_spans)
         self.game_waveform.set_commands(*self._preview_commands)
+        # 作譜モードの編集ペインにも同じものを流す。加えて小節の開始時刻を渡す
+        # (カーソルの住所計算に要る)。正式な解析が届いたので暫定表示は捨てる。
+        self.chart_edit.set_notes(self._preview_notes)
+        self.chart_edit.set_spans(*self._preview_spans)
+        self.chart_edit.set_commands(*self._preview_commands)
+        self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
+        self.chart_edit.clear_pending()
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
@@ -1270,7 +1336,7 @@ class PreviewDock(QDockWidget):
             wf.set_mips(self._waveform_mips)
 
     def _waveforms(self):
-        return (self.waveform, self.game_waveform)
+        return (self.waveform, self.game_waveform, self.chart_edit)
 
     def _on_waveform_stereo_toggled(self, stereo: bool):
         # ドック側の波形の合成/ステレオ設定のみ同期・保存する。作譜モードの
