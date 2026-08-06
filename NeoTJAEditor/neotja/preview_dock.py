@@ -1002,8 +1002,11 @@ class PreviewDock(QDockWidget):
             return
         # ミップチェインは1本だけ作って両方の波形で共有する(コピーしない)。
         self._waveform_mips = mips
-        self.waveform.set_mips(mips)
-        self.game_waveform.set_mips(mips)
+        # 3つの波形すべてに同じミップチェインを配る(コピーはしない)。
+        # 渡し忘れると duration が 0 のままになり、波形が出ないだけでなく
+        # 追従表示の view_start が曲頭にクランプされて位置が動かなくなる。
+        for wf in self._waveforms():
+            wf.set_mips(mips)
         # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
         if self._mixer_active:
