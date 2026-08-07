@@ -23,19 +23,23 @@ from neotja.waveform_widget import WaveformWidget
 # 分割数の候補。TJA でよく使う値(constants.VALID_MEASURE_COUNTS の部分集合)。
 GRID_CHOICES = [4, 8, 12, 16, 24, 32, 48, 64]
 
-# グリッド線の色と長さ(帯の高さに対する割合)。PeepoDrumKit と同じ考え方で、
-# 「その線が属する一番粗い分割」の色で描く。1/16 表示なら 4分の位置は白、
-# 8分の位置は青、残りの16分が黄、というふうに濃淡が付いて位置を数えやすい。
-# 本家のソースは手元に無いので、配色そのものは本家と同一ではない。
-GRID_STYLE = {
-    4:  ((235, 235, 235), 1.00),   # 拍(白)
-    8:  (( 70, 160, 255), 0.72),   # 青
-    12: ((175, 115, 255), 0.60),   # 紫
-    16: ((255, 205,  60), 0.60),   # 黄
-    24: ((255, 110, 185), 0.48),   # 桃
-    32: (( 90, 220, 130), 0.48),   # 緑
-    48: ((255, 150,  70), 0.40),   # 橙
-    64: ((110, 225, 225), 0.40),   # 水
+# 定規のような目盛りにする。4分(拍)の位置だけ白い長い線を引き、その間は
+# 今の分割の色で短い線を等間隔に並べる。長さで拍が読めて、色で今どの分割で
+# 打っているかが分かる。
+BEAT_COLOR = (235, 235, 235)
+BEAT_FRAC = 1.00       # 4分の線の長さ(帯の高さに対する割合)
+SUB_FRAC = 0.34        # その間の線の長さ
+
+# 分割ごとの色。線の長さは分割によらず同じ(SUB_FRAC)。
+GRID_COLORS = {
+    4:  BEAT_COLOR,
+    8:  ( 70, 160, 255),   # 青
+    12: (175, 115, 255),   # 紫
+    16: (255, 205,  60),   # 黄
+    24: (255, 110, 185),   # 桃
+    32: ( 90, 220, 130),   # 緑
+    48: (255, 150,  70),   # 橙
+    64: (110, 225, 225),   # 水
 }
 
 # 音符文字 → (表示名, 色キー)。色は theme のキー名。
@@ -443,22 +447,20 @@ class ChartEditWaveform(WaveformWidget):
             p.end()
 
     def _slot_style(self, k):
-        """スロット k が属する「一番粗い分割」の色と長さ。
+        """スロット k の線の色と長さ。
 
-        1/16 表示の k=4 は 4分の位置でもあるので白・全高、k=2 は 8分なので
-        青・やや短く、という具合。PeepoDrumKit のグリッドと同じ数え方。"""
-        for div in GRID_CHOICES:
-            if div > self._grid:
-                break
-            if (k * div) % self._grid == 0:
-                return GRID_STYLE[div]
-        return GRID_STYLE[GRID_CHOICES[-1]]
+        4分(拍)にあたる位置は白い長い線、それ以外は今の分割の色で短い線。
+        定規の「大きい目盛りと小さい目盛り」と同じ考え方。"""
+        if self._grid > 0 and (k * 4) % self._grid == 0:
+            return (BEAT_COLOR, BEAT_FRAC)
+        return (GRID_COLORS.get(self._grid, GRID_COLORS[64]), SUB_FRAC)
 
     def _draw_edit_grid(self, p, top, strip):
         """小節をグリッド分割で割る線。小節線そのものは親が描く。
 
-        線は帯の下端から生やし、粗い分割ほど長くする。全部同じ見た目にすると
-        細かいグリッドで画面が埋まって音符が読めなくなるため。"""
+        定規と同じで、4分(拍)にだけ長い白線、その間は今の分割の色で短い線。
+        帯の下端から生やす。全部同じ長さにすると細かいグリッドで画面が
+        埋まって音符が読めなくなるため。"""
         if strip <= 0:
             return
         t0 = self.view_start
@@ -541,7 +543,7 @@ class ChartEditWaveform(WaveformWidget):
         x = 6
         # 現在のグリッド。
         # 現在の分割の色でラベルを出す(グリッド線の色と対応が付くように)。
-        (lr, lg, lb), _ = GRID_STYLE.get(self._grid, ((255, 210, 60), 1.0))
+        lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
         p.setPen(QColor(lr, lg, lb))
         label = "1/%d" % self._grid
         p.drawText(x, 0, 44, h, Qt.AlignVCenter | Qt.AlignLeft, label)

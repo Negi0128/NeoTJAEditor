@@ -722,10 +722,24 @@ class PreviewDock(QDockWidget):
         # 上のレーンと完全同期し、下の波形も 120fps で滑らかにスクロールする。
         # 非表示モード/情報モードでは game_waveform が隠れていて update() が
         # no-op になるため、そのときの追加コストは無い。
-        self.chart_preview.set_frame_cb(self.game_waveform.set_position_smooth)
+        self.chart_preview.set_frame_cb(self._on_preview_frame)
         v.addWidget(self.game_waveform)
         v.addStretch()
         return page
+
+    def _on_preview_frame(self, t):
+        """レーンの 120fps クロック。音声波形と作譜、両方の波形へ同じ時刻を配る。
+
+        set_frame_cb はコールバックを1つしか持てないので、ここで束ねる。
+        作譜ペインへ渡し忘れると、そちらには再生位置の線が出ず、表示も
+        再生に追従しない。隠れているページの update() は no-op なので、
+        見ていないモードでの追加コストは無い。"""
+        self.game_waveform.set_position_smooth(t)
+        # 作譜ページは音声波形ページより後に組まれるので、構築の途中で
+        # 1フレーム入ってきても落ちないようにしておく。
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.set_position_smooth(t)
 
     def _build_edit_page(self) -> QWidget:
         """作譜モードのページ: 音声波形と同じ見た目に、グリッドと編集カーソルを
