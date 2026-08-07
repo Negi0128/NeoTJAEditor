@@ -78,7 +78,8 @@ class ChartEditWaveform(WaveformWidget):
         self._grid = 16
         self._cur_measure = 0
         self._cur_slot = 0
-        self._bar_times = []       # 小節の開始時刻(音源時間)
+        self._bar_times_raw = []   # 小節の開始時刻(譜面時間。権威データ)
+        self._bar_times = []       # 上を OFFSET で音源時間へ直したもの
         # 小節が1つも無いとき/末尾より先を外挿するときの1小節の長さ。
         # ヘッダの BPM から入れてもらう(既定は BPM120 の 4/4)。
         self._default_measure_len = 2.0
@@ -90,18 +91,39 @@ class ChartEditWaveform(WaveformWidget):
     # ------------------------------------------------------------------
     # 外から入れるもの
     # ------------------------------------------------------------------
-    def set_bar_times(self, times, offset):
-        """小節の開始時刻(譜面時間)を音源時間へ直して持つ。
+    def set_bar_times(self, times, offset=None):
+        """小節の開始時刻(譜面時間)を持つ。音源時間への変換は self.offset で行う。
 
         build_preview_timeline の "bar_times" は (時刻, BPM, SCROLL, 表示) の
-        タプル列。時刻だけあればよいので取り出す(素の float が来ても通す)。"""
-        out = []
+        タプル列。時刻だけあればよいので取り出す(素の float が来ても通す)。
+
+        譜面時刻のまま覚えておき、音源時間へは _apply_offset_local で直す。
+        親が音符を置くのと同じ変換(譜面時刻 - OFFSET)を必ず通すためで、
+        ここで一度きり引き算してしまうと、後から OFFSET が変わったときに
+        音符だけが動いてグリッドが取り残される。"""
+        raw = []
         for item in (times or []):
             t = item[0] if isinstance(item, (tuple, list)) else item
-            out.append(max(0.0, float(t) - offset))
-        self._bar_times = out
+            raw.append(float(t))
+        self._bar_times_raw = raw
+        if offset is not None and offset != self.offset:
+            # 渡された OFFSET を正とする(親の音符もこの値で置き直される)。
+            self._apply_offset_local(offset)
+        else:
+            self._rebuild_bar_times()
         self._clamp_cursor()
         self.update()
+
+    def _rebuild_bar_times(self):
+        self._bar_times = [max(0.0, t - self.offset)
+                           for t in (self._bar_times_raw or [])]
+
+    def _apply_offset_local(self, offset):
+        super()._apply_offset_local(offset)
+        # 親のコンストラクタからも呼ばれるので、まだ属性が無いことがある。
+        if getattr(self, "_bar_times_raw", None) is not None:
+            self._rebuild_bar_times()
+            self._clamp_cursor()
 
     def set_default_measure_len(self, sec):
         """小節が無い/末尾より先へ出たときに使う1小節の長さ(秒)。"""

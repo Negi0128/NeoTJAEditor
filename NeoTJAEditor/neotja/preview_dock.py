@@ -1332,6 +1332,10 @@ class PreviewDock(QDockWidget):
         まだ無ければメトロノーム用にフォールバック(空譜面/読み込み前)。"""
         clicks = self._game_grid_clicks or self._editor_metronome_clicks
         self.game_waveform.set_beat_grid(bpm, offset, clicks)
+        # 作譜モードの編集ペインにも同じものを渡す。ここを飛ばすと編集ペインの
+        # offset が 0 のままになり、親が描く音符(譜面時刻 - offset)と編集
+        # グリッド/カーソルが OFFSET のぶんだけ食い違う。
+        self.chart_edit.set_beat_grid(bpm, offset, clicks)
 
     def _wire_waveform(self, wf: WaveformWidget, sync_stereo: bool = True):
         """ドック側/ゲーム窓側の2つの WaveformWidget を同じ配線にする。
