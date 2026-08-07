@@ -131,11 +131,13 @@ def set_slot(text, body, m_index, slot, grid, char):
     行の折り返しもコメントも命令行も一切触らないので、テキストの差分が
     最小で済む(最頻ケース)。倍数でないときだけ、情報を落とさない最小の
     分割数へ小節ごと書き直す。"""
-    if char not in NOTE_CHARS or grid <= 0:
+    if char not in NOTE_CHARS or grid <= 0 or m_index < 0:
         return None
     spans = measure_spans(text, body)
-    if not (0 <= m_index < len(spans)):
-        return None
+    if m_index >= len(spans):
+        # 譜面の末尾より先。足りないぶんの空小節を作ってから置く。小節が
+        # 1つも無い譜面(新規作成直後)でも、ここを通って打ち始められる。
+        return _extend_and_set(text, body, spans, m_index, slot, grid, char)
     a, b = spans[m_index]
     chunk = text[a:b]
 
@@ -197,6 +199,40 @@ def set_slot(text, body, m_index, slot, grid, char):
     if chunk.endswith("\n") and not replacement.endswith("\n"):
         replacement += "\n"
     return (a, b, replacement, a + len(replacement))
+
+
+def _extend_and_set(text, body, spans, m_index, slot, grid, char):
+    """末尾に空小節を足して、その最後の小節に char を置く。
+
+    足す位置は最後の小節の直後(小節が無ければ本文の先頭)。#END 直前の
+    空行やコメントには触らない。消去(0)のために小節を増やすのは無意味
+    なので、そのときは何もしない。"""
+    if body is None or char == "0":
+        return None
+    if not (0 <= slot < grid) or grid > MAX_DIVISION:
+        return None
+    ins = spans[-1][1] if spans else body[0]
+    need = m_index - len(spans) + 1
+    if need <= 0:
+        return None
+
+    wrap = _wrap_for(grid)
+    chunks = []
+    for i in range(need):
+        notes = ["0"] * grid
+        if i == need - 1:
+            notes[slot] = char
+        s = "".join(notes)
+        if wrap and grid > wrap:
+            lines = [s[j:j + wrap] for j in range(0, grid, wrap)]
+        else:
+            lines = [s]
+        lines[-1] += ","
+        chunks.append("\n".join(lines))
+    # 直前が改行で終わっていなければ、まず行を改める。
+    prefix = "" if (ins == 0 or text[ins - 1] == "\n") else "\n"
+    replacement = prefix + "\n".join(chunks) + "\n"
+    return (ins, ins, replacement, ins + len(replacement))
 
 
 def _wrap_for(target):

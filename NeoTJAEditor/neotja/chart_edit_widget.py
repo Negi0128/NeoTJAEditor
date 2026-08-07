@@ -68,6 +68,10 @@ class ChartEditWaveform(WaveformWidget):
 
     LEGEND_H = 18          # 凡例の帯の高さ
     CURSOR_W = 3           # 編集カーソルの太さ
+    # 譜面の末尾より後ろへ、これだけ先までカーソルを進められる。置いた時点で
+    # 足りない小節はテキスト側に自動で足される(note_edit.set_slot)。小節が
+    # 1つも無い譜面でも打ち始められるようにするための仕組みでもある。
+    EXTEND_MEASURES = 64
 
     def __init__(self, parent=None, toggle_play_cb=None):
         super().__init__(parent, toggle_play_cb=toggle_play_cb, force_dark=True)
@@ -75,6 +79,9 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_measure = 0
         self._cur_slot = 0
         self._bar_times = []       # 小節の開始時刻(音源時間)
+        # 小節が1つも無いとき/末尾より先を外挿するときの1小節の長さ。
+        # ヘッダの BPM から入れてもらう(既定は BPM120 の 4/4)。
+        self._default_measure_len = 2.0
         self._show_legend = True
         # 楽観的表示用。置いた直後、再解析が届くまでのあいだ描く音符。
         # {(小節, スロット, 分割数): 文字}
@@ -95,6 +102,16 @@ class ChartEditWaveform(WaveformWidget):
         self._bar_times = out
         self._clamp_cursor()
         self.update()
+
+    def set_default_measure_len(self, sec):
+        """小節が無い/末尾より先へ出たときに使う1小節の長さ(秒)。"""
+        try:
+            sec = float(sec)
+        except (TypeError, ValueError):
+            return
+        if sec > 0:
+            self._default_measure_len = sec
+            self.update()
 
     def set_legend_visible(self, on: bool):
         self._show_legend = bool(on)
@@ -118,21 +135,49 @@ class ChartEditWaveform(WaveformWidget):
     # ------------------------------------------------------------------
     # カーソル
     # ------------------------------------------------------------------
+    def _known_measures(self):
+        """解析が返してきた実在の小節数。"""
+        return len(self._bar_times)
+
     def _measure_count(self):
-        return max(0, len(self._bar_times))
+        """カーソルを置ける小節数。譜面が空でも1小節ぶんは打てるようにし、
+        末尾より先へも EXTEND_MEASURES ぶん出られるようにする。"""
+        return max(1, self._known_measures()) + self.EXTEND_MEASURES
+
+    def _measure_len(self):
+        """外挿に使う1小節の長さ。既知の小節があればその最後の間隔を使う。"""
+        if len(self._bar_times) >= 2:
+            span = self._bar_times[-1] - self._bar_times[-2]
+            if span > 0:
+                return span
+        return max(1e-3, self._default_measure_len)
+
+    def _bar_time(self, m):
+        """m 小節目の開始時刻。既知の範囲より先は等間隔で外挿する。"""
+        if m < 0:
+            return None
+        n = self._known_measures()
+        if m < n:
+            return self._bar_times[m]
+        base = self._bar_times[-1] if n else 0.0
+        return base + self._measure_len() * (m - (n - 1 if n else 0))
+
+    def _address_time(self, m, slot, grid):
+        """(小節, スロット) の時刻。既知の小節の外でも返す。"""
+        t0 = self._bar_time(m)
+        if t0 is None or grid <= 0:
+            return None
+        t1 = self._bar_time(m + 1)
+        span = (t1 - t0) if (t1 is not None and t1 > t0) else self._measure_len()
+        return t0 + span * (slot / grid)
 
     def _clamp_cursor(self):
         n = self._measure_count()
-        if n <= 0:
-            self._cur_measure = 0
-            self._cur_slot = 0
-            return
         self._cur_measure = max(0, min(self._cur_measure, n - 1))
         self._cur_slot = max(0, min(self._cur_slot, self._grid - 1))
 
     def cursor_time(self):
-        t = note_edit.address_to_time(self._bar_times, self._cur_measure,
-                                      self._cur_slot, self._grid)
+        t = self._address_time(self._cur_measure, self._cur_slot, self._grid)
         return 0.0 if t is None else t
 
     def move_cursor(self, delta):
@@ -215,8 +260,6 @@ class ChartEditWaveform(WaveformWidget):
         super().keyPressEvent(event)
 
     def _place(self, char):
-        if self._measure_count() <= 0:
-            return
         addr = (self._cur_measure, self._cur_slot, self._grid)
         # 同じ音符をもう一度置いたら消す(トグル)。今そこに何があるかは
         # 暫定表示を優先して見る。
@@ -247,19 +290,27 @@ class ChartEditWaveform(WaveformWidget):
 
     def _draw_edit_grid(self, p, top, strip):
         """小節内のグリッド線。小節線そのものは親が描くので、その間を割る線だけ。"""
-        if not self._bar_times or strip <= 0:
+        if strip <= 0:
             return
         t0 = self.view_start
         t1 = t0 + self._visible_span()
         pen_fine = QPen(QColor(255, 255, 255, 40), 1)
         pen_beat = QPen(QColor(255, 255, 255, 80), 1)
-        for m in range(len(self._bar_times)):
-            m_start = self._bar_times[m]
-            m_end = (self._bar_times[m + 1] if m + 1 < len(self._bar_times)
-                     else m_start + (self._bar_times[-1] - self._bar_times[-2]
-                                     if len(self._bar_times) >= 2 else 2.0))
+        # 譜面の末尾より先の小節線は親が描かないので、ここで薄く描く
+        # (どこまでが既存の譜面かが分かるように色を変える)。
+        pen_virtual = QPen(QColor(255, 210, 60, 90), 1, Qt.DashLine)
+        known = self._known_measures()
+        for m in range(self._measure_count()):
+            m_start = self._bar_time(m)
+            m_end = self._bar_time(m + 1)
+            if m_start is None or m_end is None:
+                continue
             if m_end < t0 or m_start > t1:
                 continue
+            if m >= known and t0 <= m_start <= t1:
+                p.setPen(pen_virtual)
+                bx = self._sec_to_x(m_start)
+                p.drawLine(bx, top, bx, top + strip)
             span = m_end - m_start
             if span <= 0:
                 continue
@@ -278,13 +329,13 @@ class ChartEditWaveform(WaveformWidget):
 
     def _draw_pending(self, p, top, strip):
         """再解析が届くまでのあいだ、置いたばかりの音符を描く。"""
-        if not self._pending or not self._bar_times:
+        if not self._pending:
             return
         cy = top + strip // 2
         for (m, slot, grid), char in self._pending.items():
             if char == "0":
                 continue
-            t = note_edit.address_to_time(self._bar_times, m, slot, grid)
+            t = self._address_time(m, slot, grid)
             if t is None:
                 continue
             x = self._sec_to_x(t)
@@ -301,13 +352,11 @@ class ChartEditWaveform(WaveformWidget):
         p.setBrush(Qt.NoBrush)
 
     def _draw_cursor(self, p, top, strip):
-        if not self._bar_times:
-            return
         t = self.cursor_time()
         x = self._sec_to_x(t)
         # スロットの幅ぶんを薄く塗ってから、頭に縦線。
-        m_end_t = note_edit.address_to_time(self._bar_times, self._cur_measure,
-                                            self._cur_slot + 1, self._grid)
+        m_end_t = self._address_time(self._cur_measure, self._cur_slot + 1,
+                                     self._grid)
         if m_end_t is not None:
             x2 = self._sec_to_x(m_end_t)
             if x2 > x:

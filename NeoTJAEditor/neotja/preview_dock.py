@@ -900,6 +900,10 @@ class PreviewDock(QDockWidget):
         self._editor_metronome_clicks = metronome_clicks or []
         self.lbl_editor_bpm.setText(f"{headers['bpm']:g}" if headers["bpm"] else "-")
         self.title_label.setText(headers["title"] or "(無題)")
+        # 小節が1つも無い譜面でも作譜モードで打ち始められるよう、外挿用の
+        # 1小節の長さをヘッダの BPM から渡しておく(4/4 の4拍ぶん)。
+        if headers["bpm"]:
+            self.chart_edit.set_default_measure_len(240.0 / float(headers["bpm"]))
 
         if preview_data is not None:
             self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in preview_data.get("notes", [])]
