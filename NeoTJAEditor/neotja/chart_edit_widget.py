@@ -102,10 +102,19 @@ class ChartEditWaveform(WaveformWidget):
         ここで一度きり引き算してしまうと、後から OFFSET が変わったときに
         音符だけが動いてグリッドが取り残される。"""
         raw = []
+        last_bpm = None
         for item in (times or []):
-            t = item[0] if isinstance(item, (tuple, list)) else item
-            raw.append(float(t))
+            if isinstance(item, (tuple, list)):
+                raw.append(float(item[0]))
+                if len(item) > 1 and item[1]:
+                    last_bpm = float(item[1])
+            else:
+                raw.append(float(item))
         self._bar_times_raw = raw
+        # 小節が1つしか無いと間隔から長さを測れない。解析が返してきた BPM を
+        # 使う(ヘッダの BPM が空の新規譜面でも、ここは埋まっている)。
+        if last_bpm and last_bpm > 0:
+            self._default_measure_len = 240.0 / last_bpm
         if offset is not None and offset != self.offset:
             # 渡された OFFSET を正とする(親の音符もこの値で置き直される)。
             self._apply_offset_local(offset)
@@ -213,8 +222,22 @@ class ChartEditWaveform(WaveformWidget):
         total = min(total, max_total)
         self._cur_measure, self._cur_slot = divmod(total, self._grid)
         self._clamp_cursor()
+        self._ensure_cursor_visible()
         self.cursorMoved.emit(self.cursor_time())
         self.update()
+
+    def _ensure_cursor_visible(self):
+        """カーソルが表示窓から出そうなら窓のほうを寄せる。
+
+        set_position は使わない — あちらは再生位置(赤い線)も動かしてしまう。
+        曲の終わりより先へも出られるよう、duration ではクランプしない。"""
+        span = self._visible_span()
+        if span <= 0:
+            return
+        t = self.cursor_time()
+        margin = span * 0.1
+        if t < self.view_start + margin or t > self.view_start + span - margin:
+            self.view_start = max(0.0, t - span * self.FOLLOW_FRAC)
 
     def set_cursor_from_time(self, t):
         """再生位置などからカーソルを合わせる。"""
@@ -265,7 +288,13 @@ class ChartEditWaveform(WaveformWidget):
             self.set_legend_visible(not self._show_legend)
             self.legendToggled.emit(self._show_legend)
             return
-        if key in (Qt.Key_Delete, Qt.Key_Backspace):
+        if key == Qt.Key_Delete:
+            self._place("0")
+            return
+        if key == Qt.Key_Backspace:
+            # 文字入力の BackSpace と同じ気持ち: 1つ戻ってから消す。
+            # 配置で自動的に前へ進むので、直前に置いた音符がここに来る。
+            self.move_cursor(-1)
             self._place("0")
             return
 
@@ -282,13 +311,18 @@ class ChartEditWaveform(WaveformWidget):
         super().keyPressEvent(event)
 
     def _place(self, char):
+        """カーソル位置に音符を置き、1グリッド先へ進む。
+
+        以前は「同じ音符をもう一度でトグル」だったが、判定に使えるのが
+        暫定表示(_pending)だけで、再解析が届いて暫定表示が消えると同じキーが
+        配置になったり削除になったりして安定しなかった。消すのは 0 /
+        Delete / BackSpace に一本化してある。"""
         addr = (self._cur_measure, self._cur_slot, self._grid)
-        # 同じ音符をもう一度置いたら消す(トグル)。今そこに何があるかは
-        # 暫定表示を優先して見る。
-        if self._pending.get(addr) == char and char != "0":
-            char = "0"
         self._pending[addr] = char
         self.noteEdited.emit(self._cur_measure, self._cur_slot, self._grid, char)
+        if char != "0":
+            # 消すときは進まない(その場を見ながら消せるように)。
+            self.move_cursor(1)
         self.update()
 
     # ------------------------------------------------------------------
@@ -311,43 +345,25 @@ class ChartEditWaveform(WaveformWidget):
             p.end()
 
     def _draw_edit_grid(self, p, top, strip):
-        """小節内のグリッド線。小節線そのものは親が描くので、その間を割る線だけ。"""
+        """小節線だけを描く。
+
+        以前は小節を分割数ぶんに割る線を全部引いていたが、細かいグリッドだと
+        画面が線で埋まって音符が読めなくなるのでやめた。今どこに置かれるかは
+        編集カーソル(=そのグリッドの始点)が示している。"""
         if strip <= 0:
             return
         t0 = self.view_start
         t1 = t0 + self._visible_span()
-        pen_fine = QPen(QColor(255, 255, 255, 40), 1)
-        pen_beat = QPen(QColor(255, 255, 255, 80), 1)
-        # 譜面の末尾より先の小節線は親が描かないので、ここで薄く描く
-        # (どこまでが既存の譜面かが分かるように色を変える)。
+        # 譜面の末尾より先の小節線は親が描かないので、ここで描く
+        # (どこまでが既存の譜面かが分かるように色と線種を変える)。
         pen_virtual = QPen(QColor(255, 210, 60, 90), 1, Qt.DashLine)
-        known = self._known_measures()
-        for m in range(self._measure_count()):
+        p.setPen(pen_virtual)
+        for m in range(self._known_measures(), self._measure_count()):
             m_start = self._bar_time(m)
-            m_end = self._bar_time(m + 1)
-            if m_start is None or m_end is None:
+            if m_start is None or m_start < t0 or m_start > t1:
                 continue
-            if m_end < t0 or m_start > t1:
-                continue
-            if m >= known and t0 <= m_start <= t1:
-                p.setPen(pen_virtual)
-                bx = self._sec_to_x(m_start)
-                p.drawLine(bx, top, bx, top + strip)
-            span = m_end - m_start
-            if span <= 0:
-                continue
-            # 線が潰れるほど細かいときは描かない(見づらいだけなので)。
-            if span / self._grid * (self.width() / max(1e-6, t1 - t0)) < 4:
-                continue
-            for k in range(1, self._grid):
-                t = m_start + span * (k / self._grid)
-                if t < t0 or t > t1:
-                    continue
-                # 4分の位置は少し濃く(拍が分かるように)。
-                is_beat = (k * 4) % self._grid == 0
-                p.setPen(pen_beat if is_beat else pen_fine)
-                x = self._sec_to_x(t)
-                p.drawLine(x, top, x, top + strip)
+            bx = self._sec_to_x(m_start)
+            p.drawLine(bx, top, bx, top + strip)
 
     def _draw_pending(self, p, top, strip):
         """再解析が届くまでのあいだ、置いたばかりの音符を描く。"""
