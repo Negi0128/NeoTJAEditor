@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
             record_cb=self.open_video_recorder,
             note_edit_cb=self._apply_note_edit,
             config_data=self.config_data,
+            save_settings_cb=self._save_config,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
@@ -428,6 +429,10 @@ class MainWindow(QMainWindow):
         self._taikojiro_scan = TaikojiroScanWorker(self)
         self._taikojiro_scan.found.connect(on_found)
         self._taikojiro_scan.start()
+
+    def _save_config(self):
+        """プレビュー側が config_data を書き換えたときの保存口。"""
+        settings_mod.save_settings(self.config_data)
 
     def _save_preview_volume(self, volume: float):
         self.config_data["preview_volume"] = volume

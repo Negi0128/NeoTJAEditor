@@ -350,12 +350,14 @@ class PreviewDock(QDockWidget):
                  audio_backend="mixer", sfx_volume_cb=None,
                  waveform_stereo=True, waveform_stereo_cb=None,
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
-                 config_data=None):
+                 config_data=None, save_settings_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
         self.note_edit_cb = note_edit_cb
         self.config_data = config_data if config_data is not None else {}
+        # config_data を書き換えたあとディスクへ落とすためのもの(MainWindow が持つ)。
+        self.save_settings_cb = save_settings_cb
         self.waveform_stereo_cb = waveform_stereo_cb
         self._waveform_stereo = bool(waveform_stereo)
         # 打音表記の表示可否(settings.json の se_text_enabled)。
@@ -742,12 +744,18 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
         self.chart_edit.setFixedHeight(170)
         self.chart_edit.set_legend_visible(
-            bool(self.config_data.get("chart_edit_legend", True))
-            if hasattr(self, "config_data") else True)
+            bool(self.config_data.get("chart_edit_legend", True)))
         self.chart_edit.noteEdited.connect(self._on_note_edited)
+        self.chart_edit.legendToggled.connect(self._on_legend_toggled)
         v.addWidget(self.chart_edit)
         v.addStretch()
         return page
+
+    def _on_legend_toggled(self, on):
+        """H キーで凡例を出し入れした。次に開いたときも同じ状態にする。"""
+        self.config_data["chart_edit_legend"] = bool(on)
+        if self.save_settings_cb is not None:
+            self.save_settings_cb()
 
     def _on_note_edited(self, m_index, slot, grid, char):
         """編集ペインで音符が置かれた。テキストへの書き戻しは MainWindow の

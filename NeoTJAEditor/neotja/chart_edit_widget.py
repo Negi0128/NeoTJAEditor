@@ -62,6 +62,9 @@ class ChartEditWaveform(WaveformWidget):
     noteEdited = Signal(int, int, int, str)
     # カーソルが動いたときに時刻を通知(上位がシークするかは上位の判断)。
     cursorMoved = Signal(float)
+    # 凡例の表示を「ユーザーが」切り替えたときだけ飛ぶ。設定へ覚えさせるため。
+    # set_legend_visible() では出さない(起動時の復元で保存を呼び返さないよう)。
+    legendToggled = Signal(bool)
 
     LEGEND_H = 18          # 凡例の帯の高さ
     CURSOR_W = 3           # 編集カーソルの太さ
@@ -193,6 +196,7 @@ class ChartEditWaveform(WaveformWidget):
             return
         if key == Qt.Key_H:
             self.set_legend_visible(not self._show_legend)
+            self.legendToggled.emit(self._show_legend)
             return
         if key in (Qt.Key_Delete, Qt.Key_Backspace):
             self._place("0")
