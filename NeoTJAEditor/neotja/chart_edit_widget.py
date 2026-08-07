@@ -11,6 +11,8 @@
 同じ変更を当てて描く。待っていると打ち込みのたびに引っかかるため。
 """
 
+import bisect
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget  # noqa: F401  (型注釈用)
@@ -20,6 +22,21 @@ from neotja.waveform_widget import WaveformWidget
 
 # 分割数の候補。TJA でよく使う値(constants.VALID_MEASURE_COUNTS の部分集合)。
 GRID_CHOICES = [4, 8, 12, 16, 24, 32, 48, 64]
+
+# グリッド線の色と長さ(帯の高さに対する割合)。PeepoDrumKit と同じ考え方で、
+# 「その線が属する一番粗い分割」の色で描く。1/16 表示なら 4分の位置は白、
+# 8分の位置は青、残りの16分が黄、というふうに濃淡が付いて位置を数えやすい。
+# 本家のソースは手元に無いので、配色そのものは本家と同一ではない。
+GRID_STYLE = {
+    4:  ((235, 235, 235), 1.00),   # 拍(白)
+    8:  (( 70, 160, 255), 0.72),   # 青
+    12: ((175, 115, 255), 0.60),   # 紫
+    16: ((255, 205,  60), 0.60),   # 黄
+    24: ((255, 110, 185), 0.48),   # 桃
+    32: (( 90, 220, 130), 0.48),   # 緑
+    48: ((255, 150,  70), 0.40),   # 橙
+    64: ((110, 225, 225), 0.40),   # 水
+}
 
 # 音符文字 → (表示名, 色キー)。色は theme のキー名。
 NOTE_INFO = {
@@ -242,6 +259,57 @@ class ChartEditWaveform(WaveformWidget):
         if t < self.view_start + margin or t > self.view_start + span - margin:
             self.view_start = max(0.0, t - span * self.FOLLOW_FRAC)
 
+    def _address_from_time(self, t):
+        """時刻から (小節, スロット)。譜面の末尾より先の外挿ぶんも当てる。"""
+        if self._grid <= 0:
+            return None
+        n = self._known_measures()
+        i = 0
+        if n:
+            i = max(0, bisect.bisect_right(self._bar_times, t) - 1)
+        # 既知の小節より先は外挿。等間隔なので順に見ていけば足りる。
+        total = self._measure_count()
+        while i + 1 < total:
+            nxt = self._bar_time(i + 1)
+            if nxt is None or nxt > t:
+                break
+            i += 1
+        t0 = self._bar_time(i)
+        if t0 is None:
+            return None
+        t1 = self._bar_time(i + 1)
+        span = (t1 - t0) if (t1 is not None and t1 > t0) else self._measure_len()
+        slot = int(round((t - t0) / span * self._grid))
+        if slot < 0:
+            slot = 0
+        elif slot >= self._grid:
+            if i + 1 < total:
+                return (i + 1, 0)
+            slot = self._grid - 1
+        return (i, slot)
+
+    def mousePressEvent(self, event):
+        """クリックした位置へ編集カーソルを置く。再生位置のシークは親の担当
+        (seekRequested) なので、そのまま super() へ流す。"""
+        if event.button() == Qt.LeftButton and not self.offset_mode:
+            self._move_cursor_to_x(event.position().x())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # ドラッグでシークするあいだ、編集カーソルも一緒に付いていく。
+        if self._dragging and not self.offset_mode:
+            self._move_cursor_to_x(event.position().x())
+        super().mouseMoveEvent(event)
+
+    def _move_cursor_to_x(self, x):
+        addr = self._address_from_time(max(0.0, self._x_to_sec(x)))
+        if addr is None:
+            return
+        self._cur_measure, self._cur_slot = addr
+        self._clamp_cursor()
+        self.cursorMoved.emit(self.cursor_time())
+        self.update()
+
     def set_cursor_from_time(self, t):
         """再生位置などからカーソルを合わせる。"""
         addr = note_edit.time_to_address(self._bar_times, t, self._grid)
@@ -374,26 +442,55 @@ class ChartEditWaveform(WaveformWidget):
         finally:
             p.end()
 
-    def _draw_edit_grid(self, p, top, strip):
-        """小節線だけを描く。
+    def _slot_style(self, k):
+        """スロット k が属する「一番粗い分割」の色と長さ。
 
-        以前は小節を分割数ぶんに割る線を全部引いていたが、細かいグリッドだと
-        画面が線で埋まって音符が読めなくなるのでやめた。今どこに置かれるかは
-        編集カーソル(=そのグリッドの始点)が示している。"""
+        1/16 表示の k=4 は 4分の位置でもあるので白・全高、k=2 は 8分なので
+        青・やや短く、という具合。PeepoDrumKit のグリッドと同じ数え方。"""
+        for div in GRID_CHOICES:
+            if div > self._grid:
+                break
+            if (k * div) % self._grid == 0:
+                return GRID_STYLE[div]
+        return GRID_STYLE[GRID_CHOICES[-1]]
+
+    def _draw_edit_grid(self, p, top, strip):
+        """小節をグリッド分割で割る線。小節線そのものは親が描く。
+
+        線は帯の下端から生やし、粗い分割ほど長くする。全部同じ見た目にすると
+        細かいグリッドで画面が埋まって音符が読めなくなるため。"""
         if strip <= 0:
             return
         t0 = self.view_start
         t1 = t0 + self._visible_span()
+        known = self._known_measures()
         # 譜面の末尾より先の小節線は親が描かないので、ここで描く
         # (どこまでが既存の譜面かが分かるように色と線種を変える)。
-        pen_virtual = QPen(QColor(255, 210, 60, 90), 1, Qt.DashLine)
-        p.setPen(pen_virtual)
-        for m in range(self._known_measures(), self._measure_count()):
+        pen_virtual = QPen(QColor(255, 210, 60, 110), 1, Qt.DashLine)
+        bottom = top + strip
+        for m in range(self._measure_count()):
             m_start = self._bar_time(m)
-            if m_start is None or m_start < t0 or m_start > t1:
+            m_end = self._bar_time(m + 1)
+            if m_start is None or m_end is None or m_end < t0 or m_start > t1:
                 continue
-            bx = self._sec_to_x(m_start)
-            p.drawLine(bx, top, bx, top + strip)
+            if m >= known and t0 <= m_start <= t1:
+                p.setPen(pen_virtual)
+                bx = self._sec_to_x(m_start)
+                p.drawLine(bx, top, bx, bottom)
+            span = m_end - m_start
+            if span <= 0:
+                continue
+            # 線が潰れるほど細かいときは引かない(見づらいだけなので)。
+            if span / self._grid * (self.width() / max(1e-6, t1 - t0)) < 4:
+                continue
+            for k in range(1, self._grid):
+                t = m_start + span * (k / self._grid)
+                if t < t0 or t > t1:
+                    continue
+                (r, g, b), frac = self._slot_style(k)
+                p.setPen(QPen(QColor(r, g, b, 110), 1))
+                x = self._sec_to_x(t)
+                p.drawLine(x, bottom - int(strip * frac), x, bottom)
 
     def _draw_pending(self, p, top, strip):
         """再解析が届くまでのあいだ、置いたばかりの音符を描く。"""
@@ -443,7 +540,9 @@ class ChartEditWaveform(WaveformWidget):
         p.setFont(f)
         x = 6
         # 現在のグリッド。
-        p.setPen(QColor(255, 210, 60))
+        # 現在の分割の色でラベルを出す(グリッド線の色と対応が付くように)。
+        (lr, lg, lb), _ = GRID_STYLE.get(self._grid, ((255, 210, 60), 1.0))
+        p.setPen(QColor(lr, lg, lb))
         label = "1/%d" % self._grid
         p.drawText(x, 0, 44, h, Qt.AlignVCenter | Qt.AlignLeft, label)
         x += 46
