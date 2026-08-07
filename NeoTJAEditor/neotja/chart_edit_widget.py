@@ -190,7 +190,10 @@ class ChartEditWaveform(WaveformWidget):
         n = self._known_measures()
         if m < n:
             return self._bar_times[m]
-        base = self._bar_times[-1] if n else 0.0
+        # 小節がまだ1つも無いときの仮の1小節目は「譜面時刻 0」の音源時刻に
+        # 置く。0.0 にしてしまうと、再解析で本物の bar_times[0](= -OFFSET)が
+        # 届いた瞬間にカーソルと表示が OFFSET ぶん飛ぶ。
+        base = self._bar_times[-1] if n else max(0.0, -self.offset)
         return base + self._measure_len() * (m - (n - 1 if n else 0))
 
     def _address_time(self, m, slot, grid):
@@ -319,11 +322,38 @@ class ChartEditWaveform(WaveformWidget):
         Delete / BackSpace に一本化してある。"""
         addr = (self._cur_measure, self._cur_slot, self._grid)
         self._pending[addr] = char
+        if char == "0":
+            self._hide_note_at(*addr)
         self.noteEdited.emit(self._cur_measure, self._cur_slot, self._grid, char)
         if char != "0":
             # 消すときは進まない(その場を見ながら消せるように)。
             self.move_cursor(1)
         self.update()
+
+    def _hide_note_at(self, m, slot, grid):
+        """消したばかりの音符を、再解析を待たずに見た目から消す。
+
+        置くときは暫定表示を上に描けばよいが、消すときは親が描いている
+        権威データの音符が残ってしまい、再解析(600ms)まで消えたように
+        見えなかった。手元の音符列からそのスロットぶんを抜いて描き直す。
+        正式な結果が届けば set_notes で丸ごと置き換わる。
+
+        連打・風船の帯(set_spans の側)はここでは触らない。"""
+        raw = getattr(self, "_notes_raw", None)
+        if not raw:
+            return
+        t = self._address_time(m, slot, grid)
+        if t is None:
+            return
+        t_next = self._address_time(m, slot + 1, grid)
+        half = abs(t_next - t) * 0.5 if t_next is not None else 0.01
+        half = max(1e-3, half)
+        # _notes_raw は譜面時刻。chart_time = audio_time + OFFSET。
+        center = t + self.offset
+        kept = [n for n in raw if not (center - half <= n[0] < center + half)]
+        if len(kept) != len(raw):
+            self._notes_raw = kept
+            self._apply_offset_local(self.offset)
 
     # ------------------------------------------------------------------
     # 描画
