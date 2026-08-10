@@ -1241,6 +1241,10 @@ class MainWindow(QMainWindow):
         # actual text, if any, goes right after it, never replacing it.
         content = content.replace("SUBTITLE:--\n", f"SUBTITLE:--{subtitle}\n" if subtitle else "SUBTITLE:--\n", 1)
         content = content.replace("WAVE:\n", f"WAVE:{wave_name}\n", 1)
+        # LEVEL は空だと「未設定」扱いで、そのまま忘れられがち。YouTube から
+        # 作るのはたいてい創作譜面のおにで、後から直すにしても数字が入って
+        # いたほうが早いので 10 を入れておく。
+        content = content.replace("LEVEL:\n", "LEVEL:10\n", 1)
         # BPM/OFFSET auto-detection (experimental) already ran once in the
         # new-project dialog against the downloaded audio - pre-fill the
         # headers with its result rather than leaving them blank/0.00. Best-

@@ -213,6 +213,7 @@ class ChartPreviewWidget(QWidget):
         # 打音表記: one syllable (or None) per note, precomputed by the
         # analyzer - see neotja/se_text.py. Never derived in paintEvent.
         self._note_se = []
+        self._span_se = []
         self._rolls = []
         self._balloons = []
         self._kusudamas = []
@@ -1138,6 +1139,9 @@ class ChartPreviewWidget(QWidget):
         # 5th element is the precomputed 打音表記 syllable (see se_text.py).
         # Tolerated as absent so an older/hand-built dict still loads.
         self._note_se = [(n[4] if len(n) > 4 else None) for n in notes]
+        # 連打・風船・くす玉の頭に出す打音表記 (時刻, 表記, 大か, BPM, SCROLL)。
+        # 音符と同じ帯に描く。古い dict でも落ちないよう既定は空。
+        self._span_se = list(data.get("span_se") or [])
         self._rolls = sorted(data.get("rolls") or [], key=lambda r: r[0])
         self._balloons = sorted(data.get("balloons") or [], key=lambda b: b[0])
         # Kusudama ('9'...'8') is a balloon-shaped span (same 5-tuple shape:
@@ -2744,7 +2748,7 @@ class ChartPreviewWidget(QWidget):
                 painter.setPen(QPen(self._color("border"), 2))
                 painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
                 painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
-        if self._se_text_enabled and self._note_se:
+        if self._se_text_enabled and (self._note_se or self._span_se):
             painter.setClipRect(0, band_bottom, lane_w, footer_h)
             # 音符の色には合わせない。本家素材の帯(灰色)のときは本家と同じ白。
             # 素材が無いときはテーマの中立色(fg)。
@@ -2781,6 +2785,27 @@ class ChartPreviewWidget(QWidget):
                     # 位置は小数のまま(サブピクセル)。整数へ丸めるとスクロール中に
                     # 文字がカクつき、元の見た目と変わってしまう。拡大縮小だけを
                     # 事前に済ませ、貼る位置の滑らかさは元のままにする。
+                    painter.drawPixmap(QPointF(x - spr.width() / 2.0, se_y), spr)
+                    continue
+                size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
+                st = self._se_static_text(label, size)
+                painter.setFont(self._font(size, True))
+                sz = st.size()
+                painter.drawStaticText(int(x - sz.width() / 2.0),
+                                       int(fy - sz.height() / 2.0), st)
+            # 連打・風船・くす玉。帯の頭に「れんだ」「ふうせん」「くすだま」を
+            # 出す。音符と同じで、判定枠を通り過ぎたら消す。数が少ないので
+            # 音符のような二分探索はせず素直に舐める。
+            for t, label, big, bpm, scroll in self._span_se:
+                if t <= now:
+                    continue
+                if reveal_t is not None and t < reveal_t:
+                    continue
+                x = judge_x + (t - now) * self._speed(bpm, scroll)
+                if x < -rb or x > lane_w + rb:
+                    continue
+                spr = self._se_scaled(label, big, footer_h)
+                if spr is not None:
                     painter.drawPixmap(QPointF(x - spr.width() / 2.0, se_y), spr)
                     continue
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL

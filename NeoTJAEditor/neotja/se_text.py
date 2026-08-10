@@ -313,6 +313,40 @@ def compute_se_types(sequence):
     return out
 
 
+def compute_se_labels(notes, rolls=(), balloons=(), kusudamas=()):
+    """SE syllables for every note AND every long-note head.
+
+    Returns (note_labels, roll_labels, balloon_labels, kusudama_labels), each
+    aligned with its input list. Roll/balloon heads take part in the spacing
+    math either way (PeepoDrumKit keeps them in the same note list,
+    cpp:409-434) - what changed is that their own syllable
+    (れんだ/ふうせん/くすだま) is now returned instead of dropped, so the
+    preview can draw it at the head of the span.
+    """
+    merged = []  # (time, kind, bpm, scroll, bucket, index)
+    for i, (t, c, bpm, scroll) in enumerate(notes):
+        merged.append((float(t), CHAR_KIND.get(c), float(bpm), float(scroll), 0, i))
+    for i, r in enumerate(rolls):
+        # (start, end, char, bpm, scroll, hits) - only the head is a note.
+        kind = KIND_DRUMROLL_BIG if r[2] == "6" else KIND_DRUMROLL
+        merged.append((float(r[0]), kind, float(r[3]), float(r[4]), 1, i))
+    for i, b in enumerate(balloons):
+        # (start, end, bpm, scroll, hits)
+        merged.append((float(b[0]), KIND_BALLOON, float(b[2]), float(b[3]), 2, i))
+    for i, k in enumerate(kusudamas):
+        merged.append((float(k[0]), KIND_BALLOON_SPECIAL, float(k[2]), float(k[3]), 3, i))
+    # Stable sort by time only, so notes that share a timestamp keep the
+    # order they were emitted in (the C++ list is beat-sorted the same way).
+    merged.sort(key=lambda e: e[0])
+
+    types = compute_se_types([(e[0], e[1], e[2], e[3]) for e in merged])
+    out = ([None] * len(notes), [None] * len(rolls),
+           [None] * len(balloons), [None] * len(kusudamas))
+    for se_type, entry in zip(types, merged):
+        out[entry[4]][entry[5]] = SE_LABELS.get(se_type) if se_type else None
+    return out
+
+
 def compute_note_se_labels(notes, rolls=(), balloons=(), kusudamas=()):
     """SE syllable per entry of `notes`, in `notes` order.
 
@@ -321,31 +355,9 @@ def compute_note_se_labels(notes, rolls=(), balloons=(), kusudamas=()):
     sequence for the spacing math - PeepoDrumKit keeps them in the same note
     list (cpp:409-434), so a note sitting right before a drumroll must see
     that roll as its `next` or the run-end detection would be wrong - but
-    they get no returned label: NeoTJAEditor draws those spans as capsule
-    bars, not as stretched れんだ/ふうせん sprites (cpp:266-285), so their
-    syllables have nowhere to go.
+    それらの音節がほしいときは compute_se_labels() を使う。
 
     Returns a list of strings (or None) the same length as `notes`.
+    compute_se_labels() の音符ぶんだけを取り出す薄い包み。
     """
-    merged = []  # (time, kind, bpm, scroll, index_into_notes or -1)
-    for i, (t, c, bpm, scroll) in enumerate(notes):
-        merged.append((float(t), CHAR_KIND.get(c), float(bpm), float(scroll), i))
-    for r in rolls:
-        # (start, end, char, bpm, scroll, hits) - only the head is a note.
-        kind = KIND_DRUMROLL_BIG if r[2] == "6" else KIND_DRUMROLL
-        merged.append((float(r[0]), kind, float(r[3]), float(r[4]), -1))
-    for b in balloons:
-        # (start, end, bpm, scroll, hits)
-        merged.append((float(b[0]), KIND_BALLOON, float(b[2]), float(b[3]), -1))
-    for k in kusudamas:
-        merged.append((float(k[0]), KIND_BALLOON_SPECIAL, float(k[2]), float(k[3]), -1))
-    # Stable sort by time only, so notes that share a timestamp keep the
-    # order they were emitted in (the C++ list is beat-sorted the same way).
-    merged.sort(key=lambda e: e[0])
-
-    types = compute_se_types([(e[0], e[1], e[2], e[3]) for e in merged])
-    labels = [None] * len(notes)
-    for se_type, entry in zip(types, merged):
-        if entry[4] >= 0:
-            labels[entry[4]] = SE_LABELS.get(se_type) if se_type else None
-    return labels
+    return compute_se_labels(notes, rolls, balloons, kusudamas)[0]

@@ -1,7 +1,7 @@
 import re
 from decimal import Decimal
 
-from neotja.se_text import compute_note_se_labels
+from neotja.se_text import compute_se_labels
 from neotja.theme import COLORS
 
 
@@ -1139,10 +1139,23 @@ class TJACourseAnalyzer:
         # than in ChartPreviewWidget.paintEvent - that repaints at up to
         # 144 Hz and must not run an O(n) neighbour scan per frame. See
         # neotja/se_text.py for the ported PeepoDrumKit algorithm.
-        se_labels = compute_note_se_labels(out_notes, out_rolls, out_balloons, out_kusudamas)
+        se_labels, roll_se, balloon_se, kusudama_se = compute_se_labels(
+            out_notes, out_rolls, out_balloons, out_kusudamas)
+        # 連打・風船・くす玉の頭に出す打音表記。音符の tuple と違って各種
+        # スパンの tuple には足さない — 帯の tuple は形を決め打ちで読んで
+        # いる箇所が多いので、独立した列として持たせる。
+        # (時刻, 表記, 大か, BPM, SCROLL) で、x はレーン側が速度から出す。
+        span_se = ([(float(r[0]), lb, r[2] == "6", float(r[3]), float(r[4]))
+                    for r, lb in zip(out_rolls, roll_se) if lb]
+                   + [(float(b[0]), lb, False, float(b[2]), float(b[3]))
+                      for b, lb in zip(out_balloons, balloon_se) if lb]
+                   + [(float(k[0]), lb, False, float(k[2]), float(k[3]))
+                      for k, lb in zip(out_kusudamas, kusudama_se) if lb])
+        span_se.sort(key=lambda e: e[0])
 
         return {
             "notes": [n + (se,) for n, se in zip(out_notes, se_labels)],
+            "span_se": span_se,
             "rolls": out_rolls,
             "balloons": out_balloons,
             "kusudamas": out_kusudamas,
