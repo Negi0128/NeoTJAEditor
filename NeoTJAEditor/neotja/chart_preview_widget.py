@@ -575,6 +575,21 @@ class ChartPreviewWidget(QWidget):
         """ゴーゴー区間 [(start, end), ...]。画面側の演出用。"""
         return self._gogo_regions
 
+    def bpm_at(self, t: float) -> float:
+        """時刻 t で効いている BPM。解析済みの bpm_changes を二分探索する。"""
+        if not self._bpm_changes:
+            return 0.0
+        return float(self._bpm_changes[self._idx_at(self._bpm_times, t)][1])
+
+    def is_gogo(self, t: float) -> bool:
+        """時刻 t がゴーゴー区間の中か。"""
+        if not self._gogo_starts:
+            return False
+        i = bisect.bisect_right(self._gogo_starts, t) - 1
+        if i < 0:
+            return False
+        return t < self._gogo_regions[i][1]
+
     def note_time(self, index):
         """index 番目(1始まり)の音符の譜面時刻。範囲外は None。"""
         i = int(index) - 1

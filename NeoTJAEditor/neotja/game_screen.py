@@ -26,6 +26,7 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,
                            QPainter, QPixmap)
 from PySide6.QtWidgets import QWidget
 
+from neotja import chara as chara_mod
 from neotja import gauge as gauge_mod
 from neotja import settings as settings_mod
 from neotja.chart_preview_widget import ChartPreviewWidget
@@ -47,6 +48,13 @@ SE_STRIP_H = 26                # 打音表記帯(レーン本体の直下)
 JUDGE_X_IN_LANE = 81           # レーン左端から判定円の中心まで
 BG_DOWN_Y, BG_DOWN_H = 360, 360
 FOOTER_Y, FOOTER_H = 676, 44
+
+# --- どんちゃん (skin/1_Chara/) ------------------------------------------
+# 素材は 360x184 で、この画面と同じ 1280x720 基準なので等倍で置く。
+# 足元をフッターの少し下に沈めて立たせる。素材が無ければ描かない。
+CHARA_POS = (54, FOOTER_Y - 184 + 12)
+# 連番を1周するのにかける拍数。BPM120・119コマなら 2.0 秒 = 約60fps。
+CHARA_BEATS_PER_LOOP = 4.0
 
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
@@ -434,8 +442,30 @@ class GameScreenWidget(QWidget):
                     self._skin[key] = pm
         self._combo_text_bands = self._measure_combo_text_bands()
         self._gauge_rainbow = self._load_gauge_rainbow()
+        # どんちゃん。連番はコマ単位で遅延読みするので、ここでは枚数を
+        # 数えるだけ(素材が無ければ available() が False になる)。
+        self._chara = chara_mod.CharaAnimator()
+        self._chara.beats_per_loop = CHARA_BEATS_PER_LOOP
         self._title = ""
         self._title_family = self._load_title_font()
+
+    def _draw_chara(self, p, now):
+        """どんちゃんを1コマ描く。素材が無ければ何もしない。
+
+        コマは拍で進める(時間で進めると BPM が変わったとき曲と合わない)。
+        ゴーゴーの出入りは chart_preview に問い合わせる — レーンが持って
+        いる権威データをそのまま使うので、HUD 側で数え直す必要がない。"""
+        anim = self._chara
+        if anim is None or not anim.sprites.available():
+            return
+        try:
+            bpm = self.chart_preview.bpm_at(now)
+            gogo = self.chart_preview.is_gogo(now)
+        except Exception:  # noqa: BLE001
+            bpm, gogo = 0.0, False
+        pm = anim.pixmap(now, bpm, gogo)
+        if pm is not None:
+            p.drawPixmap(CHARA_POS[0], CHARA_POS[1], pm)
 
     def _load_title_font(self):
         """曲名用の勘亭流を読む。skin/ の .otf を優先し、無ければ入って
@@ -919,6 +949,10 @@ class GameScreenWidget(QWidget):
         # 魂ゲージは「叩いた数 × ランク / 10000」。音符数で決まるランクが
         # 1個あたりの点なので、譜面の7割半ばで入魂して以降は満タンのまま
         # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
+        # どんちゃんは下部背景の高さがある表示(録画レイアウト)でだけ出す。
+        # compact はレーンの下に余白が無いので置き場所がない。
+        if not self._compact:
+            self._draw_chara(p, now)
         self._draw_left_panel(p, combo, score, recent, now)
         self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
         self._draw_lane_readouts(p, now, recent)
