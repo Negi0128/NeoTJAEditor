@@ -44,7 +44,12 @@ PANEL_W, PANEL_H = 333, 176
 # すべてこの LANE_Y から導出しているので、ここを変えれば一緒に動く。
 LANE_X, LANE_Y = 333, 196
 LANE_W, LANE_H = 947, 130
-SE_STRIP_H = 26                # 打音表記帯(レーン本体の直下)
+# 打音表記帯(レーン本体の直下)。枠素材(Taiko_Frame.png)では
+#   上辺 48..55 (8px) / 窓 56..185 (130px) / 帯 186..214 (29px) / 下辺 215..223 (9px)
+# = 合計 176px で、これは左パネル(銘板ブロック 333x176)の高さと一致する。
+# 帯を 26px にしていたせいでレーンの箱だけ 3px 低く、パネルと下端が揃って
+# いなかった。素材どおりの 29px にすると 188..363 でぴったり重なる。
+SE_STRIP_H = 29
 JUDGE_X_IN_LANE = 81           # レーン左端から判定円の中心まで
 BG_DOWN_Y, BG_DOWN_H = 360, 360
 FOOTER_Y, FOOTER_H = 676, 44
@@ -140,12 +145,9 @@ FRAME_TOP_BAND = 48          # 素材のうち「ゲージの箱」はここま�
 FRAME_SLIVER_Y0, FRAME_SLIVER_Y1 = 190, 215
 FRAME_TOP_X_OFF = 5          # ゲージの箱だけ右へずらす量
 FRAME_TOP_Y_OFF = 1          # ゲージの箱だけ下へずらす量
-# 素材の下辺(y=215..)は本来 y=352 から始まってほしいが、素材どおりに置くと
-# 355 から始まり、打音表記帯の下端(352)との間に 3px の隙間ができて下地の紺色
-# (#0d1117)が覗く。結果、下の黒帯が 12px に見えて本家より太い。下辺だけを
-# 3px 上げて隙間を潰す。上辺は動かさないので、レーン上端との 1px 合わせと
-# ネームプレートとの高さ合わせはどちらも保たれる。
-FRAME_BOTTOM_Y_OFF = -3      # 枠の下辺だけ上へずらす量
+# 枠の下辺(素材 y=215..)だけ独立して上下できるようにしておく。帯の高さを
+# 素材どおり(29px)にすれば隙間は出ないので、既定は 0。
+FRAME_BOTTOM_Y_OFF = 0       # 枠の下辺だけ上へずらす量
 
 # 背景の絵(下段の屋台 / フッター)を出すか。素材が無ければどのみち描かれない。
 SHOW_BACKGROUND = True
@@ -320,7 +322,8 @@ class GameScreenWidget(QWidget):
         # 打音表記帯だけの高さ(130+26)にする — 余白ぶんの情報(連打カウント等)
         # は画面側の余白に描くほうが本家に近い。
         chart_preview.set_lane_geometry(LANE_W, LANE_H, JUDGE_X_IN_LANE,
-                                        top_margin=0, bottom_margin=0)
+                                        top_margin=0, bottom_margin=0,
+                                        se_height=SE_STRIP_H)
         # コンボはこちらが左パネルの太鼓の上に描くので、レーン内には出さない。
         chart_preview._hide_lane_combo = True
         chart_preview.move(LANE_X, LANE_Y)

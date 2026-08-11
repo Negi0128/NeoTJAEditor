@@ -2013,7 +2013,7 @@ class ChartPreviewWidget(QWidget):
         return self._skin_se[idx]
 
     def set_lane_geometry(self, lane_width, lane_height, judge_x,
-                          top_margin=0, bottom_margin=0):
+                          top_margin=0, bottom_margin=0, se_height=None):
         """レーンの寸法を本家(TNDE)の実測値へ差し替える。
 
         描画コードは一貫して self.LANE_WIDTH / self.JUDGE_X … と参照している
@@ -2031,6 +2031,10 @@ class ChartPreviewWidget(QWidget):
         self._se_scaled_cache = {}
         self.TOP_MARGIN = int(top_margin)
         self.BOTTOM_MARGIN = int(bottom_margin)
+        # 打音表記帯の高さ。ゲーム画面では枠素材の窓(レーン下端〜下辺)に
+        # ぴったり収める必要があるので、呼び出し側から指定できる。
+        if se_height is not None:
+            self.SE_FOOTER_HEIGHT = int(se_height)
         se = self.SE_FOOTER_HEIGHT
         self.WIDGET_HEIGHT = top_margin + self.LANE_HEIGHT + se + bottom_margin
         self.WIDGET_HEIGHT_NO_SE = top_margin + self.LANE_HEIGHT + bottom_margin
