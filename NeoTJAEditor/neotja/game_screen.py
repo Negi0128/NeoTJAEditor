@@ -166,20 +166,20 @@ BG_TOP_STYLE = "layered"
 #   Base.png   1005x188 = 335x188 が3色ぶん横並び
 #   Chara.png   656x699 = 328x233 が [変化2種] x [色3種]
 #   Flower.png  641x552 = 320x184 が [空, 花びら] x [色3種]
+#
+# Chara と Flower は「1色ぶんの行を丸ごと」敷き詰める。行の中に飾りが
+# 2種類(だんご三兄弟 / ひよこ)並んでいるので、行ごと繰り返せば本家と
+# 同じ「交互に出てくる」並びになる。Flower の行は左半分が空で、これが
+# 花びらの間隔そのもの。素材の詰め方がそのまま配置になっている。
 BG_UP_COLOR_ROW = 0          # 0=赤(1P) 1=青 2=橙
-BG_UP_BASE_CELL = (335, 188)
-BG_UP_CHARA_CELL = (328, 233)
-BG_UP_CHARA_VARIANT = 0      # 0=だんご三兄弟 1=ひよこ
-BG_UP_FLOWER_CELL = (320, 184)
-BG_UP_FLOWER_COL = 1         # 左の駒は空なので右を使う
-# 動かし方。本家はコンパイル済みで読み取れないので、OpenTaiko の背景
-# スクリプト(毎秒 X59px / Y14px を切り出し原点に足すだけ)に倣った決め打ち。
-BG_UP_BASE_VX = -14.0        # タイル地の流れ(px/秒、負=左へ)
-BG_UP_FLOWER_VX = -26.0      # 花びらの流れ(px/秒)
-BG_UP_FLOWER_VY = 34.0       # 花びらの落ちる速さ(px/秒)
-# 隅の飾りの置き場所(素材の左上を画面のどこに置くか)。素材は左に18px、
-# 下に22px の余白を持っているので、その分をここで戻している。
-BG_UP_CHARA_POS = (-18, -0)
+BG_UP_BASE_CELL = (335, 188)     # 地は1色ぶんが1駒
+BG_UP_CHARA_ROW = (656, 233)     # 飾りは1色ぶんの行(飾り2種ぶん)
+BG_UP_FLOWER_ROW = (641, 184)    # 花びらも行ごと(左半分は空)
+# 流れる速さ。実機キャプチャ(1920x1080 を 1280 に落として計測)から、
+# 1秒違いの2コマを総当たりで突き合わせて実測した値。
+#   上/中/下どの帯でも 横 -67px, 縦 0px で一致 (3か所 x 2組で同じ)
+# つまり地も飾りも花びらも同じ速さで左へ流れ、縦には動かない。
+BG_UP_SCROLL_VX = -67.0
 
 # --- 下背景の光レイヤー ---------------------------------------------------
 # TNDE の背景は 5_Background/Bg_down/<1..5>/ に「土台 0.png + 重ねる絵」の
@@ -1034,43 +1034,29 @@ class GameScreenWidget(QWidget):
             self._bg_up_cache[ck] = pm
         return pm
 
+    def _tile_row(self, p, pm, now):
+        """1枚を横に敷き詰めて、左へ流しながら上帯に描く。"""
+        if pm is None:
+            return
+        w = pm.width()
+        x = -((now * -BG_UP_SCROLL_VX) % w)
+        while x < SCREEN_W:
+            p.drawPixmap(int(x), 0, pm)
+            x += w
+
     def _draw_bg_top_layers(self, p, now):
-        """上背景を3枚重ねで描く。タイル地と花びらが流れる。"""
+        """上背景を3枚重ねで描く。3枚とも同じ速さで左へ流れる。"""
         row = BG_UP_COLOR_ROW
         base = self._bg_up_cell("bg_up_base", BG_UP_BASE_CELL, row, 0)
         if base is None:
             return
         p.save()
         p.setClipRect(QRect(0, 0, SCREEN_W, BG_TOP_H))
-
-        # --- 地(傘柄)。横に敷き詰めて流す ---
-        bw = base.width()
-        ox = -((now * -BG_UP_BASE_VX) % bw)
-        x = ox
-        while x < SCREEN_W:
-            p.drawPixmap(int(x), 0, base)
-            x += bw
-
-        # --- 花びら。縦横に敷き詰めて斜めに流す ---
-        fl = self._bg_up_cell("bg_up_flower", BG_UP_FLOWER_CELL,
-                              BG_UP_FLOWER_COL, row)
-        if fl is not None:
-            fw, fh = fl.width(), fl.height()
-            fx = -((now * -BG_UP_FLOWER_VX) % fw)
-            fy = ((now * BG_UP_FLOWER_VY) % fh) - fh
-            y = fy
-            while y < BG_TOP_H:
-                x = fx
-                while x < SCREEN_W:
-                    p.drawPixmap(int(x), int(y), fl)
-                    x += fw
-                y += fh
-
-        # --- 隅の飾り。動かない ---
-        ch = self._bg_up_cell("bg_up_chara", BG_UP_CHARA_CELL,
-                              BG_UP_CHARA_VARIANT, row)
-        if ch is not None:
-            p.drawPixmap(BG_UP_CHARA_POS[0], BG_UP_CHARA_POS[1], ch)
+        self._tile_row(p, base, now)                                  # 地(傘柄)
+        self._tile_row(p, self._bg_up_cell("bg_up_flower",            # 花びら
+                                           BG_UP_FLOWER_ROW, 0, row), now)
+        self._tile_row(p, self._bg_up_cell("bg_up_chara",             # 飾り
+                                           BG_UP_CHARA_ROW, 0, row), now)
         p.restore()
 
     def _draw_bg_light(self, p, now):
