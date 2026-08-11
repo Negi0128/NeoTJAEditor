@@ -775,9 +775,17 @@ class GameScreenWidget(QWidget):
 
         # 「連打!!」の札は最後のコマにしか入っていない。1打でも入ったら
         # 数字と一緒に出したいので、開く途中のコマは使わず一気に開く。
-        # (0打のあいだだけ閉じた扇)
+        #
+        # ここに来る時点で kind は必ず "roll"(風船は上の分岐で return 済み)、
+        # つまり連打区間の真っ最中。以前は「1打でも入ったら開く」つもりで
+        # count>=1 を見ていたが、count は _live_top_count() が
+        # int(hits * 経過割合) で補間した値なので、1小節に満たない極短の連打
+        # (16分1つぶんなど)では区間が終わるまで count が 0 のまま=扇が
+        # 閉じたコマで止まって見えるバグになっていた。連打区間に入っている
+        # こと自体が「開いている」の条件なので、count を見ずに開き切ったコマ
+        # を出す。
         cw, ch = ROLL_FAN_CELL
-        frame = ROLL_FAN_FRAMES - 1 if int(count) >= 1 else 0
+        frame = ROLL_FAN_FRAMES - 1
         dw, dh = cw * ROLL_FAN_SCALE, ch * ROLL_FAN_SCALE
         p.drawPixmap(QRect(int(ROLL_FAN_CENTER_X - dw / 2),
                            int(ROLL_FAN_BOTTOM - dh), int(dw), int(dh)),

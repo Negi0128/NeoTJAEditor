@@ -122,8 +122,13 @@ class HighSpeedDialog(QDialog):
             def want(ch):
                 return ch in self._ACTIVE
 
+        # 数字が1つも無い小節(「,」だけの行)も1スロットぶんとして数える。
+        # 文字が無いと下の _render で #SCROLL を挿す場所が無く、その小節が
+        # 丸ごと飛ばされていた("0," と書かないと効かない、という症状)。
+        # 仮想の1文字を "0" と見なすので、「なめらか」では効き、「ノーツ毎」
+        # では(0 は音符ではないので)従来どおり効かない。
         total = sum(1 for m in parsed if m["type"] == "measure"
-                    for ch in m["notes"] if want(ch))
+                    for ch in (m["notes"] or "0") if want(ch))
         if total == 0:
             self.txt_after.setPlainText(raw)
             return
@@ -170,6 +175,14 @@ class HighSpeedDialog(QDialog):
             for idx, line in item["breaks"]:
                 breaks.setdefault(idx, []).append(line)
             notes = item["notes"]
+            # 数字ゼロの小節は「仮想の1スロット」として扱う。文字は出さず、
+            # #SCROLL とカンマだけを自分の行に置く(前の小節の行にカンマを
+            # 足すと "0,," になって小節が1つ消えてしまう)。
+            empty_measure = not notes
+            if empty_measure and want("0"):
+                flush()
+                out.append(scroll_at(ni))
+                ni += 1
             for i, ch in enumerate(notes):
                 for line in breaks.get(i, ()):
                     flush()
@@ -189,7 +202,11 @@ class HighSpeedDialog(QDialog):
             if item["comment"]:
                 tail += (" " if tail else "") + item["comment"]
             if tail:
-                append_tail(tail)
+                if empty_measure:
+                    flush()
+                    out.append(tail)
+                else:
+                    append_tail(tail)
             flush()
         return out
 
