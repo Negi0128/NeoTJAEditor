@@ -42,7 +42,7 @@ PANEL_W, PANEL_H = 333, 176
 # レーン本体の左上。Y は本家に合わせて 192 から 2px 下げた(要望)。判定枠・
 # 火花・判定文字「良」・打音表記・連打数・レーン枠・譜面ウィジェット本体は
 # すべてこの LANE_Y から導出しているので、ここを変えれば一緒に動く。
-LANE_X, LANE_Y = 333, 194
+LANE_X, LANE_Y = 333, 196
 LANE_W, LANE_H = 947, 130
 SE_STRIP_H = 26                # 打音表記帯(レーン本体の直下)
 JUDGE_X_IN_LANE = 81           # レーン左端から判定円の中心まで
@@ -61,7 +61,7 @@ FOOTER_Y, FOOTER_H = 676, 44
 CHARA_CONTENT_LEFT = 76      # 素材の中で絵が始まる x
 CHARA_CONTENT_BOTTOM = 183   # 同 足元の y
 #: 画面上での「中身の左端」と「足元」。ここだけ触れば位置が動く。
-CHARA_ANCHOR = (61, 188)
+CHARA_ANCHOR = (76, 188)
 CHARA_POS = (CHARA_ANCHOR[0] - CHARA_CONTENT_LEFT,
              CHARA_ANCHOR[1] - CHARA_CONTENT_BOTTOM)
 # 連番を1周するのにかける拍数。BPM120・119コマなら 2.0 秒 = 約60fps。
@@ -140,6 +140,12 @@ FRAME_TOP_BAND = 48          # 素材のうち「ゲージの箱」はここま�
 FRAME_SLIVER_Y0, FRAME_SLIVER_Y1 = 190, 215
 FRAME_TOP_X_OFF = 5          # ゲージの箱だけ右へずらす量
 FRAME_TOP_Y_OFF = 1          # ゲージの箱だけ下へずらす量
+# 素材の下辺(y=215..)は本来 y=352 から始まってほしいが、素材どおりに置くと
+# 355 から始まり、打音表記帯の下端(352)との間に 3px の隙間ができて下地の紺色
+# (#0d1117)が覗く。結果、下の黒帯が 12px に見えて本家より太い。下辺だけを
+# 3px 上げて隙間を潰す。上辺は動かさないので、レーン上端との 1px 合わせと
+# ネームプレートとの高さ合わせはどちらも保たれる。
+FRAME_BOTTOM_Y_OFF = -3      # 枠の下辺だけ上へずらす量
 
 # 背景の絵(下段の屋台 / フッター)を出すか。素材が無ければどのみち描かれない。
 SHOW_BACKGROUND = True
@@ -943,7 +949,9 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(fx, fy + FRAME_TOP_BAND, frame,
                          0, FRAME_TOP_BAND, fw, s0 - FRAME_TOP_BAND)
             p.drawPixmap(fx + 1, fy + s0, frame, 1, s0, fw - 1, s1 - s0)
-            p.drawPixmap(fx, fy + s1, frame, 0, s1, fw, frame.height() - s1)
+            # 下辺だけ 3px 上げて、帯の下端(352)と枠の下辺(355)の隙間を潰す。
+            p.drawPixmap(fx, fy + s1 + FRAME_BOTTOM_Y_OFF, frame,
+                         0, s1, fw, frame.height() - s1)
         else:
             p.fillRect(QRect(LANE_X, LANE_Y - 2, LANE_W, 2), QColor(0, 0, 0, 220))
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
