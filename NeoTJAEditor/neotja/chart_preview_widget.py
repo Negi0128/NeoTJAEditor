@@ -1516,6 +1516,10 @@ class ChartPreviewWidget(QWidget):
     # ------------------------------------------------------------------
     # Navigation-point helpers (机能1)
     # ------------------------------------------------------------------
+    #: 1小節目の手前に置く「0小節目」の助走(秒)。ここから再生すると譜面が
+    #: いきなり始まらない。#MEASURE には影響されない固定値。
+    LEAD_IN_SEC = 1.0
+
     def _rebuild_nav_points(self):
         """Rebuilds `_nav_points` from the current bar list + OFFSET and
         re-derives `_current_idx`/`_anchor_idx` against the live position so
@@ -1524,8 +1528,16 @@ class ChartPreviewWidget(QWidget):
         OFFSET convention: audio_time = chart_time - OFFSET. Bars before the
         audio start (negative after subtracting OFFSET) clamp to 0, then the
         list is sorted and near-duplicates are collapsed so stepping never
-        lands on two points at effectively the same time."""
-        pts = [0.0]
+        lands on two points at effectively the same time.
+
+        先頭の点(いわゆる0小節目)は音源の 0 秒ではなく「1小節目の
+        LEAD_IN_SEC 秒前」に置く。1小節目から「前の小節へ」と戻ったときに、
+        いきなり曲頭まで飛ぶのではなく助走ぶんだけ戻ってほしいため
+        (Home も同じ点へ行く)。音源の頭より前にはならないようクランプする。
+        曲の 0 秒そのものへは「停止」で戻れる。"""
+        first_bar = (max(0.0, self._bar_times[0] - self._offset)
+                     if self._bar_times else 0.0)
+        pts = [max(0.0, first_bar - self.LEAD_IN_SEC)]
         for bt in self._bar_times:
             pts.append(max(0.0, bt - self._offset))
         pts.sort()
@@ -1750,7 +1762,7 @@ class ChartPreviewWidget(QWidget):
         self._playing = False
 
     def seek_to_first_measure(self):
-        """Home: 一時停止して カレントを 0小節目(曲頭) へ。"""
+        """Home: 一時停止して カレントを 0小節目(1小節目の LEAD_IN_SEC 秒前) へ。"""
         self._pause_for_jump()
         self._seek_to_nav_idx(0)
 
