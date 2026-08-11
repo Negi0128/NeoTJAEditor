@@ -153,7 +153,7 @@ FRAME_BOTTOM_Y_OFF = 0       # 枠の下辺だけ上へずらす量
 SHOW_BACKGROUND = True
 # 上段(レーンより上)の風景は別扱い。ここを False にすると真っ黒で塗る。
 # 上段は曲名・魂ゲージ・どんちゃんが乗る帯で、絵を敷くとそれらが読みにくい。
-SHOW_BACKGROUND_TOP = False
+SHOW_BACKGROUND_TOP = True
 BACKGROUND_TOP_COLOR = "#000000"
 
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
