@@ -5,7 +5,7 @@ import time as _time
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
-    QStaticText,
+    QRegion, QStaticText,
 )
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QWidget
@@ -173,6 +173,32 @@ class ChartPreviewWidget(QWidget):
     GOGO_ATT = 0.05
     GOGO_DEC = 0.20
     GOGO_REL = 0.10
+
+    # ゴーゴー区間の地(Lane_GoGo.png / GOGO_TINT)の切り替わり方。
+    # 「フェード」ではなく「縦中央から上下へ帯が広がる」動きにする。
+    # OpenTaiko(MIT ライセンス, src/Stages/07.Game/Taiko/CActImplLaneTaiko.cs)
+    # の実装に合わせた5段階のステップ(連続補間ではない - 本家がそうだから):
+    # ゴーゴー開始時に 1目盛り18msのカウンタ(0..17)を回し、その値で縦倍率と
+    # 描画yのずらしを切り替えている(565行目でカウンタ生成、149〜163行目で
+    # 参照)。対応関係(元コードのカウンタ値 -> 経過時間 -> 縦倍率):
+    #   カウンタ 0-4  (elapsed <  90ms) -> 倍率 0.2
+    #   カウンタ 5    (elapsed < 108ms) -> 倍率 0.4
+    #   カウンタ 6    (elapsed < 126ms) -> 倍率 0.6
+    #   カウンタ 7-8  (elapsed < 162ms) -> 倍率 0.8
+    #   カウンタ 9-   (elapsed >=162ms) -> 倍率 1.0
+    # 元コードは描画yを"ずらす"(縦中央固定・高さに倍率をかけるのと同じ意味 -
+    # レーン高さ135pxで検算すると +54/+40/+26/+13/+0 と一致する)。抜けるとき
+    # のアニメーションは無し: OpenTaiko もゴーゴー終了と同時に地を描かなく
+    # なるだけで、閉じるモーションは無い。
+    GOGO_OPEN_T1 = 0.090
+    GOGO_OPEN_T2 = 0.108
+    GOGO_OPEN_T3 = 0.126
+    GOGO_OPEN_T4 = 0.162
+    GOGO_OPEN_SCALE1 = 0.2
+    GOGO_OPEN_SCALE2 = 0.4
+    GOGO_OPEN_SCALE3 = 0.6
+    GOGO_OPEN_SCALE4 = 0.8
+    GOGO_OPEN_SCALE_FULL = 1.0
 
     PANEL_INSET = 14           # left margin so the combo/course block reads as a floating card, not edge-to-edge
     PANEL_GAP = 24             # gap between the panel's right edge and the judgment ring
@@ -678,6 +704,35 @@ class ChartPreviewWidget(QWidget):
         v *= 0.5
         return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
+    def _gogo_open_scale(self, now: float):
+        """ゴーゴー区間の地(Lane_GoGo.png / GOGO_TINT)を「縦中央から広がる」
+        動きにするための縦倍率を返す。区間外なら None(=描かない)。
+
+        OpenTaiko(MIT, CActImplLaneTaiko.cs)のカウンタ切り替えを、連続補間
+        ではなく段階のまま移植している(クラス定数 GOGO_OPEN_T1-4 / SCALE1-4
+        のコメントに出典と対応表がある)。抜けるとき(区間終了後)は本家と
+        同じく即座に描かなくなるだけで、閉じるモーションは無い。判定円まわり
+        の炎(GoGoFire.png)や判定リングの脈動(gogo_pulse)はここでは触らない。"""
+        starts = self._gogo_starts
+        if not starts:
+            return None
+        i = bisect.bisect_right(starts, now) - 1
+        if i < 0:
+            return None
+        g0, g1 = self._gogo_regions[i]
+        if not (g0 <= now <= g1):
+            return None
+        elapsed = now - g0
+        if elapsed < self.GOGO_OPEN_T1:
+            return self.GOGO_OPEN_SCALE1
+        if elapsed < self.GOGO_OPEN_T2:
+            return self.GOGO_OPEN_SCALE2
+        if elapsed < self.GOGO_OPEN_T3:
+            return self.GOGO_OPEN_SCALE3
+        if elapsed < self.GOGO_OPEN_T4:
+            return self.GOGO_OPEN_SCALE4
+        return self.GOGO_OPEN_SCALE_FULL
+
     SE_MIN_CONTRAST = 3.0  # WCAG 2.1 minimum for large/bold text
 
     @staticmethod
@@ -899,10 +954,29 @@ class ChartPreviewWidget(QWidget):
         cap_dst = cap.width() * scale
         total = max(cap_dst, x1 - x0)
         mid_dst = max(0.0, total - cap_dst)
-        painter.drawPixmap(QRectF(x0, cy - r, mid_dst, d), mid,
+        # head は丸い顔で、x0-r〜x0+r の外接矩形をいっぱいには塗っていない
+        # (素材を alpha でタイトクロップした結果、正方形より少し細い)。
+        # 胴(mid)を今までどおり x0 から描くと、顔の右上/右下だけ胴の描画
+        # 範囲に入らず、丸みの外側にレーンの地が三日月状に透けて見える
+        # ("連打の冒頭が透ける"の原因)。胴を頭の左端(x0-r)まで潜り込ませて
+        # 先に敷いておき、頭は今までどおり最後に上から重ねる - 頭の見た目
+        # (大きさ・位置)は変えずに、頭の陰に隠れる部分だけ胴の生地で埋まる。
+        #
+        # ただし素直に x0-r から敷くと、今度は帯の上端・下端(顔がいちばん
+        # 細くなる高さ)で胴が顔の左へはみ出す。そこで「x0 より右」と「顔の
+        # 円の中」を足した形にクリップしてから敷く。こうすると顔の輪郭の
+        # 内側だけが埋まり、外へは1pxも出ない。
+        painter.save()
+        region = QRegion(int(x0), int(cy - r) - 1,
+                         int(total) + 2, int(d) + 2)
+        region = region.united(QRegion(int(x0 - r), int(cy - r),
+                                       int(d), int(d), QRegion.Ellipse))
+        painter.setClipRegion(region, Qt.IntersectClip)
+        painter.drawPixmap(QRectF(x0 - r, cy - r, mid_dst + r, d), mid,
                            QRectF(0, 0, mid.width(), mid.height()))
         painter.drawPixmap(QRectF(x0 + mid_dst, cy - r, cap_dst, d), cap,
                            QRectF(0, 0, cap.width(), cap.height()))
+        painter.restore()
         painter.drawPixmap(QPointF(x0 - r, cy - r), head)  # pre-scaled, sub-pixel
         return True
 
@@ -2418,17 +2492,26 @@ class ChartPreviewWidget(QWidget):
         # ゴーゴー。本家の素材は「半透明の赤(左が濃く右へ薄れる)」なので、
         # 地に差し替えるのではなく地の上に重ねる。素材が無いときだけ、
         # 従来どおり画面全体を一色で染める。
-        # 全区間の線形走査をやめ、開始時刻列(_gogo_starts)の bisect で
-        # 「now 以前に始まった最後の区間」だけを見る(gogo_pulse と同じ手法)。
-        _gi = bisect.bisect_right(self._gogo_starts, now) - 1
-        in_gogo = (_gi >= 0 and now <= self._gogo_regions[_gi][1])
-        if in_gogo:
+        # 入り方はフェード(不透明度)ではなく、縦中央から上下へ帯が広がる
+        # モーション(_gogo_open_scale、OpenTaiko 準拠の5段階)。横幅は常に
+        # 全幅のまま、高さだけ band_h*倍率 に育つ - クリップ矩形をレーン
+        # 中央で挟んで狭めることで実現している(横方向のクリップは常に
+        # lane_w いっぱいなので、地の絵自体は動かさずに見える範囲だけを
+        # 帯状に絞っている)。抜けるときは None になった時点で即座に描かなく
+        # なる(閉じるモーションは無い - OpenTaiko も同様)。
+        gogo_scale = self._gogo_open_scale(now)
+        if gogo_scale is not None:
+            open_h = band_h * gogo_scale
+            y0 = mid_y - open_h / 2.0
+            painter.save()
+            painter.setClipRect(QRectF(0, y0, lane_w, open_h), Qt.IntersectClip)
             if self._skin_lane_gogo is not None:
                 painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
                                    self._skin_lane_gogo,
                                    QRectF(self._skin_lane_gogo.rect()))
             else:
-                painter.fillRect(self.rect(), GOGO_TINT)
+                painter.fillRect(QRectF(0, band_top, lane_w, band_h), GOGO_TINT)
+            painter.restore()
 
         # 叩いた瞬間の火花。地の上・音符の下に置く(本家も音符が上に来る)。
         # 音符帯へのクリップが効いているので、260px の絵は帯の高さで切れる。
