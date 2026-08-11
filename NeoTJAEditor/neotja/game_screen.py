@@ -19,6 +19,7 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 だけの 1280x360。どちらも同じ座標系なので、切り替えても位置がずれない。
 """
 
+import math
 import os
 
 from PySide6.QtCore import Qt, QRect, QTimer
@@ -154,6 +155,20 @@ SHOW_BACKGROUND = True
 # 上段(レーンより上)の風景は別扱い。ここを False にすると真っ黒で塗る。
 # 上段は曲名・魂ゲージ・どんちゃんが乗る帯で、絵を敷くとそれらが読みにくい。
 SHOW_BACKGROUND_TOP = True
+
+# --- 下背景の光レイヤー ---------------------------------------------------
+# TNDE の背景は 5_Background/Bg_down/<1..5>/ に「土台 0.png + 重ねる絵」の
+# 形で入っていて(本家はこの5セットから毎回ランダムに選ぶ)、こちらは
+# セット1 に固定して使っている。土台(Bg_down.png)だけを敷いていたが、
+# 同じセットには提灯の光だけを描いた 1.png があり、これが未使用だった。
+# 加算合成で重ねると屋台の提灯が灯る。
+#
+# ゆらぎの速さと明るさは本家(コンパイル済み)から読み取れないので、
+# OpenTaiko の背景スクリプトが時間ベースの固定周期でループしている
+# (Normal/Up/0 は3秒周期の sin)のに倣った、こちらの決め打ち。
+SHOW_BACKGROUND_LIGHT = True
+BG_LIGHT_PERIOD = 2.4        # ゆらぎの周期(秒)
+BG_LIGHT_MIN, BG_LIGHT_MAX = 0.55, 1.0   # 不透明度の下限/上限
 BACKGROUND_TOP_COLOR = "#000000"
 
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
@@ -438,6 +453,7 @@ class GameScreenWidget(QWidget):
         for key, rel in (
             ("bg_top", "Background.png"),
             ("bg_down", "Bg_down.png"),
+            ("bg_down_light", "Bg_down_Light.png"),
             ("footer", "Footer.png"),
             ("panel", "Taiko_Background.png"),
             ("lane_frame", "Taiko_Frame.png"),
@@ -960,6 +976,24 @@ class GameScreenWidget(QWidget):
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
                        QColor(0, 0, 0, 220))
 
+    def _draw_bg_light(self, p, now):
+        """下背景の提灯の光を、加算合成でゆっくり明滅させながら重ねる。"""
+        if not (SHOW_BACKGROUND and SHOW_BACKGROUND_LIGHT):
+            return
+        lit = self._skin.get("bg_down_light")
+        if lit is None:
+            return
+        phase = (now % BG_LIGHT_PERIOD) / BG_LIGHT_PERIOD
+        # 0.5+0.5cos なので 1.0(いちばん明るい)から始めてひと呼吸する。
+        k = 0.5 + 0.5 * math.cos(2.0 * math.pi * phase)
+        p.save()
+        # フッター(676..)は光より手前に出るので、そこは塗らない。
+        p.setClipRect(QRect(0, BG_DOWN_Y, SCREEN_W, FOOTER_Y - BG_DOWN_Y))
+        p.setCompositionMode(QPainter.CompositionMode_Plus)
+        p.setOpacity(BG_LIGHT_MIN + (BG_LIGHT_MAX - BG_LIGHT_MIN) * k)
+        p.drawPixmap(0, BG_DOWN_Y, lit)
+        p.restore()
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -983,6 +1017,7 @@ class GameScreenWidget(QWidget):
         # どんちゃんは下部背景の高さがある表示(録画レイアウト)でだけ出す。
         # compact はレーンの下に余白が無いので置き場所がない。
         if not self._compact:
+            self._draw_bg_light(p, now)
             self._draw_chara(p, now)
         self._draw_left_panel(p, combo, score, recent, now)
         self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
