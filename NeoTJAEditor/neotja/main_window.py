@@ -7,7 +7,7 @@ import tempfile
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QTimer, QByteArray, QThread, Signal
+from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -156,6 +156,12 @@ class MainWindow(QMainWindow):
     def __init__(self, app):
         super().__init__()
         self.app = app
+        # Alt単独の押下/離しでメニューバーへフォーカスが移る既定動作を止める
+        # (eventFilter 参照)。QApplication へ登録するアプリ全体フィルタは、
+        # QMenuBar が MainWindow へ独自に張っているオブジェクト個別フィルタ
+        # (Alt単独リリースでメニューをハイライトする内蔵動作)より先に呼ばれる
+        # ので、そちらへ生の Alt イベントが渡る前にここで握りつぶせる。
+        self.app.installEventFilter(self)
 
         self.config_data = settings_mod.load_settings()
         apply_theme(app, self.config_data.get("theme", "dark"))
@@ -1622,6 +1628,19 @@ class MainWindow(QMainWindow):
         if not self._unsaved_check():
             return
         self._open_path(path)
+
+    def eventFilter(self, obj, event):
+        # Alt はドン/カの大音符入力(Alt+F/J)、Alt+0〜9 のカスタムショートカット、
+        # 命令挿入(Alt+B/D/G/L/R)など、このアプリでは修飾キーとして多用している。
+        # Qt の既定では Alt を単独で押して離すとメニューバーがハイライトされ、
+        # 矢印キーでの操作待ちになってしまう(=キー入力の邪魔)。ここでは
+        # Key_Alt そのものの生イベント(押下/離し)だけを握りつぶす。
+        # Alt+何か の組み合わせは、組み合わせ先のキー(F/J/0〜9 等)のイベント
+        # 側に AltModifier が乗って別に届くので、これを止めても影響しない。
+        # F10 での経路(F10 は Key_Alt ではない)にも影響しない。
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease) and event.key() == Qt.Key_Alt:
+            return True
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
         # _updating means the unsaved check already ran and the updater batch is

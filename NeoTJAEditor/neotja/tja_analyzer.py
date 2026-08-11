@@ -1157,15 +1157,17 @@ class TJACourseAnalyzer:
         # neotja/se_text.py for the ported PeepoDrumKit algorithm.
         se_labels, roll_se, balloon_se, kusudama_se = compute_se_labels(
             out_notes, out_rolls, out_balloons, out_kusudamas)
-        # 連打・風船・くす玉の頭に出す打音表記。音符の tuple と違って各種
-        # スパンの tuple には足さない — 帯の tuple は形を決め打ちで読んで
-        # いる箇所が多いので、独立した列として持たせる。
-        # (時刻, 表記, 大か, BPM, SCROLL) で、x はレーン側が速度から出す。
-        span_se = ([(float(r[0]), lb, r[2] == "6", float(r[3]), float(r[4]))
+        # 連打・風船・くす玉に出す打音表記。音符の tuple と違って各種スパンの
+        # tuple には足さない — 帯の tuple は形を決め打ちで読んでいる箇所が
+        # 多いので、独立した列として持たせる。
+        # (開始, 終了, 表記, 大か, BPM, SCROLL)。終了まで持たせるのは、連打の
+        # 表記が「連打ーーーっ!!」と区間いっぱいに伸びるため(x はレーン側が
+        # 速度から出す)。
+        span_se = ([(float(r[0]), float(r[1]), lb, r[2] == "6", float(r[3]), float(r[4]))
                     for r, lb in zip(out_rolls, roll_se) if lb]
-                   + [(float(b[0]), lb, False, float(b[2]), float(b[3]))
+                   + [(float(b[0]), float(b[1]), lb, False, float(b[2]), float(b[3]))
                       for b, lb in zip(out_balloons, balloon_se) if lb]
-                   + [(float(k[0]), lb, False, float(k[2]), float(k[3]))
+                   + [(float(k[0]), float(k[1]), lb, False, float(k[2]), float(k[3]))
                       for k, lb in zip(out_kusudamas, kusudama_se) if lb])
         span_se.sort(key=lambda e: e[0])
 

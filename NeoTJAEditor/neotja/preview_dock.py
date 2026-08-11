@@ -458,6 +458,15 @@ class PreviewDock(QDockWidget):
         layout = QVBoxLayout(content)
         self._content_widget = content
 
+        # Peepo式作譜(下部パネルの「作譜」モード)は実験的機能として既定オフ。
+        # settings.json の peepo_chart_edit(環境設定ダイアログ「実験的機能」
+        # タブ)。オフのときは「作譜」ページをスタックへ足さない(≒3モードで
+        # 循環)だけにして、ChartEditWaveform 自体は常に作る。ここで作らずに
+        # self.chart_edit を None のままにすると、_waveforms()/_on_preview_frame/
+        # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ
+        # ならなくなり事故りやすいので、ページに載せないだけに留める方が安全。
+        self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
+
         self.title_label = QLabel("(WAVEファイルなし)")
         layout.addWidget(self.title_label)
 
@@ -503,12 +512,13 @@ class PreviewDock(QDockWidget):
         # game_waveform は後(_build_sakufu_page)で作られるので遅延参照する。
         self.chart_preview.set_checkpoints_changed_cb(self._on_preview_checkpoints)
 
-        # 下部パネルを3モードの QStackedWidget に(フェーズ3):
+        # 下部パネルを QStackedWidget に(フェーズ3):
         #   index 0 = 非表示モード(曲名・サブタイトルだけ表示) ← 既定
-        #   index 1 = 作譜モード(波形 + 再生速度スライダー)
-        #   index 2 = 情報モード(既存 ChartInfoBar)
+        #   index 1 = 音声波形モード(見るだけ)
+        #   index 2 = 作譜モード(波形 + 再生速度スライダー) ※実験的機能が有効な時のみ
+        #   最後  = 情報モード(既存 ChartInfoBar)
         # 先頭(index 0)が起動時の既定表示になるので、既定を「非表示」にし、
-        # Tab/トグルは 非表示→作譜→情報→… と循環する。非表示でも「今どの曲を
+        # Tab/トグルは 非表示→(作譜→)情報→… と循環する。非表示でも「今どの曲を
         # 見ているか」は分かるように曲名・サブタイトルだけは残す。
         self._wave_page = self._build_wave_page()
         self._edit_page = self._build_edit_page()
@@ -516,15 +526,19 @@ class PreviewDock(QDockWidget):
         self.bottom_stack = QStackedWidget()
         self.bottom_stack.addWidget(self._title_page)   # 0 非表示(曲名のみ)
         self.bottom_stack.addWidget(self._wave_page)    # 1 音声波形(見るだけ)
-        self.bottom_stack.addWidget(self._edit_page)    # 2 作譜(音符を置ける)
-        self.bottom_stack.addWidget(self.info_bar)      # 3 情報
+        if self._peepo_enabled:
+            self.bottom_stack.addWidget(self._edit_page)  # 2 作譜(音符を置ける、実験的機能)
+        self.bottom_stack.addWidget(self.info_bar)      # 情報(有効時3、無効時2)
 
         # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
         # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
-        # ページに合わせてスタックの高さを固定する。
-        bottom_h = max(self.info_bar.minimumHeight(),
-                       self._wave_page.sizeHint().height(),
-                       self._edit_page.sizeHint().height())
+        # ページに合わせてスタックの高さを固定する。作譜ページを積んでいない
+        # ときはその高さを候補から外す(でないと使わないページの高さに
+        # 引きずられて下部パネルが無駄に高くなる)。
+        heights = [self.info_bar.minimumHeight(), self._wave_page.sizeHint().height()]
+        if self._peepo_enabled:
+            heights.append(self._edit_page.sizeHint().height())
+        bottom_h = max(heights)
         self.bottom_stack.setFixedHeight(bottom_h)
         self._bottom_panel = QWidget()
         bp = QVBoxLayout(self._bottom_panel)
@@ -549,7 +563,15 @@ class PreviewDock(QDockWidget):
         # どれもフォーカスは奪わない(Space/Tab/PgUp/PgDn の操作対象はレーンの
         # ままにする)。録画は通常再生モードのときだけ出す — 作譜/情報モードは
         # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
-        self._mode_names = ["通常再生", "音声波形", "作譜", "情報"]
+        # ページ番号は上のスタック組み立てと連動させる(作譜が無効なら3つで
+        # 循環)。増減したらここだけ見ればよいように名前を付ける。
+        self.MODE_TITLE, self.MODE_WAVE = 0, 1
+        if self._peepo_enabled:
+            self._mode_names = ["通常再生", "音声波形", "作譜", "情報"]
+            self.MODE_EDIT, self.MODE_INFO = 2, 3
+        else:
+            self._mode_names = ["通常再生", "音声波形", "情報"]
+            self.MODE_EDIT, self.MODE_INFO = None, 2
         right = self.game_screen.width() - 8
 
         self.mode_button = self._lane_button(self._mode_names[0], 96,
@@ -933,12 +955,11 @@ class PreviewDock(QDockWidget):
         if color:
             self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
 
-    #: 下部パネルのページ番号。増減したらここだけ見ればよいように名前を付ける。
-    MODE_TITLE, MODE_WAVE, MODE_EDIT, MODE_INFO = 0, 1, 2, 3
-
     def cycle_bottom_mode(self):
-        """通常再生→音声波形→作譜→情報→… と循環。Tab キー(chart_preview)と
-        モードトグルボタンの両方から呼ばれる。"""
+        """通常再生→音声波形→(作譜→)情報→… と循環。作譜は実験的機能
+        (peepo_chart_edit)が有効なときだけ挟まる(_build_ui でページ自体を
+        積んでいないので % self.bottom_stack.count() が自然に3つで回る)。
+        Tab キー(chart_preview)とモードトグルボタンの両方から呼ばれる。"""
         idx = (self.bottom_stack.currentIndex() + 1) % self.bottom_stack.count()
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])

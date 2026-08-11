@@ -719,6 +719,47 @@ class ChartPreviewWidget(QWidget):
             self._qcolor_cache[cache_key] = c
         return c
 
+    def _draw_roll_se(self, painter, x0, x1, big, se_y, fy, footer_h):
+        """連打の打音表記を区間いっぱいに伸ばして描く。
+
+        「連打」(大なら「連打(大)」)を頭に置き、そこから区間の終わりまで
+        「ー」を隙間なく敷き詰め、最後を「ーっ‼」で締める。ー は途中で
+        切れると線が途切れて見えるので、敷き詰めた上から尾と頭を重ねて
+        描き、はみ出したぶんはクリップで落とす。"""
+        head = self._se_scaled("れんだ", big, footer_h)
+        mid = self._se_scaled(self.SE_ROLL_MID, False, footer_h)
+        tail = self._se_scaled(self.SE_ROLL_TAIL, False, footer_h)
+        if head is None or mid is None or tail is None:
+            # 素材が無い環境。文字で「連打ーーっ!!」相当を1つ置くに留める。
+            size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
+            st = self._se_static_text("連打(大)" if big else "連打", size)
+            painter.setFont(self._font(size, True))
+            sz = st.size()
+            painter.drawStaticText(int(x0 - sz.width() / 2.0),
+                                   int(fy - sz.height() / 2.0), st)
+            return
+        # 頭と尾はそれぞれ連打の頭・尾の音符に中心をそろえる(帯の丸と同じ)。
+        head_l = x0 - head.width() / 2.0
+        head_r = head_l + head.width()
+        tail_r = x1 + tail.width() / 2.0
+        tail_l = tail_r - tail.width()
+        if tail_l < head_r:
+            # 区間が短くて「ー」を挟む余地が無い。頭だけ出す(尾を重ねると
+            # 字が潰れて読めなくなるため)。
+            painter.drawPixmap(QPointF(head_l, se_y), head)
+            return
+        # 「ー」は敷き詰めない。素材の「ー」は上下左右に縁取りが付いた独立した
+        # 字なので、並べると縁どうしが当たって隙間のある点線に見えてしまう。
+        # かといって字ごと横に引き伸ばすと丸い両端まで伸びて棒が細って見える。
+        # 真ん中の平らな1列だけを取って引き伸ばす(いわゆる9スライス)。太さと
+        # 上下の縁はそのままに、どれだけ長くても1本に繋がる。
+        mid_col = QRectF(max(0.0, mid.width() / 2.0 - 1.0), 0,
+                         min(2.0, float(mid.width())), mid.height())
+        painter.drawPixmap(QRectF(head_r, se_y, tail_l - head_r, mid.height()),
+                           mid, mid_col)
+        painter.drawPixmap(QPointF(tail_l, se_y), tail)
+        painter.drawPixmap(QPointF(head_l, se_y), head)
+
     def _se_static_text(self, label: str, size: int) -> QStaticText:
         family = self.font().family()
         if family != self._se_static_family:
@@ -1676,8 +1717,15 @@ class ChartPreviewWidget(QWidget):
     # 帯の高さに対する打音文字の倍率。段には字の上下に余白があるので、
     # 1.0 より大きくしても字そのものは帯に収まる。
     SE_SPRITE_SCALE = 1.2
+    # SENotes.png の段: 0 ドン / 1 ド / 2 コ / 3 カッ / 4 カ / 5 ドン(大) /
+    # 6 カッ(大) / 7 連打 / 8 ー / 9 ーっ‼ / 10 連打(大) / 11 ふうせん。
+    # 8段目と9段目は連打の表記を区間いっぱいに伸ばすための部品で、
+    # 「連打 + ー×n + ーっ‼」と並べると本家と同じ見え方になる。
+    SE_ROLL_MID = "ー"
+    SE_ROLL_TAIL = "っ!!"
     SE_SPRITE_INDEX = {"ドン": 0, "ド": 1, "コ": 2, "カッ": 3, "カ": 4,
-                       "れんだ": 7, "ふうせん": 11, "くすだま": 11}
+                       "れんだ": 7, SE_ROLL_MID: 8, SE_ROLL_TAIL: 9,
+                       "ふうせん": 11, "くすだま": 11}
     SE_SPRITE_INDEX_BIG = {"ドン": 5, "カッ": 6, "れんだ": 10}
 
     def _load_se_sprites(self):
@@ -2793,26 +2841,30 @@ class ChartPreviewWidget(QWidget):
                 sz = st.size()
                 painter.drawStaticText(int(x - sz.width() / 2.0),
                                        int(fy - sz.height() / 2.0), st)
-            # 連打・風船・くす玉。帯の頭に「れんだ」「ふうせん」「くすだま」を
-            # 出す。音符と同じで、判定枠を通り過ぎたら消す。数が少ないので
-            # 音符のような二分探索はせず素直に舐める。
-            for t, label, big, bpm, scroll in self._span_se:
-                if t <= now:
+            # 連打・風船・くす玉。音符と同じで、判定枠を通り過ぎたら消す。
+            # 数が少ないので音符のような二分探索はせず素直に舐める。
+            for t0, t1, label, big, bpm, scroll in self._span_se:
+                if t0 <= now:
                     continue
-                if reveal_t is not None and t < reveal_t:
+                if reveal_t is not None and t0 < reveal_t:
                     continue
-                x = judge_x + (t - now) * self._speed(bpm, scroll)
-                if x < -rb or x > lane_w + rb:
+                spd = self._speed(bpm, scroll)
+                x0 = judge_x + (t0 - now) * spd
+                x1 = judge_x + (t1 - now) * spd
+                if max(x0, x1) < -rb or min(x0, x1) > lane_w + rb:
+                    continue
+                if label == "れんだ":
+                    self._draw_roll_se(painter, x0, x1, big, se_y, fy, footer_h)
                     continue
                 spr = self._se_scaled(label, big, footer_h)
                 if spr is not None:
-                    painter.drawPixmap(QPointF(x - spr.width() / 2.0, se_y), spr)
+                    painter.drawPixmap(QPointF(x0 - spr.width() / 2.0, se_y), spr)
                     continue
                 size = self.SE_FONT_SIZE_BIG if big else self.SE_FONT_SIZE_SMALL
                 st = self._se_static_text(label, size)
                 painter.setFont(self._font(size, True))
                 sz = st.size()
-                painter.drawStaticText(int(x - sz.width() / 2.0),
+                painter.drawStaticText(int(x0 - sz.width() / 2.0),
                                        int(fy - sz.height() / 2.0), st)
             painter.setClipRect(self.rect())
 

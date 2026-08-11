@@ -28,6 +28,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_run_tab()), "シミュレータ起動")
         tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
         tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
+        tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
 
         btn_row = QHBoxLayout()
         btn_reset = QPushButton("初期化")
@@ -231,6 +232,21 @@ class SettingsDialog(QDialog):
         form.addRow(QLabel("未指定ならTJAと同じフォルダが既定になります。"))
         return w
 
+    def _build_experimental_tab(self):
+        """まだ様子見の機能をまとめて置くタブ。既定は全部オフ、有効化しても
+        すぐには反映されずアプリの再起動が要るものが多い(この点は各項目の
+        説明文で個別に断る)。"""
+        w = QWidget()
+        form = QFormLayout(w)
+        cfg = self.main_window.config_data
+
+        self.peepo_chart_edit_check = QCheckBox("Peepo式作譜（実験的）")
+        self.peepo_chart_edit_check.setChecked(cfg.get("peepo_chart_edit", False))
+        form.addRow(self.peepo_chart_edit_check)
+        form.addRow(QLabel("譜面プレビューの下部パネルに、音符を直接置ける「作譜」モードを"
+                           "追加します。※反映にはアプリの再起動が必要です。"))
+        return w
+
     def _save(self):
         cfg = self.main_window.config_data
         for k, (name_edit, path_edit) in self.run_entries.items():
@@ -257,6 +273,7 @@ class SettingsDialog(QDialog):
         cfg["record_output_dir"] = self.rec_dir_edit.text()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
+        cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
         self.accept()
 
     def _reset(self):

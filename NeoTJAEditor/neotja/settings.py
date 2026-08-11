@@ -10,7 +10,7 @@ _SETTINGS_KEYS = (
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
-    "preview_show_fps",
+    "preview_show_fps", "peepo_chart_edit",
 )
 
 
@@ -68,6 +68,12 @@ def default_settings() -> dict:
         # なら既定サイズで開く。
         "window_geometry": "",
         "splitter_state": "",
+        # 実験的機能: 譜面プレビュー下部パネルの「作譜」モード(波形の上に
+        # グリッドとカーソルを出し、キーで音符を直接置ける)を出すかどうか。
+        # 既定はオフ。環境設定ダイアログ「実験的機能」タブのチェックボックスで
+        # 変更でき、反映はアプリの再起動後(preview_dock.py がここを見て
+        # 「作譜」ページを最初から作るかどうかを決めるため)。
+        "peepo_chart_edit": False,
     }
 
 
