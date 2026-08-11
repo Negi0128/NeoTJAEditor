@@ -350,7 +350,8 @@ class PreviewDock(QDockWidget):
                  audio_backend="mixer", sfx_volume_cb=None,
                  waveform_stereo=True, waveform_stereo_cb=None,
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
-                 config_data=None, save_settings_cb=None):
+                 config_data=None, save_settings_cb=None,
+                 checkpoint_lines_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
@@ -358,6 +359,12 @@ class PreviewDock(QDockWidget):
         self.config_data = config_data if config_data is not None else {}
         # config_data を書き換えたあとディスクへ落とすためのもの(MainWindow が持つ)。
         self.save_settings_cb = save_settings_cb
+        # チェックポイントはエディタの「行」が正。プレビューで作ったものも
+        # 行へ直してエディタへ返し、エディタ側の変更もここへ流れてくる。
+        self.checkpoint_lines_cb = checkpoint_lines_cb
+        self._checkpoint_lines = set()
+        self._bar_lines = []          # 小節ごとの開始行(1始まり)
+        self._bar_times_chart = []    # 同じ並びの開始時刻(譜面時間)
         self.waveform_stereo_cb = waveform_stereo_cb
         self._waveform_stereo = bool(waveform_stereo)
         # 打音表記の表示可否(settings.json の se_text_enabled)。
@@ -494,8 +501,7 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_reveal_cb(self._end_fadein)
         # チェックポイントを作譜モードの命令レーンにも表示する(CHECK POINT)。
         # game_waveform は後(_build_sakufu_page)で作られるので遅延参照する。
-        self.chart_preview.set_checkpoints_changed_cb(
-            lambda times: self.game_waveform.set_checkpoints(times))
+        self.chart_preview.set_checkpoints_changed_cb(self._on_preview_checkpoints)
 
         # 下部パネルを3モードの QStackedWidget に(フェーズ3):
         #   index 0 = 非表示モード(曲名・サブタイトルだけ表示) ← 既定
@@ -765,6 +771,76 @@ class PreviewDock(QDockWidget):
         v.addStretch()
         return page
 
+    # ------------------------------------------------------------------
+    # チェックポイント(エディタの行が正、プレビューは時刻で持つ)
+    # ------------------------------------------------------------------
+    def _take_bar_lines(self, preview_data):
+        """小節の開始時刻と開始行を覚え、既知のチェックポイントを引き直す。
+
+        譜面を編集すると小節の時刻も行も動くので、解析結果が届くたびに
+        行→時刻を取り直す。行のほうを正としているのはそのため。"""
+        if preview_data is None:
+            return
+        bars = preview_data.get("bar_times") or []
+        self._bar_times_chart = [float(b[0]) for b in bars]
+        self._bar_lines = [int(ln) for ln in (preview_data.get("bar_lines") or [])]
+        self._apply_checkpoint_lines()
+
+    def _line_to_audio_time(self, line):
+        """その行を含む(=その行以前で一番後ろの)小節の開始時刻(音源時間)。"""
+        best = None
+        for t, ln in zip(self._bar_times_chart, self._bar_lines):
+            if ln <= line:
+                best = t
+            else:
+                break
+        if best is None:
+            return None
+        return max(0.0, best - self.spin_offset.value())
+
+    def _audio_time_to_line(self, t_audio):
+        """音源時刻がどの小節にあたるかを見て、その小節の開始行を返す。"""
+        if not self._bar_lines:
+            return None
+        tc = t_audio + self.spin_offset.value()
+        best = None
+        for t, ln in zip(self._bar_times_chart, self._bar_lines):
+            # 小節頭ちょうどを拾いたいので、丸め誤差ぶんだけ甘く見る。
+            if t <= tc + 1e-4:
+                best = ln
+            else:
+                break
+        return best
+
+    def _apply_checkpoint_lines(self):
+        """覚えている行から時刻を引き直して、レーンと波形へ配る。"""
+        times = []
+        for ln in sorted(self._checkpoint_lines):
+            t = self._line_to_audio_time(ln)
+            if t is not None:
+                times.append(t)
+        self.chart_preview.set_checkpoints(times)
+        for wf in (self.game_waveform, self.chart_edit):
+            wf.set_checkpoints(times)
+
+    def set_checkpoint_lines(self, lines):
+        """エディタ側(Alt+P など)で変わったチェックポイントを受け取る。"""
+        new = {int(ln) for ln in (lines or [])}
+        if new == self._checkpoint_lines:
+            return
+        self._checkpoint_lines = new
+        self._apply_checkpoint_lines()
+
+    def _on_preview_checkpoints(self, times):
+        """レーンで P を押した。時刻を行へ直してエディタへ返す。"""
+        for wf in (self.game_waveform, self.chart_edit):
+            wf.set_checkpoints(times)
+        lines = {ln for ln in (self._audio_time_to_line(t) for t in times)
+                 if ln is not None}
+        self._checkpoint_lines = lines
+        if self.checkpoint_lines_cb is not None:
+            self.checkpoint_lines_cb(sorted(lines))
+
     def _on_legend_toggled(self, on):
         """H キーで凡例を出し入れした。次に開いたときも同じ状態にする。"""
         self.config_data["chart_edit_legend"] = bool(on)
@@ -958,6 +1034,7 @@ class PreviewDock(QDockWidget):
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
+        self._take_bar_lines(preview_data)
         if preview_data is not None:
             self.chart_preview.set_preview_data(preview_data)
             self.info_bar.set_course_info(
@@ -1224,6 +1301,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
         self.chart_edit.clear_pending()
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
+        self._take_bar_lines(data)
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
         self._set_lane_course_label(data.get("course_label"), data.get("course_color"))

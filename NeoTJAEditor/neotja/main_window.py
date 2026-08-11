@@ -244,6 +244,8 @@ class MainWindow(QMainWindow):
         self.editor.cursorPositionChanged.connect(self._update_status)
         self.editor.cursorPositionChanged.connect(lambda: self._metronome_timer.start(150))
         self.editor.checkpointsChanged.connect(self._update_status)
+        # エディタが正。Alt+P で付け外ししたぶんを譜面プレビューへ流す。
+        self.editor.checkpointsChanged.connect(self._push_checkpoints_to_preview)
         self.editor.set_note_typed_cb(self._on_note_typed)
 
         self._rebuild_recent_menu()
@@ -385,6 +387,7 @@ class MainWindow(QMainWindow):
             note_edit_cb=self._apply_note_edit,
             config_data=self.config_data,
             save_settings_cb=self._save_config,
+            checkpoint_lines_cb=self._set_checkpoint_lines,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
@@ -429,6 +432,31 @@ class MainWindow(QMainWindow):
         self._taikojiro_scan = TaikojiroScanWorker(self)
         self._taikojiro_scan.found.connect(on_found)
         self._taikojiro_scan.start()
+
+    def _set_checkpoint_lines(self, lines):
+        """譜面プレビューで P を押した結果をエディタのチェックポイントへ。
+
+        チェックポイントはエディタの行が正で、行番号の横に ▶ が出るのも
+        ファイルを開き直しても残るのもこちら。プレビュー側は時刻で持って
+        いるので、行へ直したものをここで受け取る。"""
+        new = {int(ln) for ln in (lines or [])}
+        if new == self.editor.checkpoints:
+            return
+        self._syncing_checkpoints = True
+        try:
+            self.editor.checkpoints = new
+            self.editor.gutter.update()
+            self.editor.checkpointsChanged.emit()
+        finally:
+            self._syncing_checkpoints = False
+
+    def _push_checkpoints_to_preview(self):
+        """エディタ側(Alt+P)で変わったチェックポイントをプレビューへ。"""
+        if getattr(self, "_syncing_checkpoints", False):
+            return      # プレビュー発の変更を跳ね返さない
+        dock = getattr(self, "preview_dock", None)
+        if dock is not None:    # 起動途中に飛んでくることがある
+            dock.set_checkpoint_lines(self.editor.checkpoints)
 
     def _save_config(self):
         """プレビュー側が config_data を書き換えたときの保存口。"""
@@ -1182,6 +1210,8 @@ class MainWindow(QMainWindow):
         self.current_file = None
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
+        # 別のファイルになったので、プレビュー側に残っている印も消す。
+        self.editor.checkpointsChanged.emit()
         self._refresh_title()
         self._mark_saved()
         self._set_preview_content(NEW_FILE_TEMPLATE)
@@ -1266,6 +1296,8 @@ class MainWindow(QMainWindow):
         self.current_file = tja_path
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
+        # 別のファイルになったので、プレビュー側に残っている印も消す。
+        self.editor.checkpointsChanged.emit()
         self._refresh_title()
         self.save_file()
         self._mark_saved()

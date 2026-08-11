@@ -1002,6 +1002,12 @@ class TJACourseAnalyzer:
                 elif s == "#M":
                     branch_active = (branch_level == "M")
                 continue
+            # 行番号を混ぜておく。小節の開始が「エディタの何行目か」を後で
+            # 引けるようにするため(譜面プレビューのチェックポイントを
+            # エディタの行と共通にするのに要る)。NOTE/COMMA と同じ列に
+            # 流すだけなので、これを読まない側は素通りする。
+            if branch_active:
+                events.append(("LINE", idx))
             for c in s:
                 if c in "0123456789":
                     if not branch_active:
@@ -1034,6 +1040,11 @@ class TJACourseAnalyzer:
         balloons = []
         kusudamas = []
         bar_times = []
+        # bar_times と同じ長さの「その小節が始まるエディタの行番号(1始まり)」。
+        # 本文の先頭行を初期値にしておく(最初の小節の前に LINE が来ない
+        # 書き方でも None にならないように)。
+        bar_lines = []
+        curr_line = a + 1
         gogo_regions = []
         bpm_changes = [(Decimal(0), bpm)]
         measure_changes = [(Decimal(0), curr_num, curr_den)]
@@ -1055,8 +1066,12 @@ class TJACourseAnalyzer:
             bar_recorded = False
             n_len = sum(1 for t, _ in m_events if t == "NOTE")
             for t, v in m_events:
+                if t == "LINE":
+                    curr_line = v
+                    continue
                 if not bar_recorded and t == "NOTE":
                     bar_times.append((total_time, curr_bpm, curr_scroll, curr_bar_visible))
+                    bar_lines.append(curr_line)
                     bar_recorded = True
                 if t == "BPMCHANGE":
                     curr_bpm = v
@@ -1112,6 +1127,7 @@ class TJACourseAnalyzer:
                     total_time += time_per_note
             if not bar_recorded:
                 bar_times.append((total_time, curr_bpm, curr_scroll, curr_bar_visible))
+                bar_lines.append(curr_line)
                 # n_len == 0 here (that's exactly when no NOTE event ever ran
                 # to set bar_recorded) - a measure with no notes still
                 # occupies real time, but nothing above advances total_time
@@ -1166,6 +1182,9 @@ class TJACourseAnalyzer:
             # 曲名(録画画面の右上に出す)。ヘッダは曲に1つなので素直に拾う。
             "title": _header_value(content, "TITLE"),
             "bar_times": [(float(t), float(bpm_), float(sc), bool(vis)) for t, bpm_, sc, vis in bar_times],
+            # bar_times と同じ並びの「その小節が始まる行番号(1始まり)」。
+            # 譜面プレビューのチェックポイントをエディタの行と結び付けるのに使う。
+            "bar_lines": [int(ln) for ln in bar_lines],
             "bpm_changes": [(float(t), float(v)) for t, v in bpm_changes],
             "measure_changes": [(float(t), int(num), int(den)) for t, num, den in measure_changes],
             "scroll_changes": [(float(t), float(v)) for t, v in scroll_changes],
