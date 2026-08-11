@@ -156,6 +156,31 @@ SHOW_BACKGROUND = True
 # 上段は曲名・魂ゲージ・どんちゃんが乗る帯で、絵を敷くとそれらが読みにくい。
 SHOW_BACKGROUND_TOP = True
 
+# --- 上背景の作り ---------------------------------------------------------
+# "flat"    : Background.png を1枚貼るだけ(絵は綺麗だが動かせない)
+# "layered" : TNDE の 5_Background/Bg_up/3 と同じ3枚重ね。傘柄のタイル地
+#             (Base) + 落ちてくる花びら(Flower) + 隅の飾り(Chara)。
+#             タイル地と花びらが動く。
+BG_TOP_STYLE = "layered"
+# 素材は色違いが1枚に詰まっている。行/列で 1P(赤) の駒を取り出す。
+#   Base.png   1005x188 = 335x188 が3色ぶん横並び
+#   Chara.png   656x699 = 328x233 が [変化2種] x [色3種]
+#   Flower.png  641x552 = 320x184 が [空, 花びら] x [色3種]
+BG_UP_COLOR_ROW = 0          # 0=赤(1P) 1=青 2=橙
+BG_UP_BASE_CELL = (335, 188)
+BG_UP_CHARA_CELL = (328, 233)
+BG_UP_CHARA_VARIANT = 0      # 0=だんご三兄弟 1=ひよこ
+BG_UP_FLOWER_CELL = (320, 184)
+BG_UP_FLOWER_COL = 1         # 左の駒は空なので右を使う
+# 動かし方。本家はコンパイル済みで読み取れないので、OpenTaiko の背景
+# スクリプト(毎秒 X59px / Y14px を切り出し原点に足すだけ)に倣った決め打ち。
+BG_UP_BASE_VX = -14.0        # タイル地の流れ(px/秒、負=左へ)
+BG_UP_FLOWER_VX = -26.0      # 花びらの流れ(px/秒)
+BG_UP_FLOWER_VY = 34.0       # 花びらの落ちる速さ(px/秒)
+# 隅の飾りの置き場所(素材の左上を画面のどこに置くか)。素材は左に18px、
+# 下に22px の余白を持っているので、その分をここで戻している。
+BG_UP_CHARA_POS = (-18, -0)
+
 # --- 下背景の光レイヤー ---------------------------------------------------
 # TNDE の背景は 5_Background/Bg_down/<1..5>/ に「土台 0.png + 重ねる絵」の
 # 形で入っていて(本家はこの5セットから毎回ランダムに選ぶ)、こちらは
@@ -349,6 +374,8 @@ class GameScreenWidget(QWidget):
         # 静的な下地(背景・左パネル・黒枠 等)を焼いたキャッシュ。None なら
         # 次の paintEvent で作り直す。compact 切替やスキン再読込で捨てること。
         self._static_layer = None
+        # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
+        self._bg_up_cache = {}
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
         # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
@@ -454,6 +481,9 @@ class GameScreenWidget(QWidget):
             ("bg_top", "Background.png"),
             ("bg_down", "Bg_down.png"),
             ("bg_down_light", "Bg_down_Light.png"),
+            ("bg_up_base", os.path.join("Bg_up", "Base.png")),
+            ("bg_up_chara", os.path.join("Bg_up", "Chara.png")),
+            ("bg_up_flower", os.path.join("Bg_up", "Flower.png")),
             ("footer", "Footer.png"),
             ("panel", "Taiko_Background.png"),
             ("lane_frame", "Taiko_Frame.png"),
@@ -906,24 +936,39 @@ class GameScreenWidget(QWidget):
         # 直接描くとアルファ付き(ARGB32_Premultiplied)になり、毎フレームの
         # 貼り付けが SourceOver 合成になって、元の「必要な部分だけ数回 blit」
         # より遅くなってしまう。不透明なら単純コピーで済む。
-        img = QImage(self.width(), self.height(), QImage.Format_RGB32)
-        img.fill(QColor("#0d1117"))
+        # 重ね式の上背景は毎フレーム動くので、静的キャッシュ側は上の帯を
+        # 透明にしておき、paintEvent で「動く背景 → キャッシュ」の順に貼る。
+        # このときだけアルファ付きになる(貼るのが単純コピーでなくなる)。
+        layered = self._layered_top()
+        fmt = (QImage.Format_ARGB32_Premultiplied if layered
+               else QImage.Format_RGB32)
+        img = QImage(self.width(), self.height(), fmt)
+        img.fill(Qt.transparent if layered else QColor("#0d1117"))
         p = QPainter(img)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         self._paint_static(p)
         p.end()
         return QPixmap.fromImage(img)
 
+    def _layered_top(self):
+        """上背景を重ね式で描くか(素材が揃っているときだけ)。"""
+        return (SHOW_BACKGROUND_TOP and BG_TOP_STYLE == "layered"
+                and self._skin.get("bg_up_base") is not None)
+
     def _paint_static(self, p):
         """静的部分の描画本体(キャッシュ作成時に1回だけ呼ばれる)。"""
 
         # --- 上部背景 (0..188 が見える範囲) ---
+        # 重ね式のときはここでは何も敷かない(paintEvent が毎フレーム描く)。
         # 絵を出さないときは黒で塗る。下地(#0d1117)のままだと少し青みが
         # 残って「消し忘れ」に見えるので、はっきり黒にする。
-        if not SHOW_BACKGROUND_TOP:
-            p.fillRect(QRect(0, 0, SCREEN_W, BG_TOP_H),
-                       QColor(BACKGROUND_TOP_COLOR))
-        bg = self._skin.get("bg_top") if SHOW_BACKGROUND_TOP else None
+        if self._layered_top():
+            bg = None
+        else:
+            if not SHOW_BACKGROUND_TOP:
+                p.fillRect(QRect(0, 0, SCREEN_W, BG_TOP_H),
+                           QColor(BACKGROUND_TOP_COLOR))
+            bg = self._skin.get("bg_top") if SHOW_BACKGROUND_TOP else None
         if bg is not None:
             # 素材(1280x316)を 188px で切ると絵が途中で断ち切られるので、
             # 丸ごと描いて下端(188 以降)はレーン一式で隠す。地面の線が
@@ -976,6 +1021,58 @@ class GameScreenWidget(QWidget):
             p.fillRect(QRect(LANE_X, LANE_Y + LANE_H + SE_STRIP_H, LANE_W, 2),
                        QColor(0, 0, 0, 220))
 
+    def _bg_up_cell(self, key, cell, col, row):
+        """色違いが詰まったシートから 1 駒だけ切り出す(結果は使い回す)。"""
+        sheet = self._skin.get(key)
+        if sheet is None:
+            return None
+        ck = (key, col, row)
+        pm = self._bg_up_cache.get(ck)
+        if pm is None:
+            cw, ch = cell
+            pm = sheet.copy(QRect(col * cw, row * ch, cw, ch))
+            self._bg_up_cache[ck] = pm
+        return pm
+
+    def _draw_bg_top_layers(self, p, now):
+        """上背景を3枚重ねで描く。タイル地と花びらが流れる。"""
+        row = BG_UP_COLOR_ROW
+        base = self._bg_up_cell("bg_up_base", BG_UP_BASE_CELL, row, 0)
+        if base is None:
+            return
+        p.save()
+        p.setClipRect(QRect(0, 0, SCREEN_W, BG_TOP_H))
+
+        # --- 地(傘柄)。横に敷き詰めて流す ---
+        bw = base.width()
+        ox = -((now * -BG_UP_BASE_VX) % bw)
+        x = ox
+        while x < SCREEN_W:
+            p.drawPixmap(int(x), 0, base)
+            x += bw
+
+        # --- 花びら。縦横に敷き詰めて斜めに流す ---
+        fl = self._bg_up_cell("bg_up_flower", BG_UP_FLOWER_CELL,
+                              BG_UP_FLOWER_COL, row)
+        if fl is not None:
+            fw, fh = fl.width(), fl.height()
+            fx = -((now * -BG_UP_FLOWER_VX) % fw)
+            fy = ((now * BG_UP_FLOWER_VY) % fh) - fh
+            y = fy
+            while y < BG_TOP_H:
+                x = fx
+                while x < SCREEN_W:
+                    p.drawPixmap(int(x), int(y), fl)
+                    x += fw
+                y += fh
+
+        # --- 隅の飾り。動かない ---
+        ch = self._bg_up_cell("bg_up_chara", BG_UP_CHARA_CELL,
+                              BG_UP_CHARA_VARIANT, row)
+        if ch is not None:
+            p.drawPixmap(BG_UP_CHARA_POS[0], BG_UP_CHARA_POS[1], ch)
+        p.restore()
+
     def _draw_bg_light(self, p, now):
         """下背景の提灯の光を、加算合成でゆっくり明滅させながら重ねる。"""
         if not (SHOW_BACKGROUND and SHOW_BACKGROUND_LIGHT):
@@ -1000,6 +1097,13 @@ class GameScreenWidget(QWidget):
         # 静的な下地は1枚のキャッシュを貼るだけ(初回のみ作る)。
         if self._static_layer is None or self._static_layer.size() != self.size():
             self._static_layer = self._build_static_layer()
+        # 重ね式の上背景はキャッシュに焼けないので、先に敷いてから被せる。
+        if self._layered_top():
+            try:
+                bg_now = self.chart_preview.game_state()[0]
+            except Exception:  # noqa: BLE001
+                bg_now = 0.0
+            self._draw_bg_top_layers(p, bg_now)
         p.drawPixmap(0, 0, self._static_layer)
 
         # --- HUD(スコア・コンボ・太鼓・ゲージ) ---
