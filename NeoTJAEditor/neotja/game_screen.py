@@ -60,7 +60,10 @@ FOOTER_Y, FOOTER_H = 676, 44
 # 足元が y=193 なので、素材の左上はその逆算になる。
 CHARA_CONTENT_LEFT = 76      # 素材の中で絵が始まる x
 CHARA_CONTENT_BOTTOM = 183   # 同 足元の y
-CHARA_POS = (21 - CHARA_CONTENT_LEFT, 193 - CHARA_CONTENT_BOTTOM)
+#: 画面上での「中身の左端」と「足元」。ここだけ触れば位置が動く。
+CHARA_ANCHOR = (61, 188)
+CHARA_POS = (CHARA_ANCHOR[0] - CHARA_CONTENT_LEFT,
+             CHARA_ANCHOR[1] - CHARA_CONTENT_BOTTOM)
 # 連番を1周するのにかける拍数。BPM120・119コマなら 2.0 秒 = 約60fps。
 CHARA_BEATS_PER_LOOP = 4.0
 
@@ -138,10 +141,12 @@ FRAME_SLIVER_Y0, FRAME_SLIVER_Y1 = 190, 215
 FRAME_TOP_X_OFF = 5          # ゲージの箱だけ右へずらす量
 FRAME_TOP_Y_OFF = 1          # ゲージの箱だけ下へずらす量
 
-# 背景の絵(上段の風景 / 下段 / フッター)を出すか。素材が無ければどのみち
-# 描かれないので、あっても困らない。どんちゃんは下段の上に立つので、
-# ここを False にすると黒地に浮いて見える。
+# 背景の絵(下段の屋台 / フッター)を出すか。素材が無ければどのみち描かれない。
 SHOW_BACKGROUND = True
+# 上段(レーンより上)の風景は別扱い。ここを False にすると真っ黒で塗る。
+# 上段は曲名・魂ゲージ・どんちゃんが乗る帯で、絵を敷くとそれらが読みにくい。
+SHOW_BACKGROUND_TOP = False
+BACKGROUND_TOP_COLOR = "#000000"
 
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
 # ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
@@ -888,7 +893,12 @@ class GameScreenWidget(QWidget):
         """静的部分の描画本体(キャッシュ作成時に1回だけ呼ばれる)。"""
 
         # --- 上部背景 (0..188 が見える範囲) ---
-        bg = self._skin.get("bg_top") if SHOW_BACKGROUND else None
+        # 絵を出さないときは黒で塗る。下地(#0d1117)のままだと少し青みが
+        # 残って「消し忘れ」に見えるので、はっきり黒にする。
+        if not SHOW_BACKGROUND_TOP:
+            p.fillRect(QRect(0, 0, SCREEN_W, BG_TOP_H),
+                       QColor(BACKGROUND_TOP_COLOR))
+        bg = self._skin.get("bg_top") if SHOW_BACKGROUND_TOP else None
         if bg is not None:
             # 素材(1280x316)を 188px で切ると絵が途中で断ち切られるので、
             # 丸ごと描いて下端(188 以降)はレーン一式で隠す。地面の線が
