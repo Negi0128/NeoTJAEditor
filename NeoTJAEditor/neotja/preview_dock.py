@@ -64,18 +64,12 @@ class ChartInfoBar(QWidget):
             button_row.addWidget(btn)
         layout.addLayout(button_row)
 
+        # 曲名・サブタイトルはゲーム画面(右上)に出るので、ここには出さない。
+        # 値だけは set_static_info が入れるので、ラベル自体は残して隠す。
         self.lbl_title = QLabel("-")
-        self.lbl_title.setAlignment(Qt.AlignCenter)
-        title_font = self.lbl_title.font()
-        title_font.setBold(True)
-        title_font.setPointSize(13)
-        self.lbl_title.setFont(title_font)
-        layout.addWidget(self.lbl_title)
-
+        self.lbl_title.setVisible(False)
         self.lbl_subtitle = QLabel("")
-        self.lbl_subtitle.setAlignment(Qt.AlignCenter)
-        self.lbl_subtitle.setStyleSheet(f"color: {_DARK['fg_dim']};")
-        layout.addWidget(self.lbl_subtitle)
+        self.lbl_subtitle.setVisible(False)
 
         # Cards are tinted by category so the panel reads at a glance instead
         # of everything looking the same: BPM/SCROLL/MEASURE in green (ok
@@ -584,25 +578,26 @@ class PreviewDock(QDockWidget):
         else:
             self._mode_names = ["通常再生", "音声波形", "情報"]
             self.MODE_EDIT, self.MODE_INFO = None, 2
-        right = self.game_screen.width() - 8
-
-        self.mode_button = self._lane_button(self._mode_names[0], 96,
-                                             "下部パネルの表示切替(Tab)")
-        right -= 96
-        self.mode_button.move(right, 6)
-        self.mode_button.clicked.connect(self.cycle_bottom_mode)
-
-        self.course_button = self._lane_button("コース: -", 150,
-                                               "クリックでコース切替(シミュ・録画の両方に反映)")
-        right -= 150 + 6
-        self.course_button.move(right, 6)
-        self.course_button.clicked.connect(self.chart_preview.cycle_course)
+        # 画面の左上に「録画 / コース / モード切替」の順で並べる。以前は
+        # 右上だったが、右上は曲名が出る場所なので左へ移した。
+        left = 8
 
         self.record_button = self._lane_button("● 録画", 84,
                                                "いま選んでいるコースを動画に書き出す")
-        right -= 84 + 6
-        self.record_button.move(right, 6)
+        self.record_button.move(left, 6)
+        left += 84 + 6
         self.record_button.clicked.connect(self._on_record_clicked)
+
+        self.course_button = self._lane_button("コース: -", 150,
+                                               "クリックでコース切替(シミュ・録画の両方に反映)")
+        self.course_button.move(left, 6)
+        left += 150 + 6
+        self.course_button.clicked.connect(self.chart_preview.cycle_course)
+
+        self.mode_button = self._lane_button(self._mode_names[0], 96,
+                                             "下部パネルの表示切替(Tab)")
+        self.mode_button.move(left, 6)
+        self.mode_button.clicked.connect(self.cycle_bottom_mode)
 
         # 起動時の既定は通常再生。ここで一度通しておかないと、画面が
         # compact のまま(どんちゃんも下の背景も出ない)で始まってしまう。
@@ -982,20 +977,20 @@ class PreviewDock(QDockWidget):
     def set_bottom_mode(self, idx: int):
         """下部パネルのモードを切り替える。
 
-        通常再生のときだけ、ゲーム画面を録画と同じ 1280x720 の全体に広げる
-        (どんちゃん・下の背景・フッターまで出る)。ほかのモードでは画面を
-        上半分(1280x360)に縮めて、空いた下半分にそのモードのペインを置く
-        — 下の背景があった場所に、これまでどおり波形や情報が入る。"""
+        ゲーム画面はどのモードでも録画と同じ 1280x720 のまま(どんちゃん・
+        下の背景・フッターまで出る)。モード別のペイン(音声波形/作譜/情報)は
+        その下に足す。通常再生だけはペインを出さないので、画面と速度行だけの
+        いちばん低い窓になる。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
         self.record_button.setVisible(idx == self.MODE_TITLE)
-        full = (idx == self.MODE_TITLE)
-        self.game_screen.set_compact(not full)
-        # 通常再生では曲名も画面の中に描かれるので、下のページは出さない。
-        self.bottom_stack.setVisible(not full)
+        self.game_screen.set_compact(False)
+        # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
+        show_page = (idx != self.MODE_TITLE)
+        self.bottom_stack.setVisible(show_page)
         self._bottom_panel.setFixedHeight(
-            self._bottom_h_speed_only if full else self._bottom_h_full)
+            self._bottom_h_full if show_page else self._bottom_h_speed_only)
         self.game_preview_window.refit()
         # 作譜モードのときだけ、キー入力を受けるのは編集ペイン。ほかのモードでは
         # レーンへ返す(Space/小節移動が今までどおり効くように)。

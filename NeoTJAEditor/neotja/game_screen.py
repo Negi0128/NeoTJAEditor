@@ -139,7 +139,10 @@ GAUGE_BLOCKS = gauge_mod.GAUGE_MAX // gauge_mod.GAUGE_STEP
 # 入っている(左=明るい灰 / 右=暗い灰)。実機ではクリア圏(段が高くなる所)の
 # 左上に出る。地の金色が暗いうちは明るい方、満ちて明るくなったら暗い方に
 # 替えて読めるようにする(実機のキャプチャで明るい方が出ているのを確認)。
-GAUGE_CLEAR_GLYPH = ((3, 44), (61, 44), 45, 22)
+#   1つ目 = 未クリアのとき / 2つ目 = クリアしたとき。
+#   素材の左(x=3)は塗りが白、右(x=61)は塗りが灰色。ノルマに届く前は灰色で
+#   沈ませ、届いたら白く光らせる。最初これが逆で「明るすぎる」状態だった。
+GAUGE_CLEAR_GLYPH = ((61, 44), (3, 44), 45, 22)
 GAUGE_CLEAR_STEP_X = 547      # 素材の中でクリア圏(背の高い側)が始まる x
 GAUGE_CLEAR_TEXT_OFF = (3, 1)     # 段の始まりからの微調整
 # 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
@@ -184,9 +187,12 @@ RAINBOW_WIPE_DEN = 85
 RAINBOW_HEAD_CELL = 130
 RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
 RAINBOW_HEAD_SCALE = 1.0
-# 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
-# 丸ごと入る範囲。上端は 0 — てっぺんで画面の外へ出る分はここで切れる。
-SOUL_FLY_RECT = (330, 0, SCREEN_W - 330, 330)
+# レーンより手前に描くものを載せる板。ここに入るのは
+#   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
+#   * 風船中のどんちゃん(画布 648x345 を CHARA_BALLOON_CANVAS_OFF に置く)
+# どちらも丸ごと入るだけの範囲を取る。上端 0 は、弧のてっぺんで画面の外へ
+# 出る分をここで切るため。
+SOUL_FLY_RECT = (0, 0, SCREEN_W, 520)
 
 # レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
 # 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
@@ -376,6 +382,8 @@ class _FlightOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
+        # 風船中のどんちゃん → 飛んでいく音符 の順。音符が手前。
+        self._screen.draw_chara_front(p, self.x(), self.y())
         self._screen.draw_soul_flights(p, self.x(), self.y())
         p.end()
 
@@ -579,11 +587,14 @@ class GameScreenWidget(QWidget):
         if active or self._judge_was_active:
             self._judge_overlay.update()
         self._judge_was_active = active
-        # 飛んでいる音符の板。同じ理由で、飛んでいる間と、その次の1回だけ。
+        # レーンより手前の板(飛んでいく音符・風船中のどんちゃん)。同じ理由で、
+        # 中身がある間と、その次の1回だけ塗り直す。
         try:
             now = self.chart_preview.game_state()[0]
             flying = bool(self.chart_preview.recent_hits(
                 now, SOUL_FLY_SEC + SOUL_LAND_SEC))
+            if not flying and self._chara is not None:
+                flying = self._chara.state() in chara_mod.TIME_BASED_STATES
         except Exception:  # noqa: BLE001
             flying = False
         if flying or self._flight_was_active:
@@ -639,6 +650,28 @@ class GameScreenWidget(QWidget):
         self._title = ""
         self._title_family = self._load_title_font()
 
+    def draw_chara_front(self, p, ox=0, oy=0):
+        """風船中のどんちゃんだけを、レーンより手前に描く。
+
+        風船の絵は立ち姿で背が高く、置き場所もレーンに重なる。親(画面)は
+        子(レーン)より先に描かれるので、親に描くと下半分がレーンに隠れる。
+        「良」や飛んでいく音符と同じく、レーンの兄弟の板に描いて手前に出す。
+        ふだん/ゴーゴーの絵はレーンに重ならないので、これまでどおり親が描く。"""
+        anim = self._chara
+        if anim is None or self._compact or not anim.sprites.available():
+            return
+        state = anim.state()
+        if state not in chara_mod.TIME_BASED_STATES:
+            return
+        idx = anim.frame_index()
+        if idx is None:
+            return
+        pm = anim.sprites.frame(state, idx)
+        if pm is None:
+            return
+        bx, by = CHARA_BALLOON_CANVAS_OFF
+        p.drawPixmap(CHARA_POS[0] + bx - ox, CHARA_POS[1] + by - oy, pm)
+
     def _draw_chara(self, p, now):
         """どんちゃんを1コマ描く。素材が無ければ何もしない。
 
@@ -661,9 +694,8 @@ class GameScreenWidget(QWidget):
         if pm is None:
             return
         if state in chara_mod.TIME_BASED_STATES:
-            # 風船の絵だけは画布の左上をふだんの絵と同じ位置に置いてずらす。
-            ox, oy = CHARA_BALLOON_CANVAS_OFF
-            p.drawPixmap(CHARA_POS[0] + ox, CHARA_POS[1] + oy, pm)
+            # 風船の絵はレーンより手前に出したいので、ここでは描かない
+            # (draw_chara_front が板の側で描く)。状態を進めるのが目的。
             return
         # ふだん/ゴーゴーは絵の中身で合わせる。状態ごとに画布もキャラの
         # 立ち位置も違うので、画布の左上を固定すると切り替わった瞬間に飛ぶ。

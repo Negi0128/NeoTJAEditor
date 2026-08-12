@@ -187,6 +187,17 @@ class CharaAnimator:
     def state(self):
         return self._state
 
+    def frame_index(self):
+        """いま出しているコマ番号。update() のあとに読む。素材が無ければ None。
+
+        画面側が「同じコマをもう一度、別の板に描く」ために要る(風船の絵だけ
+        レーンより手前に出す)。update() をもう一度呼ぶと時間が二重に進むので、
+        結果だけをここから取る。"""
+        n = self.sprites.count(self._state)
+        if n <= 0:
+            return None
+        return min(int(self._frames), n - 1)
+
     def update(self, now, bpm, gogo, balloon=None):
         """now(秒) と bpm と ゴーゴー中かで状態と位相を進める。
 
