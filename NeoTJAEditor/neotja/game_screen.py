@@ -72,6 +72,10 @@ CHARA_POS = (CHARA_ANCHOR[0] - CHARA_CONTENT_LEFT,
              CHARA_ANCHOR[1] - CHARA_CONTENT_BOTTOM)
 # 連番を1周するのにかける拍数。BPM120・119コマなら 2.0 秒 = 約60fps。
 CHARA_BEATS_PER_LOOP = 4.0
+# 風船の状態(Balloon_Breaking / Balloon_Broke)だけは、中身で合わせるのを
+# やめて画布(648x345)の左上をふだんの絵と同じ位置に置き、そこからずらす。
+# 中身で合わせると立ち姿(高さ195)の頭が画面の上へ出るため。
+CHARA_BALLOON_CANVAS_OFF = (50, 300)
 
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
@@ -656,9 +660,13 @@ class GameScreenWidget(QWidget):
         pm = anim.sprites.frame(state, idx)
         if pm is None:
             return
-        # 置き場所は状態ごとに絵の中身から測って合わせる。風船の絵は画布が
-        # 大きく(360x184 に対し 648x345)、キャラの立ち位置も違うので、
-        # 画布の左上を固定すると状態が変わった瞬間にキャラが飛ぶ。
+        if state in chara_mod.TIME_BASED_STATES:
+            # 風船の絵だけは画布の左上をふだんの絵と同じ位置に置いてずらす。
+            ox, oy = CHARA_BALLOON_CANVAS_OFF
+            p.drawPixmap(CHARA_POS[0] + ox, CHARA_POS[1] + oy, pm)
+            return
+        # ふだん/ゴーゴーは絵の中身で合わせる。状態ごとに画布もキャラの
+        # 立ち位置も違うので、画布の左上を固定すると切り替わった瞬間に飛ぶ。
         box = anim.sprites.content_box(state)
         if box is None:
             p.drawPixmap(CHARA_POS[0], CHARA_POS[1], pm)
