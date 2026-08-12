@@ -1962,8 +1962,13 @@ class ChartPreviewWidget(QWidget):
     # コマ送りが速いほど「弾ける」感じが強くなる。0.025 だと 40fps 相当で
     # 動きがきつかったので、60fps で1コマ2フレーム相当まで緩めた。
     HIT_EXP_FRAME_SEC = 0.033      # 5コマで約 0.167 秒
-    # 全体の濃さ。素材そのままの全不透明だと音符ごとに強く光って目が疲れる。
-    HIT_EXP_OPACITY = 0.80
+    # 全体の濃さ。以前は 0.80 まで落としていたが、本家と見比べると明らかに
+    # 暗かったので素材どおりに戻した。
+    HIT_EXP_OPACITY = 1.0
+    # 加算合成で重ねる。素材は橙〜黄の炎と灰色の光条という「暗い所へ足す」
+    # 前提の絵で、ふつうに重ねると橙のまま濁る。加算にすると本家と同じ
+    # 「黄色く光る」見え方になる(灰色の光条も足し算で白く抜ける)。
+    HIT_EXP_ADDITIVE = True
     # 終わり際は濃さを落としてなめらかに消す(最後のコマで急に消えると
     # 瞬いて見える)。ここから先を線形に 0 へ。
     HIT_EXP_FADE_FROM = 0.55       # 0..1 のうちどこからフェードを始めるか
@@ -2002,10 +2007,13 @@ class ChartPreviewWidget(QWidget):
         op = self.HIT_EXP_OPACITY
         if q > self.HIT_EXP_FADE_FROM:
             op *= max(0.0, 1.0 - (q - self.HIT_EXP_FADE_FROM) / (1.0 - self.HIT_EXP_FADE_FROM))
+        painter.save()
+        if self.HIT_EXP_ADDITIVE:
+            painter.setCompositionMode(QPainter.CompositionMode_Plus)
         painter.setOpacity(op)
         painter.drawPixmap(x, y, self._skin_explosion[fire][f])
         painter.drawPixmap(x, y, self._skin_explosion[silver][f])
-        painter.setOpacity(1.0)
+        painter.restore()
 
     def _se_scaled(self, label, big, footer_h):
         """打音表記スプライトを帯の高さに合わせて縮小したものを返す(キャッシュ)。
