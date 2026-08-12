@@ -618,6 +618,27 @@ class ChartPreviewWidget(QWidget):
 
     BALLOON_BROKE_SEC = 0.5      # 割れたあと、その絵を出しておく時間
 
+    def balloon_pop_elapsed(self, now: float, window: float):
+        """直近に風船が割れてからの経過秒。window 秒より前なら None。
+
+        虹のように「割れた瞬間から流す」演出に使う。区間は割れる時刻まで
+        切り詰めたほうなので、end がそのまま割れた瞬間。"""
+        best = None
+        for spans, starts in zip((self._balloons, self._kusudamas),
+                                 self._span_starts[1:]):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            while j >= 0:
+                end = spans[j][1]
+                if end <= now:
+                    el = now - end
+                    if el < window and (best is None or el < best):
+                        best = el
+                    break
+                j -= 1
+        return best
+
     def balloon_state(self, now: float):
         """風船・くす玉の様子。"hitting" / "broke" / None。
 

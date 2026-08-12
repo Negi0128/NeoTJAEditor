@@ -155,6 +155,23 @@ SOUL_FLY_SCALE_END = 1.0
 # 「CurrentValue < 13 のあいだ終点に音符を描く」= 13 * 17ms ≒ 0.22 秒。
 # 本家はそのまま消えるが、こちらは白へ寄せながら薄くして消す。
 SOUL_LAND_SEC = 0.22
+
+# --- 風船が割れたときの虹 (skin/Rainbow.png = TNDE の 10_Effects/Rainbow.png)
+# OpenTaiko の Rainbow.cs をそのまま移す。カウンタ 0..164 を Timer(ms) 刻みで
+# 進めて、
+#   前半 (0..81)  : 左から順に「描き足していく」
+#                   切り出し (0, 0, W*c/85, H) を (X, Y) に置く
+#   後半 (82..164): 左から順に「消していく」
+#                   nx = W*(c-82)/85 として (nx, 0, W-nx, H) を (X+nx, Y) に置く
+# 数値は OpenTaiko の既定値(CSkin.cs):
+#   Game_Effect_Rainbow_X = 360 / _Y = -100 / _Timer = 8ms
+# 全体で 164*8 = 1.31 秒。
+SHOW_BALLOON_RAINBOW = True
+RAINBOW_POS = (360, -100)
+RAINBOW_TICK_SEC = 0.008
+RAINBOW_TICKS = 164
+RAINBOW_HALF = 82
+RAINBOW_WIPE_DEN = 85
 # 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
 # 丸ごと入る範囲。上端は 0 — てっぺんで画面の外へ出る分はここで切れる。
 SOUL_FLY_RECT = (330, 0, SCREEN_W - 330, 330)
@@ -570,6 +587,7 @@ class GameScreenWidget(QWidget):
             ("bg_up_base", os.path.join("Bg_up", "Base.png")),
             ("bg_up_chara", os.path.join("Bg_up", "Chara.png")),
             ("bg_up_flower", os.path.join("Bg_up", "Flower.png")),
+            ("rainbow", "Rainbow.png"),
             ("footer", "Footer.png"),
             ("panel", "Taiko_Background.png"),
             ("lane_frame", "Taiko_Frame.png"),
@@ -1274,6 +1292,32 @@ class GameScreenWidget(QWidget):
                                            BG_UP_CHARA_ROW, 0, row), now)
         p.restore()
 
+    def _draw_rainbow(self, p, now):
+        """風船が割れたあとにかかる虹。上背景の上・レーンより奥に描く。"""
+        if not SHOW_BALLOON_RAINBOW:
+            return
+        pm = self._skin.get("rainbow")
+        if pm is None:
+            return
+        span = RAINBOW_TICKS * RAINBOW_TICK_SEC
+        try:
+            el = self.chart_preview.balloon_pop_elapsed(now, span)
+        except Exception:  # noqa: BLE001
+            return
+        if el is None:
+            return
+        c = int(el / RAINBOW_TICK_SEC)
+        w, h = pm.width(), pm.height()
+        x, y = RAINBOW_POS
+        if c < RAINBOW_HALF:
+            nx = w * c // RAINBOW_WIPE_DEN
+            if nx > 0:
+                p.drawPixmap(x, y, pm, 0, 0, nx, h)
+        else:
+            nx = w * (c - RAINBOW_HALF) // RAINBOW_WIPE_DEN
+            if nx < w:
+                p.drawPixmap(x + nx, y, pm, nx, 0, w - nx, h)
+
     def _draw_bg_light(self, p, now):
         """下背景の提灯の光を、加算合成でゆっくり明滅させながら重ねる。"""
         if not (SHOW_BACKGROUND and SHOW_BACKGROUND_LIGHT):
@@ -1305,6 +1349,9 @@ class GameScreenWidget(QWidget):
             except Exception:  # noqa: BLE001
                 bg_now = 0.0
             self._draw_bg_top_layers(p, bg_now)
+            # 虹は上背景の上、レーン一式より奥。キャッシュを被せる前に描く
+            # (1枚絵の上背景のときはキャッシュが不透明なので出ない)。
+            self._draw_rainbow(p, bg_now)
         p.drawPixmap(0, 0, self._static_layer)
 
         # --- HUD(スコア・コンボ・太鼓・ゲージ) ---
