@@ -172,6 +172,14 @@ RAINBOW_TICK_SEC = 0.008
 RAINBOW_TICKS = 164
 RAINBOW_HALF = 82
 RAINBOW_WIPE_DEN = 85
+# 描き足していく間、その先端に大ドンの顔を乗せる。素材どおりに切ると
+# 先端が縦にスパッと切れて見えるので、顔で隠して「顔が虹を引いている」
+# 見え方にする。Notes.png は 130px のセルが 13列x3行で、(3, 0) が
+# 大ドンの叩いた顔。虹の帯の真ん中に乗るよう、その列の不透明な範囲の
+# 中心に置く。
+RAINBOW_HEAD_CELL = 130
+RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
+RAINBOW_HEAD_SCALE = 1.0
 # 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
 # 丸ごと入る範囲。上端は 0 — てっぺんで画面の外へ出る分はここで切れる。
 SOUL_FLY_RECT = (330, 0, SCREEN_W - 330, 330)
@@ -461,6 +469,9 @@ class GameScreenWidget(QWidget):
         self._bg_up_cache = {}
         # 白く染めた音符(着弾の白飛ばし用)。文字 -> QPixmap
         self._white_note_cache = {}
+        # 虹の先端に乗せる顔と、虹の帯の中心の高さ(列ごと)。どちらも1回だけ。
+        self._rainbow_head_pm = None
+        self._rainbow_centers = None
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
         # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
@@ -588,6 +599,7 @@ class GameScreenWidget(QWidget):
             ("bg_up_chara", os.path.join("Bg_up", "Chara.png")),
             ("bg_up_flower", os.path.join("Bg_up", "Flower.png")),
             ("rainbow", "Rainbow.png"),
+            ("notes", "Notes.png"),
             ("footer", "Footer.png"),
             ("panel", "Taiko_Background.png"),
             ("lane_frame", "Taiko_Frame.png"),
@@ -1292,6 +1304,46 @@ class GameScreenWidget(QWidget):
                                            BG_UP_CHARA_ROW, 0, row), now)
         p.restore()
 
+    def _rainbow_head(self):
+        """虹の先端に乗せる大ドンの顔(Notes.png から1枚切って覚える)。"""
+        pm = self._rainbow_head_pm
+        if pm is None:
+            sheet = self._skin.get("notes")
+            if sheet is None:
+                return None
+            c = RAINBOW_HEAD_CELL
+            col, row = RAINBOW_HEAD_INDEX
+            if sheet.width() < (col + 1) * c or sheet.height() < (row + 1) * c:
+                return None
+            pm = sheet.copy(QRect(col * c, row * c, c, c))
+            self._rainbow_head_pm = pm
+        return pm
+
+    def _rainbow_band_center(self, col):
+        """虹の絵の col 列目で、帯の中心が上から何pxか。無ければ None。
+
+        虹は弧なので、先端の高さは列ごとに違う。素材のアルファから列ごとに
+        1回だけ測って覚えておく(毎フレーム測ると重い)。"""
+        if self._rainbow_centers is None:
+            pm = self._skin.get("rainbow")
+            if pm is None:
+                return None
+            img = pm.toImage()
+            w, h = img.width(), img.height()
+            centers = []
+            for x in range(w):
+                top, bottom = -1, -1
+                for y in range(h):
+                    if img.pixelColor(x, y).alpha() > 8:
+                        if top < 0:
+                            top = y
+                        bottom = y
+                centers.append(None if top < 0 else (top + bottom) / 2.0)
+            self._rainbow_centers = centers
+        if 0 <= col < len(self._rainbow_centers):
+            return self._rainbow_centers[col]
+        return None
+
     def _draw_rainbow(self, p, now):
         """風船が割れたあとにかかる虹。上背景の上・レーンより奥に描く。"""
         if not SHOW_BALLOON_RAINBOW:
@@ -1313,6 +1365,14 @@ class GameScreenWidget(QWidget):
             nx = w * c // RAINBOW_WIPE_DEN
             if nx > 0:
                 p.drawPixmap(x, y, pm, 0, 0, nx, h)
+                head = self._rainbow_head()
+                cy = self._rainbow_band_center(min(nx, w - 1))
+                if head is not None and cy is not None:
+                    k = RAINBOW_HEAD_SCALE
+                    hw, hh = head.width() * k, head.height() * k
+                    p.drawPixmap(QRectF(x + nx - hw / 2.0,
+                                        y + cy - hh / 2.0, hw, hh),
+                                 head, QRectF(0, 0, head.width(), head.height()))
         else:
             nx = w * (c - RAINBOW_HALF) // RAINBOW_WIPE_DEN
             if nx < w:
