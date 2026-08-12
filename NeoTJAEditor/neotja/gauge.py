@@ -69,6 +69,7 @@ _RANK_RANGES = (
 
 GAUGE_MAX = 10000       # 入魂
 GAUGE_CLEAR = 8000      # ノルマ(クリア)
+GAUGE_STEP = 200        # 1本ぶんの点。10000/200 = 50本
 CLEAR_RATIO = GAUGE_CLEAR / GAUGE_MAX      # 0.8
 
 # 表の外側(音符が 246 未満 / 1608 超)を埋めるための外挿。

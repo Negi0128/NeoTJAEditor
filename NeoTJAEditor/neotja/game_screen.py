@@ -22,7 +22,7 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import math
 import os
 
-from PySide6.QtCore import Qt, QRect, QTimer
+from PySide6.QtCore import Qt, QRect, QRectF, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,
                            QPainter, QPixmap)
 from PySide6.QtWidgets import QWidget
@@ -126,6 +126,22 @@ GAUGE_CLEAR_RATIO = gauge_mod.CLEAR_RATIO
 # ゲージ右端(499+697=1196)と枠の右端(331+950=1281)の間、85px の窓に収める。
 SOUL_CELL = 80
 SOUL_POS = (1198, 126)
+# ゲージは1本ずつ増える。内部10000点で200点ごとに1本 = 50本。素材の縞も
+# 50等分で入っているので、幅を1本ぶんの倍数に丸めると縞と揃う。
+GAUGE_BLOCKS = gauge_mod.GAUGE_MAX // gauge_mod.GAUGE_STEP
+# 「クリア」の文字。Gauge.png / Gauge_Base.png の y=44.. に 45x22 が2つ
+# 入っている(左=明るい灰 / 右=暗い灰)。実機ではクリア圏(段が高くなる所)の
+# 左上に出る。地の金色が暗いうちは明るい方、満ちて明るくなったら暗い方に
+# 替えて読めるようにする(実機のキャプチャで明るい方が出ているのを確認)。
+GAUGE_CLEAR_GLYPH = ((3, 44), (61, 44), 45, 22)
+GAUGE_CLEAR_STEP_X = 547      # 素材の中でクリア圏(背の高い側)が始まる x
+GAUGE_CLEAR_TEXT_OFF = (-5, -1)   # 段の始まりからの微調整
+# 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
+SOUL_FLY_SEC = 0.42
+SOUL_FLY_ARC = 70.0          # 弧の高さ(上へ膨らむ量)
+SOUL_FLY_SCALE_END = 0.45    # 着地時の大きさ(等倍からここまで縮む)
+# 飛行を描く板。判定円(y=261)から魂(y=166)までの弧が丸ごと入る範囲。
+SOUL_FLY_RECT = (330, 100, SCREEN_W - 330, 230)
 
 # レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
 # 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
@@ -291,6 +307,27 @@ OVERLAY_RECT = ((-130, 0, 260, 338) if SHOW_GOGO_SPLASH
                 else (-130, 88, 260, 250))   # (dx, y, w, h) dx は判定円中心からの左端
 
 
+class _FlightOverlay(QWidget):
+    """叩いた音符が魂ゲージへ飛んでいくところだけを描く板。
+
+    飛び始めは判定円の上、つまりレーンの中にいる。親(画面)は子(レーン)より
+    先に描かれるので親に描くとその間だけレーンに隠れて、途中から湧いて出た
+    ように見える。「良」と同じくレーンの兄弟として重ねて手前に出す。"""
+
+    def __init__(self, screen):
+        super().__init__(screen)
+        self._screen = screen
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._screen.draw_soul_flights(p, self.x(), self.y())
+        p.end()
+
+
 class _JudgeOverlay(QWidget):
     """判定文字「良」だけを描く、レーンより手前の板。
 
@@ -366,6 +403,8 @@ class GameScreenWidget(QWidget):
                                         se_height=SE_STRIP_H)
         # コンボはこちらが左パネルの太鼓の上に描くので、レーン内には出さない。
         chart_preview._hide_lane_combo = True
+        # 叩いた音符の飛び去りは、こちらが魂ゲージまで一続きに描く。
+        chart_preview._hide_hit_fly = True
         chart_preview.move(LANE_X, LANE_Y)
 
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
@@ -380,6 +419,8 @@ class GameScreenWidget(QWidget):
         self._digit_cache = {}
         # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
         self._judge_was_active = False
+        # 飛んでいる音符が前フレームに居たか(同じく消し込みを1回だけ行う)
+        self._flight_was_active = False
 
         # レーンが update() しても、Qt が塗り直すのはレーンの矩形だけ。
         # スコア・コンボ・太鼓・魂ゲージ・「良」はどれもレーンの外にあるので、
@@ -387,6 +428,12 @@ class GameScreenWidget(QWidget):
         # 塗り直す。レーンに重ならない2つの矩形だけを指定して、レーンを
         # 二重に描かせない。
         # 「良」はレーンにかぶるので、レーンより手前の板に描く。
+        # 飛んでいく音符も、判定円(レーンの中)から出るのでレーンより手前。
+        # 「良」より奥にしたいので先に作って先に raise する。
+        self._flight_overlay = _FlightOverlay(self)
+        self._flight_overlay.setGeometry(*SOUL_FLY_RECT)
+        self._flight_overlay.raise_()
+
         ox, oy, ow, oh = OVERLAY_RECT
         self._judge_overlay = _JudgeOverlay(self)
         self._judge_overlay.setGeometry(LANE_X + JUDGE_X_IN_LANE + ox, oy, ow, oh)
@@ -471,6 +518,15 @@ class GameScreenWidget(QWidget):
         if active or self._judge_was_active:
             self._judge_overlay.update()
         self._judge_was_active = active
+        # 飛んでいる音符の板。同じ理由で、飛んでいる間と、その次の1回だけ。
+        try:
+            now = self.chart_preview.game_state()[0]
+            flying = bool(self.chart_preview.recent_hits(now, SOUL_FLY_SEC))
+        except Exception:  # noqa: BLE001
+            flying = False
+        if flying or self._flight_was_active:
+            self._flight_overlay.update()
+        self._flight_was_active = flying
 
     # ------------------------------------------------------------------
     def _load_skin(self):
@@ -783,10 +839,23 @@ class GameScreenWidget(QWidget):
         ratio = max(0.0, min(1.0, ratio))
         if base is not None:
             p.drawPixmap(gx, gy, base, 0, 0, base.width(), GAUGE_BAR_H)
+        # 1本ぶんの幅に切り下げる。中途半端に伸びず、素材の縞と揃って
+        # 「カチッ、カチッ」と1本ずつ増える。
+        step = fill.width() / float(GAUGE_BLOCKS) if fill is not None else 0.0
+        blocks = int(ratio * GAUGE_BLOCKS + 1e-9)
+        wpx = 0
         if fill is not None:
-            wpx = int(fill.width() * ratio)
+            wpx = int(round(blocks * step))
             if wpx > 0:
                 p.drawPixmap(gx, gy, fill, 0, 0, wpx, GAUGE_BAR_H)
+        # 「クリア」の文字。クリア圏の左上に置く。
+        src = fill if fill is not None else base
+        if src is not None:
+            (lx, ly), (dx_, dy_), gw, gh = GAUGE_CLEAR_GLYPH
+            lit = wpx > GAUGE_CLEAR_STEP_X if fill is not None else False
+            sx, sy = (dx_, dy_) if lit else (lx, ly)
+            p.drawPixmap(gx + GAUGE_CLEAR_STEP_X + GAUGE_CLEAR_TEXT_OFF[0],
+                         gy + GAUGE_CLEAR_TEXT_OFF[1], src, sx, sy, gw, gh)
         # 入魂(満タン)のあいだはゲージが虹色になる。素材のマスクがゲージ本体と
         # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
         if ratio >= 1.0 and self._gauge_rainbow:
@@ -813,6 +882,44 @@ class GameScreenWidget(QWidget):
             row = 1 if ratio >= GAUGE_CLEAR_RATIO else 0
             p.drawPixmap(SOUL_POS[0], SOUL_POS[1], soul,
                          0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
+
+    def draw_soul_flights(self, p, ox=0, oy=0):
+        """叩いた音符を判定円から魂ゲージへ飛ばす。
+
+        レーンの外(黒枠やゲージの上)まで出るので、レーン側ではなく画面側が
+        描く。ox/oy は描き先の板の左上。持ち回る状態は無く、その時刻に
+        飛んでいる音符を毎回引き直すだけなので、シークしても止めても
+        矛盾しない。"""
+        cp = self.chart_preview
+        try:
+            now = cp.game_state()[0]
+            hits = cp.recent_hits(now, SOUL_FLY_SEC)
+        except Exception:  # noqa: BLE001
+            return
+        if not hits:
+            return
+        sx, sy = self.judge_center()
+        ex = SOUL_POS[0] + SOUL_CELL / 2.0
+        ey = SOUL_POS[1] + SOUL_CELL / 2.0
+        # 上へ膨らむ二次ベジェ。制御点は始点と終点の中間の、さらに上。
+        cx = (sx + ex) / 2.0
+        cy = (sy + ey) / 2.0 - SOUL_FLY_ARC
+        for elapsed, char in hits:
+            q = max(0.0, min(1.0, elapsed / SOUL_FLY_SEC))
+            sprite, _big = cp.note_sprite(char)
+            if sprite is None or sprite.width() <= 0:
+                continue
+            u = 1.0 - q
+            x = u * u * sx + 2 * u * q * cx + q * q * ex
+            y = u * u * sy + 2 * u * q * cy + q * q * ey
+            k = 1.0 - (1.0 - SOUL_FLY_SCALE_END) * q
+            w = sprite.width() * k
+            h = sprite.height() * k
+            # 着地の間際だけ消す。途中で薄くすると軌跡が見えなくなる。
+            p.setOpacity(1.0 if q < 0.8 else max(0.0, (1.0 - q) / 0.2))
+            p.drawPixmap(QRectF(x - w / 2.0 - ox, y - h / 2.0 - oy, w, h), sprite,
+                         QRectF(0, 0, sprite.width(), sprite.height()))
+        p.setOpacity(1.0)
 
     def _draw_lane_readouts(self, p, now, recent):
         """連打・風船の打数を、本家と同じ金の扇で出す。

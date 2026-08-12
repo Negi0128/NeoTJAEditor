@@ -417,6 +417,9 @@ class ChartPreviewWidget(QWidget):
         self._skin_gogo_fire, self._gogo_fire_org = self._crop_frames(self._skin_gogo_fire)
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
+        # True にすると、叩いた音符の飛び去りをレーン側で描かない
+        # (本家レイアウトでは画面側が魂ゲージまで一続きに飛ばす)。
+        self._hide_hit_fly = False
         self._se_static_family = None
 
         self._timer = QTimer(self)
@@ -564,6 +567,30 @@ class ChartPreviewWidget(QWidget):
 
     def total_notes(self) -> int:
         return len(self._note_times)
+
+    def recent_hits(self, now: float, window: float):
+        """window 秒以内に判定線を通過した音符 [(経過秒, 文字), ...]。
+
+        _recent_hit() は直近の1個だけだが、魂ゲージへ飛ばす演出は複数が
+        同時に飛ぶので、区間で取れるようにする。二分探索するだけなので
+        こちらも状態を持たず、シークしても矛盾しない。"""
+        if not self._note_times or window <= 0.0:
+            return []
+        hi = bisect.bisect_right(self._note_times, now)
+        lo = bisect.bisect_left(self._note_times, now - window)
+        out = []
+        for i in range(hi - 1, lo - 1, -1):
+            t = self._note_times[i]
+            if self._reveal_time is not None and t < self._reveal_time:
+                break
+            out.append((now - t, self._note_chars[i]))
+        return out
+
+    def note_sprite(self, char: str):
+        """音符の絵と、大音符かどうか。画面側が同じ絵で飛ばすのに使う。"""
+        big = char in NOTE_BIG
+        sprites = self._sprites_big if big else self._sprites_small
+        return sprites.get(char), big
 
     def live_tap_count(self, now=None):
         """連打の数え上げ / 風船・くす玉の残り打数。区間外は None。
@@ -2758,6 +2785,11 @@ class ChartPreviewWidget(QWidget):
                 big = c in NOTE_BIG
                 r = self.NOTE_R_BIG if big else self.NOTE_R_SMALL
                 if t <= now:
+                    # 本家レイアウトでは、叩いた音符は判定線から魂ゲージまで
+                    # 一続きに飛ぶ。その飛行は画面側(game_screen.py)がレーンの
+                    # 外まで描くので、こちらでは二重に出さない。
+                    if self._hide_hit_fly:
+                        continue
                     elapsed = now - t
                     dx, dy = self.hit_fly_offset(elapsed)
                     x = judge_x + dx
