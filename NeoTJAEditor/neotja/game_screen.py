@@ -135,11 +135,15 @@ GAUGE_BLOCKS = gauge_mod.GAUGE_MAX // gauge_mod.GAUGE_STEP
 # 替えて読めるようにする(実機のキャプチャで明るい方が出ているのを確認)。
 GAUGE_CLEAR_GLYPH = ((3, 44), (61, 44), 45, 22)
 GAUGE_CLEAR_STEP_X = 547      # 素材の中でクリア圏(背の高い側)が始まる x
-GAUGE_CLEAR_TEXT_OFF = (-2, 1)    # 段の始まりからの微調整
+GAUGE_CLEAR_TEXT_OFF = (3, 1)     # 段の始まりからの微調整
 # 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
 SOUL_FLY_SEC = 0.42
-# 弧のてっぺん(道のりの半分の地点)を通る y。0 なら音符の中心が画面の上端に
-# 来る = 半分だけ画面の外へ出る。制御点はここから逆算する。
+# 弧のてっぺん(道のりの半分の地点)が通る点。y=0 なら音符の中心が画面の
+# 上端に来る = 半分だけ画面の外へ出る。x は左右の膨らみの偏り — 判定円
+# (414)と魂(1238)のちょうど中間は 826 だが、そこだと右へ寄って見えるので
+# 左へ寄せて、判定円を出たあとすぐ立ち上がる形にする。
+# 制御点はこの2つから逆算する。
+SOUL_FLY_APEX_X = 700.0
 SOUL_FLY_APEX_Y = 0.0
 SOUL_FLY_SCALE_END = 0.45    # 着地時の大きさ(等倍からここまで縮む)
 # 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
@@ -298,7 +302,7 @@ TITLE_COLOR = "#ffffff"
 # 文字の輪郭をなぞる線なので、下が何色でも読める。太さは線の幅で、外へ
 # 出るのはその半分。
 TITLE_OUTLINE = "#000000"
-TITLE_OUTLINE_W = 5.0
+TITLE_OUTLINE_W = 9.0
 
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
@@ -699,8 +703,9 @@ class GameScreenWidget(QWidget):
         # 魂ゲージの伸び方(おに基準)。譜面が決まればランクが決まる。
         self._gauge = gauge_mod.GaugeModel(preview_data or {})
         self._title = (preview_data or {}).get("title") or ""
-        # クリアに届く音符の時刻。魂のバーストをそこから流す。毎フレーム
-        # 探さずに済むよう譜面が決まった時点で1回だけ求めておく。
+        # クリア(ノルマ)に届く音符の時刻。魂の弾けは着弾ごとに出すので
+        # ここでは使っていないが、クリアの瞬間そのものを使う演出を足すとき
+        # のために求めておく。
         try:
             self._clear_time = self.chart_preview.note_time(self._gauge.notes_to_clear)
         except Exception:  # noqa: BLE001
@@ -880,12 +885,25 @@ class GameScreenWidget(QWidget):
             i = int(now / GAUGE_RAINBOW_FRAME_SEC) % len(self._gauge_rainbow)
             p.drawPixmap(gx, gy, self._gauge_rainbow[i])
 
-        # クリア(ノルマ)に届いた瞬間、魂の文字の後ろで輪が開く。
+        # 飛んできた音符が魂に当たった瞬間の弾け。以前は「クリアに届いた
+        # 瞬間の演出」だと思って1回だけ出していたが、実機のキャプチャを見ると
+        # 音符が着弾するたびに出ている(叩き続けているあいだ出っぱなしになる)。
+        # 着弾の時刻は「叩いた時刻 + 飛行時間」なので、それだけで描ける。
         burst = self._skin.get("soul_burst")
-        if burst is not None and self._clear_time is not None:
-            el = now - self._clear_time
+        if burst is not None:
             n = SOUL_BURST_FRAMES - SOUL_BURST_FIRST
-            if 0.0 <= el < n * SOUL_BURST_FRAME_SEC:
+            span = n * SOUL_BURST_FRAME_SEC
+            el = None
+            try:
+                hits = self.chart_preview.recent_hits(now, SOUL_FLY_SEC + span)
+            except Exception:  # noqa: BLE001
+                hits = []
+            for elapsed, _c in hits:      # 新しい順。最初に着弾済みのものを採る
+                e = elapsed - SOUL_FLY_SEC
+                if e >= 0.0:
+                    el = e
+                    break
+            if el is not None and el < span:
                 f = SOUL_BURST_FIRST + int(el / SOUL_BURST_FRAME_SEC)
                 c = SOUL_BURST_CELL
                 d = c * SOUL_BURST_SCALE
@@ -920,8 +938,8 @@ class GameScreenWidget(QWidget):
         ex = SOUL_POS[0] + SOUL_CELL / 2.0
         ey = SOUL_POS[1] + SOUL_CELL / 2.0
         # 上へ膨らむ二次ベジェ。q=0.5 の点は (始点 + 2*制御点 + 終点)/4 なので、
-        # てっぺんを SOUL_FLY_APEX_Y に通すには制御点をこう置けばよい。
-        cx = (sx + ex) / 2.0
+        # てっぺんを通したい点から制御点はこう逆算できる。
+        cx = (4.0 * SOUL_FLY_APEX_X - sx - ex) / 2.0
         cy = (4.0 * SOUL_FLY_APEX_Y - sy - ey) / 2.0
         for elapsed, char in hits:
             q = max(0.0, min(1.0, elapsed / SOUL_FLY_SEC))
@@ -934,8 +952,9 @@ class GameScreenWidget(QWidget):
             k = 1.0 - (1.0 - SOUL_FLY_SCALE_END) * q
             w = sprite.width() * k
             h = sprite.height() * k
-            # 着地の間際だけ消す。途中で薄くすると軌跡が見えなくなる。
-            p.setOpacity(1.0 if q < 0.8 else max(0.0, (1.0 - q) / 0.2))
+            p.setOpacity(1.0)
+            # 薄くしない。魂に着いたところで弾けるので、消えるのではなく
+            # 「吸い込まれる」ように見えるのが正しい。
             p.drawPixmap(QRectF(x - w / 2.0 - ox, y - h / 2.0 - oy, w, h), sprite,
                          QRectF(0, 0, sprite.width(), sprite.height()))
         p.setOpacity(1.0)
