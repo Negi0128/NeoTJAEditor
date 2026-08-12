@@ -145,7 +145,14 @@ SOUL_FLY_SEC = 0.42
 # 制御点はこの2つから逆算する。
 SOUL_FLY_APEX_X = 700.0
 SOUL_FLY_APEX_Y = 0.0
-SOUL_FLY_SCALE_END = 0.45    # 着地時の大きさ(等倍からここまで縮む)
+# OpenTaiko の FlyingNotes.cs は NotesManager.DisplayNote() を素のまま呼ぶ
+# だけで、拡大率も不透明度もいじっていない。飛んでいる間は等倍のまま。
+SOUL_FLY_SCALE_END = 1.0
+# 着弾したあと、音符は魂の上にしばらく残る。OpenTaiko の
+# CActImplChipEffects.cs は ctChipEffect = CCounter(0, 24, 17ms) を回して
+# 「CurrentValue < 13 のあいだ終点に音符を描く」= 13 * 17ms ≒ 0.22 秒。
+# 本家はそのまま消えるが、こちらは白へ寄せながら薄くして消す。
+SOUL_LAND_SEC = 0.22
 # 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
 # 丸ごと入る範囲。上端は 0 — てっぺんで画面の外へ出る分はここで切れる。
 SOUL_FLY_RECT = (330, 0, SCREEN_W - 330, 330)
@@ -294,7 +301,7 @@ TITLE_FONT_FILE = "Kanteiryu.otf"
 TITLE_FONT_FALLBACKS = ("FOT-大江戸勘亭流 Std E", "FOT-OedoKtr Std E",
                         "DFPKanteiryu-XB", "DFP勘亭流")
 TITLE_RECT = (620, 14, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
-TITLE_SIZE = 34                   # 大きさは曲名の長さによらず一定
+TITLE_SIZE = 41                   # 大きさは曲名の長さによらず一定(34の1.2倍)
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
 TITLE_COLOR = "#ffffff"
@@ -426,6 +433,8 @@ class GameScreenWidget(QWidget):
         self._static_layer = None
         # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
         self._bg_up_cache = {}
+        # 白く染めた音符(着弾の白飛ばし用)。文字 -> QPixmap
+        self._white_note_cache = {}
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
         # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
@@ -532,7 +541,8 @@ class GameScreenWidget(QWidget):
         # 飛んでいる音符の板。同じ理由で、飛んでいる間と、その次の1回だけ。
         try:
             now = self.chart_preview.game_state()[0]
-            flying = bool(self.chart_preview.recent_hits(now, SOUL_FLY_SEC))
+            flying = bool(self.chart_preview.recent_hits(
+                now, SOUL_FLY_SEC + SOUL_LAND_SEC))
         except Exception:  # noqa: BLE001
             flying = False
         if flying or self._flight_was_active:
@@ -919,6 +929,21 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(SOUL_POS[0], SOUL_POS[1], soul,
                          0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
 
+    def _white_note(self, char, sprite):
+        """音符の絵を真っ白に染めたもの(形はそのまま)。着弾の白飛ばし用。"""
+        pm = self._white_note_cache.get(char)
+        if pm is None or pm.size() != sprite.size():
+            pm = QPixmap(sprite.size())
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            q.drawPixmap(0, 0, sprite)
+            # 元の絵の形(アルファ)だけ残して、中身を白で置き換える。
+            q.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            q.fillRect(pm.rect(), QColor("#ffffff"))
+            q.end()
+            self._white_note_cache[char] = pm
+        return pm
+
     def draw_soul_flights(self, p, ox=0, oy=0):
         """叩いた音符を判定円から魂ゲージへ飛ばす。
 
@@ -929,7 +954,7 @@ class GameScreenWidget(QWidget):
         cp = self.chart_preview
         try:
             now = cp.game_state()[0]
-            hits = cp.recent_hits(now, SOUL_FLY_SEC)
+            hits = cp.recent_hits(now, SOUL_FLY_SEC + SOUL_LAND_SEC)
         except Exception:  # noqa: BLE001
             return
         if not hits:
@@ -942,21 +967,33 @@ class GameScreenWidget(QWidget):
         cx = (4.0 * SOUL_FLY_APEX_X - sx - ex) / 2.0
         cy = (4.0 * SOUL_FLY_APEX_Y - sy - ey) / 2.0
         for elapsed, char in hits:
-            q = max(0.0, min(1.0, elapsed / SOUL_FLY_SEC))
             sprite, _big = cp.note_sprite(char)
             if sprite is None or sprite.width() <= 0:
                 continue
-            u = 1.0 - q
-            x = u * u * sx + 2 * u * q * cx + q * q * ex
-            y = u * u * sy + 2 * u * q * cy + q * q * ey
-            k = 1.0 - (1.0 - SOUL_FLY_SCALE_END) * q
-            w = sprite.width() * k
-            h = sprite.height() * k
-            p.setOpacity(1.0)
-            # 薄くしない。魂に着いたところで弾けるので、消えるのではなく
-            # 「吸い込まれる」ように見えるのが正しい。
-            p.drawPixmap(QRectF(x - w / 2.0 - ox, y - h / 2.0 - oy, w, h), sprite,
-                         QRectF(0, 0, sprite.width(), sprite.height()))
+            w = sprite.width() * SOUL_FLY_SCALE_END
+            h = sprite.height() * SOUL_FLY_SCALE_END
+            src = QRectF(0, 0, sprite.width(), sprite.height())
+            if elapsed < SOUL_FLY_SEC:
+                # --- 飛行中。大きさも濃さも変えない(OpenTaiko と同じ) ---
+                q = max(0.0, elapsed / SOUL_FLY_SEC)
+                u = 1.0 - q
+                x = u * u * sx + 2 * u * q * cx + q * q * ex
+                y = u * u * sy + 2 * u * q * cy + q * q * ey
+                p.setOpacity(1.0)
+                p.drawPixmap(QRectF(x - w / 2.0 - ox, y - h / 2.0 - oy, w, h),
+                             sprite, src)
+                continue
+            # --- 着弾後。魂の上に残しつつ、白へ寄せながら消す ---
+            t = (elapsed - SOUL_FLY_SEC) / SOUL_LAND_SEC
+            if t >= 1.0:
+                continue
+            rect = QRectF(ex - w / 2.0 - ox, ey - h / 2.0 - oy, w, h)
+            # 着いた瞬間は素の音符、そこから白へ寄せながら全体を薄くする。
+            alpha = 1.0 - t
+            p.setOpacity(alpha * (1.0 - t))
+            p.drawPixmap(rect, sprite, src)
+            p.setOpacity(alpha * t)
+            p.drawPixmap(rect, self._white_note(char, sprite), src)
         p.setOpacity(1.0)
 
     def _draw_lane_readouts(self, p, now, recent):
