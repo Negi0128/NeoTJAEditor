@@ -22,9 +22,9 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import math
 import os
 
-from PySide6.QtCore import Qt, QRect, QRectF, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,
-                           QPainter, QPixmap)
+from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QTimer
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QImage,
+                           QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QWidget
 
 from neotja import chara as chara_mod
@@ -135,13 +135,16 @@ GAUGE_BLOCKS = gauge_mod.GAUGE_MAX // gauge_mod.GAUGE_STEP
 # 替えて読めるようにする(実機のキャプチャで明るい方が出ているのを確認)。
 GAUGE_CLEAR_GLYPH = ((3, 44), (61, 44), 45, 22)
 GAUGE_CLEAR_STEP_X = 547      # 素材の中でクリア圏(背の高い側)が始まる x
-GAUGE_CLEAR_TEXT_OFF = (-5, -1)   # 段の始まりからの微調整
+GAUGE_CLEAR_TEXT_OFF = (-2, 1)    # 段の始まりからの微調整
 # 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
 SOUL_FLY_SEC = 0.42
-SOUL_FLY_ARC = 70.0          # 弧の高さ(上へ膨らむ量)
+# 弧のてっぺん(道のりの半分の地点)を通る y。0 なら音符の中心が画面の上端に
+# 来る = 半分だけ画面の外へ出る。制御点はここから逆算する。
+SOUL_FLY_APEX_Y = 0.0
 SOUL_FLY_SCALE_END = 0.45    # 着地時の大きさ(等倍からここまで縮む)
-# 飛行を描く板。判定円(y=261)から魂(y=166)までの弧が丸ごと入る範囲。
-SOUL_FLY_RECT = (330, 100, SCREEN_W - 330, 230)
+# 飛行を描く板。判定円(y=261)から魂(y=166)まで、画面の上端をかすめる弧が
+# 丸ごと入る範囲。上端は 0 — てっぺんで画面の外へ出る分はここで切れる。
+SOUL_FLY_RECT = (330, 0, SCREEN_W - 330, 330)
 
 # レーンと魂ゲージを囲む黒枠(1P_Frame.png 951x224)。アルファを測ったところ
 # 中の透明な窓が y=56..185 = 高さ130 で、レーン本体とぴったり同じだった。
@@ -291,7 +294,11 @@ TITLE_SIZE = 34                   # 大きさは曲名の長さによらず一�
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
 TITLE_COLOR = "#ffffff"
-TITLE_SHADOW = "#000000"
+# 上背景を敷いてから白1色だと柄に埋もれるので、黒で縁取る。落ち影ではなく
+# 文字の輪郭をなぞる線なので、下が何色でも読める。太さは線の幅で、外へ
+# 出るのはその半分。
+TITLE_OUTLINE = "#000000"
+TITLE_OUTLINE_W = 5.0
 
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
@@ -620,12 +627,23 @@ class GameScreenWidget(QWidget):
         # 右端は固定。左へはみ出せるよう、枠の左端を画面左まで広げておく
         # (右詰めなので、収まる曲名の見た目は変わらない)。
         left = TITLE_LEFT_LIMIT
-        rect_w = x + w - left
-        flags = Qt.AlignRight | Qt.AlignVCenter
-        p.setPen(QColor(TITLE_SHADOW))
-        p.drawText(QRect(left + 2, y + 2, rect_w, h), flags, self._title)
-        p.setPen(QColor(TITLE_COLOR))
-        p.drawText(QRect(left, y, rect_w, h), flags, self._title)
+        # 縁取りは文字の輪郭を線でなぞる。drawText では出せないので、
+        # 文字を図形(パス)にしてから「線=黒 / 塗り=白」で1回で描く。
+        # 右詰めなので、文字幅を測って右端から逆算して置く。
+        fm = QFontMetricsF(f)
+        tw = fm.horizontalAdvance(self._title)
+        bx = max(float(left), x + w - tw)
+        by = y + (h + fm.ascent() - fm.descent()) / 2.0
+        path = QPainterPath()
+        path.addText(QPointF(bx, by), f, self._title)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 先に黒でなぞってから、白で塗り潰す。塗りと線を同時に出すと線が
+        # 内側へも太って、勘亭流の細い所が黒く埋まってしまう。
+        p.strokePath(path, QPen(QColor(TITLE_OUTLINE), TITLE_OUTLINE_W,
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.fillPath(path, QColor(TITLE_COLOR))
+        p.restore()
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
@@ -901,9 +919,10 @@ class GameScreenWidget(QWidget):
         sx, sy = self.judge_center()
         ex = SOUL_POS[0] + SOUL_CELL / 2.0
         ey = SOUL_POS[1] + SOUL_CELL / 2.0
-        # 上へ膨らむ二次ベジェ。制御点は始点と終点の中間の、さらに上。
+        # 上へ膨らむ二次ベジェ。q=0.5 の点は (始点 + 2*制御点 + 終点)/4 なので、
+        # てっぺんを SOUL_FLY_APEX_Y に通すには制御点をこう置けばよい。
         cx = (sx + ex) / 2.0
-        cy = (sy + ey) / 2.0 - SOUL_FLY_ARC
+        cy = (4.0 * SOUL_FLY_APEX_Y - sy - ey) / 2.0
         for elapsed, char in hits:
             q = max(0.0, min(1.0, elapsed / SOUL_FLY_SEC))
             sprite, _big = cp.note_sprite(char)
