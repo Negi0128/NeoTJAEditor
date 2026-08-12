@@ -616,6 +616,28 @@ class ChartPreviewWidget(QWidget):
             return (now - (start + i * interval), i + 1)
         return None
 
+    BALLOON_BROKE_SEC = 0.5      # 割れたあと、その絵を出しておく時間
+
+    def balloon_state(self, now: float):
+        """風船・くす玉の様子。"hitting" / "broke" / None。
+
+        どんちゃんの絵を切り替えるのに使う。区間は「割れる時刻まで
+        切り詰めた」ほう(_balloons/_kusudamas)なので、end がそのまま
+        割れた瞬間になる。"""
+        for spans, starts in zip((self._balloons, self._kusudamas),
+                                 self._span_starts[1:]):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            if j < 0:
+                continue
+            start, end = spans[j][0], spans[j][1]
+            if start <= now < end:
+                return "hitting"
+            if end <= now < end + self.BALLOON_BROKE_SEC:
+                return "broke"
+        return None
+
     def note_sprite(self, char: str):
         """音符の絵と、大音符かどうか。画面側が同じ絵で飛ばすのに使う。"""
         big = char in NOTE_BIG

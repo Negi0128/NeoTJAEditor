@@ -13,10 +13,23 @@ Game_Chara_Motion_* / Game_Chara_Beat_* を読むが、TNDE-R のスキンには
   119コマ / 4拍 は BPM120 で 2.0 秒 = 約60fps。素材の枚数から見て
   60fps で描かれた絵だと思われるので、この値を初期値にしている。
 
-状態は3つ:
-  Normal      … ふだん
-  GoGoStart   … ゴーゴーに入った瞬間に1回だけ流す
-  GoGo        … ゴーゴー中のループ
+状態:
+  Normal            … ふだん
+  GoGoStart         … ゴーゴーに入った瞬間に1回だけ流す
+  GoGo              … ゴーゴー中のループ
+  Balloon_Breaking  … 風船を叩いている間のループ
+  Balloon_Broke     … 風船が割れた瞬間に1回だけ流す
+
+風船の2つだけは**拍ではなく時間で**送る。OpenTaiko の CActImplCharacter は
+状態ごとに nCharaBeat を持っていて、ふだんの絵は拍で進めるのに対し
+
+    case Anime.Balloon_Breaking: nCharaBeat = 0.2f;
+    case Anime.Balloon_Broke:    nCharaBeat = 0.2f;
+    void updateBalloon() { nNowCharaCounter += DeltaTime / nCharaBeat; }
+
+と、風船だけ DeltaTime をそのまま割っている(= BPM に依らず 0.2 秒で1周)。
+画布も大きく(TNDE-R では ふだん 360x184 に対し 648x345)、キャラの立ち位置が
+状態ごとに違うので、置き場所は状態ごとに絵の中身から測って合わせる。
 """
 
 import os
@@ -31,9 +44,14 @@ CHARA_DIR = "1_Chara"
 STATE_NORMAL = "Normal"
 STATE_GOGO = "GoGo"
 STATE_GOGO_START = "GoGoStart"
+STATE_BALLOON = "Balloon_Breaking"
+STATE_BALLOON_BROKE = "Balloon_Broke"
 
-#: 読みに行く状態。GoGoStart が無いスキンでも動くよう、欠けは許容する。
-STATES = (STATE_NORMAL, STATE_GOGO, STATE_GOGO_START)
+#: 読みに行く状態。欠けは許容する(無い状態はふだんの絵で通す)。
+STATES = (STATE_NORMAL, STATE_GOGO, STATE_GOGO_START,
+          STATE_BALLOON, STATE_BALLOON_BROKE)
+#: 拍ではなく時間で送る状態(OpenTaiko の updateBalloon と同じ扱い)。
+TIME_BASED_STATES = (STATE_BALLOON, STATE_BALLOON_BROKE)
 
 
 class CharaSprites:
@@ -47,6 +65,7 @@ class CharaSprites:
         self._dir = base_dir or os.path.join(str(settings_mod.skin_dir()), CHARA_DIR)
         self._counts = {}
         self._cache = {}
+        self._boxes = {}
         for state in STATES:
             self._counts[state] = self._count_frames(state)
 
@@ -76,6 +95,40 @@ class CharaSprites:
     def has(self, state):
         return self._counts.get(state, 0) > 0
 
+    def content_box(self, state):
+        """その状態の1コマ目の「中身の外接」(左, 上, 右, 下)。無ければ None。
+
+        画布の大きさもキャラの立ち位置も状態ごとに違う(TNDE-R では
+        ふだん 360x184 / 風船 648x345)ので、画布の左上をそのまま画面に
+        置くと状態が変わった瞬間にキャラが飛ぶ。1コマ目の中身がどこに
+        あるかを測っておいて、そこを基準に置く。
+
+        測るのは1コマ目だけ。同じ状態の他のコマは同じ基準で描かれている
+        ので、コマごとの動き(跳ねる・移動する)はそのまま残る。"""
+        if state in self._boxes:
+            return self._boxes[state]
+        box = None
+        pm = self.frame(state, 0)
+        if pm is not None and not pm.isNull():
+            img = pm.toImage()
+            w, h = img.width(), img.height()
+            left, top, right, bottom = w, h, -1, -1
+            for y in range(h):
+                for x in range(w):
+                    if img.pixelColor(x, y).alpha() > 8:
+                        if x < left:
+                            left = x
+                        if x > right:
+                            right = x
+                        if y < top:
+                            top = y
+                        if y > bottom:
+                            bottom = y
+            if right >= 0:
+                box = (left, top, right, bottom)
+        self._boxes[state] = box
+        return box
+
     def frame(self, state, index):
         """state の index コマ目。無ければ None。"""
         n = self._counts.get(state, 0)
@@ -103,6 +156,8 @@ class CharaAnimator:
     BEATS_PER_LOOP = 4.0
     #: これ以上時間が飛んだらシークとみなして位相を作り直す(秒)。
     SEEK_JUMP_SEC = 0.4
+    #: 風船の状態を1周するのにかける秒数(OpenTaiko の nCharaBeat = 0.2f)。
+    BALLOON_LOOP_SEC = 0.2
 
     def __init__(self, sprites=None):
         self.sprites = sprites if sprites is not None else CharaSprites()
@@ -132,8 +187,12 @@ class CharaAnimator:
     def state(self):
         return self._state
 
-    def update(self, now, bpm, gogo):
+    def update(self, now, bpm, gogo, balloon=None):
         """now(秒) と bpm と ゴーゴー中かで状態と位相を進める。
+
+        balloon は風船の様子: "hitting"(叩いている最中) / "broke"(割れた) /
+        None(風船に関係なし)。風船はゴーゴーより優先する — 叩いている間は
+        そちらの絵に切り替わるのが本家の挙動(b風船連打中 を先に見ている)。
 
         戻り値は (状態, コマ番号)。素材が無ければ (状態, None)。"""
         gogo = bool(gogo)
@@ -151,6 +210,31 @@ class CharaAnimator:
         except (TypeError, ValueError):
             bpm = 0.0
         beats = abs(bpm) / 60.0 * dt
+
+        # --- 風船(ゴーゴーより優先) ---
+        want = None
+        if balloon == "hitting" and self.sprites.has(STATE_BALLOON):
+            want = STATE_BALLOON
+        elif balloon == "broke" and self.sprites.has(STATE_BALLOON_BROKE):
+            want = STATE_BALLOON_BROKE
+        if want is not None:
+            if self._state != want:
+                self._state = want
+                self._frames = 0.0
+            self._last_gogo = gogo      # 抜けたときに遷移が二重に走らないよう
+            n = self.sprites.count(want)
+            if n <= 0:
+                return (want, None)
+            self._frames += dt / max(1e-6, self.BALLOON_LOOP_SEC) * n
+            if want == STATE_BALLOON_BROKE and self._frames >= n:
+                # 割れる絵は1回だけ。流し終わったら次のフレームで戻る。
+                return (want, n - 1)
+            self._frames %= n
+            return (want, min(int(self._frames), n - 1))
+        if self._state in TIME_BASED_STATES:
+            # 風船が終わったので、ふだん/ゴーゴーへ戻す。
+            self._state = STATE_GOGO if gogo else STATE_NORMAL
+            self._frames = 0.0
 
         # --- 状態の遷移 ---
         if gogo != self._last_gogo:
@@ -183,9 +267,9 @@ class CharaAnimator:
         self._frames %= n
         return (state, min(int(self._frames), n - 1))
 
-    def pixmap(self, now, bpm, gogo):
+    def pixmap(self, now, bpm, gogo, balloon=None):
         """update した結果の絵。無ければ None。"""
-        state, idx = self.update(now, bpm, gogo)
+        state, idx = self.update(now, bpm, gogo, balloon)
         if idx is None:
             return None
         return self.sprites.frame(state, idx)

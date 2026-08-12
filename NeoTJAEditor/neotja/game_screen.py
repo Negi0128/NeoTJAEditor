@@ -617,11 +617,23 @@ class GameScreenWidget(QWidget):
         try:
             bpm = self.chart_preview.bpm_at(now)
             gogo = self.chart_preview.is_gogo(now)
+            balloon = self.chart_preview.balloon_state(now)
         except Exception:  # noqa: BLE001
-            bpm, gogo = 0.0, False
-        pm = anim.pixmap(now, bpm, gogo)
-        if pm is not None:
+            bpm, gogo, balloon = 0.0, False, None
+        state, idx = anim.update(now, bpm, gogo, balloon)
+        if idx is None:
+            return
+        pm = anim.sprites.frame(state, idx)
+        if pm is None:
+            return
+        # 置き場所は状態ごとに絵の中身から測って合わせる。風船の絵は画布が
+        # 大きく(360x184 に対し 648x345)、キャラの立ち位置も違うので、
+        # 画布の左上を固定すると状態が変わった瞬間にキャラが飛ぶ。
+        box = anim.sprites.content_box(state)
+        if box is None:
             p.drawPixmap(CHARA_POS[0], CHARA_POS[1], pm)
+            return
+        p.drawPixmap(CHARA_ANCHOR[0] - box[0], CHARA_ANCHOR[1] - box[3], pm)
 
     def _load_title_font(self):
         """曲名用の勘亭流を読む。skin/ の .otf を優先し、無ければ入って
