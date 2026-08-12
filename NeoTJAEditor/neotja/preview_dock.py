@@ -247,6 +247,13 @@ class GamePreviewWindow(QWidget):
         # 窓の固定サイズも取り直す。
         self._lane.heightChanged.connect(self._on_preview_height_changed)
 
+    def refit(self):
+        """中身の高さが変わったときに窓の固定サイズを取り直す。
+
+        モード切替でゲーム画面が 360 <-> 720 に変わり、下部パネルの高さも
+        変わるので、外(preview_dock)から呼べるようにしてある。"""
+        self._refit()
+
     def _refit(self):
         # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
         # モード切替のたびに窓がガタつくので、呼び出し側で最も高いページに合わせて
@@ -544,9 +551,14 @@ class PreviewDock(QDockWidget):
         bp = QVBoxLayout(self._bottom_panel)
         bp.setContentsMargins(0, 0, 0, 0)
         bp.setSpacing(0)
+        self._speed_row = self._build_speed_row()
         bp.addWidget(self.bottom_stack)
-        bp.addWidget(self._build_speed_row())
-        self._bottom_panel.setFixedHeight(self._bottom_panel.sizeHint().height())
+        bp.addWidget(self._speed_row)
+        # 通常再生ではモード別ページを隠すので、そのぶん下部パネルも縮める。
+        # 縮めないと画面の下に空白が残って、窓だけ無駄に高くなる。
+        self._bottom_h_full = self._bottom_panel.sizeHint().height()
+        self._bottom_h_speed_only = self._speed_row.sizeHint().height()
+        self._bottom_panel.setFixedHeight(self._bottom_h_full)
 
         # 本家レイアウト: レーンを 1280x360 の画面へ組み込む(背景・左パネル・
         # スコア・コンボ・太鼓・魂ゲージはこちらが描く)。レーン自体の描画は
@@ -591,6 +603,10 @@ class PreviewDock(QDockWidget):
         right -= 84 + 6
         self.record_button.move(right, 6)
         self.record_button.clicked.connect(self._on_record_clicked)
+
+        # 起動時の既定は通常再生。ここで一度通しておかないと、画面が
+        # compact のまま(どんちゃんも下の背景も出ない)で始まってしまう。
+        self.set_bottom_mode(self.MODE_TITLE)
 
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -961,13 +977,29 @@ class PreviewDock(QDockWidget):
         積んでいないので % self.bottom_stack.count() が自然に3つで回る)。
         Tab キー(chart_preview)とモードトグルボタンの両方から呼ばれる。"""
         idx = (self.bottom_stack.currentIndex() + 1) % self.bottom_stack.count()
+        self.set_bottom_mode(idx)
+
+    def set_bottom_mode(self, idx: int):
+        """下部パネルのモードを切り替える。
+
+        通常再生のときだけ、ゲーム画面を録画と同じ 1280x720 の全体に広げる
+        (どんちゃん・下の背景・フッターまで出る)。ほかのモードでは画面を
+        上半分(1280x360)に縮めて、空いた下半分にそのモードのペインを置く
+        — 下の背景があった場所に、これまでどおり波形や情報が入る。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
         self.record_button.setVisible(idx == self.MODE_TITLE)
+        full = (idx == self.MODE_TITLE)
+        self.game_screen.set_compact(not full)
+        # 通常再生では曲名も画面の中に描かれるので、下のページは出さない。
+        self.bottom_stack.setVisible(not full)
+        self._bottom_panel.setFixedHeight(
+            self._bottom_h_speed_only if full else self._bottom_h_full)
+        self.game_preview_window.refit()
         # 作譜モードのときだけ、キー入力を受けるのは編集ペイン。ほかのモードでは
         # レーンへ返す(Space/小節移動が今までどおり効くように)。
-        if idx == self.MODE_EDIT:
+        if idx == self.MODE_EDIT and self.MODE_EDIT is not None:
             self.chart_edit.setFocus(Qt.OtherFocusReason)
         else:
             self.chart_preview.setFocus(Qt.OtherFocusReason)

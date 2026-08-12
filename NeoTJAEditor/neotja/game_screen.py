@@ -952,7 +952,13 @@ class GameScreenWidget(QWidget):
             wpx = int(round(blocks * step))
             if wpx > 0:
                 p.drawPixmap(gx, gy, fill, 0, 0, wpx, GAUGE_BAR_H)
-        # 「クリア」の文字。クリア圏の左上に置く。
+        # 入魂(満タン)のあいだはゲージが虹色になる。素材のマスクがゲージ本体と
+        # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
+        if ratio >= 1.0 and self._gauge_rainbow:
+            i = int(now / GAUGE_RAINBOW_FRAME_SEC) % len(self._gauge_rainbow)
+            p.drawPixmap(gx, gy, self._gauge_rainbow[i])
+        # 「クリア」の文字。クリア圏の左上に置く。虹色のときも読めるよう、
+        # ゲージの色を差し替えたあとに描く(先に描くと虹に塗り潰される)。
         src = fill if fill is not None else base
         if src is not None:
             (lx, ly), (dx_, dy_), gw, gh = GAUGE_CLEAR_GLYPH
@@ -960,11 +966,6 @@ class GameScreenWidget(QWidget):
             sx, sy = (dx_, dy_) if lit else (lx, ly)
             p.drawPixmap(gx + GAUGE_CLEAR_STEP_X + GAUGE_CLEAR_TEXT_OFF[0],
                          gy + GAUGE_CLEAR_TEXT_OFF[1], src, sx, sy, gw, gh)
-        # 入魂(満タン)のあいだはゲージが虹色になる。素材のマスクがゲージ本体と
-        # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
-        if ratio >= 1.0 and self._gauge_rainbow:
-            i = int(now / GAUGE_RAINBOW_FRAME_SEC) % len(self._gauge_rainbow)
-            p.drawPixmap(gx, gy, self._gauge_rainbow[i])
 
         # 飛んできた音符が魂に当たった瞬間の弾け。以前は「クリアに届いた
         # 瞬間の演出」だと思って1回だけ出していたが、実機のキャプチャを見ると
