@@ -86,7 +86,7 @@ SCORE_ADVANCE = 0.73
 # 下げ量を持たせて揃える。
 SCORE_DIGIT_Y_OFF = {5: 1, 6: 1}
 COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
-DRUM_POS = (203, 199)                # 太鼓 120x133
+DRUM_POS = (208, 209)                # 太鼓 120x133
 # コンボの数字と「コンボ」文字は太鼓の上に載るが、太鼓だけを動かしたときに
 # 一緒に動いてほしくないので、位置の基準は別に持つ。
 COMBO_ANCHOR = (200, 196)
@@ -300,7 +300,7 @@ JUDGE_POP_SEC = 0.34             # ポップの持続
 TITLE_FONT_FILE = "Kanteiryu.otf"
 TITLE_FONT_FALLBACKS = ("FOT-大江戸勘亭流 Std E", "FOT-OedoKtr Std E",
                         "DFPKanteiryu-XB", "DFP勘亭流")
-TITLE_RECT = (620, 14, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
+TITLE_RECT = (600, 34, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
 TITLE_SIZE = 41                   # 大きさは曲名の長さによらず一定(34の1.2倍)
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
