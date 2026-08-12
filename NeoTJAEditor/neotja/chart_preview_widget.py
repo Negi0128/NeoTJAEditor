@@ -243,6 +243,7 @@ class ChartPreviewWidget(QWidget):
         self._rolls = []
         self._balloons = []
         self._kusudamas = []
+        self._span_starts = ([], [], [])
         self._live_spans = []
         self._bar_times = []
         self._bar_bpms = []
@@ -585,6 +586,35 @@ class ChartPreviewWidget(QWidget):
                 break
             out.append((now - t, self._note_chars[i]))
         return out
+
+    def roll_tick(self, now: float):
+        """連打・風船・くす玉を叩いている最中なら (直前の打からの経過秒, 打数)。
+
+        打の時刻は打音と同じ決め方 — 区間を打数で等分した位置(preview_dock の
+        _roll_tick_notes と同じ)。あちらは音、こちらは太鼓の絵で、同じ拍で
+        動かないと音と手が合わない。叩いていなければ None。"""
+        for spans, starts in zip(
+                (self._rolls, self._balloons, self._kusudamas),
+                self._span_starts):
+            if not spans:
+                continue
+            # どれも開始順に並んでいるので、now より前に始まった最後の1つ
+            # だけを見ればよい(同じ種類の区間は重ならない)。
+            j = bisect.bisect_right(starts, now) - 1
+            if j < 0:
+                continue
+            span = spans[j]
+            start, end, hits = span[0], span[1], span[-1]
+            if not (start <= now < end) or not hits or hits <= 0:
+                continue
+            interval = (end - start) / float(hits)
+            if interval <= 0.0:
+                continue
+            i = int((now - start) / interval)
+            if i >= hits:
+                continue
+            return (now - (start + i * interval), i + 1)
+        return None
 
     def note_sprite(self, char: str):
         """音符の絵と、大音符かどうか。画面側が同じ絵で飛ばすのに使う。"""
@@ -1313,6 +1343,11 @@ class ChartPreviewWidget(QWidget):
         from neotja.tja_analyzer import balloon_pop_spans
         self._balloons = balloon_pop_spans(self._balloons, self._roll_hit_speed)
         self._kusudamas = balloon_pop_spans(self._kusudamas, self._roll_hit_speed)
+        # 区間の開始時刻だけ抜いた並び。roll_tick() が毎フレーム二分探索する
+        # のに使う(bisect の key= は Python 3.10 からなので、ここで持つ)。
+        self._span_starts = ([r[0] for r in self._rolls],
+                             [b[0] for b in self._balloons],
+                             [k[0] for k in self._kusudamas])
         # (start, end, hits) view combining all three span types, used only
         # for the live/held combo-count readout - independent of the rolls/
         # balloons/kusudamas lists above since those keep their full

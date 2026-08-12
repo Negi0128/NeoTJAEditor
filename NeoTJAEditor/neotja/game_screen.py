@@ -294,6 +294,9 @@ JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶ
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
 JUDGE_POP_SEC = 0.34             # ポップの持続
+# 出た瞬間から薄くしていくと、ずっと半透明の文字が漂って見える。本家は
+# しばらくはっきり出てから消えるので、ここまでは不透明のままにする。
+JUDGE_POP_FADE_FROM = 0.55       # 0..1 のうちどこからフェードを始めるか
 
 # --- 曲名(録画のときだけ、画面の右上) ------------------------------------
 # 勘亭流。DFP勘亭流(DynaFont)はこの環境に無かったので、TNDE が同梱している
@@ -378,7 +381,11 @@ class _JudgeOverlay(QWidget):
         spr = self._screen.chart_preview.judge_sprite()
         jp = elapsed / JUDGE_POP_SEC
         rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
-        p.setOpacity(max(0.0, 1.0 - jp))
+        if jp <= JUDGE_POP_FADE_FROM:
+            p.setOpacity(1.0)
+        else:
+            p.setOpacity(max(0.0, 1.0 - (jp - JUDGE_POP_FADE_FROM)
+                             / (1.0 - JUDGE_POP_FADE_FROM)))
         cx = self.width() // 2
         bottom = JUDGE_BOTTOM - self.y() - rise
         if spr is not None:
@@ -819,9 +826,21 @@ class GameScreenWidget(QWidget):
         dx, dy = DRUM_POS
         if drum is not None:
             p.drawPixmap(dx, dy, drum)
+            # 連打・風船を叩いている間は、そちらの打に合わせて光らせる。
+            # 打の時刻は打音と同じ決め方なので、音と手が合う。連打は面だけ
+            # (打音も面だけにしてある)。
+            hit = None
+            try:
+                tick = self.chart_preview.roll_tick(now)
+            except Exception:  # noqa: BLE001
+                tick = None
+            if tick is not None:
+                hit = (tick[0], "1", tick[1])
+            elif recent is not None:
+                hit = recent
             # 叩いた瞬間だけ、その音符の色で光らせる(面=赤 / 縁=水色)。
-            if recent is not None:
-                elapsed, char, n = recent
+            if hit is not None:
+                elapsed, char, n = hit
                 if 0.0 <= elapsed < DRUM_GLOW_SEC:
                     glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
                     if glow is not None:
