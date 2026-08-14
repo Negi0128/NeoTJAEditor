@@ -75,7 +75,7 @@ CHARA_BEATS_PER_LOOP = 4.0
 # 風船の状態(Balloon_Breaking / Balloon_Broke)だけは、中身で合わせるのを
 # やめて画布(648x345)の左上をふだんの絵と同じ位置に置き、そこからずらす。
 # 中身で合わせると立ち姿(高さ195)の頭が画面の上へ出るため。
-CHARA_BALLOON_CANVAS_OFF = (45, 120)
+CHARA_BALLOON_CANVAS_OFF = (45, 20)
 
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
@@ -382,8 +382,9 @@ class _FlightOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # 風船中のどんちゃん → 飛んでいく音符 の順。音符が手前。
+        # どんちゃん → 風船 → 飛んでいく音符 の順。後のものほど手前。
         self._screen.draw_chara_front(p, self.x(), self.y())
+        self._screen.draw_balloon_front(p, self.x(), self.y())
         self._screen.draw_soul_flights(p, self.x(), self.y())
         p.end()
 
@@ -469,6 +470,8 @@ class GameScreenWidget(QWidget):
         chart_preview._hide_lane_combo = True
         # 叩いた音符の飛び去りは、こちらが魂ゲージまで一続きに描く。
         chart_preview._hide_hit_fly = True
+        # 判定枠の風船も、どんちゃんより手前に出すためこちらで描く。
+        chart_preview._hide_balloon_sprite = True
         chart_preview.move(LANE_X, LANE_Y)
 
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
@@ -671,6 +674,23 @@ class GameScreenWidget(QWidget):
             return
         bx, by = CHARA_BALLOON_CANVAS_OFF
         p.drawPixmap(CHARA_POS[0] + bx - ox, CHARA_POS[1] + by - oy, pm)
+
+    def draw_balloon_front(self, p, ox=0, oy=0):
+        """判定枠の風船を、どんちゃんより手前に描く。
+
+        レーン側の描画は _hide_balloon_sprite で止めてあるので、ここが
+        唯一の描き手。並びは レーン < どんちゃん < 風船。"""
+        cp = self.chart_preview
+        try:
+            now = cp.game_state()[0]
+            f = cp.balloon_sprite_frame(now)
+        except Exception:  # noqa: BLE001
+            return
+        if f is None:
+            return
+        cx = LANE_X + JUDGE_X_IN_LANE - ox
+        cy = LANE_Y + LANE_H // 2 - oy
+        cp.draw_balloon_sprite_at(p, cx, cy, f)
 
     def _draw_chara(self, p, now):
         """どんちゃんを1コマ描く。素材が無ければ何もしない。

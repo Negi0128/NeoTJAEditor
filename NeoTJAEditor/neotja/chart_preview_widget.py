@@ -421,6 +421,9 @@ class ChartPreviewWidget(QWidget):
         # True にすると、叩いた音符の飛び去りをレーン側で描かない
         # (本家レイアウトでは画面側が魂ゲージまで一続きに飛ばす)。
         self._hide_hit_fly = False
+        # True にすると、判定枠に固定した風船の絵をレーン側で描かない
+        # (本家レイアウトでは、どんちゃんより手前の板に描く)。
+        self._hide_balloon_sprite = False
         self._se_static_family = None
 
         self._timer = QTimer(self)
@@ -638,6 +641,34 @@ class ChartPreviewWidget(QWidget):
                     break
                 j -= 1
         return best
+
+    def balloon_sprite_frame(self, now: float):
+        """判定枠に固定して出す風船の絵のコマ番号。出さないときは None。
+
+        _hide_balloon_sprite でレーン側の描画を止めたぶんを、画面側が
+        どんちゃんより手前に描き直すのに使う。コマの決め方はレーン側と
+        同じ式(区間の進み具合で 0..4、割れたら 5)。"""
+        burst = self.BALLOON_BURST_SEC if self._skin_balloon_seq is not None else 0.0
+        if self._skin_balloon_seq is None:
+            return None
+        for spans, starts in zip((self._balloons, self._kusudamas),
+                                 self._span_starts[1:]):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            if j < 0:
+                continue
+            b_start, b_end = spans[j][0], spans[j][1]
+            if not (b_start <= now < b_end + burst):
+                continue
+            span = max(1e-6, b_end - b_start)
+            prog = min(1.0, max(0.0, (now - b_start) / span))
+            return 5 if now >= b_end else min(4, int(prog * 5))
+        return None
+
+    def draw_balloon_sprite_at(self, painter, x, y, frame):
+        """風船の絵を任意の位置に1コマ描く(画面側の板から呼ぶ)。"""
+        self._draw_balloon_sprite(painter, x, y, frame)
 
     def balloon_state(self, now: float):
         """風船・くす玉の様子。"hitting" / "broke" / None。
@@ -2858,6 +2889,11 @@ class ChartPreviewWidget(QWidget):
                     # 叩いている間は本家素材に差し替える。残り打数が減るほど
                     # 膨らみ、割れると破片のコマになる。流れてくる間は顔つきの
                     # 音符のままなので、絵が変わるのは判定枠に着いた一度だけ。
+                    # 本家レイアウトでは、風船はどんちゃんより手前に出す。
+                    # レーンに描くとどんちゃん(レーンより手前の板)に隠れるので、
+                    # そちらの板で描いてもらう(balloon_sprite_state を見る)。
+                    if self._hide_balloon_sprite:
+                        continue
                     span = max(1e-6, b_end - b_start)
                     prog = min(1.0, max(0.0, (now - b_start) / span))
                     f = 5 if now >= b_end else min(4, int(prog * 5))
