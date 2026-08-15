@@ -2709,11 +2709,26 @@ class ChartPreviewWidget(QWidget):
         snap = self.CHECKPOINT_SNAP
         pen_bar = QPen(self._color("fg_dim"), 2)
         pen_cp = QPen(self._color("checkpoint"), 3)
+        # レーンの外に出る小節線はここで落とす。可視の時間窓は「譜面でいちばん
+        # 遅い見かけ速度」に合わせて広く取ってあるので(_visible_window)、窓に
+        # 入る小節線のほとんどはレーンの外にいる(実測: ある譜面で1フレーム
+        # 1299本の候補のうち、レーンに掛かるのは 2.6本)。Qt のクリップ任せに
+        # すると setPen + drawLine がその数だけ空振りして、これだけで1フレーム
+        # 1ms 前後を食っていた。音符・連打が既にやっているのと同じ間引き。
+        #   余白 8px は線の太さ(最大3)とアンチエイリアスのぶん。クリップ矩形は
+        #   x=0..lane_w なので、そこに1画素でも掛かりうる範囲は必ず内側に入る。
+        # 属性引きもループの外へ出す(1300回 x 3回引いていた)。
+        bar_times = self._bar_times
+        bar_speeds = self._bar_speeds
+        bar_visible = self._bar_visible
+        x_lo, x_hi = -8.0, lane_w + 8.0
         for i in range(lo_bar, hi_bar):
-            if not self._bar_visible[i]:
+            if not bar_visible[i]:
                 continue
-            bt = self._bar_times[i]
-            x = judge_x + (bt - now) * self._bar_speeds[i]
+            bt = bar_times[i]
+            x = judge_x + (bt - now) * bar_speeds[i]
+            if x < x_lo or x > x_hi:
+                continue
             is_cp = False
             if cps:
                 at = bt - self._offset

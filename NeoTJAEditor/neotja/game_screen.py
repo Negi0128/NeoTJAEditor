@@ -482,6 +482,10 @@ class GameScreenWidget(QWidget):
         self._static_layer = None
         # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
         self._bg_up_cache = {}
+        # 上背景3層を焼いた帯(画面幅+余白)と、それを焼いたときの位相。
+        # 位相が同じだけ進んでいる間は、この帯から窓を切って貼るだけで済む。
+        self._bg_strip = None
+        self._bg_strip_keys = None
         # 白く染めた音符(着弾の白飛ばし用)。文字 -> QPixmap
         self._white_note_cache = {}
         # 虹の先端に乗せる顔と、虹の帯の中心の高さ(列ごと)。どちらも1回だけ。
@@ -1340,30 +1344,100 @@ class GameScreenWidget(QWidget):
             self._bg_up_cache[ck] = pm
         return pm
 
-    def _tile_row(self, p, pm, now):
-        """1枚を横に敷き詰めて、左へ流しながら上帯に描く。"""
+    def _tile_row(self, p, pm, phase, width):
+        """1枚を横に敷き詰めて、左へ phase 画素ずらして描く。
+
+        置き方は元のまま(float で持って int() で切り捨て)。ここを変えると
+        1px 単位で絵が変わるので、式には一切手を触れていない。違うのは
+        「どこへ何 px ぶん敷くか」を引数で受けるようになったことだけ。"""
         if pm is None:
             return
         w = pm.width()
-        x = -((now * -BG_UP_SCROLL_VX) % w)
-        while x < SCREEN_W:
+        x = -phase
+        while x < width:
             p.drawPixmap(int(x), 0, pm)
             x += w
 
-    def _draw_bg_top_layers(self, p, now):
-        """上背景を3枚重ねで描く。3枚とも同じ速さで左へ流れる。"""
+    #: 焼いた帯に持たせる余分な幅(画素)。これを使い切るまで焼き直さない。
+    #: 67px/秒 で流れるので 384px ≒ 5.7 秒ぶん。
+    BG_STRIP_MARGIN = 384
+
+    def _bg_up_layers(self):
+        """上背景の3層(奥→手前)。素材が無ければ None を含む。"""
         row = BG_UP_COLOR_ROW
-        base = self._bg_up_cell("bg_up_base", BG_UP_BASE_CELL, row, 0)
-        if base is None:
+        return (self._bg_up_cell("bg_up_base", BG_UP_BASE_CELL, row, 0),
+                self._bg_up_cell("bg_up_flower", BG_UP_FLOWER_ROW, 0, row),
+                self._bg_up_cell("bg_up_chara", BG_UP_CHARA_ROW, 0, row))
+
+    def _bg_up_phases(self, layers, now):
+        """各層の位相 f = (now*67) % 幅。そのまま _tile_row へ渡す。"""
+        return tuple(0.0 if pm is None
+                     else (now * -BG_UP_SCROLL_VX) % pm.width()
+                     for pm in layers)
+
+    @staticmethod
+    def _bg_up_keys(layers, phases):
+        """位相から「絵が決まる整数」を作る。
+
+        _tile_row の置き場所は int(-f) と int(k*w - f)、つまり
+        floor(f) と ceil(f) だけで決まる(f の小数部そのものは効かない)。
+        この2つが全層で同じだけ進んでいれば、絵は帯を平行移動したものに
+        等しい — 帯を焼き直さずに窓をずらすだけで済む。
+
+        素材が欠けている層は絵に効かないので数に入れない(入れると位相が
+        いつも 0 のまま = 常に「ずれた」判定になり、毎フレーム焼き直して
+        しまう)。"""
+        return tuple((math.floor(f), math.ceil(f))
+                     for pm, f in zip(layers, phases) if pm is not None)
+
+    def _draw_bg_top_layers(self, p, now):
+        """上背景を3枚重ねで描く。3枚とも同じ速さで左へ流れる。
+
+        3枚を毎フレーム敷き詰めると 11 回の drawPixmap(うち2枚はアルファ付き
+        の全面)になり、1フレーム 1.1ms を食っていた。3枚とも同じ速さで流れる
+        ので、重ねた結果は「1枚の帯が左へ流れているだけ」。画面幅+余白ぶんの
+        帯に焼いておいて、毎フレームはそこから窓を1回貼るだけにする。焼き
+        直すのは、どれかの層が一周して並びがずれたとき(いちばん短い地で
+        5 秒に1回)か、余白を使い切ったとき(5.7 秒)だけ。
+
+        帯はアルファ付きのまま持ち、貼るのも SourceOver のまま。地の素材にも
+        わずかにアルファ 253/254 の画素があり(全体の 0.03%)、下が透ける作りに
+        なっているため — 不透明に潰すとそこだけ色が変わる。SourceOver は
+        結合則が成り立つので、3枚を先に重ねてから1回で貼っても、1枚ずつ
+        貼ったのと同じ絵になる。"""
+        layers = self._bg_up_layers()
+        if layers[0] is None:
             return
-        p.save()
-        p.setClipRect(QRect(0, 0, SCREEN_W, BG_TOP_H))
-        self._tile_row(p, base, now)                                  # 地(傘柄)
-        self._tile_row(p, self._bg_up_cell("bg_up_flower",            # 花びら
-                                           BG_UP_FLOWER_ROW, 0, row), now)
-        self._tile_row(p, self._bg_up_cell("bg_up_chara",             # 飾り
-                                           BG_UP_CHARA_ROW, 0, row), now)
-        p.restore()
+        phases = self._bg_up_phases(layers, now)
+        keys = self._bg_up_keys(layers, phases)
+        d = None
+        if (self._bg_strip is not None and self._bg_strip_keys is not None
+                and len(self._bg_strip_keys) == len(keys)):
+            # 全層の floor/ceil が同じだけ進んでいれば平行移動と同じ。
+            ds = set()
+            for (a, b), (a0, b0) in zip(keys, self._bg_strip_keys):
+                ds.add(a - a0)
+                ds.add(b - b0)
+            if len(ds) == 1:
+                dd = ds.pop()
+                if 0 <= dd <= self.BG_STRIP_MARGIN:
+                    d = dd
+        if d is None:
+            self._bake_bg_strip(layers, phases, keys)
+            d = 0
+        p.drawPixmap(0, 0, self._bg_strip, d, 0, SCREEN_W, BG_TOP_H)
+
+    def _bake_bg_strip(self, layers, phases, keys):
+        """上背景3層を、画面幅+余白の帯1枚に焼く。"""
+        sw = SCREEN_W + self.BG_STRIP_MARGIN
+        img = QImage(sw, BG_TOP_H, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        q = QPainter(img)
+        for pm, f in zip(layers, phases):
+            self._tile_row(q, pm, f, sw)
+        q.end()
+        self._bg_strip = QPixmap.fromImage(img)
+        self._bg_strip_keys = keys
 
     def _rainbow_head(self):
         """虹の先端に乗せる大ドンの顔(Notes.png から1枚切って覚える)。"""
