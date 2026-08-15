@@ -35,13 +35,18 @@ _SLICE_SEC = 0.016
 # 1080p は 1.5 倍 = 1920x1080)。以前は両方 2 倍で描いてから ffmpeg 側で
 # lanczos 縮小しており、出力の 4 倍(720p)/1.8 倍(1080p)の画素を毎コマ描いて
 # 捨てていた。等倍にすると縮小フィルタ自体が不要になり、パイプに流す量も減る。
+#
+# time_factor は「実際に待った時間 ÷ 曲の長さ」の実測。以前の値は
+# レーンだけを描いていた頃のもので、いまは 1280x720 の画面まるごと
+# (上下の背景・どんちゃん・魂ゲージ・虹 等)を毎コマ描くため、実際には
+# 倍かかる。案内が短すぎると「固まった?」と思わせるので倍にする。
 QUALITY_PRESETS = [
     ("60 fps / 720p",  {"fps": 60,  "canvas": "720p",  "supersample": 1.0,
-                        "preset": "veryfast", "time_factor": 0.25}),
+                        "preset": "veryfast", "time_factor": 0.5}),
     ("60 fps / 1080p", {"fps": 60, "canvas": "1080p", "supersample": 1.5,
-                        "preset": "veryfast", "time_factor": 0.45}),
+                        "preset": "veryfast", "time_factor": 0.9}),
     ("120 fps / 1080p", {"fps": 120, "canvas": "1080p", "supersample": 1.5,
-                         "preset": "veryfast", "time_factor": 0.9}),
+                         "preset": "veryfast", "time_factor": 1.8}),
 ]
 DEFAULT_QUALITY = 1        # 既定は 60fps/1080p(速度と画質のつり合いが良い)
 

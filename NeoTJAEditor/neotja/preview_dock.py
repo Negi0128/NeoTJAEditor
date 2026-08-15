@@ -594,15 +594,15 @@ class PreviewDock(QDockWidget):
         else:
             self._mode_names = ["通常再生", "音声波形", "情報"]
             self.MODE_EDIT, self.MODE_INFO = None, 2
-        # 画面の左上に「録画 / コース / モード切替」の順で並べる。以前は
+        # 画面の左上に「モード切替 / コース / 録画」の順で並べる。以前は
         # 右上だったが、右上は曲名が出る場所なので左へ移した。
         left = 8
 
-        self.record_button = self._lane_button("● 録画", 84,
-                                               "いま選んでいるコースを動画に書き出す")
-        self.record_button.move(left, 6)
-        left += 84 + 6
-        self.record_button.clicked.connect(self._on_record_clicked)
+        self.mode_button = self._lane_button(self._mode_names[0], 96,
+                                             "下部パネルの表示切替(Tab)")
+        self.mode_button.move(left, 6)
+        left += 96 + 6
+        self.mode_button.clicked.connect(self.cycle_bottom_mode)
 
         self.course_button = self._lane_button("コース: -", 150,
                                                "クリックでコース切替(シミュ・録画の両方に反映)")
@@ -610,10 +610,10 @@ class PreviewDock(QDockWidget):
         left += 150 + 6
         self.course_button.clicked.connect(self.chart_preview.cycle_course)
 
-        self.mode_button = self._lane_button(self._mode_names[0], 96,
-                                             "下部パネルの表示切替(Tab)")
-        self.mode_button.move(left, 6)
-        self.mode_button.clicked.connect(self.cycle_bottom_mode)
+        self.record_button = self._lane_button("● 録画", 84,
+                                               "いま選んでいるコースを動画に書き出す")
+        self.record_button.move(left, 6)
+        self.record_button.clicked.connect(self._on_record_clicked)
 
         # 起動時の既定は通常再生。ここで一度通しておかないと、画面が
         # compact のまま(どんちゃんも下の背景も出ない)で始まってしまう。
