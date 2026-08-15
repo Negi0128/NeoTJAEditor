@@ -386,6 +386,8 @@ class MainWindow(QMainWindow):
             branch_select_cb=self._on_preview_branch_selected,
             audio_backend=self.config_data.get("audio_backend", "mixer"),
             sfx_volume_cb=self._save_sfx_volume,
+            master_volume_cb=self._save_master_volume,
+            audio_output_device=self.config_data.get("audio_output_device", ""),
             waveform_stereo=self.config_data.get("waveform_stereo", True),
             waveform_stereo_cb=self._save_waveform_stereo,
             se_text_enabled=self.config_data.get("se_text_enabled", True),
@@ -396,8 +398,12 @@ class MainWindow(QMainWindow):
             checkpoint_lines_cb=self._set_checkpoint_lines,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
+        # マスターが先。曲/SE はマスターに対する「比率」なので、マスターを
+        # 決めてから比率を入れたほうが途中の一瞬だけ音量が飛ぶことがない。
+        self.preview_dock.set_master_volume(self.config_data.get("master_volume", 1.0))
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
         self.preview_dock.set_sfx_volume(self.config_data.get("sfx_volume", 0.9))
+        self._apply_wireless_offset()
         # A skin pack's own hit sounds (skin/don.wav, skin/ka.wav) take
         # precedence: dropping in a pack is a deliberate "use this" and should
         # win over a previously auto-detected 太鼓さん次郎 path. An explicit
@@ -479,6 +485,18 @@ class MainWindow(QMainWindow):
     def _save_sfx_volume(self, volume: float):
         self.config_data["sfx_volume"] = volume
         settings_mod.save_settings(self.config_data)
+
+    def _save_master_volume(self, volume: float):
+        self.config_data["master_volume"] = volume
+        settings_mod.save_settings(self.config_data)
+
+    def _apply_wireless_offset(self):
+        """ワイヤレス調整(出力遅延の補正)を再生側へ流す。オフのときは 0ms、
+        つまり従来とまったく同じ挙動になる。"""
+        ms = 0.0
+        if self.config_data.get("wireless_offset_enabled", False):
+            ms = float(self.config_data.get("wireless_offset_ms", 0.0) or 0.0)
+        self.preview_dock.set_output_offset_ms(ms)
 
     # 機能1(ノーツ入力音): エディタでノーツ文字を打鍵した瞬間に対応する
     # 打音を即座に鳴らす。1/3=ドン、2/4=カツ。5/6(連打開始)・7(風船開始)・
@@ -2183,6 +2201,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         from neotja.dialogs.settings_dialog import SettingsDialog
+        prev_device = self.config_data.get("audio_output_device", "")
         dlg = SettingsDialog(self)
         if dlg.exec():
             settings_mod.save_settings(self.config_data)
@@ -2195,6 +2214,11 @@ class MainWindow(QMainWindow):
             )
             self.preview_dock.refresh_theme()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))
+            self._apply_wireless_offset()
+            # 出力デバイスを変えたときだけ開き直す(結果はプレビュー側が表示する)。
+            new_device = self.config_data.get("audio_output_device", "")
+            if new_device != prev_device:
+                self.preview_dock.reopen_audio_output(new_device)
             self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
             self.btn_auto_save.blockSignals(True)
             self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))

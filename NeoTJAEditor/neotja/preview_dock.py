@@ -4,8 +4,8 @@ import time as _time
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
@@ -349,6 +349,7 @@ class PreviewDock(QDockWidget):
                  duration_ready_cb=None, expanded_changed_cb=None, refresh_preview_cb=None,
                  course_select_cb=None, game_preview_changed_cb=None, branch_select_cb=None,
                  audio_backend="mixer", sfx_volume_cb=None,
+                 master_volume_cb=None, audio_output_device="",
                  waveform_stereo=True, waveform_stereo_cb=None,
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
                  config_data=None, save_settings_cb=None,
@@ -373,6 +374,13 @@ class PreviewDock(QDockWidget):
         self.seek_cursor_cb = seek_cursor_cb
         self.volume_cb = volume_cb
         self.sfx_volume_cb = sfx_volume_cb
+        self.master_volume_cb = master_volume_cb
+        # 音量は「マスター × 個別の比率」。ここで両方を覚えておき、経路
+        # (ミキサー/レガシー)ごとの掛け方の違いは _apply_*_volume に閉じ込める。
+        self._master_volume = 1.0
+        self._sfx_ratio = 0.9
+        # ワイヤレス調整(出力遅延の補正、ms)。0 = 補正なし。
+        self._output_offset_ms = 0.0
         self.expanded_changed_cb = expanded_changed_cb
         self.duration_ready_cb = duration_ready_cb
         self.refresh_preview_cb = refresh_preview_cb
@@ -391,11 +399,19 @@ class PreviewDock(QDockWidget):
         self._backend_notice = ""
         if audio_backend != "qt":
             try:
-                from neotja.mixer_engine import MixerAudioEngine
-                self.audio = MixerAudioEngine(self)
+                from neotja.mixer_engine import MixerAudioEngine, list_output_devices
+                self.audio = MixerAudioEngine(self, device_name=audio_output_device or "")
                 self.metronome = self.audio.metronome
                 self.hit_sounds = self.audio.hit_sounds
                 self._mixer_active = True
+                # 設定で選んだデバイスが今つながっていないときは既定で開かれる。
+                # 音は出るので致命的ではないが、黙って別の口から鳴っていると
+                # 分からないので一言出す。
+                if audio_output_device and audio_output_device not in [
+                        n for n, _label in list_output_devices()]:
+                    self._backend_notice = (
+                        f"設定の出力デバイス「{audio_output_device}」が見つからないため、"
+                        "既定のデバイスで再生します。")
             except Exception:  # noqa: BLE001
                 import traceback
                 traceback.print_exc()
@@ -636,25 +652,50 @@ class PreviewDock(QDockWidget):
         layout.addLayout(transport_row)
 
         volume_row = QHBoxLayout()
-        volume_row.addWidget(QLabel("音量:"))
+        # マスターボリューム: 曲・打音・メトロノームすべてに掛かる大元の音量。
+        # 右隣の2つは「マスターに対する比率」なので、ラベルにもそう書いてある。
+        volume_row.addWidget(QLabel("マスター:"))
+        self.master_volume_slider = QSlider(Qt.Horizontal)
+        self.master_volume_slider.setRange(0, 100)
+        self.master_volume_slider.setFixedWidth(120)
+        self.master_volume_slider.setToolTip(
+            "曲・打音・メトロノームすべてに掛かる音量。実際に出る音量 = マスター × 各比率。")
+        self.master_volume_slider.valueChanged.connect(self._on_master_volume_changed)
+        volume_row.addWidget(self.master_volume_slider)
+        self.lbl_master_volume = QLabel("")
+        volume_row.addWidget(self.lbl_master_volume)
+
+        volume_row.addSpacing(16)
+        volume_row.addWidget(QLabel("曲(比率):"))
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setFixedWidth(120)
+        self.volume_slider.setToolTip("マスターに対する曲の音量の比率。")
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
         volume_row.addWidget(self.volume_slider)
         self.lbl_volume = QLabel("")
         volume_row.addWidget(self.lbl_volume)
-        # 効果音(打音/メトロノーム共通)の音量。ミキサー経路のみ実効。レガシーでは
-        # 各 QSoundEffect の音量は固定なので、この値は保存されるだけになる。
+        # 効果音(打音/メトロノーム共通)の音量比率。
         volume_row.addSpacing(16)
-        volume_row.addWidget(QLabel("SE音量:"))
+        volume_row.addWidget(QLabel("SE(比率):"))
         self.sfx_volume_slider = QSlider(Qt.Horizontal)
         self.sfx_volume_slider.setRange(0, 100)
         self.sfx_volume_slider.setFixedWidth(120)
+        self.sfx_volume_slider.setToolTip("マスターに対する打音・メトロノームの音量の比率。")
         self.sfx_volume_slider.valueChanged.connect(self._on_sfx_volume_changed)
         volume_row.addWidget(self.sfx_volume_slider)
         self.lbl_sfx_volume = QLabel("")
         volume_row.addWidget(self.lbl_sfx_volume)
+
+        # 音声出力を開き直すボタン。WASAPI排他モードへの切替などで鳴らなくなった
+        # ときの復帰口(環境設定で選んだ出力デバイスの反映もこれで行う)。
+        volume_row.addSpacing(16)
+        self.btn_reopen_audio = QPushButton("音声を再接続")
+        self.btn_reopen_audio.setToolTip(
+            "音声出力を開き直します。ほかのアプリがWASAPI排他モードで掴んだ等の理由で"
+            "音が出なくなったときに使ってください。再生位置・音量・打音の予定はそのまま復帰します。")
+        self.btn_reopen_audio.clicked.connect(self.reopen_audio_output)
+        volume_row.addWidget(self.btn_reopen_audio)
         volume_row.addStretch()
         layout.addLayout(volume_row)
 
@@ -1397,9 +1438,91 @@ class PreviewDock(QDockWidget):
         if setter is not None:
             setter(audio_time)
 
+    def set_master_volume(self, volume: float):
+        """マスターボリューム(0.0-1.0)を保存コールバックを呼ばずに設定する
+        (settings.json の master_volume 復元用)。"""
+        self._master_volume = max(0.0, min(1.0, float(volume)))
+        self._apply_master_volume()
+        self.master_volume_slider.blockSignals(True)
+        self.master_volume_slider.setValue(round(self._master_volume * 100))
+        self.master_volume_slider.blockSignals(False)
+        self.lbl_master_volume.setText(f"{round(self._master_volume * 100)}%")
+
+    def _on_master_volume_changed(self, value):
+        self._master_volume = value / 100.0
+        self._apply_master_volume()
+        self.lbl_master_volume.setText(f"{value}%")
+        if self.master_volume_cb:
+            self.master_volume_cb(self._master_volume)
+
+    def _apply_master_volume(self):
+        """マスターを両経路へ流す。ミキサーでは MixerCore が曲にもボイスにも
+        一様に掛けてくれるので投げるだけ。レガシーは曲(QAudioOutput)は engine
+        側で掛かるが、効果音(QSoundEffect)は自前で掛ける必要がある。"""
+        setter = getattr(self.audio, "set_master_volume", None)
+        if setter is not None:
+            setter(self._master_volume)
+        self._apply_legacy_sfx_volume()
+
+    def _apply_legacy_sfx_volume(self):
+        """レガシー経路の打音/メトロノームへ「マスター × SE比率」を反映する。
+        ミキサー経路では MixerCore が vol_sfx/vol_metro × vol_master を掛けるので
+        何もしない。"""
+        if self._mixer_active:
+            return
+        v = self._master_volume * self._sfx_ratio
+        for engine in (self.hit_sounds, self.metronome):
+            setter = getattr(engine, "set_volume", None)
+            if setter is not None:
+                setter(v)
+
+    # ------------------------------------------------------------------
+    # 音声出力の開き直し / ワイヤレス調整
+    # ------------------------------------------------------------------
+    def reopen_audio_output(self, device_name=None):
+        """音声出力を開き直す(ボタン / 環境設定でデバイスを変えたとき)。
+
+        成功しても失敗しても必ず利用者に見える形で結果を出す — 黙って無音の
+        まま、が一番困るため。失敗時は警告ダイアログも出す。"""
+        reopen = getattr(self.audio, "reopen_stream", None)
+        if reopen is not None:
+            ok, msg = reopen(device_name)
+        else:
+            # レガシー経路(QMediaPlayer)。デバイス選択は持たないので名前は無視。
+            legacy = getattr(self.audio, "reopen_output", None)
+            if legacy is None:
+                ok, msg = False, "この再生方式では音声出力の開き直しに対応していません。"
+            else:
+                ok, msg = legacy()
+        self.status_label.setText(msg)
+        try:
+            self.chart_preview.show_toast("音声再接続: " + ("OK" if ok else "失敗"))
+        except Exception:  # noqa: BLE001
+            pass
+        if not ok:
+            QMessageBox.warning(self, "音声出力", msg)
+        return ok
+
+    def set_output_offset_ms(self, ms: float):
+        """ワイヤレス調整(出力遅延の補正、ms)。曲・打音・メトロノームすべてに
+        一律で効く。0 で無効と同じ。既存の BPM 依存の打音レイテンシ補正は
+        そのままで、これはその上に足される。"""
+        self._output_offset_ms = float(ms)
+        setter = getattr(self.audio, "set_output_offset_ms", None)
+        if setter is not None:
+            setter(self._output_offset_ms)
+        # レガシー経路のみ: 打音/メトロノームは再生位置の報告で駆動されるので、
+        # 位置をずらしたぶんをスケジュール側で戻す(audio_engine 側の説明を参照)。
+        sec = self._output_offset_ms / 1000.0
+        for engine in (self.hit_sounds, self.metronome):
+            eng_setter = getattr(engine, "set_output_offset", None)
+            if eng_setter is not None:
+                eng_setter(sec)
+
     def set_volume(self, volume: float):
-        """Sets the initial volume (0.0-1.0) without triggering the save
-        callback, e.g. when restoring the value saved in settings.json."""
+        """曲の音量比率(0.0-1.0)を保存コールバックを呼ばずに設定する
+        (settings.json の preview_volume 復元用)。実際に出る音量は
+        マスター × この比率。"""
         self.audio.set_volume(volume)
         self.volume_slider.blockSignals(True)
         self.volume_slider.setValue(round(volume * 100))
@@ -1414,10 +1537,12 @@ class PreviewDock(QDockWidget):
             self.volume_cb(volume)
 
     def set_sfx_volume(self, volume: float):
-        """効果音音量(0.0-1.0)を保存コールバックを呼ばずに設定(settings.json の
-        sfx_volume 復元用)。ミキサー経路では打音/メトロノームに実効。"""
+        """効果音の音量比率(0.0-1.0)を保存コールバックを呼ばずに設定
+        (settings.json の sfx_volume 復元用)。実際に出る音量はマスター × この比率。"""
+        self._sfx_ratio = max(0.0, min(1.0, float(volume)))
         if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
             self.audio.set_sfx_volume(volume)
+        self._apply_legacy_sfx_volume()
         self.sfx_volume_slider.blockSignals(True)
         self.sfx_volume_slider.setValue(round(volume * 100))
         self.sfx_volume_slider.blockSignals(False)
@@ -1425,8 +1550,10 @@ class PreviewDock(QDockWidget):
 
     def _on_sfx_volume_changed(self, value):
         volume = value / 100.0
+        self._sfx_ratio = volume
         if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
             self.audio.set_sfx_volume(volume)
+        self._apply_legacy_sfx_volume()
         self.lbl_sfx_volume.setText(f"{value}%")
         if self.sfx_volume_cb:
             self.sfx_volume_cb(volume)

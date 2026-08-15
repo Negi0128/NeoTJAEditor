@@ -477,10 +477,24 @@ class AudioEngine(QObject):
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
 
-        self.player.positionChanged.connect(lambda p: self.positionChanged.emit(int(p)))
+        # 曲の音量は「マスターに対する比率」。実際に出る音量 = マスター × 比率。
+        self._volume_ratio = 1.0
+        self._master_volume = 1.0
+        # ワイヤレス調整(出力遅延の補正、ms)。再生位置の報告をこのぶん遅らせる
+        # ことで実装する(set_output_offset_ms のコメント参照)。
+        self._output_offset_ms = 0.0
+        self._playback_rate = 1.0
+
+        self.player.positionChanged.connect(lambda p: self.positionChanged.emit(self._shift_ms(p)))
         self.player.durationChanged.connect(lambda d: self.durationChanged.emit(int(d)))
         self.player.playingChanged.connect(lambda playing: self.playingChanged.emit(bool(playing)))
         self.player.mediaStatusChanged.connect(self.mediaStatusChanged.emit)
+
+    def _shift_ms(self, ms) -> int:
+        """QMediaPlayer の生の再生位置に、ワイヤレス調整ぶんの遅れを織り込む。
+        オフセットは実時間basisなので、音声時間へ直すために再生倍率を掛ける
+        (HitSoundEngine._rebuild_schedule と同じ換算)。"""
+        return int(max(0.0, ms - self._output_offset_ms * self._playback_rate))
 
     def load(self, path: str):
         self.player.setSource(QUrl.fromLocalFile(path))
@@ -505,13 +519,56 @@ class AudioEngine(QObject):
 
     def set_playback_rate(self, rate: float):
         # 作譜モードの速度スライダー/[ ] キー用。ピッチは変わる仕様(確定)。
+        self._playback_rate = float(rate)
         self.player.setPlaybackRate(rate)
 
     def set_volume(self, volume: float):
-        self.audio_output.setVolume(max(0.0, min(1.0, volume)))
+        """曲の音量「比率」(0.0〜1.0)。実際に出る音量はマスター × この値。"""
+        self._volume_ratio = max(0.0, min(1.0, float(volume)))
+        self._apply_volume()
+
+    def set_master_volume(self, volume: float):
+        self._master_volume = max(0.0, min(1.0, float(volume)))
+        self._apply_volume()
+
+    def _apply_volume(self):
+        self.audio_output.setVolume(self._volume_ratio * self._master_volume)
+
+    def set_output_offset_ms(self, ms: float):
+        """ワイヤレス調整(出力遅延の補正)。正の値 = 出力がその ms だけ遅れて
+        耳に届くとみなす。
+
+        レガシー経路では、曲は QMediaPlayer、打音/メトロノームは QSoundEffect と
+        別々の口から出るが、Bluetooth の遅延はそのどちらにも同じだけ乗るので、
+        音どうしの相対関係はずれない(ずれるのは「音と画面」だけ)。そこでこの
+        オフセットは再生位置の報告を遅らせる形で入れる = レーンの表示が耳に
+        届く音と合う。打音/メトロノームは同じ報告位置で駆動されているため、
+        そのままだと一緒に遅れてしまうので、各エンジンの set_output_offset で
+        スケジュール側を同じだけ手前へ戻して打ち消す(既存の BPM 依存補正には
+        触らない)。"""
+        self._output_offset_ms = float(ms)
 
     def position(self) -> int:
-        return self.player.position()
+        return self._shift_ms(self.player.position())
+
+    def reopen_output(self):
+        """音声出力を開き直す(WASAPI排他モードへの切替などで鳴らなくなった
+        ときの復帰操作)。QAudioOutput を作り直して差し替えるだけで、再生位置・
+        音量・再生中かどうかは引き継ぐ。(成功したか, メッセージ) を返す。"""
+        try:
+            was_playing = self.player.isPlaying()
+            pos = self.player.position()
+            old = self.audio_output
+            self.audio_output = QAudioOutput(self)
+            self._apply_volume()
+            self.player.setAudioOutput(self.audio_output)
+            old.deleteLater()
+            self.player.setPosition(pos)
+            if was_playing:
+                self.player.play()
+            return True, "音声出力を開き直しました。"
+        except Exception as e:  # noqa: BLE001
+            return False, f"音声出力を開き直せませんでした: {e}"
 
     def duration(self) -> int:
         return self.player.duration()
@@ -780,6 +837,12 @@ class HitSoundEngine(QObject):
         # まま発音だけ飛ばす(set_mute_before 参照)。
         self._mute_before = None
         self._note_plain_times = []   # 補正なしの音声時刻(mute 判定用)
+        # ワイヤレス調整(実時間 秒)。AudioEngine.set_output_offset_ms の説明を
+        # 参照。BPM 依存の _compensation_for_bpm とは別に、一律で足す。
+        self._output_offset = 0.0
+        # 実際に出る音量 = マスター × SE比率。呼び出し側(preview_dock)が掛けた
+        # ものをそのまま受け取る。
+        self.volume = 0.9
 
         self.sound_don = QSoundEffect(self)
         self.sound_ka = QSoundEffect(self)
@@ -795,9 +858,29 @@ class HitSoundEngine(QObject):
         don = don_path if don_path and os.path.exists(don_path) else ensure_don_wav()
         ka = ka_path if ka_path and os.path.exists(ka_path) else ensure_ka_wav()
         self.sound_don.setSource(QUrl.fromLocalFile(don))
-        self.sound_don.setVolume(0.9)
         self.sound_ka.setSource(QUrl.fromLocalFile(ka))
-        self.sound_ka.setVolume(0.9)
+        self._apply_volume()
+
+    def set_volume(self, volume: float):
+        """打音の実効音量(0.0〜1.0)。従来この経路の音量は 0.9 固定で、SE音量
+        スライダーはミキサー経路でしか効かなかった。マスターボリュームを全経路
+        で効かせるため、レガシーでもここから設定できるようにした。"""
+        self.volume = max(0.0, min(1.0, float(volume)))
+        self._apply_volume()
+
+    def _apply_volume(self):
+        self.sound_don.setVolume(self.volume)
+        self.sound_ka.setVolume(self.volume)
+
+    def set_output_offset(self, seconds: float):
+        """ワイヤレス調整(秒)。値そのものは AudioEngine 側で再生位置を遅らせる
+        のに使われており、こちらはそのぶんスケジュールを手前へ戻して、打音が
+        曲に対して余計に遅れないようにするためのもの。"""
+        seconds = float(seconds)
+        if seconds == self._output_offset:
+            return
+        self._output_offset = seconds
+        self._rebuild_schedule()
 
     def set_schedule(self, notes, offset: float):
         """`notes` is [(chart_time_seconds, note_char, bpm)] for '1'-'4'
@@ -828,8 +911,12 @@ class HitSoundEngine(QObject):
         # at 0.5x left the hit sounds leading the notes by twice as much as
         # they should.
         r = self._playback_rate
+        # ワイヤレス調整ぶんは、再生位置の報告が同じだけ遅れている(AudioEngine.
+        # _shift_ms)のを打ち消すために引く。実時間basisなので rate 換算するのは
+        # BPM 依存補正と同じ。
+        w = self._output_offset * r
         pairs = sorted(
-            (t - self._offset + self._compensation_for_bpm(bpm) * r, c in "13", t - self._offset)
+            (t - self._offset + self._compensation_for_bpm(bpm) * r - w, c in "13", t - self._offset)
             for t, c, bpm in self._raw_notes
         )
         self._note_times = [p[0] for p in pairs]
@@ -929,10 +1016,26 @@ class MetronomeEngine(QObject):
         self._raw_clicks = []
         self._offset = 0.0
         self._playback_rate = 1.0
+        # ワイヤレス調整(実時間 秒)。HitSoundEngine.set_output_offset と同じ役割。
+        self._output_offset = 0.0
+        self.volume = 0.9
 
         self.sound = QSoundEffect(self)
         self.sound.setSource(QUrl.fromLocalFile(ensure_click_wav()))
-        self.sound.setVolume(0.9)
+        self.sound.setVolume(self.volume)
+
+    def set_volume(self, volume: float):
+        """メトロノームの実効音量(0.0〜1.0)。マスターボリュームを全経路で
+        効かせるためにレガシー経路でも設定できるようにした(従来は 0.9 固定)。"""
+        self.volume = max(0.0, min(1.0, float(volume)))
+        self.sound.setVolume(self.volume)
+
+    def set_output_offset(self, seconds: float):
+        seconds = float(seconds)
+        if seconds == self._output_offset:
+            return
+        self._output_offset = seconds
+        self._rebuild_schedule()
 
     def set_schedule(self, chart_clicks, offset: float):
         """`chart_clicks` are (chart_time_seconds, is_measure_start) tuples
@@ -953,8 +1056,10 @@ class MetronomeEngine(QObject):
     def _rebuild_schedule(self):
         # Scaled by the playback rate for the same reason as HitSoundEngine's
         # compensation - see _rebuild_schedule there.
+        # ワイヤレス調整ぶんの引き算は HitSoundEngine._rebuild_schedule と同じ。
+        w = self._output_offset * self._playback_rate
         self._click_times = sorted(
-            t - self._offset + self.LATENCY_COMPENSATION_SEC * self._playback_rate
+            t - self._offset + self.LATENCY_COMPENSATION_SEC * self._playback_rate - w
             for t, _is_measure in self._raw_clicks
         )
         self._last_click_idx = None

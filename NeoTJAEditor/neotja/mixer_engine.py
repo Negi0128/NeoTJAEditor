@@ -39,6 +39,72 @@ _MAX_VOICES = 32
 _MAX_BLOCK = 4096
 
 
+def list_output_devices():
+    """選択できる音声出力デバイスの一覧 [(name, label)]。name は settings.json の
+    audio_output_device にそのまま入る識別子(番号ではなく名前で持つ — 番号は
+    再起動や機器の抜き差しで簡単に変わるため)。label は UI 表示用に
+    ホストAPI名を添えたもの。sounddevice が無ければ空リスト。
+
+    同じ機器が MME / WASAPI / DirectSound と複数のホストAPIから見えるのは
+    普通なので、名前が重複したものはひとつにまとめる(最初に見つけたものを
+    採用し、実際にどのホストAPIで開くかは _open_stream の試行順に任せる)。"""
+    try:
+        import sounddevice as sd
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        hostapis = sd.query_hostapis()
+        devices = sd.query_devices()
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    seen = set()
+    for dev in devices:
+        try:
+            if int(dev.get("max_output_channels", 0)) < 1:
+                continue
+            name = str(dev.get("name", "")).strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            host = hostapis[int(dev.get("hostapi", 0))]["name"]
+        except Exception:  # noqa: BLE001
+            host = ""
+        out.append((name, f"{name} ({host})" if host else name))
+    return out
+
+
+def _find_output_device(sd, name: str):
+    """デバイス名から (index, samplerate) を引く。見つからなければ None。
+    WASAPI のものを優先する(排他モード等でこのアプリが使いたいのは大抵そちら)。"""
+    if not name:
+        return None
+    try:
+        hostapis = sd.query_hostapis()
+        devices = sd.query_devices()
+    except Exception:  # noqa: BLE001
+        return None
+    best = None
+    for i, dev in enumerate(devices):
+        if int(dev.get("max_output_channels", 0)) < 1:
+            continue
+        if str(dev.get("name", "")).strip() != name:
+            continue
+        try:
+            host = hostapis[int(dev.get("hostapi", 0))]["name"]
+        except Exception:  # noqa: BLE001
+            host = ""
+        cand = (i, int(dev.get("default_samplerate") or 48000))
+        if "WASAPI" in host:
+            return cand
+        if best is None:
+            best = cand
+    return best
+
+
 # ----------------------------------------------------------------------
 # WAV 読み込み / リサンプル(いずれも load 時のみ。render では呼ばない)
 # ----------------------------------------------------------------------
@@ -496,10 +562,19 @@ class MixerAudioEngine(QObject):
     audioError = Signal(str)             # 音声コールバックが死んだ(1回だけ)
     sfxLoadFailed = Signal(str)          # 打音WAVを解釈できず合成音に戻した
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, device_name: str = ""):
         super().__init__(parent)
         import sounddevice as sd  # ここで ImportError ならフォールバックさせる
         self._sd = sd
+
+        # 使いたい出力デバイス名(空 = 既定)。settings.json の audio_output_device。
+        self._device_name = device_name or ""
+        # 打音WAVのパスを覚えておく。デバイスを開き直してサンプリングレートが
+        # 変わったとき、バンクをそのレートで読み直す必要があるため。
+        self._hit_paths = ("", "")
+        # ワイヤレス調整(出力遅延の補正、ms)。position() に足すだけ — 曲も打音も
+        # メトロノームも同じストリームから出るので、この1つで全部まとめてずれる。
+        self._output_offset_ms = 0.0
 
         # render が例外を投げたときの受け渡し。コールバック側は「例外オブジェクトを
         # 1つ置いてフラグを立てる」だけ(I/O もフォーマットもしない)。GUI 側の
@@ -539,9 +614,23 @@ class MixerAudioEngine(QObject):
 
         self._stream.start()
 
-    # ---- ストリームを開く(WASAPI native -> default -> auto_convert@44100)----
+    # ---- ストリームを開く(指定デバイス -> WASAPI native -> default -> auto_convert@44100)----
     def _open_stream(self, sd):
         attempts = []
+
+        # 0) 明示的に選ばれたデバイス(settings.json の audio_output_device)。
+        #    見つからなければ黙って以下の既定デバイスの試行へ落ちる。
+        picked = _find_output_device(sd, self._device_name)
+        if picked is not None:
+            dev, native_sr = picked
+            attempts.append(dict(device=dev, samplerate=native_sr,
+                                 channels=2, dtype="float32", latency="low"))
+            try:
+                attempts.append(dict(device=dev, samplerate=44100, channels=2,
+                                     dtype="float32", latency="low",
+                                     extra_settings=sd.WasapiSettings(auto_convert=True)))
+            except Exception:  # noqa: BLE001
+                pass
 
         # 1) WASAPI ホストの既定出力デバイスをネイティブレートで low latency
         try:
@@ -606,6 +695,7 @@ class MixerAudioEngine(QObject):
     # ---- 効果音バンク差し替え ----
     def _reload_hit_bank(self, don_path: str, ka_path: str):
         # HitSoundEngine.set_sound_files と同じ解決順: 指定 WAV(存在すれば)->合成音。
+        self._hit_paths = (don_path or "", ka_path or "")
         self._load_one_sfx("don", don_path, ensure_don_wav)
         self._load_one_sfx("ka", ka_path, ensure_ka_wav)
 
@@ -691,14 +781,116 @@ class MixerAudioEngine(QObject):
         self.core.post(("vol", "sfx", v))
         self.core.post(("vol", "metro", v))
 
+    def set_master_volume(self, volume: float):
+        """マスターボリューム。MixerCore.render() が曲にもボイス(打音/メトロ
+        ノーム)にも一様に掛けるので、ここに投げるだけで全部に効く。"""
+        self.core.post(("vol", "master", max(0.0, min(1.0, float(volume)))))
+
+    def set_output_offset_ms(self, ms: float):
+        """ワイヤレス調整(出力遅延の補正)。正の値 = 出力がその ms だけ遅れて
+        耳に届くとみなす。
+
+        ミキサー経路では曲・打音・メトロノームがすべて同じストリームの同じ
+        コールバックから出るので、Bluetooth の遅延は3つに等しく乗り、音どうしの
+        相対関係はずれない。ずれるのは「音と画面」だけ。したがって、報告する
+        再生位置をこのぶん余計に手前へ戻す(= 既存の出力レイテンシ補正
+        _latency_ms と同じ扱いにする)のが、3つまとめて一律にずらすことと同じに
+        なる。打音のサンプル単位スケジュール自体には手を触れないので、既存の
+        タイミング精度も壊れない。"""
+        self._output_offset_ms = float(ms)
+
     def position(self) -> int:
         if self._song_sr <= 0:
             return 0
         # 出力レイテンシ分だけ引いて、耳に聞こえる音と視覚を合わせる。低速再生では
         # 音声時間の進みが遅くなるので rate を掛けて実時間レイテンシを音声時間へ換算。
+        # ワイヤレス調整も同じ「実時間の出力遅れ」なので、同じ扱いで足し込む。
         ms = self.core.read_pos / self._song_sr * 1000.0
-        ms -= self._latency_ms * self.core.rate
+        ms -= (self._latency_ms + self._output_offset_ms) * self.core.rate
         return int(max(0.0, ms))
+
+    # ---- 出力デバイスの開き直し / 選択 ----
+    def output_device_name(self) -> str:
+        return self._device_name
+
+    def reopen_stream(self, device_name=None):
+        """音声出力を開き直す。(成功したか, メッセージ) を返す。
+
+        WASAPI 排他モードへの切替などで PortAudio のストリームが死ぬと、以後
+        いくら再生しても無音になる。MixerCore は再生位置・音量・スケジュール・
+        発音中ボイスをすべて自分で持っていてデバイスには依存しないので、
+        ストリームだけ差し替えれば状態はそのまま復帰できる。唯一デバイス依存
+        なのは効果音バンク(device_sr へリサンプル済み)とレンダのレート換算なので、
+        サンプリングレートが変わったときだけバンクを読み直す。
+
+        開けなかったときは停止状態にして False を返す(黙って無音にしない)。"""
+        if device_name is not None:
+            self._device_name = device_name or ""
+
+        was_playing = self._playing
+        # 古いストリームは何があっても手放す。閉じられなくても先へ進む
+        # (開き直せないより、開き直しを試みるほうがまし)。
+        try:
+            self._stream.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            stream, device_sr, latency_ms = self._open_stream(self._sd)
+        except Exception as e:  # noqa: BLE001
+            # 開けなかった: 再生中だったなら止めた状態で戻し、UI に伝える。
+            self.core.post(("pause",))
+            if self._playing:
+                self._playing = False
+                self.playingChanged.emit(False)
+            self._pos_timer.stop()
+            return False, f"音声デバイスを開けませんでした: {e}"
+
+        self._stream = stream
+        self._latency_ms = latency_ms
+        if device_sr != self.device_sr:
+            # 効果音は device_sr へリサンプル済みなので、レートが変わったら
+            # 読み直さないとピッチも長さも狂う。
+            self.device_sr = device_sr
+            self.core.device_sr = device_sr
+            self._reload_hit_bank(*self._hit_paths)
+            self.core.post(("sfx", "click", _load_sfx(ensure_click_wav(), device_sr)))
+
+        # コールバックが死んでいた場合の後始末: 監視フラグを戻し、次に何かあれば
+        # またちゃんと通知が出るようにする。
+        self._render_exc = None
+        self._render_failed = False
+        self._render_reported = False
+        self._err_timer.start()
+
+        try:
+            self._stream.start()
+        except Exception as e:  # noqa: BLE001
+            self.core.post(("pause",))
+            if self._playing:
+                self._playing = False
+                self.playingChanged.emit(False)
+            self._pos_timer.stop()
+            return False, f"音声ストリームを開始できませんでした: {e}"
+
+        # 再生位置(core.read_pos)もスケジュールも触っていないので、再生中
+        # だったならそのまま続きから鳴らし直すだけでよい。
+        if was_playing:
+            self.core.post(("play",))
+            self._pos_timer.start()
+        # どこで開いたのかを正直に返す。指定のデバイスが見つからなかったときに
+        # 「開き直しました(その名前)」と言うと、指定どおりに繋がったように読めて
+        # しまうので、既定へ落ちたことをはっきり書く。
+        if not self._device_name:
+            return True, "音声出力を開き直しました(既定のデバイス)。"
+        if _find_output_device(self._sd, self._device_name) is None:
+            return True, (f"指定の出力デバイス「{self._device_name}」が見つからないため、"
+                          "既定のデバイスで開き直しました。")
+        return True, f"音声出力を開き直しました({self._device_name})。"
 
     def duration(self) -> int:
         return self._duration_ms

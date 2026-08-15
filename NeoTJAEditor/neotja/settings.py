@@ -8,6 +8,8 @@ _SETTINGS_KEYS = (
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
     "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
+    "master_volume", "audio_output_device",
+    "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit",
@@ -43,6 +45,21 @@ def default_settings() -> dict:
         # QMediaPlayer+QSoundEffect 三点セットを強制)。切替 UI は無く settings.json
         # のみ。"mixer" でもストリームが開けなければ自動的に "qt" 相当へ退避する。
         "audio_backend": "mixer",
+        # マスターボリューム(0.0〜1.0)。preview_volume(曲)/sfx_volume(打音・
+        # メトロノーム)は「マスターに対する比率」で、実際に出る音量は
+        # マスター × 比率 になる。プレビュー窓の音量行の一番左のスライダー。
+        "master_volume": 1.0,
+        # 音声出力デバイス。空文字 = OS の既定デバイス。指定するときは
+        # sounddevice のデバイス「名前」を入れる(番号は再起動や機器の抜き差しで
+        # 変わるため)。名前が見つからなければ黙って既定へ落ちる。環境設定
+        # ダイアログ「音声」タブで選ぶ。ミキサー経路でのみ有効。
+        "audio_output_device": "",
+        # ワイヤレス調整(出力遅延の補正)。Bluetooth イヤホン等で音が遅れて
+        # 届くぶんを打ち消すための、曲・打音・メトロノームすべてに一律で効く
+        # オフセット。既存の BPM 依存の打音レイテンシ補正とは別物で、そちらに
+        # 加算される。正の値 = 出力がその ms だけ遅れているとみなす。
+        "wireless_offset_enabled": False,
+        "wireless_offset_ms": 0.0,
         # 波形表示: True = L/R を上下2段で個別表示、False = 合成(モノラル)1段。
         "waveform_stereo": True,
         # 打音表記(ド/ドン/コ/カ/カッ)をゲーム風プレビューのレーン下段に

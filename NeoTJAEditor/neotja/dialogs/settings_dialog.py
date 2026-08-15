@@ -1,6 +1,6 @@
 from PySide6.QtGui import QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -28,6 +28,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_run_tab()), "シミュレータ起動")
         tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
         tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
+        tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
         tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
 
         btn_row = QHBoxLayout()
@@ -232,6 +233,62 @@ class SettingsDialog(QDialog):
         form.addRow(QLabel("未指定ならTJAと同じフォルダが既定になります。"))
         return w
 
+    def _build_audio_tab(self):
+        """出力デバイスの選択と、ワイヤレス調整(出力遅延の補正)。
+
+        音量そのもの(マスター/曲/SE)はプレビュー窓のスライダーが持ち場なので、
+        ここには置かない。"""
+        w = QWidget()
+        form = QFormLayout(w)
+        cfg = self.main_window.config_data
+
+        # --- 出力デバイス ---
+        from neotja.mixer_engine import list_output_devices
+        self.audio_device_combo = QComboBox()
+        self.audio_device_combo.addItem("既定のデバイス", "")
+        current = cfg.get("audio_output_device", "") or ""
+        found = False
+        for name, label in list_output_devices():
+            self.audio_device_combo.addItem(label, name)
+            if name == current:
+                found = True
+        if current and not found:
+            # いま繋がっていない機器が設定に残っている場合。黙って「既定」に
+            # 見せると、保存した瞬間に設定が消えてしまうので項目として残す。
+            self.audio_device_combo.addItem(f"{current} (見つかりません)", current)
+        idx = self.audio_device_combo.findData(current)
+        self.audio_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("出力デバイス", self.audio_device_combo)
+        form.addRow(QLabel("音声の出力先です。「既定のデバイス」ならWindowsの既定に従います。\n"
+                           "変更すると保存時に音声出力を開き直します。"
+                           "(この設定はミキサー再生方式のときのみ有効です)"))
+
+        reopen_btn = QPushButton("いますぐ音声出力を開き直す")
+        reopen_btn.clicked.connect(
+            lambda: self.main_window.preview_dock.reopen_audio_output())
+        form.addRow(reopen_btn)
+        form.addRow(QLabel("ほかのアプリがWASAPI排他モードでデバイスを掴んだ等の理由で音が出なく"
+                           "なったときの復帰用です。再生位置・音量・打音の予定はそのまま戻ります。"))
+
+        # --- ワイヤレス調整 ---
+        self.wireless_check = QCheckBox("ワイヤレス調整（出力遅延の補正）を有効にする")
+        self.wireless_check.setChecked(bool(cfg.get("wireless_offset_enabled", False)))
+        form.addRow(self.wireless_check)
+
+        self.wireless_spin = QDoubleSpinBox()
+        self.wireless_spin.setRange(-500.0, 500.0)
+        self.wireless_spin.setDecimals(1)
+        self.wireless_spin.setSingleStep(5.0)
+        self.wireless_spin.setSuffix(" ms")
+        self.wireless_spin.setValue(float(cfg.get("wireless_offset_ms", 0.0) or 0.0))
+        form.addRow("補正値", self.wireless_spin)
+        form.addRow(QLabel(
+            "Bluetoothイヤホンなどで音が遅れて聞こえるぶんを打ち消します。曲・打音・"
+            "メトロノームすべてに一律で効き、既存の打音レイテンシ補正とは別に足されます。\n"
+            "正の値 = 音がそのミリ秒だけ遅れて耳に届くとみなす、という意味です。譜面が"
+            "見た目より遅れて聞こえるなら値を増やしてください。"))
+        return w
+
     def _build_experimental_tab(self):
         """まだ様子見の機能をまとめて置くタブ。既定は全部オフ、有効化しても
         すぐには反映されずアプリの再起動が要るものが多い(この点は各項目の
@@ -274,6 +331,10 @@ class SettingsDialog(QDialog):
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
+
+        cfg["audio_output_device"] = self.audio_device_combo.currentData() or ""
+        cfg["wireless_offset_enabled"] = self.wireless_check.isChecked()
+        cfg["wireless_offset_ms"] = float(self.wireless_spin.value())
         self.accept()
 
     def _reset(self):
