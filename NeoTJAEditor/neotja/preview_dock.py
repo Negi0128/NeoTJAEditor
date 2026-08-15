@@ -977,15 +977,15 @@ class PreviewDock(QDockWidget):
     def set_bottom_mode(self, idx: int):
         """下部パネルのモードを切り替える。
 
-        ゲーム画面はどのモードでも録画と同じ 1280x720 のまま(どんちゃん・
-        下の背景・フッターまで出る)。モード別のペイン(音声波形/作譜/情報)は
-        その下に足す。通常再生だけはペインを出さないので、画面と速度行だけの
-        いちばん低い窓になる。"""
+        通常再生は録画と同じ 1280x720(どんちゃん・下の背景・フッターまで出る)。
+        ほかのモードは上半分(1280x360)に縮めて、下の背景があった場所に
+        そのモードのペイン(音声波形/作譜/情報)を置く — あそこは屋台の絵より
+        波形や情報を出したい場所なので、下の背景ごと譲る。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
         self.record_button.setVisible(idx == self.MODE_TITLE)
-        self.game_screen.set_compact(False)
+        self.game_screen.set_compact(idx != self.MODE_TITLE)
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
         show_page = (idx != self.MODE_TITLE)
         self.bottom_stack.setVisible(show_page)
