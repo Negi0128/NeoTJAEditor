@@ -847,6 +847,9 @@ class GameScreenWidget(QWidget):
                 if os.path.exists(path):
                     pm = QPixmap(path)
                     self._course_sym = pm if not pm.isNull() else None
+        # 曲名は静的キャッシュに焼いてある。ここで捨てないと、譜面を切り替えても
+        # 前の曲名が出たままになる(update() だけではキャッシュを貼り直すだけ)。
+        self._static_layer = None
         self.update()
 
     # ------------------------------------------------------------------
