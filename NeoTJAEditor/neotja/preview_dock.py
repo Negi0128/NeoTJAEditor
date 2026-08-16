@@ -23,6 +23,17 @@ from neotja.chart_edit_widget import ChartEditWaveform
 from neotja.waveform_widget import WaveformWidget
 
 
+# ゲーム画面の上に浮かせるボタン(モード切替/コース/録画)の寸法。
+# 画面の絵は 1280x720 の固定寸法なので、ボタンだけ拡大率やフォント設定で
+# 大きくなると位置も大きさも合わなくなる。ここで固定して外の設定から切り離す。
+LANE_BUTTON_H = 26
+LANE_BUTTON_FONT_PX = 12
+
+# 再生速度の範囲(%)。0.25 倍は遅すぎて実用にならないので廃止した。
+# スライダーとレーン側のクランプで同じ値を使う。
+SPEED_MIN_PCT, SPEED_MAX_PCT = 50, 200
+
+
 class ChartInfoBar(QWidget):
     """Panel shown under the game-preview lane: transport buttons (mouse
     equivalents of the lane's Space/Q/PgUp/PgDn shortcuts), song title/
@@ -1082,16 +1093,17 @@ class PreviewDock(QDockWidget):
         self._tp_subtitle.setVisible(bool(subtitle))
 
     def _build_speed_row(self) -> QWidget:
-        """再生速度スライダー(0.25〜1.0)。作譜モード専用ではなく、下部パネルの
+        """再生速度スライダー(0.5〜2.0)。作譜モード専用ではなく、下部パネルの
         どのモードでも常に見えるよう、モードスタックの外に置く。"""
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
         h.addWidget(QLabel("再生速度:"))
         self.speed_slider = QSlider(Qt.Horizontal)
-        # 25〜200 の整数レンジ → /100 で 0.25〜2.00 倍。ミキサーは read_pos の
+        # 50〜200 の整数レンジ → /100 で 0.50〜2.00 倍。ミキサーは read_pos の
         # 増分が変わるだけでピッチも変化する(作譜モードの仕様)。
-        self.speed_slider.setRange(25, 200)
+        # 0.25 倍は遅すぎて実用にならないので廃止した。
+        self.speed_slider.setRange(SPEED_MIN_PCT, SPEED_MAX_PCT)
         self.speed_slider.setValue(100)
         # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
         self.speed_slider.setFocusPolicy(Qt.NoFocus)
@@ -1117,7 +1129,13 @@ class PreviewDock(QDockWidget):
         b = QPushButton(text, self.game_screen)
         b.setFocusPolicy(Qt.NoFocus)
         b.setToolTip(tooltip)
-        b.resize(width, 26)
+        # ゲーム画面は 1280x720 の固定寸法で絵を描いているので、ボタンだけが
+        # 拡大率やフォント設定で大きくなると、画面の絵に対して位置も大きさも
+        # 合わなくなる。寸法と文字の大きさをここで固定して切り離す。
+        b.setFixedSize(width, LANE_BUTTON_H)
+        f = b.font()
+        f.setPixelSize(LANE_BUTTON_FONT_PX)
+        b.setFont(f)
         return b
 
     def _on_record_clicked(self):

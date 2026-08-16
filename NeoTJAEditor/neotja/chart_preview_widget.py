@@ -1754,13 +1754,16 @@ class ChartPreviewWidget(QWidget):
             self.seek_relative_measure(direction)
         self._feedback("ka")
 
+    #: 再生速度の下限/上限。0.25 倍は遅すぎて実用にならないので廃止した。
+    SPEED_MIN, SPEED_MAX = 0.5, 2.0
+
     def _apply_speed(self, rate: float) -> float:
-        """目標倍率(0.25〜2.0にクランプ・小数2桁に丸め)を適用して、実際に
+        """目標倍率(SPEED_MIN〜SPEED_MAX にクランプ・小数2桁に丸め)を適用して、実際に
         適用された値を返す。スライダー配線済みなら set_speed_cb 経由(→
         スライダー値変更→valueChanged で audio/chart_preview 双方に同期反映)、
         未配線(単体使用)なら自分の _playback_rate を直接更新するフォール
         バック。"""
-        rate = round(max(0.25, min(2.0, rate)), 2)
+        rate = round(max(self.SPEED_MIN, min(self.SPEED_MAX, rate)), 2)
         if self._set_speed_cb:
             self._set_speed_cb(rate)
         else:
@@ -1773,8 +1776,8 @@ class ChartPreviewWidget(QWidget):
             self.show_toast(f"再生速度 : ×{rate:.2f}")
 
     def set_playback_rate(self, rate: float):
-        """再生速度倍率(0.25〜2.0)を設定。再生中の時間外挿に使う。"""
-        self._playback_rate = max(0.25, min(2.0, rate))
+        """再生速度倍率(SPEED_MIN〜SPEED_MAX)を設定。再生中の時間外挿に使う。"""
+        self._playback_rate = max(self.SPEED_MIN, min(self.SPEED_MAX, rate))
 
     def set_loading(self, loading: bool):
         """音源の読み込み中(=再生できない)かどうか。レーンに幕を出す。"""
@@ -1797,11 +1800,18 @@ class ChartPreviewWidget(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        if delta > 0:
-            self.seek_relative_measure(1)
-        elif delta < 0:
-            self.seek_relative_measure(-1)
+        # Python の例外をここから外へ出さない。イベントハンドラから例外が
+        # 抜けると Qt(C++)側へ伝播できず、環境によってはプロセスごと落ちる。
+        # ホイールは短時間に何十回も飛んでくるので、1回の失敗で終了させない。
+        try:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.seek_relative_measure(1)
+            elif delta < 0:
+                self.seek_relative_measure(-1)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
         event.accept()
 
     # ------------------------------------------------------------------
