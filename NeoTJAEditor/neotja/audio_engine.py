@@ -2,7 +2,10 @@ import bisect
 import math
 import os
 import random
+import re
 import struct
+import subprocess
+import sys
 import tempfile
 import wave
 
@@ -67,6 +70,92 @@ def _to_float_stereo(raw: bytes, fmt: QAudioFormat) -> np.ndarray:
     if channels == 1:
         return np.repeat(floats, 2, axis=1)
     return np.ascontiguousarray(floats[:, :2], dtype=np.float32)
+
+
+# ffmpeg が stderr へ出す入力ストリームの行から「サンプリングレート」と
+# 「チャンネル配置」を拾う。例:
+#   Stream #0:0: Audio: vorbis, 48000 Hz, stereo, fltp, 160 kb/s
+_FF_AUDIO_STREAM_RE = re.compile(
+    r"Stream #\d+:\d+.*?: Audio: .*?,\s*(\d+)\s*Hz,\s*([^,\r\n]+)")
+
+
+def _no_window():
+    """Windows で ffmpeg のコンソールが一瞬光るのを防ぐ(recorder.py と同じ)。"""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
+def decode_stereo_ffmpeg(path: str, timeout_sec: float = 120.0):
+    """曲を (frames, 2) float32 + サンプリングレートへデコードする。
+    読めない/ffmpeg が居ない場合は None を返し、呼び出し側は QAudioDecoder へ
+    退避する。
+
+    **なぜ QAudioDecoder ではなく ffmpeg を直接叩くのか**
+    Qt 6 の QAudioDecoder は中身が結局 FFmpeg なのに、デコード結果を
+    「bufferReady シグナル1発 = 約18ms ぶんの音声」という細切れでイベント
+    ループ越しに渡してくる。3分の曲で 9400 回のキュー渡し + Python 側の
+    バッファ結合が入り、実測で 3.2 秒かかっていた(うち numpy 変換は 0.19 秒
+    だけで、残りはほぼ往復のオーバーヘッド)。同じ曲を ffmpeg へ生 PCM で
+    吐かせて一括で受け取ると 0.5 秒で済む。しかも Qt が内部で使っているのと
+    同じ FFmpeg なので、出てくる標本は**1ビットも変わらない**(3分の曲
+    8,253,450 フレームで max|差| = 0.0 を実測で確認済み)。
+
+    サンプリングレートは変換せず入力のまま(-ar を渡さない)。ここでレートを
+    固定すると再標本化が入って波形も再生も微妙に変わってしまう。
+    チャンネルの畳み方も _to_float_stereo と厳密に合わせる:
+    モノラルは左右へ複製、3ch 以上は先頭2chだけを採る。"""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
+
+    # 1本のプロセスで PCM(stdout)とストリーム情報(stderr)の両方を受け取る。
+    # -nostats は進捗行を止めるだけで、入力ストリームの情報行は残るので、
+    # サンプリングレートとチャンネル配置は「デコードした本人」から読める。
+    # わざわざ別プロセスで測りに行くと 1 回ぶん(数十 ms)無駄になる。
+    base = [exe, "-hide_banner", "-nostats", "-nostdin", "-i", path]
+    tail = ["-f", "f32le", "-acodec", "pcm_f32le"]
+
+    def run(chan_args):
+        try:
+            return subprocess.run(base + tail + chan_args + ["-"], capture_output=True,
+                                  timeout=timeout_sec, **_no_window())
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    # ほぼすべての曲はモノラルかステレオなので、まず -ac 2 で一発で獲りにいく。
+    # モノラルに対する -ac 2 は同じ標本を左右へ複製するだけで、
+    # _to_float_stereo の np.repeat とまったく同じ結果になる。
+    p = run(["-ac", "2"])
+    if p is None or p.returncode != 0 or not p.stdout:
+        return None
+    info = (p.stderr or b"").decode("utf-8", "replace")
+    m = _FF_AUDIO_STREAM_RE.search(info)
+    if not m:
+        return None            # 形式を読み取れないなら無理をせず Qt 側へ譲る
+    sr = int(m.group(1))
+    if sr <= 0:
+        return None
+
+    if m.group(2).strip() not in ("mono", "stereo"):
+        # 3ch 以上だった(5.1 など)。-ac 2 では ffmpeg がダウンミックスして
+        # しまい、_to_float_stereo の「先頭2ch をそのまま採る」と結果が
+        # 変わってしまうので、pan フィルタで採り直す。滅多に通らない道。
+        p = run(["-af", "pan=stereo|c0=c0|c1=c1"])
+        if p is None or p.returncode != 0 or not p.stdout:
+            return None
+
+    pcm = np.frombuffer(p.stdout, dtype=np.float32)
+    frames = pcm.size // 2
+    if frames <= 0:
+        return None
+    # frombuffer は読み取り専用ビューなので copy して書き込み可能にする
+    # (ミキサー側がそのまま持ち回るため)。
+    return pcm[: frames * 2].reshape(frames, 2).copy(), sr
 
 
 def downsample_peaks(mono: np.ndarray, target_columns: int) -> list:
@@ -334,6 +423,20 @@ class WaveformDecodeWorker(QThread):
         self.target_columns = target_columns
 
     def run(self):
+        # SongDecodeWorker と同じ理由で、まず ffmpeg 直叩きを試す。
+        # こちらはモノラルのピーク列しか要らないので、ステレオで受けてから
+        # 平均する。1〜2ch(実質すべての曲)では _to_float_mono と同じ畳み方に
+        # なる。3ch 以上のときだけ「全ch平均」ではなく「先頭2chの平均」に
+        # なるが、これは波形表示の包絡線にしか使わない値で、しかもこの経路は
+        # レガシー(Qt)バックエンド専用なので実害はない。
+        fast = decode_stereo_ffmpeg(self.path)
+        if fast is not None:
+            stereo, sr = fast
+            mono = stereo.mean(axis=1)
+            self.decoded.emit(downsample_peaks(mono, self.target_columns),
+                              mono.size / float(sr))
+            return
+
         loop = QEventLoop()
         decoder = QAudioDecoder()
         decoder.setSource(QUrl.fromLocalFile(self.path))
@@ -396,6 +499,15 @@ class SongDecodeWorker(QThread):
         self.target_columns = target_columns
 
     def run(self):
+        # まず ffmpeg 直叩きで一括デコードを試す(下の QAudioDecoder 経路の
+        # 6倍速く、出てくる標本は同一)。ffmpeg が無い/読めない形式のときだけ
+        # 従来どおり QAudioDecoder へ落ちる。
+        fast = decode_stereo_ffmpeg(self.path)
+        if fast is not None:
+            stereo, sr = fast
+            self._emit_result(stereo, sr)
+            return
+
         loop = QEventLoop()
         decoder = QAudioDecoder()
         decoder.setSource(QUrl.fromLocalFile(self.path))
@@ -455,7 +567,12 @@ class SongDecodeWorker(QThread):
             return
 
         stereo = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-        sr = int(sample_rate[0])
+        self._emit_result(stereo, int(sample_rate[0]))
+
+    def _emit_result(self, stereo, sr):
+        """デコード済み PCM から派生物(長さ・ピーク列・ミップチェイン)を作って
+        流す。ffmpeg 経路と QAudioDecoder 経路で完全に同じ計算を通すために
+        切り出してある。"""
         duration = stereo.shape[0] / float(sr)
         mono = stereo.mean(axis=1)
         peaks = downsample_peaks(mono, self.target_columns)

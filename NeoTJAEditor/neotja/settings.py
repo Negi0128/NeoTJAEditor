@@ -12,7 +12,8 @@ _SETTINGS_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
-    "preview_show_fps", "peepo_chart_edit",
+    "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
+    "preview_zoom",
 )
 
 
@@ -78,6 +79,15 @@ def default_settings() -> dict:
         # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
         # 確認するための目安)。既定True。気になる場合はfalseで消せる。
         "preview_show_fps": True,
+        # 譜面プレビュー下部パネルの最後に使っていたモード(Tab / モード切替
+        # ボタン)。番号ではなくモード名で持つ — 実験的機能(peepo_chart_edit)の
+        # 入り切りで「作譜」が挟まったり抜けたりして番号の意味がずれるため。
+        # 既定は本家どおりの「通常再生」。低スペック機は「軽量」を選んでおくと
+        # 次回もその状態で開く。
+        "preview_bottom_mode": "通常再生",
+        # えぬいーさん次郎の表示倍率(%)。100/75/50/25 を循環する。
+        # 小さい画面で 720px の絵が入りきらないとき用。
+        "preview_zoom": 100,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための

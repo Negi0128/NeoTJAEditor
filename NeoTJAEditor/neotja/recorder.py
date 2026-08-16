@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 import numpy as np
 from PySide6.QtGui import QImage
@@ -214,6 +215,174 @@ def _video_filter(canvas, src_w, src_h, bg="0x0d1117"):
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={bg}")
 
 
+def frame_pixel_size(widget, supersample=1.0):
+    """録画で実際に描く画素数。VideoRecording と1pxも違わない丸め方をする。
+
+    見積もり(FrameCostProbe)は「本番とまったく同じ大きさ・同じ
+    devicePixelRatio」で測らないと意味がないので、丸めをここに集約して
+    両方から呼ぶ。"""
+    ss = max(1.0, float(supersample))
+    pw = int(round(widget.width() * ss))
+    ph = int(round(widget.height() * ss))
+    return pw + (pw & 1), ph + (ph & 1), ss
+
+
+def _new_frame_image(pw, ph, ss):
+    """1コマぶんの描画先を作る。
+
+    Format_RGB32 なのは速さのため。Qt のラスタエンジンが素で扱えるのは
+    ARGB32_Premultiplied 系(= RGB32 と同じ B,G,R,X 並び)で、以前使っていた
+    RGBA8888 は毎回 非プリマルチプライ経路へ落ちるぶん 2〜3割 遅かった
+    (1920x1080 で 17.0ms/コマ → 13.4ms/コマ の実測)。しかも RGB32 は画面の
+    バックストア(ARGB32_Premultiplied)と1bitも違わない絵になるので、
+    エディタ上で見えているものと動画が完全に一致する。
+    ffmpeg 側へは "bgra" として渡す(このメモリ配置そのまま)。
+
+    描画側(GameScreenWidget / ChartPreviewWidget)は毎フレーム全面を塗る
+    (WA_OpaquePaintEvent + paintEvent 冒頭の fillRect)ので、毎コマの
+    fill() は不要。ただし ss が小数のとき端に 1px 塗り残る可能性があるので、
+    最初の1回だけ塗って未初期化メモリを避ける。"""
+    img = QImage(pw, ph, QImage.Format_RGB32)
+    # devicePixelRatio を上げると、Qt は同じ論理座標のまま ss 倍の細かさで
+    # 描いてくれる(円も文字も本当に高精細になる。単なる拡大ではない)。
+    img.setDevicePixelRatio(ss)
+    img.fill(0)
+    return img
+
+
+# 描画の前後にかかる、コマ数によらない分。曲のデコードと音声合成(曲の長さに
+# ほぼ比例する)と、最後に ffmpeg がファイルを閉じきるまでの待ち。描画に比べれば
+# 小さいが、短い曲だと無視できない。
+SETUP_PER_SONG_SEC = 0.030
+SETUP_FIXED_SEC = 2.5
+
+
+def estimate_seconds(ms_per_frame, song_seconds, fps):
+    """1コマの実測(ms)から、書き出し全体にかかる秒数を見積もる。
+
+    ffmpeg のエンコードはこちらが描いているあいだ別プロセスで並走していて、
+    veryfast なら常に描画のほうが遅い。だからエンコード時間そのものは足さない
+    (足すと二重に数えることになる)。並走ぶん描画が重くなる分は、
+    FrameCostProbe が実際に x264 を回しながら測っているので ms_per_frame に
+    もう入っている。"""
+    frames = max(0.0, float(song_seconds)) * float(fps)
+    draw = frames * (max(0.0, float(ms_per_frame)) / 1000.0)
+    setup = SETUP_FIXED_SEC + SETUP_PER_SONG_SEC * max(0.0, float(song_seconds))
+    return draw + setup
+
+
+class FrameCostProbe:
+    """「この PC・この譜面・この画質で1コマ何ms か」をその場で測る。
+
+    固定の係数表(以前の time_factor)を捨てたのは、1コマの重さが PC の速さだけ
+    でなく譜面の密度・スキンの有無・supersample・解像度で何倍も動くため。
+    書いた本人の PC で測った数字は他所ではまるで当たらない。
+
+    **本番と同じ形で測る**のが肝。ここでは本番とまったく同じ大きさの QImage へ
+    描き、しかも同じ設定の x264 を裏で回してそこへ流し込む(出力は -f null で
+    捨てる)。これをしないと数字が半分以下に出てしまう: ふだんの描画は
+    メモリ帯域で頭打ちになっていて、x264 が同じ帯域を食い始めた途端に 2〜3倍
+    重くなる。しかもその倍率は解像度で変わる(1080p で約2.6倍、720p で約1.9倍)
+    ので、係数で後から補正するのは無理だった。裏で本物を回してしまえば、
+    パイプへの書き込み待ちも含めて丸ごと実測になる。
+
+    UI を固めないよう step() で少しずつ進める。最初の数コマ(warmup)は必ず
+    捨てる: フォントやスキンの初回読み込みで 100ms〜1秒かかるうえ、x264 も
+    走り出すまで数コマかかる。
+    """
+
+    def __init__(self, widget, *, supersample=1.0, song_seconds=0.0,
+                 warmup=8, samples=24, crf=18, preset="veryfast"):
+        self.widget = widget
+        self.warmup = max(1, int(warmup))
+        self.samples = max(1, int(samples))
+        pw, ph, ss = frame_pixel_size(widget, supersample)
+        self._img = _new_frame_image(pw, ph, ss)
+        # 測る時刻は曲の中ほどへ散らす。頭は音符が無くて軽く、そこだけ測ると
+        # 見積もりが短く出てしまう。
+        span = max(1.0, float(song_seconds))
+        total = self.warmup + self.samples
+        self._times = [span * (0.2 + 0.6 * i / max(1, total - 1))
+                       for i in range(total)]
+        self._i = 0
+        self._elapsed = 0.0
+        self._started = False
+        self.done = False
+        # 出力は -f null で捨てる。音声も多重化もしないが、x264 のエンコードは
+        # 本番どおり行われるので CPU とメモリ帯域の食われ方は同じになる。
+        cmd = [
+            _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+            "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
+            "-thread_queue_size", "64", "-r", "60", "-i", "-",
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-f", "null", "-",
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, **_no_window())
+        except OSError:
+            # ffmpeg が起動できなくても見積もりは出したい。描画だけの数字に
+            # なるぶん短めに出るが、無いよりはるかにまし。
+            self._proc = None
+
+    def step(self, count=3) -> bool:
+        """最大 count コマ測る。まだ続きがあれば True。"""
+        if self.done:
+            return False
+        if not self._started:
+            self.widget.begin_offline_render()
+            self._started = True
+        total = self.warmup + self.samples
+        end = min(self._i + max(1, int(count)), total)
+        while self._i < end:
+            t0 = time.perf_counter()
+            self.widget.set_render_time(self._times[self._i])
+            self.widget.render(self._img)
+            if self._proc is not None:
+                try:
+                    self._proc.stdin.write(self._img.constBits())
+                except (BrokenPipeError, OSError):
+                    self._proc = None
+            if self._i >= self.warmup:
+                self._elapsed += time.perf_counter() - t0
+            self._i += 1
+        if self._i >= total:
+            self._teardown()
+            return False
+        return True
+
+    def _teardown(self):
+        self.done = True
+        try:
+            self.widget.end_offline_render()
+        except RuntimeError:
+            pass                      # ウィジェットが先に消えていた
+        self._img = None
+        if self._proc is not None:
+            # 溜まっているぶんを最後まで encode させる必要はない。閉じてから
+            # 少しだけ待ち、居座るようなら殺す(見積もりで待たされたら本末転倒)。
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+            self._proc = None
+
+    def cancel(self):
+        if not self.done:
+            self._teardown()
+
+    @property
+    def ms_per_frame(self) -> float:
+        n = max(0, self._i - self.warmup)
+        return (self._elapsed / n * 1000.0) if n else 0.0
+
+
 class VideoRecording:
     """少しずつ進められる録画セッション。
 
@@ -272,15 +441,14 @@ class VideoRecording:
         # ように「出力と同じ画素数」で描ければ、ffmpeg 側の lanczos 縮小が丸ごと
         # 不要になり、パイプに流すデータ量も大きく減る(整数丸めだと 2 倍固定に
         # なってしまい、出力の4倍を描いて捨てていた)。
-        ss = max(1.0, float(supersample))
-        pw, ph = int(round(w * ss)), int(round(h * ss))
-        pw += pw & 1
-        ph += ph & 1
+        pw, ph, ss = frame_pixel_size(widget, supersample)
         vf = _video_filter(CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"]), pw, ph)
 
         cmd = [
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-            "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{pw}x{ph}",
+            # bgra = QImage.Format_RGB32 のメモリ配置そのまま(リトルエンディアンで
+            # B,G,R,X の順)。下の QImage の説明を参照。
+            "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
             # 入力キューを深くしておくと、こちらの書き込みとエンコードが
             # 重なりやすくなる(既定は浅くて待ちが生じる)。
             "-thread_queue_size", "64",
@@ -304,15 +472,7 @@ class VideoRecording:
             _cleanup(self._tmp_dir)
             raise RecordingError(f"ffmpeg を起動できませんでした: {e}") from e
 
-        # devicePixelRatio を上げると、Qt は同じ論理座標のまま ss 倍の細かさで
-        # 描いてくれる(円も文字も本当に高精細になる。単なる拡大ではない)。
-        self._img = QImage(pw, ph, QImage.Format_RGBA8888)
-        self._img.setDevicePixelRatio(ss)
-        # 描画側(GameScreenWidget / ChartPreviewWidget)は毎フレーム全面を塗る
-        # (WA_OpaquePaintEvent + paintEvent 冒頭の fillRect)ので、毎コマの
-        # fill(0) は不要。ただし ss が小数のとき端に 1px 塗り残る可能性がある
-        # ので、最初の1回だけ塗って未初期化メモリを避ける。
-        self._img.fill(0)
+        self._img = _new_frame_image(pw, ph, ss)
         widget.begin_offline_render()
 
     def step(self, max_frames=8) -> bool:

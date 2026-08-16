@@ -2,10 +2,11 @@ import math
 import os
 import time as _time
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QMouseEvent, QPainter, QRegion
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
+    QMessageBox, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
@@ -64,13 +65,13 @@ class ChartInfoBar(QWidget):
             button_row.addWidget(btn)
         layout.addLayout(button_row)
 
-        # 曲名・サブタイトルはゲーム画面(右上)に出るので、ここには出さない。
-        # 値だけは set_static_info が入れるので、ラベル自体は残して隠す。
-        self.lbl_title = QLabel("-")
-        self.lbl_title.setVisible(False)
-        self.lbl_subtitle = QLabel("")
-        self.lbl_subtitle.setVisible(False)
-
+        # 曲名・サブタイトルはゲーム画面(右上)に出すようになったので、ここには
+        # 置かない。以前は「値だけ入れて隠しておく」ためにラベルだけ残していたが、
+        # **どのレイアウトにも入れていない親なしのラベル**だったため、
+        # set_static_info が setVisible(True) を呼んだ瞬間に Qt がそれを
+        # トップレベルウィンドウとして開いてしまい、サブタイトルだけが乗った
+        # 小さな別窓が現れていた。ラベルごと消すのが正しい直し方。
+        #
         # Cards are tinted by category so the panel reads at a glance instead
         # of everything looking the same: BPM/SCROLL/MEASURE in green (ok
         # color - distinct from the don/ka red/blue used below so tempo info
@@ -134,7 +135,6 @@ class ChartInfoBar(QWidget):
         引き直すだけ(実質不変)。呼び出し側との整合のため残している。"""
         for frame, lbl_header, lbl_value, color_key in self._cards:
             self._style_card(frame, lbl_header, lbl_value, color_key)
-        self.lbl_subtitle.setStyleSheet(f"color: {_DARK['fg_dim']};")
 
     @staticmethod
     def _row(*cards):
@@ -144,9 +144,8 @@ class ChartInfoBar(QWidget):
         return row
 
     def set_static_info(self, title: str, subtitle: str, course_stats: dict):
-        self.lbl_title.setText(title or "(無題)")
-        self.lbl_subtitle.setText(subtitle or "")
-        self.lbl_subtitle.setVisible(bool(subtitle))
+        # title / subtitle はゲーム画面側が描くので、ここでは統計カードだけ更新する
+        # (引数は呼び出し側の都合でそのまま受け取る)。
         if not course_stats:
             self.lbl_notes.setText("-")
             self.lbl_men.setText("-")
@@ -200,6 +199,103 @@ class ChartInfoBar(QWidget):
         self.lbl_roll_est.setText(str(cumulative_hits))
 
 
+class ScaledHost(QWidget):
+    """中身(ゲーム画面)を原寸で1枚に描いて、それを1回だけ縮小して貼る入れ物。
+
+    **なぜこの方式か**: 以前 QGraphicsScene + QGraphicsProxyWidget に載せて
+    拡大縮小を試したところ、倍率 1.0 でも再生の描画が 8〜11倍重くなった
+    (描画呼び出しのたびに変換行列が乗るため)。ここでは「原寸で普通に1枚
+    描く + 縮小ブリット1回」しか増えないので、倍率を下げても重くならない。
+
+    倍率 1.0 のときはこの入れ物を素通りさせる(中身をそのまま子として見せ、
+    オフスクリーンを挟まない)。つまり**等倍の経路は今までと1命令も変わらない**。
+
+    縮小中は中身を隠して自前のタイマーで描き直す。隠すと中身の update() が
+    効かなくなるので、代わりにここが 120fps 相当で render() を回す。
+    マウスは座標を倍率で割って中身へ転送する(レーン上のボタンが押せるように)。"""
+
+    FRAME_MS = 8          # 120fps 相当。レーン側の目標と揃える。
+
+    def __init__(self, content, parent=None):
+        super().__init__(parent)
+        self._content = content
+        content.setParent(self)
+        content.move(0, 0)
+        self._scale = 1.0
+        self._buf = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        self.refit()
+
+    def scale(self) -> float:
+        return self._scale
+
+    def set_scale(self, s: float):
+        s = max(0.1, min(1.0, float(s)))
+        if abs(s - self._scale) < 1e-6:
+            return
+        self._scale = s
+        if self._passthrough():
+            self._timer.stop()
+            self._content.show()
+        else:
+            self._content.hide()
+            self._timer.start(self.FRAME_MS)
+        self.refit()
+
+    def _passthrough(self) -> bool:
+        return self._scale >= 0.999
+
+    def refit(self):
+        """中身の大きさが変わった/倍率が変わったときに自分の大きさを取り直す。"""
+        cw, ch = self._content.width(), self._content.height()
+        self.setFixedSize(max(1, int(round(cw * self._scale))),
+                          max(1, int(round(ch * self._scale))))
+        self._buf = None
+        self.update()
+
+    def paintEvent(self, event):
+        if self._passthrough():
+            return                      # 中身が子として自分で描く(従来どおり)
+        # **原寸で描いてから縮小するのではなく、最初から縮小後の大きさで描く。**
+        # 一度 1280x720 に描いてから縮小すると、その縮小1回だけで 75% のとき
+        # 3.8ms かかっていた(中身の描画そのものより重い)。倍率をかけた painter を
+        # 渡すと、Qt は円も文字もその大きさで直接ラスタライズするので、大きな
+        # 中間画像も縮小工程も要らない。画面側は deviceTransform() を見て
+        # 静的キャッシュを同じ倍率で焼き直すので、絵も素直に小さくなる。
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.scale(self._scale, self._scale)
+        self._content.render(p, QPoint(0, 0), QRegion(),
+                             QWidget.RenderFlag.DrawChildren)
+
+    # --- マウスの転送(縮小中だけ) ---------------------------------------
+    def _forward(self, event, kind) -> bool:
+        if self._passthrough():
+            return False
+        pos = event.position() / self._scale
+        pt = pos.toPoint()
+        target = self._content.childAt(pt) or self._content
+        local = target.mapFrom(self._content, pt)
+        QApplication.sendEvent(target, QMouseEvent(
+            kind, QPointF(local), event.globalPosition(),
+            event.button(), event.buttons(), event.modifiers()))
+        return True
+
+    def mousePressEvent(self, event):
+        if not self._forward(event, QEvent.MouseButtonPress):
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if not self._forward(event, QEvent.MouseButtonRelease):
+            super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self._forward(event, QEvent.MouseMove):
+            super().mouseMoveEvent(event)
+
+
 class GamePreviewWindow(QWidget):
     """Standalone, non-modal window hosting the game-style chart preview.
 
@@ -234,7 +330,12 @@ class GamePreviewWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(chart_preview)
+        # ゲーム画面だけを倍率つきの入れ物に入れる。下部パネル(速度スライダー・
+        # 波形・情報)は本物の Qt ウィジェットなので、縮小すると文字がにじんで
+        # 押しにくくなる。小さい画面で困るのは 720px の絵のほうなので、そこだけ
+        # 縮める。
+        self.scaled_host = ScaledHost(chart_preview, self)
+        layout.addWidget(self.scaled_host)
         layout.addWidget(bottom_widget)
         self._refit()
         # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
@@ -255,12 +356,13 @@ class GamePreviewWindow(QWidget):
         top = self._chart_preview
         if hasattr(top, "is_compact"):
             # 本家レイアウト(GameScreenWidget)は自分で固定サイズを持っている。
-            w, h = top.width(), top.height()
+            pass
         else:
-            h = top.widget_height()
-            w = int(ChartPreviewWidget.LANE_WIDTH)
-            top.setFixedSize(w, h)
-        self.setFixedSize(w, h + self._bottom_widget.minimumHeight())
+            top.setFixedSize(int(ChartPreviewWidget.LANE_WIDTH), top.widget_height())
+        # 窓の大きさは「倍率をかけたあとのゲーム画面」＋下部パネル。
+        self.scaled_host.refit()
+        self.setFixedSize(max(self.scaled_host.width(), self._bottom_widget.minimumWidth()),
+                          self.scaled_host.height() + self._bottom_widget.minimumHeight())
 
     def _on_preview_height_changed(self, _h):
         self._refit()
@@ -483,6 +585,8 @@ class PreviewDock(QDockWidget):
         # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ
         # ならなくなり事故りやすいので、ページに載せないだけに留める方が安全。
         self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
+        # 起動時のモード復元中は settings.json へ書き戻さない(_save_bottom_mode)。
+        self._restoring_mode = False
 
         self.title_label = QLabel("(WAVEファイルなし)")
         layout.addWidget(self.title_label)
@@ -540,12 +644,19 @@ class PreviewDock(QDockWidget):
         self._wave_page = self._build_wave_page()
         self._edit_page = self._build_edit_page()
         self._title_page = self._build_title_page()
+        # 軽量モードのページ。中身は空で、実際に表示されることは無い
+        # (set_bottom_mode が通常再生と同じくページごと隠す)。それでも
+        # スタックへ1枚積むのは、「bottom_stack のインデックス == モード番号」
+        # という前提を崩さないため — ここを崩すと cycle_bottom_mode の
+        # % count() も _mode_names の並びも一斉にずれる。
+        self._lite_page = QWidget()
         self.bottom_stack = QStackedWidget()
         self.bottom_stack.addWidget(self._title_page)   # 0 非表示(曲名のみ)
-        self.bottom_stack.addWidget(self._wave_page)    # 1 音声波形(見るだけ)
+        self.bottom_stack.addWidget(self._lite_page)    # 1 軽量(画面だけ・ページ無し)
+        self.bottom_stack.addWidget(self._wave_page)    # 2 音声波形(見るだけ)
         if self._peepo_enabled:
-            self.bottom_stack.addWidget(self._edit_page)  # 2 作譜(音符を置ける、実験的機能)
-        self.bottom_stack.addWidget(self.info_bar)      # 情報(有効時3、無効時2)
+            self.bottom_stack.addWidget(self._edit_page)  # 3 作譜(音符を置ける、実験的機能)
+        self.bottom_stack.addWidget(self.info_bar)      # 情報(有効時4、無効時3)
 
         # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
         # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
@@ -587,13 +698,13 @@ class PreviewDock(QDockWidget):
         # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
         # ページ番号は上のスタック組み立てと連動させる(作譜が無効なら3つで
         # 循環)。増減したらここだけ見ればよいように名前を付ける。
-        self.MODE_TITLE, self.MODE_WAVE = 0, 1
+        self.MODE_TITLE, self.MODE_LITE, self.MODE_WAVE = 0, 1, 2
         if self._peepo_enabled:
-            self._mode_names = ["通常再生", "音声波形", "作譜", "情報"]
-            self.MODE_EDIT, self.MODE_INFO = 2, 3
+            self._mode_names = ["通常再生", "軽量", "音声波形", "作譜", "情報"]
+            self.MODE_EDIT, self.MODE_INFO = 3, 4
         else:
-            self._mode_names = ["通常再生", "音声波形", "情報"]
-            self.MODE_EDIT, self.MODE_INFO = None, 2
+            self._mode_names = ["通常再生", "軽量", "音声波形", "情報"]
+            self.MODE_EDIT, self.MODE_INFO = None, 3
         # 画面の左上に「モード切替 / コース / 録画」の順で並べる。以前は
         # 右上だったが、右上は曲名が出る場所なので左へ移した。
         left = 8
@@ -613,11 +724,24 @@ class PreviewDock(QDockWidget):
         self.record_button = self._lane_button("● 録画", 84,
                                                "いま選んでいるコースを動画に書き出す")
         self.record_button.move(left, 6)
+        left += 84 + 6
         self.record_button.clicked.connect(self._on_record_clicked)
 
-        # 起動時の既定は通常再生。ここで一度通しておかないと、画面が
-        # compact のまま(どんちゃんも下の背景も出ない)で始まってしまう。
-        self.set_bottom_mode(self.MODE_TITLE)
+        # 表示倍率。小さい画面で 1280x720 が入りきらないとき用。押すたびに
+        # 100 -> 75 -> 50 -> 25 -> 100 と回る。等倍のときは中身をそのまま
+        # 見せる(ScaledHost 参照)ので、100% の描画は今までと変わらない。
+        self.zoom_button = self._lane_button("表示: 100%", 96,
+                                             "再生ウィンドウの表示倍率を切り替えます(100/75/50/25%)")
+        self.zoom_button.move(left, 6)
+        self.zoom_button.clicked.connect(self.cycle_zoom)
+
+        # 起動時は前回終了時のモードへ戻す(既定は通常再生)。ここで一度
+        # 通しておかないと、画面が compact のまま(どんちゃんも下の背景も
+        # 出ない)で始まってしまう。
+        # 倍率はモード復元より先に当てる(モード復元が窓の大きさを取り直すので、
+        # 先に倍率を決めておくと refit が1回で済む)。
+        self.set_zoom(self.config_data.get("preview_zoom", 100), save=False)
+        self._restore_bottom_mode()
 
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -1007,6 +1131,28 @@ class PreviewDock(QDockWidget):
         if color:
             self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
 
+    ZOOM_STEPS = (100, 75, 50, 25)
+
+    def cycle_zoom(self):
+        """表示倍率を 100 -> 75 -> 50 -> 25 -> 100 と回す。"""
+        cur = int(round(self.game_preview_window.scaled_host.scale() * 100))
+        try:
+            i = self.ZOOM_STEPS.index(cur)
+        except ValueError:
+            i = 0
+        self.set_zoom(self.ZOOM_STEPS[(i + 1) % len(self.ZOOM_STEPS)])
+
+    def set_zoom(self, percent: int, save: bool = True):
+        """表示倍率(%)を適用する。ボタンの表示と窓の大きさも取り直す。"""
+        percent = int(percent) if int(percent) in self.ZOOM_STEPS else 100
+        self.game_preview_window.scaled_host.set_scale(percent / 100.0)
+        self.game_preview_window.refit()
+        self.zoom_button.setText(f"表示: {percent}%")
+        if save and self.config_data.get("preview_zoom") != percent:
+            self.config_data["preview_zoom"] = percent
+            if self.save_settings_cb is not None:
+                self.save_settings_cb()
+
     def cycle_bottom_mode(self):
         """通常再生→音声波形→(作譜→)情報→… と循環。作譜は実験的機能
         (peepo_chart_edit)が有効なときだけ挟まる(_build_ui でページ自体を
@@ -1021,14 +1167,23 @@ class PreviewDock(QDockWidget):
         通常再生は録画と同じ 1280x720(どんちゃん・下の背景・フッターまで出る)。
         ほかのモードは上半分(1280x360)に縮めて、下の背景があった場所に
         そのモードのペイン(音声波形/作譜/情報)を置く — あそこは屋台の絵より
-        波形や情報を出したい場所なので、下の背景ごと譲る。"""
+        波形や情報を出したい場所なので、下の背景ごと譲る。
+
+        軽量モードは通常再生と同じ 1280x720(縦横比を揃えたいという要望)。
+        ただし背景の絵は上下とも出さず黒で埋め、どんちゃん・魂ゲージ・
+        魂の飛翔・スコア加算も落とす(set_lite)。下にペインは置かない。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
         self.record_button.setVisible(idx == self.MODE_TITLE)
         self.game_screen.set_compact(idx != self.MODE_TITLE)
+        # 軽量の入り切りは compact の切替より後に。set_lite が静的キャッシュを
+        # 捨てるので、先に呼ぶと set_compact が焼き直した直後のキャッシュを
+        # また捨てることになり、無駄が1枚ぶん増える。
+        self.game_screen.set_lite(idx == self.MODE_LITE)
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
-        show_page = (idx != self.MODE_TITLE)
+        # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
+        show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)
         self.bottom_stack.setVisible(show_page)
         self._bottom_panel.setFixedHeight(
             self._bottom_h_full if show_page else self._bottom_h_speed_only)
@@ -1039,6 +1194,41 @@ class PreviewDock(QDockWidget):
             self.chart_edit.setFocus(Qt.OtherFocusReason)
         else:
             self.chart_preview.setFocus(Qt.OtherFocusReason)
+        self._save_bottom_mode(idx)
+
+    # ------------------------------------------------------------------
+    # 最後に使ったモードの保存/復元(settings.json の preview_bottom_mode)
+    # ------------------------------------------------------------------
+    # 保存するのは番号ではなく**モード名**。番号は実験的機能(peepo_chart_edit)
+    # の入り切りで「作譜」が挟まったり抜けたりして意味がずれるので、番号で
+    # 覚えると設定を変えた次の起動で別のモードが開いてしまう。名前なら
+    # _mode_names に無くなったとき(作譜を切ったあと)も素直に既定へ落ちる。
+
+    def _save_bottom_mode(self, idx: int):
+        # 起動時の復元で書き戻さない。実験的機能(作譜)を切った直後の起動では
+        # 「作譜」が _mode_names に無くて通常再生へ落ちるので、そのまま保存
+        # すると作譜を戻したときに設定が消えている。
+        if self._restoring_mode or not (0 <= idx < len(self._mode_names)):
+            return
+        name = self._mode_names[idx]
+        if self.config_data.get("preview_bottom_mode") == name:
+            return          # 変わっていないなら書かない(切替のたびに保存しない)
+        self.config_data["preview_bottom_mode"] = name
+        if self.save_settings_cb is not None:
+            self.save_settings_cb()
+
+    def _restore_bottom_mode(self):
+        """起動時に、前回終了時のモードへ戻す。"""
+        name = self.config_data.get("preview_bottom_mode")
+        try:
+            idx = self._mode_names.index(name)
+        except ValueError:
+            idx = self.MODE_TITLE
+        self._restoring_mode = True
+        try:
+            self.set_bottom_mode(idx)
+        finally:
+            self._restoring_mode = False
 
     def _on_speed_slider_changed(self, value: int):
         # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の

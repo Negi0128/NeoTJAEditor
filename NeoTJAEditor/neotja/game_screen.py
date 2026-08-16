@@ -30,11 +30,29 @@ from PySide6.QtWidgets import QWidget
 from neotja import chara as chara_mod
 from neotja import gauge as gauge_mod
 from neotja import settings as settings_mod
-from neotja.chart_preview_widget import ChartPreviewWidget
+from neotja.chart_preview_widget import (ChartPreviewWidget, blit_fitted,
+                                         blit_sprite, dev_info)
 
 SCREEN_W = 1280
 SCREEN_H_FULL = 720
 SCREEN_H_COMPACT = 360
+# 軽量モードの画面の高さ。上半分(compact)と同じ 1280x360 にしてある。
+#
+# 上の帯(y=0..188)には魂ゲージしか無いので、一度は 100px 切り落として
+# 1280x260 にしていた。だが軽量に残すものが増えて、そこを使う要素が
+# 戻ってきた:
+#   ・連打/風船の打数の読み出し(金の扇は y≒22..202、風船の吹き出しも同じ辺り)
+#   ・判定文字「良」の板 (OVERLAY_RECT の上端が y=88)
+# どちらも切り取り範囲に丸ごと入るので、切ると上が欠ける。「戻した要素が
+# 全部ちゃんと見えていること」を優先して、切り取りはやめて compact と同じ
+# 高さに戻した。左右は元から一切触っていないので、判定円の x・音符の
+# 横位置・流れる速さは通常再生と完全に同一のまま。
+# 軽量モードの画面の高さ。通常再生と**同じ 16:9** にして、背景を出さない
+# ぶんは黒で埋める。以前は上半分だけの 1280x360 にしていたが、モードを
+# 行き来するたびに窓の縦横比が変わって落ち着かないという指摘を受けた。
+# 黒く塗る部分は静的キャッシュに焼くので、面積が増えても毎フレームの費用は
+# 増えない(貼るのは元から画面1枚ぶんの単純コピー)。
+SCREEN_H_LITE = SCREEN_H_FULL
 
 # --- 実測した配置 --------------------------------------------------------
 BG_TOP_H = 188            # 上部背景の高さ
@@ -451,6 +469,21 @@ class GameScreenWidget(QWidget):
         super().__init__(parent)
         self.chart_preview = chart_preview
         self._compact = bool(compact)
+        # 軽量モード(下部パネルの「軽量」)。低スペック機でも譜面が止まらずに
+        # 流れることを狙って、**譜面と手応えに関係しない絵だけ**を止める。
+        #   止めるもの: どんちゃん / 上下の背景(重ね式の流れる背景・提灯の光・
+        #               Background.png・Bg_down.png・フッター) / 魂ゲージ・
+        #               「クリア」・虹・叩いた音符が魂へ飛ぶ演出 /
+        #               スコア加算の浮き上がり
+        #   残すもの:   レーンと音符(連打・風船込み)・小節線・判定円・
+        #               コンボ・スコア・打音(音声)・ゴーゴー(炎と帯)・
+        #               打音表記の帯・判定の火花・「良」・連打の金の扇・
+        #               太鼓の光り
+        # つまり「叩いている感じ」はそのままで、背景と装飾の絵だけが消える。
+        # レイアウトは通常再生と同じ 1280x720(SCREEN_H_LITE 参照)。背景の
+        # あった場所は黒く塗るだけで、レーンも左パネルも位置は動かさない。
+        # 左右も一切動かさないので、音符の横位置も流れる速さも通常再生と同一。
+        self._lite = False
         self._skin = {}
         self._score_timeline = None
         self._gauge = None
@@ -480,6 +513,14 @@ class GameScreenWidget(QWidget):
         # 静的な下地(背景・左パネル・黒枠 等)を焼いたキャッシュ。None なら
         # 次の paintEvent で作り直す。compact 切替やスキン再読込で捨てること。
         self._static_layer = None
+        # 静的キャッシュを焼いたときの devicePixelRatio。録画(1080p)は 1.5 で
+        # 描くので、DPR 1 で焼いた1枚を貼ると毎コマ 1.5 倍へ拡大される
+        # (1コマ 3.2ms、1080p の描画時間の 3割)。DPR ごとに焼き直して
+        # 等倍ブリットにする。
+        self._static_layer_dpr = 1.0
+        # いま描いている面の devicePixelRatio。paintEvent が毎コマ更新する。
+        # 子の板(_FlightOverlay など)は親と同じ面へ描かれるのでこれを見る。
+        self._dpr = 1.0
         # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
         self._bg_up_cache = {}
         # 上背景3層を焼いた帯(画面幅+余白)と、それを焼いたときの位相。
@@ -602,6 +643,12 @@ class GameScreenWidget(QWidget):
                 now, SOUL_FLY_SEC + SOUL_LAND_SEC))
             if not flying and self._chara is not None:
                 flying = self._chara.state() in chara_mod.TIME_BASED_STATES
+            if not flying and self._lite:
+                # 軽量ではどんちゃんを描かない = anim.update() を回さないので、
+                # 上の「風船中のどんちゃん」判定が効かない。板の中身は風船の絵
+                # だけになるので、風船が判定枠に居るかを直接見る。これが無いと
+                # 風船の絵が最初のコマで固まる(板が塗り直されないため)。
+                flying = self.chart_preview.balloon_sprite_frame(now) is not None
         except Exception:  # noqa: BLE001
             flying = False
         if flying or self._flight_was_active:
@@ -665,7 +712,7 @@ class GameScreenWidget(QWidget):
         「良」や飛んでいく音符と同じく、レーンの兄弟の板に描いて手前に出す。
         ふだん/ゴーゴーの絵はレーンに重ならないので、これまでどおり親が描く。"""
         anim = self._chara
-        if anim is None or self._compact or not anim.sprites.available():
+        if anim is None or self._compact or self._lite or not anim.sprites.available():
             return
         state = anim.state()
         if state not in chara_mod.TIME_BASED_STATES:
@@ -885,15 +932,26 @@ class GameScreenWidget(QWidget):
         # QPixmap.cacheKey() は「その中身」に対する Qt の一意キー。id() だと
         # 素材を読み直したときに同じアドレスが再利用されて、別のシートの
         # キャッシュを引き当てる恐れがある。
-        key = (sheet.cacheKey(), cols, rows, row, round(float(scale), 4))
+        # 倍率だけでなく devicePixelRatio もキーに含める。録画(DPR 1.5)で
+        # DPR 1 のまま作った字を貼ると、毎コマ 1.5 倍へ拡大されてしまう
+        # (スコア+コンボ+連打数で1コマ十数回)。実寸を dpr 倍で作って
+        # setDevicePixelRatio を立てれば、論理サイズは同じまま等倍で貼れる。
+        dpr = max(1.0, float(getattr(self, "_dpr", 1.0)))
+        key = (sheet.cacheKey(), cols, rows, row, round(float(scale), 4),
+               round(dpr, 4))
         got = self._digit_cache.get(key)
         if got is not None:
             return got
         cw, ch = sheet.width() / cols, sheet.height() / rows
+        # 論理サイズは従来どおり int(cw*scale)+1。実寸だけ dpr 倍にする。
         dw, dh = int(cw * scale) + 1, int(ch * scale) + 1
-        out = [sheet.copy(QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
-               .scaled(dw, dh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-               for i in range(10)]
+        out = []
+        for i in range(10):
+            cell = sheet.copy(QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
+            g = cell.scaled(max(1, int(round(dw * dpr))), max(1, int(round(dh * dpr))),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            g.setDevicePixelRatio(dpr)
+            out.append(g)
         self._digit_cache[key] = out
         return out
 
@@ -906,7 +964,9 @@ class GameScreenWidget(QWidget):
                           y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
-        if self._score_timeline is not None:
+        # 軽量では出さない。要るのは「いま何点か」であって、加算の演出は
+        # スコアそのものを見れば分かる情報の重ね描きでしかない。
+        if self._score_timeline is not None and not self._lite:
             ev = self._score_timeline.last_event(now)
             if ev is not None:
                 et, gain = ev
@@ -928,13 +988,14 @@ class GameScreenWidget(QWidget):
 
         # --- コース記号 ---
         if self._course_sym is not None:
-            p.drawPixmap(COURSE_SYM_POS[0], COURSE_SYM_POS[1], self._course_sym)
+            blit_sprite(p, COURSE_SYM_POS[0], COURSE_SYM_POS[1],
+                        self._course_sym, self._dpr)
 
         # --- 太鼓 ---
         drum = self._skin.get("drum")
         dx, dy = DRUM_POS
         if drum is not None:
-            p.drawPixmap(dx, dy, drum)
+            blit_sprite(p, dx, dy, drum, self._dpr)
             # 連打・風船を叩いている間は、そちらの打に合わせて光らせる。
             # 打の時刻は打音と同じ決め方なので、音と手が合う。連打は面だけ
             # (打音も面だけにしてある)。
@@ -992,7 +1053,7 @@ class GameScreenWidget(QWidget):
         # --- 銘板 ---
         np_ = self._skin.get("nameplate")
         if np_ is not None:
-            p.drawPixmap(NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_)
+            blit_sprite(p, NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_, self._dpr)
 
     def _draw_gauge(self, p, ratio, now):
         """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
@@ -1015,7 +1076,7 @@ class GameScreenWidget(QWidget):
         # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
         if ratio >= 1.0 and self._gauge_rainbow:
             i = int(now / GAUGE_RAINBOW_FRAME_SEC) % len(self._gauge_rainbow)
-            p.drawPixmap(gx, gy, self._gauge_rainbow[i])
+            blit_sprite(p, gx, gy, self._gauge_rainbow[i], self._dpr)
         # 「クリア」の文字。クリア圏の左上に置く。虹色のときも読めるよう、
         # ゲージの色を差し替えたあとに描く(先に描くと虹に塗り潰される)。
         src = fill if fill is not None else base
@@ -1050,15 +1111,16 @@ class GameScreenWidget(QWidget):
                 d = c * SOUL_BURST_SCALE
                 cx = SOUL_POS[0] + SOUL_CELL / 2.0
                 cy = SOUL_POS[1] + SOUL_CELL / 2.0
-                p.drawPixmap(QRect(int(cx - d / 2), int(cy - d / 2), int(d), int(d)),
-                             burst, QRect(f * c, 0, c, c))
+                blit_fitted(p, int(cx - d / 2), int(cy - d / 2), int(d), int(d),
+                            burst, self._dpr, src=QRect(f * c, 0, c, c))
 
         # 魂の文字。ゲージの右端に置き、クリア圏まで溜まったら光る段に変える。
         soul = self._skin.get("soul")
         if soul is not None:
             row = 1 if ratio >= GAUGE_CLEAR_RATIO else 0
-            p.drawPixmap(SOUL_POS[0], SOUL_POS[1], soul,
-                         0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL)
+            blit_fitted(p, SOUL_POS[0], SOUL_POS[1], SOUL_CELL, SOUL_CELL,
+                        soul, self._dpr,
+                        src=QRect(0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL))
 
     def _white_note(self, char, sprite):
         """音符の絵を真っ白に染めたもの(形はそのまま)。着弾の白飛ばし用。"""
@@ -1082,6 +1144,10 @@ class GameScreenWidget(QWidget):
         描く。ox/oy は描き先の板の左上。持ち回る状態は無く、その時刻に
         飛んでいる音符を毎回引き直すだけなので、シークしても止めても
         矛盾しない。"""
+        # 軽量では出さない。行き先の魂ゲージごと描いていないので、飛んだ先に
+        # 何も無い(音符が画面の右上へ吸い込まれて消えるだけの絵になる)。
+        if self._lite:
+            return
         cp = self.chart_preview
         try:
             now = cp.game_state()[0]
@@ -1090,6 +1156,7 @@ class GameScreenWidget(QWidget):
             return
         if not hits:
             return
+        dpr, dev_off = dev_info(p)
         sx, sy = self.judge_center()
         ex = SOUL_POS[0] + SOUL_CELL / 2.0
         ey = SOUL_POS[1] + SOUL_CELL / 2.0
@@ -1103,7 +1170,6 @@ class GameScreenWidget(QWidget):
                 continue
             w = sprite.width() * SOUL_FLY_SCALE_END
             h = sprite.height() * SOUL_FLY_SCALE_END
-            src = QRectF(0, 0, sprite.width(), sprite.height())
             if elapsed < SOUL_FLY_SEC:
                 # --- 飛行中。大きさも濃さも変えない(OpenTaiko と同じ) ---
                 q = max(0.0, elapsed / SOUL_FLY_SEC)
@@ -1111,20 +1177,21 @@ class GameScreenWidget(QWidget):
                 x = u * u * sx + 2 * u * q * cx + q * q * ex
                 y = u * u * sy + 2 * u * q * cy + q * q * ey
                 p.setOpacity(1.0)
-                p.drawPixmap(QRectF(x - w / 2.0 - ox, y - h / 2.0 - oy, w, h),
-                             sprite, src)
+                blit_fitted(p, x - w / 2.0 - ox, y - h / 2.0 - oy, w, h,
+                            sprite, dpr, dev_off)
                 continue
             # --- 着弾後。魂の上に残しつつ、白へ寄せながら消す ---
             t = (elapsed - SOUL_FLY_SEC) / SOUL_LAND_SEC
             if t >= 1.0:
                 continue
-            rect = QRectF(ex - w / 2.0 - ox, ey - h / 2.0 - oy, w, h)
+            rx, ry = ex - w / 2.0 - ox, ey - h / 2.0 - oy
             # 着いた瞬間は素の音符、そこから白へ寄せながら全体を薄くする。
             alpha = 1.0 - t
             p.setOpacity(alpha * (1.0 - t))
-            p.drawPixmap(rect, sprite, src)
+            blit_fitted(p, rx, ry, w, h, sprite, dpr, dev_off)
             p.setOpacity(alpha * t)
-            p.drawPixmap(rect, self._white_note(char, sprite), src)
+            blit_fitted(p, rx, ry, w, h, self._white_note(char, sprite),
+                        dpr, dev_off)
         p.setOpacity(1.0)
 
     def _draw_lane_readouts(self, p, now, recent):
@@ -1228,15 +1295,43 @@ class GameScreenWidget(QWidget):
         if compact == self._compact:
             return
         self._compact = compact
-        self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
-        self._static_layer = None      # 高さが変わるので焼き直す
+        self._apply_geometry()         # 高さが変わるので焼き直す
         self.update()
 
     def is_compact(self) -> bool:
         return self._compact
 
+    def set_lite(self, lite: bool):
+        """軽量モードの入り切り。
+
+        レーン(ChartPreviewWidget)側には何も伝えない。軽量で止めるのは
+        「画面側が描いている背景と装飾」だけで、レーンの中(音符・ゴーゴー・
+        判定の火花・打音表記の帯)は通常再生と同じものをそのまま描くため。
+        「良」と風船を描く板(_JudgeOverlay / _FlightOverlay)も出したままに
+        して、その中で軽量に要らないもの(どんちゃん・魂の飛翔)だけを
+        描き手側で落とす(draw_chara_front / draw_soul_flights)。"""
+        lite = bool(lite)
+        if lite == self._lite:
+            return
+        self._lite = lite
+        self._apply_geometry()      # 高さと静的キャッシュの面倒はここで見る
+        self.update()
+
+    def is_lite(self) -> bool:
+        return self._lite
+
+    def _screen_height(self) -> int:
+        if self._lite:
+            return SCREEN_H_LITE
+        return SCREEN_H_COMPACT if self._compact else SCREEN_H_FULL
+
+    def _apply_geometry(self):
+        """画面の高さを、いまの compact/lite に合わせ直す。"""
+        self.setFixedSize(SCREEN_W, self._screen_height())
+        self._static_layer = None      # 大きさ/中身が変わるので焼き直す
+
     # ------------------------------------------------------------------
-    def _build_static_layer(self):
+    def _build_static_layer(self, dpr=1.0):
         """毎フレーム同じ絵になる部分(下地・上下背景・フッター・曲名・左パネル・
         黒枠)を1枚のピクスマップに焼く。
 
@@ -1252,20 +1347,34 @@ class GameScreenWidget(QWidget):
         # 重ね式の上背景は毎フレーム動くので、静的キャッシュ側は上の帯を
         # 透明にしておき、paintEvent で「動く背景 → キャッシュ」の順に貼る。
         # このときだけアルファ付きになる(貼るのが単純コピーでなくなる)。
+        # `dpr` は貼り付け先(録画用 QImage)の devicePixelRatio。実寸を dpr 倍で
+        # 取り、QImage 側にも同じ dpr を立てておくと、_paint_static は論理座標の
+        # ままで中身が dpr 倍の細かさで焼き直される。貼るときは DPR が一致する
+        # ので拡大なしの単純ブリットになる。
         layered = self._layered_top()
         fmt = (QImage.Format_ARGB32_Premultiplied if layered
                else QImage.Format_RGB32)
-        img = QImage(self.width(), self.height(), fmt)
+        dpr = max(1.0, float(dpr))
+        img = QImage(int(round(self.width() * dpr)),
+                     int(round(self.height() * dpr)), fmt)
+        img.setDevicePixelRatio(dpr)
         img.fill(Qt.transparent if layered else QColor("#0d1117"))
         p = QPainter(img)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         self._paint_static(p)
         p.end()
-        return QPixmap.fromImage(img)
+        pm = QPixmap.fromImage(img)
+        pm.setDevicePixelRatio(dpr)
+        return pm
 
     def _layered_top(self):
         """上背景を重ね式で描くか(素材が揃っているときだけ)。"""
-        return (SHOW_BACKGROUND_TOP and BG_TOP_STYLE == "layered"
+        # 軽量では重ね式を使わない。重ね式は毎フレーム「3層を帯へ焼く/位相が
+        # 進んだら焼き直す + 画面幅ぶんの窓を切って貼る」が要るうえ、静的
+        # キャッシュ側をアルファ付きにするので、貼り付けまで SourceOver 合成に
+        # なってしまう。軽量は上背景を出さない = キャッシュを不透明(単純コピー)
+        # に戻せる、という二重の効き方をする。
+        return (not self._lite and SHOW_BACKGROUND_TOP and BG_TOP_STYLE == "layered"
                 and self._skin.get("bg_up_base") is not None)
 
     def _paint_static(self, p):
@@ -1276,6 +1385,12 @@ class GameScreenWidget(QWidget):
         # 絵を出さないときは黒で塗る。下地(#0d1117)のままだと少し青みが
         # 残って「消し忘れ」に見えるので、はっきり黒にする。
         if self._layered_top():
+            bg = None
+        elif self._lite:
+            # 軽量: 背景の絵は上も下も出さない。画面ぜんぶを黒で塗っておく
+            # (ここはキャッシュなので1回きり)。下地(#0d1117)のままだと青みが
+            # 残って「消し忘れ」に見えるので、はっきり黒で埋める。
+            p.fillRect(QRect(0, 0, SCREEN_W, self.height()), QColor(BACKGROUND_TOP_COLOR))
             bg = None
         else:
             if not SHOW_BACKGROUND_TOP:
@@ -1288,7 +1403,7 @@ class GameScreenWidget(QWidget):
             # レーンの上に来るので、本家と同じ「奥行きのある」見え方になる。
             p.drawPixmap(0, 0, bg)
 
-        if not self._compact and SHOW_BACKGROUND:
+        if not self._compact and not self._lite and SHOW_BACKGROUND:
             # --- 下部背景 (360..720) ---
             bd = self._skin.get("bg_down")
             if bd is not None:
@@ -1315,8 +1430,11 @@ class GameScreenWidget(QWidget):
         if frame is not None:
             fx, fy = LANE_FRAME_POS
             # 魂ゲージを囲う箱(素材の y=0..FRAME_TOP_BAND)だけ独立して動かす。
-            p.drawPixmap(fx + FRAME_TOP_X_OFF, fy + FRAME_TOP_Y_OFF, frame,
-                         0, 0, frame.width(), FRAME_TOP_BAND)
+            # 軽量ではゲージそのものを出さないので、この箱も描かない。中身の
+            # 無い枠だけが宙に浮いて残ると「消し忘れ」に見えるため。
+            if not self._lite:
+                p.drawPixmap(fx + FRAME_TOP_X_OFF, fy + FRAME_TOP_Y_OFF, frame,
+                             0, 0, frame.width(), FRAME_TOP_BAND)
             # レーンを囲う部分(上辺・左右・下辺)は動かさない。透明窓がレーンと
             # 1px 合わせなので、ここを動かすとレーンとずれる。
             # ただし y=190..214 の左端1pxだけは打音表記帯の色が入っていて、
@@ -1531,15 +1649,24 @@ class GameScreenWidget(QWidget):
         p.setClipRect(QRect(0, BG_DOWN_Y, SCREEN_W, FOOTER_Y - BG_DOWN_Y))
         p.setCompositionMode(QPainter.CompositionMode_Plus)
         p.setOpacity(BG_LIGHT_MIN + (BG_LIGHT_MAX - BG_LIGHT_MIN) * k)
-        p.drawPixmap(0, BG_DOWN_Y, lit)
+        blit_sprite(p, 0, BG_DOWN_Y, lit, self._dpr)
         p.restore()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
+        # この1コマの実効 devicePixelRatio。画面は 1.0、録画(1080p)は 1.5。
+        # ウィジェットの devicePixelRatio() ではなく deviceTransform を見るのは、
+        # 前者が「今ぶら下がっている画面の拡大率」を返すため(画面外へ render する
+        # 録画では実際の描画先と一致しない)。deviceTransform は論理座標から
+        # 実画素への変換そのものなので、描画先が何であれ正しい。
+        self._dpr = float(p.deviceTransform().m11() or 1.0)
         # 静的な下地は1枚のキャッシュを貼るだけ(初回のみ作る)。
-        if self._static_layer is None or self._static_layer.size() != self.size():
-            self._static_layer = self._build_static_layer()
+        if (self._static_layer is None
+                or self._static_layer.deviceIndependentSize().toSize() != self.size()
+                or abs(self._static_layer_dpr - self._dpr) > 1e-4):
+            self._static_layer = self._build_static_layer(self._dpr)
+            self._static_layer_dpr = self._dpr
         # 重ね式の上背景はキャッシュに焼けないので、先に敷いてから被せる。
         if self._layered_top():
             try:
@@ -1566,11 +1693,21 @@ class GameScreenWidget(QWidget):
         # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
         # どんちゃんは下部背景の高さがある表示(録画レイアウト)でだけ出す。
         # compact はレーンの下に余白が無いので置き場所がない。
-        if not self._compact:
+        # 軽量も出さない — 背景と装飾を落とすのが軽量の目的で、提灯の光は
+        # 毎フレームの加算合成、どんちゃんは毎フレーム別画像への差し替えと、
+        # どちらも「譜面を読む」のに要らないわりに重い。素材(1_Chara /
+        # Bg_down_Light.png)が入っている環境では、ここが軽量の効きの大半。
+        if not self._compact and not self._lite:
             self._draw_bg_light(p, now)
             self._draw_chara(p, now)
         self._draw_left_panel(p, combo, score, recent, now)
-        self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
+        # 軽量では魂ゲージ(+「クリア」+ 虹)を出さない。ゲージは 400px 超の
+        # 帯とブロックを毎フレーム重ね描きするうえ、このプレビューは全ノーツ
+        # 自動「良」なので「叩いた数」以上の情報を持たない = 譜面を読むのに
+        # 要らない。連打・風船の金の扇(_draw_lane_readouts)は残す — あれは
+        # 「今この連打を何回叩いたか」という譜面そのものの情報。
+        if not self._lite:
+            self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
         self._draw_lane_readouts(p, now, recent)
 
         p.end()

@@ -74,6 +74,142 @@ def _pil_to_qpixmap(img) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
+# --- 倍率ごとの拡大済みスプライト置き場 -----------------------------------
+# 動画の書き出しは devicePixelRatio(以下 DPR)を 1.5 などに上げて描く
+# (recorder._new_frame_image)。論理座標のまま細かく描けるのが狙いだが、
+# **キャッシュ済みのピクスマップだけは話が別**で、DPR 1 のまま貼ると Qt が
+# 毎コマ 1.5 倍へスムーズ拡大しながらブリットする。1080p のプロファイルでは
+# これが描画時間の 8 割を占めていた(1コマ 53 回の drawPixmap で 9.7ms)。
+#
+# Qt はピクスマップの DPR が描画先の DPR と一致していれば拡大せずそのまま
+# 貼る。そこで「実寸 = 論理サイズ × DPR」に一度だけ拡大したものを作り、
+# setDevicePixelRatio を立てて覚えておく。以降は論理座標で貼るだけで等倍
+# ブリットになり、しかも拡大が録画1回ぶんに減るので絵はむしろ綺麗になる。
+#
+# 画面プレビュー(DPR=1.0)では下の early return でそのまま元を返すので、
+# 見た目も経路も一切変わらない。
+#
+# キーは QPixmap.cacheKey()。中身が同じでも別インスタンスなら別キーになる
+# ので取り違えは起きない。元のピクスマップも一緒に持っておくのは、元が
+# 消えたあと cacheKey が使い回されて別物に化けるのを防ぐため。スキンを
+# 読み直したときは clear_dpr_sprite_cache() で丸ごと捨てる。
+_DPR_SPRITES = {}
+
+
+def sprite_for_dpr(pm, dpr):
+    """`pm` を DPR `dpr` 用に拡大済みのピクスマップにして返す(キャッシュ付き)。
+
+    返り値は論理サイズが `pm` と同じなので、呼び出し側の座標計算は一切
+    変えなくてよい。DPR が 1 のとき(画面プレビュー)は `pm` そのもの。"""
+    if pm is None or dpr <= 1.0001:
+        return pm
+    key = (pm.cacheKey(), round(float(dpr), 4))
+    hit = _DPR_SPRITES.get(key)
+    if hit is not None:
+        return hit[0]
+    src_dpr = pm.devicePixelRatio() or 1.0
+    w = max(1, int(round(pm.width() / src_dpr * dpr)))
+    h = max(1, int(round(pm.height() / src_dpr * dpr)))
+    out = pm.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    out.setDevicePixelRatio(dpr)
+    _DPR_SPRITES[key] = (out, pm)
+    return out
+
+
+def dev_info(painter):
+    """いま描いている面の実効 devicePixelRatio と、実画素での原点を返す。
+
+    ウィジェットの devicePixelRatio() ではなく deviceTransform を見るのは、
+    前者が「今ぶら下がっている画面の拡大率」を返すため — 画面外の QImage へ
+    render する録画では、実際の描画先と一致しない。原点が要るのは、子の板が
+    親の中の半端な位置にいるため(レーンは x=333 なので dpr=1.5 では実画素
+    499.5 から始まる)。paintEvent の頭で1回だけ呼ぶこと。"""
+    t = painter.deviceTransform()
+    return float(t.m11() or 1.0), (t.dx(), t.dy())
+
+
+def blit_sprite(painter, x, y, pm, dpr, off=(0.0, 0.0)):
+    """`drawPixmap(x, y, pm)` の DPR 対応版(素材の大きさのまま貼るとき用)。
+
+    録画(dpr > 1)では、拡大済み(sprite_for_dpr)を実画素の格子へ乗せて貼る。
+    貼り位置は最大 1/dpr 論理画素だけ動くが、そのぶん毎コマの双一次補間が
+    まるごと消える(1080p の実測で 1枚あたり 30〜50us → 3us)。
+    dpr が 1 のとき(画面プレビュー)は従来と同じ呼び出しに落ちる。"""
+    if pm is None:
+        return
+    if dpr <= 1.0001:
+        painter.drawPixmap(QPointF(x, y), pm)
+        return
+    ox, oy = off
+    painter.drawPixmap(QPointF((round(x * dpr + ox) - ox) / dpr,
+                               (round(y * dpr + oy) - oy) / dpr),
+                       sprite_for_dpr(pm, dpr))
+
+
+def blit_fitted(painter, x, y, w, h, pm, dpr, off=(0.0, 0.0), src=None):
+    """論理矩形 (x, y, w, h) へ `pm` を目一杯貼る(拡大縮小あり)。
+
+    録画(dpr > 1)のときだけ細工をする。ふつうに貼ると、貼り先の実画素矩形が
+    整数に乗らないことが多く(例: レーンは親の中で x=333 にいるので、dpr=1.5
+    では実画素 499.5 から始まる)、たとえ素材を実寸へ拡大しておいても Qt は
+    毎コマ双一次補間をやり直す。そこで
+      1) 貼り先を実画素の格子へ丸め、
+      2) 素材をその実画素数ぴったりへ一度だけ拡大しておく
+    ことで、等倍・整数位置のブリットにする。ずれるのは最大で 1/dpr 論理画素
+    (1080p なら 0.33px)で、しかもぼけが消えるぶん絵はむしろはっきりする。
+
+    `off` は painter.deviceTransform() の平行移動ぶん(子ウィジェットの原点)。
+    dpr が 1 のとき(画面プレビュー)は従来どおりの経路をそのまま通る。"""
+    if pm is None:
+        return
+    if dpr <= 1.0001:
+        painter.drawPixmap(QRectF(x, y, w, h), pm,
+                           QRectF(pm.rect() if src is None else src))
+        return
+    if src is not None:
+        # シートの1コマだけ貼るとき。切り出しも覚えておく(毎コマ切ると
+        # 拡大を消した意味がなくなる)。
+        pm = _cropped(pm, src)
+    ox, oy = off
+    x0 = round(x * dpr + ox)
+    y0 = round(y * dpr + oy)
+    dw = max(1, int(round((x + w) * dpr + ox)) - x0)
+    dh = max(1, int(round((y + h) * dpr + oy)) - y0)
+    fitted = _fitted(pm, dw, dh)
+    painter.drawPixmap(QRectF((x0 - ox) / dpr, (y0 - oy) / dpr,
+                              dw / dpr, dh / dpr),
+                       fitted, QRectF(fitted.rect()))
+
+
+def _cropped(pm, src):
+    """`pm` から矩形 `src` を切り出したものを覚えておいて返す。"""
+    key = (pm.cacheKey(), "crop", src.x(), src.y(), src.width(), src.height())
+    hit = _DPR_SPRITES.get(key)
+    if hit is not None:
+        return hit[0]
+    out = pm.copy(src)
+    _DPR_SPRITES[key] = (out, pm)
+    return out
+
+
+def _fitted(pm, dw, dh):
+    """`pm` を実寸 (dw, dh) へ拡大縮小したものを覚えておいて返す。"""
+    if pm.width() == dw and pm.height() == dh:
+        return pm
+    key = (pm.cacheKey(), dw, dh)
+    hit = _DPR_SPRITES.get(key)
+    if hit is not None:
+        return hit[0]
+    out = pm.scaled(dw, dh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    _DPR_SPRITES[key] = (out, pm)
+    return out
+
+
+def clear_dpr_sprite_cache():
+    """拡大済みスプライトを捨てる。素材を読み直したときに呼ぶ。"""
+    _DPR_SPRITES.clear()
+
+
 class ChartPreviewWidget(QWidget):
     """Fixed-judgment-line, real-time scrolling note preview (taiko-simulator
     style), synced to the audio playback position.
@@ -425,6 +561,10 @@ class ChartPreviewWidget(QWidget):
         # (本家レイアウトでは、どんちゃんより手前の板に描く)。
         self._hide_balloon_sprite = False
         self._se_static_family = None
+        # いま描いている面の実効 devicePixelRatio と実画素での原点。
+        # paintEvent が毎コマ更新する。
+        self._dpr = 1.0
+        self._dev_off = (0.0, 0.0)
 
         self._timer = QTimer(self)
         # PreciseTimer is required on Windows to actually tick faster than the
@@ -2120,8 +2260,10 @@ class ChartPreviewWidget(QWidget):
         if self.HIT_EXP_ADDITIVE:
             painter.setCompositionMode(QPainter.CompositionMode_Plus)
         painter.setOpacity(op)
-        painter.drawPixmap(x, y, self._skin_explosion[fire][f])
-        painter.drawPixmap(x, y, self._skin_explosion[silver][f])
+        blit_sprite(painter, x, y, self._skin_explosion[fire][f],
+                    self._dpr, self._dev_off)
+        blit_sprite(painter, x, y, self._skin_explosion[silver][f],
+                    self._dpr, self._dev_off)
         painter.restore()
 
     def _se_scaled(self, label, big, footer_h):
@@ -2496,7 +2638,8 @@ class ChartPreviewWidget(QWidget):
         self._info_update_cb(bpm, scroll, m_num, m_den, cumulative_hits)
 
     def _draw_note(self, painter: QPainter, x: float, y: float, r: int, c: str, big: bool):
-        sprite = (self._sprites_big if big else self._sprites_small).get(c)
+        sprite = sprite_for_dpr(
+            (self._sprites_big if big else self._sprites_small).get(c), self._dpr)
         if sprite is not None:
             painter.drawPixmap(QPointF(x - r, y - r), sprite)  # sub-pixel placement
             return
@@ -2545,6 +2688,15 @@ class ChartPreviewWidget(QWidget):
         # across the lane moves smoothly instead of snapping a whole pixel at a
         # time - this makes the scroll look noticeably smoother at the SAME fps.
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        # この1コマの実効 devicePixelRatio。画面は 1.0、録画(1080p)は 1.5。
+        # スプライトはこれに合わせた拡大済みを貼る(sprite_for_dpr)。
+        # ウィジェットの devicePixelRatio() ではなく deviceTransform を見る理由は
+        # sprite_for_dpr の説明と game_screen.paintEvent を参照。
+        _xf = painter.deviceTransform()
+        self._dpr = float(_xf.m11() or 1.0)
+        # 実画素での原点。レーンは画面の中で x=333 にいるので、dpr=1.5 では
+        # 499.5 という「半画素ずれ」から始まる。blit_fitted が格子へ寄せるのに使う。
+        self._dev_off = (_xf.dx(), _xf.dy())
         w, h = self.width(), self.height()
         # The lane box is a fixed pixel size (LANE_WIDTH x LANE_HEIGHT), not
         # tied to the widget's actual size, so resizing/maximizing the
@@ -2650,9 +2802,8 @@ class ChartPreviewWidget(QWidget):
         # レーンの地。スキンに素材があればそれを敷く(本家と同じ色になる)。
         skinned = self._skin_lane_main is not None
         if skinned:
-            painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
-                               self._skin_lane_main,
-                               QRectF(self._skin_lane_main.rect()))
+            blit_fitted(painter, 0, band_top, lane_w, band_h,
+                        self._skin_lane_main, self._dpr, self._dev_off)
         else:
             painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
 
@@ -2673,9 +2824,8 @@ class ChartPreviewWidget(QWidget):
             painter.save()
             painter.setClipRect(QRectF(0, y0, lane_w, open_h), Qt.IntersectClip)
             if self._skin_lane_gogo is not None:
-                painter.drawPixmap(QRectF(0, band_top, lane_w, band_h),
-                                   self._skin_lane_gogo,
-                                   QRectF(self._skin_lane_gogo.rect()))
+                blit_fitted(painter, 0, band_top, lane_w, band_h,
+                            self._skin_lane_gogo, self._dpr, self._dev_off)
             else:
                 painter.fillRect(QRectF(0, band_top, lane_w, band_h), GOGO_TINT)
             painter.restore()
@@ -2755,8 +2905,9 @@ class ChartPreviewWidget(QWidget):
             spr = self._skin_judge_ring
             painter.save()
             painter.setCompositionMode(QPainter.CompositionMode_Plus)
-            painter.drawPixmap(int(judge_x - self.JUDGE_RING_SPRITE_CX),
-                               int(mid_y - self.JUDGE_RING_SPRITE_CX), spr)
+            blit_sprite(painter, int(judge_x - self.JUDGE_RING_SPRITE_CX),
+                        int(mid_y - self.JUDGE_RING_SPRITE_CX), spr,
+                        self._dpr, self._dev_off)
             painter.restore()
         else:
             painter.setPen(QPen(self._color("fg_bright"), 3))
@@ -3063,9 +3214,8 @@ class ChartPreviewWidget(QWidget):
             if self._skin_lane_sub is not None:
                 # 素材の高さ(26px)ぶんぴったり敷く。1px 空けると譜面レーンとの
                 # 間に隙間の線が出て、本家の「地続き」の見え方にならない。
-                painter.drawPixmap(QRectF(0, band_bottom, lane_w, footer_h),
-                                   self._skin_lane_sub,
-                                   QRectF(self._skin_lane_sub.rect()))
+                blit_fitted(painter, 0, band_bottom, lane_w, footer_h,
+                            self._skin_lane_sub, self._dpr, self._dev_off)
             else:
                 painter.fillRect(0, band_bottom + 1, lane_w, footer_h - 1, self._color("surface"))
                 painter.setPen(QPen(self._color("border"), 2))

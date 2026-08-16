@@ -201,8 +201,11 @@ class WaveformWidget(QWidget):
         if self._clicks_raw:
             self._click_audio_times = sorted(
                 (t - offset, is_measure) for t, is_measure in self._clicks_raw)
+            # ビートグリッドの bisect 用。命令ラベルと同じ理由で前計算する。
+            self._click_time_list = [t for t, _m in self._click_audio_times]
         else:
             self._click_audio_times = None
+            self._click_time_list = None
         if self._notes_raw:
             self._note_audio = sorted((t - offset, c) for t, c in self._notes_raw)
         else:
@@ -222,8 +225,13 @@ class WaveformWidget(QWidget):
             self._span_audio = None
         if self._cmd_raw:
             self._cmd_audio = sorted((t - offset, txt, col) for t, txt, col in self._cmd_raw)
+            # 命令の時刻だけの列。_draw_command_labels が bisect に使う。音符や
+            # 小節線と同じ理由で前計算する(命令が1万件を超える譜面では、毎フレーム
+            # のリスト内包だけで 0.7ms かかっていた = 普通の譜面の1フレーム総額より重い)。
+            self._cmd_time_list = [t for t, _txt, _col in self._cmd_audio]
         else:
             self._cmd_audio = None
+            self._cmd_time_list = None
         if self._gogo_raw:
             self._gogo_audio = sorted((s - offset, e - offset) for s, e in self._gogo_raw)
         else:
@@ -797,6 +805,43 @@ class WaveformWidget(QWidget):
             x = self._sec_to_x(mt[i])
             painter.drawLine(x, y0, x, y0 + height)
 
+    # 命令ラベル用の使い回し。作譜モードは120fpsで描き直すので、ここで作る物を
+    # 毎フレーム作り直すと命令の多い譜面では効いてくる(QFont は毎 paintEvent、
+    # 文字幅は 1フレーム 700回超、QPen/QColor はラベル1個ごとに作っていた)。
+    # 文字の種類は "HS1.50" のように数十個しかなく、色は3種類しかない。
+    _cmd_time_list = None
+    _click_time_list = None
+    _label_font_cache = None
+    _label_tw = None
+    _label_pens = None
+    _label_box_brush_v = None
+
+    def _label_font(self):
+        key = (self.font().family(), 7)
+        got = self._label_font_cache
+        if got is None or got[0] != key:
+            f = QFont(key[0], 7, QFont.Bold)
+            self._label_font_cache = (key, f)
+            self._label_tw = {}          # フォントが変われば文字幅も変わる
+        return self._label_font_cache[1]
+
+    def _label_pen(self, col: str) -> QPen:
+        pens = self._label_pens
+        if pens is None:
+            pens = self._label_pens = {}
+        pen = pens.get(col)
+        if pen is None:
+            pen = QPen(QColor(col), 1)
+            pens[col] = pen
+        return pen
+
+    @property
+    def _label_box_brush(self) -> QBrush:
+        b = self._label_box_brush_v
+        if b is None:
+            b = self._label_box_brush_v = QBrush(QColor(0, 0, 0, 170))
+        return b
+
     def _draw_command_labels(self, painter, w: int, note_top: int, note_bottom: int,
                              cmd_h: int, t0: float, t1: float):
         """命令(BPM/SCROLL/拍子の変化)を譜面の下の帯にラベルで描く。ラベルは
@@ -805,36 +850,48 @@ class WaveformWidget(QWidget):
         ca = self._cmd_audio
         if not ca:
             return
-        painter.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        painter.setFont(self._label_font())
         fm = painter.fontMetrics()
         line_h = fm.height() + 1
+        tw_cache = self._label_tw
         # 段(階段状の重なり回避)は「その命令の左側にある近い命令」だけで決まる。
         # 以前は可視分だけを毎フレーム並べ直して段を計算していたため、命令が左端で
         # 消えるたびに段が組み替わってチラついていた。ここでは可視範囲より少し前
         # (2秒)からの命令を通して段を計算し、可視分だけ描く。スクロールしても
         # 段が変わらず、位置もそのまま流れる。
-        times = [c[0] for c in ca]
+        times = self._cmd_time_list or [c[0] for c in ca]
         lo = max(0, bisect.bisect_left(times, t0 - 2.0))
         hi = bisect.bisect_right(times, t1)
         last_end = [-1e9, -1e9, -1e9]     # 3段までの右端 x
+        box_brush = self._label_box_brush
         for i in range(lo, hi):
             t, txt, col = ca[i]
             x = self._sec_to_x(t)
-            tw = fm.horizontalAdvance(txt)
+            tw = tw_cache.get(txt)
+            if tw is None:
+                tw = fm.horizontalAdvance(txt)
+                tw_cache[txt] = tw
             level = 0
-            while level < 2 and x < last_end[level] + 4:
+            while level < 3 and x < last_end[level] + 4:
                 level += 1
+            if level >= 3:
+                # 3段とも埋まっている = このラベルは必ず他のラベルの下に隠れる。
+                # 以前は level を 2 に丸めて描き続けていたため、#SCROLL が1万個
+                # あるような譜面では見えないラベルを毎フレーム数千個描いていた
+                # (1フレーム 112ms まで跳ねる。可視は高々 150個ほど)。
+                # 隠れるものを描かないだけなので、見えている絵は変わらない。
+                continue
             last_end[level] = x + 4 + tw
             if t < t0 or t > t1:
                 continue   # 段の計算だけして描画はしない(左外の命令で段を安定化)
             ly = note_bottom + 2 + level * line_h
-            qcol = QColor(col)
-            painter.setPen(QPen(qcol, 1))
+            pen = self._label_pen(col)
+            painter.setPen(pen)
             painter.drawLine(x, note_top, x, ly)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 170))
+            painter.setBrush(box_brush)
             painter.drawRect(x + 1, ly, tw + 4, fm.height())
-            painter.setPen(qcol)
+            painter.setPen(pen)
             painter.drawText(x + 3, ly + fm.ascent(), txt)
 
     def _draw_checkpoints(self, painter, note_top: int, note_bottom: int,
@@ -845,7 +902,7 @@ class WaveformWidget(QWidget):
         if not cp:
             return
         yellow = QColor("#ffd166")
-        painter.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        painter.setFont(self._label_font())   # 命令ラベルと同じフォントを使い回す
         fm = painter.fontMetrics()
         label = "CHECK POINT"
         tw = fm.horizontalAdvance(label)
@@ -868,7 +925,8 @@ class WaveformWidget(QWidget):
         measure_pen = self._pen("checkpoint", 2 if self.offset_mode else 1)
         beat_pen = self._pen("border", 2 if self.offset_mode else 1)
         if self._click_audio_times:
-            times = [t for t, _ in self._click_audio_times]
+            # 命令ラベルと同じ理由で前計算した列を使う(_apply_offset_local)。
+            times = self._click_time_list or [t for t, _ in self._click_audio_times]
             lo = bisect.bisect_left(times, visible_start)
             hi = bisect.bisect_right(times, visible_end)
             for t, is_measure in self._click_audio_times[max(0, lo - 1):hi + 1]:
