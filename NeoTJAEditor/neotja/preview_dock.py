@@ -29,9 +29,8 @@ from neotja.waveform_widget import WaveformWidget
 LANE_BUTTON_H = 26
 LANE_BUTTON_FONT_PX = 12
 
-# 再生速度の範囲(%)。0.25 倍は遅すぎて実用にならないので廃止した。
-# スライダーとレーン側のクランプで同じ値を使う。
-SPEED_MIN_PCT, SPEED_MAX_PCT = 50, 200
+# 再生速度の範囲(%)。スライダーとレーン側のクランプで同じ値を使う。
+SPEED_MIN_PCT, SPEED_MAX_PCT = 25, 200
 
 
 class ChartInfoBar(QWidget):
@@ -739,10 +738,10 @@ class PreviewDock(QDockWidget):
         self.record_button.clicked.connect(self._on_record_clicked)
 
         # 表示倍率。小さい画面で 1280x720 が入りきらないとき用。押すたびに
-        # 100 -> 75 -> 50 -> 25 -> 100 と回る。等倍のときは中身をそのまま
+        # 100 -> 75 -> 50 -> 100 と回る。等倍のときは中身をそのまま
         # 見せる(ScaledHost 参照)ので、100% の描画は今までと変わらない。
         self.zoom_button = self._lane_button("表示: 100%", 96,
-                                             "再生ウィンドウの表示倍率を切り替えます(100/75/50/25%)")
+                                             "再生ウィンドウの表示倍率を切り替えます(100/75/50%)")
         self.zoom_button.move(left, 6)
         self.zoom_button.clicked.connect(self.cycle_zoom)
 
@@ -1093,16 +1092,15 @@ class PreviewDock(QDockWidget):
         self._tp_subtitle.setVisible(bool(subtitle))
 
     def _build_speed_row(self) -> QWidget:
-        """再生速度スライダー(0.5〜2.0)。作譜モード専用ではなく、下部パネルの
+        """再生速度スライダー(0.25〜2.0)。作譜モード専用ではなく、下部パネルの
         どのモードでも常に見えるよう、モードスタックの外に置く。"""
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
         h.addWidget(QLabel("再生速度:"))
         self.speed_slider = QSlider(Qt.Horizontal)
-        # 50〜200 の整数レンジ → /100 で 0.50〜2.00 倍。ミキサーは read_pos の
+        # 25〜200 の整数レンジ → /100 で 0.25〜2.00 倍。ミキサーは read_pos の
         # 増分が変わるだけでピッチも変化する(作譜モードの仕様)。
-        # 0.25 倍は遅すぎて実用にならないので廃止した。
         self.speed_slider.setRange(SPEED_MIN_PCT, SPEED_MAX_PCT)
         self.speed_slider.setValue(100)
         # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
@@ -1126,16 +1124,20 @@ class PreviewDock(QDockWidget):
         押したあとも Space/Tab/PgUp/PgDn はレーンに効いたまま。"""
         # 画面(GameScreenWidget)の子にする。レーンの子にすると本家レイアウトでは
         # レーンが x=333 から始まるぶんだけボタンが右へずれてしまう。
-        b = QPushButton(text, self.game_screen)
+        # 親はゲーム画面ではなく ScaledHost。表示倍率を下げると ScaledHost は
+        # 中身(ゲーム画面)を子ごと縮小して描くので、ゲーム画面の子にすると
+        # ボタンまで小さくなって押しにくくなる。入れ物の側に置けば、絵だけが
+        # 縮んでボタンは原寸のまま残る(下の速度スライダーと同じ扱い)。
+        host = self.game_preview_window.scaled_host
+        b = QPushButton(text, host)
         b.setFocusPolicy(Qt.NoFocus)
         b.setToolTip(tooltip)
-        # ゲーム画面は 1280x720 の固定寸法で絵を描いているので、ボタンだけが
-        # 拡大率やフォント設定で大きくなると、画面の絵に対して位置も大きさも
-        # 合わなくなる。寸法と文字の大きさをここで固定して切り離す。
+        # 寸法と文字の大きさも固定して、フォント設定にも引きずられないようにする。
         b.setFixedSize(width, LANE_BUTTON_H)
         f = b.font()
         f.setPixelSize(LANE_BUTTON_FONT_PX)
         b.setFont(f)
+        b.raise_()          # 等倍のときは中身が子として乗るので、その上へ
         return b
 
     def _on_record_clicked(self):
@@ -1149,10 +1151,11 @@ class PreviewDock(QDockWidget):
         if color:
             self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
 
-    ZOOM_STEPS = (100, 75, 50, 25)
+    # 25% は小さすぎて譜面が読めないので廃止した。
+    ZOOM_STEPS = (100, 75, 50)
 
     def cycle_zoom(self):
-        """表示倍率を 100 -> 75 -> 50 -> 25 -> 100 と回す。"""
+        """表示倍率を 100 -> 75 -> 50 -> 100 と回す。"""
         cur = int(round(self.game_preview_window.scaled_host.scale() * 100))
         try:
             i = self.ZOOM_STEPS.index(cur)

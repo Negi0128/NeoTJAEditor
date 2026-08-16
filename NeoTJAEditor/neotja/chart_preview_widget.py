@@ -1754,8 +1754,8 @@ class ChartPreviewWidget(QWidget):
             self.seek_relative_measure(direction)
         self._feedback("ka")
 
-    #: 再生速度の下限/上限。0.25 倍は遅すぎて実用にならないので廃止した。
-    SPEED_MIN, SPEED_MAX = 0.5, 2.0
+    #: 再生速度の下限/上限。
+    SPEED_MIN, SPEED_MAX = 0.25, 2.0
 
     def _apply_speed(self, rate: float) -> float:
         """目標倍率(SPEED_MIN〜SPEED_MAX にクランプ・小数2桁に丸め)を適用して、実際に
