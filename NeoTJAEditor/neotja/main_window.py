@@ -309,7 +309,8 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_top, "保存", self.save_file, accent=True)
         self.btn_auto_save = QPushButton()
         self.btn_auto_save.setCheckable(True)
-        self.btn_auto_save.setToolTip("構文の色付けが更新されるたびに自動保存します。")
+        self.btn_auto_save.setToolTip(
+            "保存先(ファイル)が決まっている場合、編集の手が止まってから約0.6秒後に自動保存します。")
         self.btn_auto_save.toggled.connect(self._on_auto_save_toggled)
         self.btn_auto_save.setChecked(self.config_data.get("auto_save_enabled", False))
         self._sync_auto_save_button(self.btn_auto_save.isChecked())
@@ -772,10 +773,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _on_text_changed(self):
         # タイトルバー/タスクバーに未保存(*)を出す。dirty 判定はアプリ独自の
-        # modified_lines(実際のキー入力で増える)に合わせる。setPlainText や
-        # OFFSET の裏書き戻しといったプログラム的な編集では増えないので、
-        # 読み込み/保存直後に * が付いてしまうのを防げる。setWindowModified は
-        # タイトル内の [*] プレースホルダを * / 空 に切り替える。
+        # modified_lines(本文が実際に変わったときだけ増える)に合わせる。
+        # 読み込み(setPlainText)直後は _open_path / new_file 側で clear して
+        # いるので、開いた瞬間に * が付いてしまうことはない。
+        # setWindowModified は タイトル内の [*] プレースホルダを * / 空 に
+        # 切り替える。
         # setWindowModified は毎回呼ぶとウィンドウタイトルの組み立てが走るので
         # (打鍵ごとに 0.2ms ほど)、状態が変わったときだけ呼ぶ。
         dirty = bool(self.editor.modified_lines)
@@ -1486,6 +1488,11 @@ class MainWindow(QMainWindow):
             self.editor.setPlainText(content)
             self.current_file = path
             self.editor.modified_lines.clear()
+            # 別のファイルになったので、前の譜面で付けた ▶ は消す
+            # (new_file / _apply_youtube_project と同じ扱い)。残しておくと
+            # 譜面Aの行番号のまま譜面Bの無関係な行に ▶ が出ていた。
+            self.editor.checkpoints.clear()
+            self.editor.checkpointsChanged.emit()
             self._refresh_title()
             self._mark_saved()
             self._push_recent(path)
@@ -1763,7 +1770,7 @@ class MainWindow(QMainWindow):
     def _get_selection(self):
         cursor = self.editor.textCursor()
         if not cursor.hasSelection():
-            QMessageBox.warning(self, "確認", "範囲を選択してください。")
+            QMessageBox.warning(self, "警告", "範囲を選択してください。")
             return None, None
         text = cursor.selectedText().replace(" ", "\n")
         return cursor, text
@@ -1789,7 +1796,11 @@ class MainWindow(QMainWindow):
                 out.append(line)          # 命令行/ヘッダ行はそのまま
             else:
                 out.append(line.translate(self._REVERSE_NOTE_MAP))
+        start = cursor.selectionStart()
         cursor.insertText("\n".join(out))
+        # プログラム編集なので dirty と自動保存の対象を明示的に立てる。
+        self.editor.mark_edited(start, cursor.position())
+        self.setWindowModified(True)
         self._force_update()
 
     # ------------------------------------------------------------------
@@ -1878,16 +1889,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def auto_detect_bpm_offset(self):
         if not self.current_file:
-            QMessageBox.information(self, "確認", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
+            QMessageBox.warning(self, "警告", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
             return
         headers = parse_preview_headers(self.editor.toPlainText())
         wave = headers["wave"]
         if not wave:
-            QMessageBox.information(self, "確認", "WAVE:に音源ファイルが指定されていません。")
+            QMessageBox.warning(self, "警告", "WAVE:に音源ファイルが指定されていません。")
             return
         wave_path = os.path.join(os.path.dirname(self.current_file), wave)
         if not os.path.exists(wave_path):
-            QMessageBox.warning(self, "確認", f"音源ファイルが見つかりません: {wave}")
+            QMessageBox.warning(self, "警告", f"音源ファイルが見つかりません: {wave}")
             return
         self.status_label.setText("BPM/OFFSETを自動検出中(実験的)...")
         self._bpm_detect_worker = BpmOffsetDetectWorker(wave_path, self)
@@ -1911,17 +1922,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def open_auto_chart_generator(self):
         if not self.current_file:
-            QMessageBox.information(self, "確認", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
+            QMessageBox.warning(self, "警告", "先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
             return
         content = self.editor.toPlainText()
         headers = parse_preview_headers(content)
         wave = headers["wave"]
         if not wave:
-            QMessageBox.information(self, "確認", "WAVE:に音源ファイルが指定されていません。")
+            QMessageBox.warning(self, "警告", "WAVE:に音源ファイルが指定されていません。")
             return
         wave_path = os.path.join(os.path.dirname(self.current_file), wave)
         if not os.path.exists(wave_path):
-            QMessageBox.warning(self, "確認", f"音源ファイルが見つかりません: {wave}")
+            QMessageBox.warning(self, "警告", f"音源ファイルが見つかりません: {wave}")
             return
 
         from neotja.dialogs.auto_chart_dialog import AutoChartDialog
@@ -1961,7 +1972,7 @@ class MainWindow(QMainWindow):
         prospective_path = f"{base}(AI){ext}"
         if os.path.exists(prospective_path):
             ans = QMessageBox.question(
-                self, "確認", f"既にファイルが存在します。上書きしますか?\n{prospective_path}",
+                self, "確認", f"既にファイルが存在します。上書きしますか？\n{prospective_path}",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if ans != QMessageBox.Yes:
@@ -1978,7 +1989,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "保存エラー", str(e))
             return
         if new_path is None:
-            QMessageBox.warning(self, "エラー", "対象コースが見つかりませんでした。")
+            QMessageBox.critical(self, "エラー", "対象コースが見つかりませんでした。")
             return
         QMessageBox.information(self, "AI譜面生成(実験的)", f"生成しました:\n{new_path}\n\n現在開いているファイルは変更されていません。")
 
@@ -2044,7 +2055,7 @@ class MainWindow(QMainWindow):
         worker.update_available.connect(lambda tag, notes, url: self._prompt_update(tag, notes, url))
         if manual:
             worker.up_to_date.connect(lambda: QMessageBox.information(self, "更新の確認", f"現在のバージョン v{VERSION} は最新です。"))
-            worker.failed.connect(lambda msg: QMessageBox.warning(self, "更新の確認", f"更新の確認に失敗しました:\n{msg}"))
+            worker.failed.connect(lambda msg: QMessageBox.warning(self, "更新エラー", f"更新の確認に失敗しました:\n{msg}"))
         self._update_check_worker = worker
         worker.start()
 
@@ -2150,15 +2161,11 @@ class MainWindow(QMainWindow):
             content, cursor_line, self._preview_course_override,
             branch_level=self._preview_branch_level,
         )
-        # 保存先の既定: 環境設定の「動画の保存先」→ 前回使った場所 → TJA と同じ
-        # フォルダ、の順で最初に見つかった実在するものを使う。
-        out_dir = ""
-        for cand in (self.config_data.get("record_output_dir", ""),
-                     os.path.dirname(self.current_file) if self.current_file else ""):
-            if cand and os.path.isdir(cand):
-                out_dir = cand
-                break
-        if not out_dir:
+        # ここで渡すのは最後の逃げ道(TJA と同じフォルダ、無ければホーム)だけ。
+        # 環境設定の保存先や前回使った場所との優先順は RecordDialog 側の
+        # _resolve_out_dir がまとめて決める。
+        out_dir = os.path.dirname(self.current_file) if self.current_file else ""
+        if not out_dir or not os.path.isdir(out_dir):
             out_dir = os.path.expanduser("~")
         from neotja.dialogs.record_dialog import RecordDialog
         RecordDialog(
@@ -2173,7 +2180,11 @@ class MainWindow(QMainWindow):
         from neotja.dialogs.highspeed_dialog import HighSpeedDialog
 
         def apply(new_text):
+            start = cursor.selectionStart()
             cursor.insertText(new_text + "\n")
+            # プログラム編集なので dirty と自動保存の対象を明示的に立てる。
+            self.editor.mark_edited(start, cursor.position())
+            self.setWindowModified(True)
             self._force_update()
         HighSpeedDialog(self, txt, apply).exec()
 
@@ -2184,7 +2195,11 @@ class MainWindow(QMainWindow):
         from neotja.dialogs.measure_convert_dialog import MeasureConvertDialog
 
         def apply(new_text):
+            start = cursor.selectionStart()
             cursor.insertText(new_text + "\n")
+            # プログラム編集なので dirty と自動保存の対象を明示的に立てる。
+            self.editor.mark_edited(start, cursor.position())
+            self.setWindowModified(True)
             self._force_update()
         MeasureConvertDialog(self, txt, apply).exec()
 
@@ -2248,7 +2263,11 @@ class MainWindow(QMainWindow):
         from neotja.dialogs.strobe_dialog import StrobeGeneratorDialog
 
         def apply(new_text):
+            start = self.editor.textCursor().position()
             self.editor.insert_at_cursor(new_text + "\n")
+            # プログラム編集なので dirty と自動保存の対象を明示的に立てる。
+            self.editor.mark_edited(start, self.editor.textCursor().position())
+            self.setWindowModified(True)
             self._force_update()
         StrobeGeneratorDialog(self, current_bpm, apply,
                               restore_measure=current_measure,

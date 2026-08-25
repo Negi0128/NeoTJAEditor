@@ -193,7 +193,11 @@ class FindReplaceBar(QWidget):
                 a, b = sel, self.find_edit.text()
                 matches = (a == b) if self.chk_case.isChecked() else (a.lower() == b.lower())
         if matches:
+            start = cur.selectionStart()
             cur.insertText(self.repl_edit.text())
+            # 全置換と同じ理由で、置換した行を変更行として立てておく。
+            self.editor.mark_edited(start, cur.position())
+            self.window().setWindowModified(True)
         self._find_next()
 
     def _replace_all(self):
@@ -211,14 +215,29 @@ class FindReplaceBar(QWidget):
         find_from = QTextCursor(doc)
         find_from.movePosition(QTextCursor.Start)
         n = 0
+        # 置換した範囲を覚えるための印。QTextCursor は後続の編集に合わせて
+        # 位置が自動で追従するので、生の整数ではなくカーソルで持っておく。
+        first_cur = last_cur = None
         while True:
             found = doc.find(needle, find_from, flags)
             if found.isNull():
                 break
             found.insertText(repl)
+            if first_cur is None:
+                first_cur = QTextCursor(doc)
+                first_cur.setPosition(max(0, found.position() - len(repl)))
+            last_cur = QTextCursor(doc)
+            last_cur.setPosition(found.position())
             find_from = found   # 置換後の位置から続行(無限ループ防止)
             n += 1
             if n > 99999:
                 break
         editcur.endEditBlock()
+        if n:
+            # 全置換は一度に大量の行を書き換えるのに、以前は変更行として
+            # 記録していなかったため、直後に閉じると確認ダイアログすら出ずに
+            # 消えていた(自動保存も modified_lines を見ているので走らない)。
+            # 置換した範囲を明示的に変更行として立てておく。
+            self.editor.mark_edited(first_cur.position(), last_cur.position())
+            self.window().setWindowModified(True)
         self.lbl_count.setText(f"{n}件置換")

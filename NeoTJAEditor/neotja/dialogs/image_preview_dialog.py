@@ -156,7 +156,7 @@ class _ImagePreviewBase(QDialog):
             self, "保存", f"{self._save_basename}.png", "PNG Image (*.png)")
         if path:
             self.img.save(path)
-            QMessageBox.information(self, "成功", "譜面画像を保存しました。")
+            QMessageBox.information(self, "情報", "譜面画像を保存しました。")
             self.accept()
 
 

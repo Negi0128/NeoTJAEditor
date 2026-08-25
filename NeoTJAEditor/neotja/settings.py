@@ -14,6 +14,10 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom",
+    # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
+    # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
+    # たびに空へ戻っていた。
+    "record_output_dir", "record_last_dir",
 )
 
 
@@ -24,8 +28,14 @@ def default_settings() -> dict:
             **{k: {"name": f"シミュレータ{k}", "path": ""} for k in ("F2", "F3")},
         },
         "custom_shortcuts": {str(i): "" for i in range(10)},
-        # 動画書き出しの保存先(空 = 前回使った場所 / TJA と同じフォルダ)。
+        # 動画書き出しの保存先。ユーザーが環境設定で決める既定で、書き出しても
+        # 勝手には変わらない(空 = 前回使った場所 / TJA と同じフォルダ)。
         "record_output_dir": "",
+        # 動画書き出しで最後に実際に使った場所。録画のたびに書き換わる履歴で、
+        # 上の record_output_dir(ユーザーの指定)とは別に持つ。一緒にしていた
+        # ころは、環境設定で保存先を決めても一度別の場所へ書き出すだけで
+        # 上書きされ、二度と戻らなかった。
+        "record_last_dir": "",
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,

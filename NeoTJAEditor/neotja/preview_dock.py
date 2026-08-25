@@ -327,7 +327,13 @@ class GamePreviewWindow(QWidget):
         """chart_preview には、レーン単体(ChartPreviewWidget)でも本家レイアウト
         (GameScreenWidget)でも渡せる。後者のときは lane_widget に中のレーンを
         渡すこと(打音表記のオン/オフで高さが変わる通知を受けるため)。"""
-        super().__init__(parent, Qt.Window)
+        # 最大化ボタンは出さない。この窓は中身(ゲーム画面＋下部パネル)に
+        # 合わせて setFixedSize で大きさを固定しているので、最大化しても中身は
+        # 広がらず、枠だけが変わってタイトルバーしか残らない潰れた窓になる。
+        # 押せてしまうこと自体が罠なので、ボタンごと消す。
+        super().__init__(parent, Qt.Window | Qt.CustomizeWindowHint
+                         | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+                         | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
         self.setWindowTitle("えぬいーさん次郎")
         # アプリのテーマに関わらず窓全体をダーク基調に固定する。ウィジェット
         # 自身のスタイルシートは app 全体の QSS より優先されるので、ライト
@@ -383,6 +389,12 @@ class GamePreviewWindow(QWidget):
 
     def changeEvent(self, event):
         super().changeEvent(event)
+        # ボタンを消しても Win+↑ やタイトルバーのダブルクリックからは最大化
+        # できてしまうので、なってしまったら元に戻す。固定サイズの窓を最大化
+        # すると中身が広がらないまま枠だけ変わって潰れて見えるため。
+        if event.type() == QEvent.WindowStateChange and self.isMaximized():
+            self.showNormal()
+            return
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow() and self._pause_cb:
             self._pause_cb()
 

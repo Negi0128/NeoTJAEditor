@@ -180,7 +180,9 @@ class RecordDialog(QDialog):
         form.addRow("", self.chk_hit)
 
         path_row = QHBoxLayout()
-        self._auto_path = os.path.join(default_dir, self._default_name())
+        self._auto_path = os.path.join(
+            self._resolve_out_dir(main_window.config_data, default_dir),
+            self._default_name())
         self.ed_path = QLineEdit(self._auto_path)
         btn_browse = QPushButton("参照...")
         btn_browse.clicked.connect(self._browse)
@@ -211,6 +213,21 @@ class RecordDialog(QDialog):
         # (スキンの読み込み)だけで数百ms かかることがあり、__init__ の中で
         # やると「メニューを押したのに窓が出ない」時間になってしまう。
         QTimer.singleShot(0, self._begin_measure)
+
+    @staticmethod
+    def _resolve_out_dir(cfg, default_dir):
+        """保存先の既定を決める。順番は
+        「環境設定の保存先 → 前回使った場所 → 呼び出し側が渡した場所
+        (TJA と同じフォルダ、無ければホーム)」。
+
+        ユーザーが明示した指定を履歴より先に見るのが肝で、こうしておけば
+        よそへ一度書き出しても、次に開いたときは環境設定の場所へ戻る。
+        実在しないフォルダ(外付けを外した等)は飛ばす。"""
+        for cand in (cfg.get("record_output_dir", ""),
+                     cfg.get("record_last_dir", "")):
+            if cand and os.path.isdir(cand):
+                return cand
+        return default_dir
 
     def _default_name(self):
         base = os.path.splitext(os.path.basename(self._mw.current_file or "chart"))[0]
@@ -420,8 +437,11 @@ class RecordDialog(QDialog):
         # 打音は再生と同じものを使う。設定の欄だけを見るとスキン同梱の打音が
         # 拾えず、動画だけ内蔵音になってしまう。
         rec_don, rec_ka = settings_mod.effective_hit_sound_paths(cfg)
-        # 次に開いたときも同じ場所が出るよう、保存先のフォルダを覚える。
-        cfg["record_output_dir"] = os.path.dirname(out)
+        # 次に開いたときも同じ場所が出るよう、実際に使ったフォルダを覚える。
+        # 環境設定の record_output_dir(ユーザーが決めた既定)ではなく専用の
+        # 履歴キーへ書く — 同じキーだと、一度よそへ書き出しただけで環境設定の
+        # 指定が黙って上書きされ、戻す手立てが無くなるため。
+        cfg["record_last_dir"] = os.path.dirname(out)
         settings_mod.save_settings(cfg)
         # 描画用ウィジェットは見積もりのときに作ってある(_begin_measure)。
         # 作り直さないのは、スキンの読み込みぶんだけ待ちが増えるのと、

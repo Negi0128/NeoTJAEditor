@@ -47,6 +47,15 @@ class TJAEditor(QPlainTextEdit):
         self.updateRequest.connect(self._update_gutter_area)
         self.cursorPositionChanged.connect(self.viewport().update)
 
+        # 変更行マークとチェックポイントは「絶対行番号」で持っているので、
+        # 行が増減すると以降の印が全部ずれる。QTextDocument.contentsChange は
+        # 実際に本文が変わったときだけ(変わった位置と文字数つきで)飛んでくる
+        # ので、これを唯一の入口にして (a) 増減したぶん行番号をずらし、
+        # (b) 変わった行だけを変更行として立てる。直前のブロック数を覚えて
+        # おくのは、contentsChange が「何行増減したか」を教えてくれないため。
+        self._prev_block_count = self.document().blockCount()
+        self.document().contentsChange.connect(self._on_contents_change)
+
         self._update_gutter_width(0)
         self.setMouseTracking(True)
 
@@ -149,6 +158,72 @@ class TJAEditor(QPlainTextEdit):
             block_number += 1
 
     # ------------------------------------------------------------------
+    # 行マークの追従(挿入/削除で行番号がずれないようにする)
+    # ------------------------------------------------------------------
+    def _clamp_pos(self, pos: int) -> int:
+        # characterCount() は終端の番兵を含むので、有効な位置は -1 まで。
+        return max(0, min(int(pos), self.document().characterCount() - 1))
+
+    def mark_edited(self, start_pos: int, end_pos=None):
+        """位置 start_pos〜end_pos にかかる行を「変更あり」として立てる。
+
+        contentsChange 経由でも立つが、ツール類(全置換・あべこべ反転・
+        ハイスピ変換など)は「閉じるときの確認ダイアログと自動保存が必ず
+        効く」ことが要なので、適用側からも明示的に呼べるようにしてある。"""
+        doc = self.document()
+        a = self._clamp_pos(start_pos)
+        b = self._clamp_pos(start_pos if end_pos is None else end_pos)
+        lo = doc.findBlock(min(a, b)).blockNumber() + 1
+        hi = doc.findBlock(max(a, b)).blockNumber() + 1
+        for ln in range(lo, hi + 1):
+            self.modified_lines.add(ln)
+        self.gutter.update()
+
+    def _shift_marks(self, base: int, delta: int):
+        """base 行目以降の行マークを delta 行ぶんずらす。
+
+        delta < 0(行が消えた)のときは、消えた行 base〜base-delta-1 に付いて
+        いた印は行ごと無くなったものとして捨てる。"""
+        def shifted(lines):
+            out = set()
+            if delta > 0:
+                for ln in lines:
+                    out.add(ln + delta if ln >= base else ln)
+            else:
+                k = -delta
+                for ln in lines:
+                    if ln < base:
+                        out.add(ln)
+                    elif ln >= base + k:
+                        out.add(ln - k)
+            return out
+
+        before = self.checkpoints
+        self.checkpoints = shifted(before)
+        self.modified_lines = shifted(self.modified_lines)
+        # invalid_lines は次の解析パスで作り直されるので、ここでは触らない。
+        if self.checkpoints != before:
+            # プレビュー側のチェックポイントも同じだけずらす必要がある。
+            # main_window がこの signal を拾って押し込んでくれる。
+            self.checkpointsChanged.emit()
+
+    def _on_contents_change(self, position, chars_removed, chars_added):
+        doc = self.document()
+        delta = doc.blockCount() - self._prev_block_count
+        self._prev_block_count = doc.blockCount()
+
+        block = doc.findBlock(self._clamp_pos(position))
+        line = block.blockNumber() + 1
+        # 行頭ちょうどでの挿入/削除は、その行の中身ごと下(上)へ動く。行の
+        # 途中なら、その行の前半は動かないので次の行から数える。
+        base = line if position == block.position() else line + 1
+        if delta:
+            self._shift_marks(base, delta)
+
+        if chars_removed or chars_added:
+            self.mark_edited(position, position + max(0, int(chars_added)))
+
+    # ------------------------------------------------------------------
     # Checkpoints
     # ------------------------------------------------------------------
     def toggle_checkpoint(self):
@@ -192,10 +267,11 @@ class TJAEditor(QPlainTextEdit):
     # Dirty-line tracking / font zoom / hover tooltips
     # ------------------------------------------------------------------
     def keyPressEvent(self, event):
-        if event.key() not in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt,
-                                Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
-            li = self.textCursor().blockNumber() + 1
-            self.modified_lines.add(li)
+        # ここで変更行を立てていた頃は「押されたキーの除外リスト」方式だった
+        # ため、End や PageDown、Ctrl+C といった本文を変えない操作まで変更行に
+        # 入り、開いて End を1回押して閉じるだけで「保存しますか？」が出て
+        # いた。いまは _on_contents_change(本文が実際に変わったときだけ飛ぶ)
+        # 一本に任せているので、ここでは何もしない。
         # 機能1(ノーツ入力音): text() が単一のノーツ文字そのものの、正真正銘
         # 1回ぶんのキー入力にだけ反応する。Ctrl/Alt/Meta 修飾つき(カスタム
         # ショートカット等)は除外。ペーストは QPlainTextEdit 側で

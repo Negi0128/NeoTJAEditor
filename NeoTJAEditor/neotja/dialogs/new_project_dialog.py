@@ -1,5 +1,7 @@
 import os
+import re
 import time
+import webbrowser
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -20,6 +22,39 @@ THUMB_W, THUMB_H = 200, 113
 # Generous enough to cover slow metadata extraction and OGG conversion, which
 # legitimately report no updates for a while.
 STALL_TIMEOUT_SEC = 90
+
+# URLがまだ無い(か、YouTubeのものと判断できない)ときにブラウザで開く行き先。
+# 「とりあえずYouTubeを開いて動画を探す」という導線のための既定値。
+YOUTUBE_HOME_URL = "https://www.youtube.com/"
+
+# 動画IDだけを貼り付ける人が実際に多いので、11文字のID単体も受け付ける。
+_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+# ホスト名だけで判定する。watch/shorts/embed/live などパスの形は種類が多く、
+# 全部を列挙して弾くと正しいURLまで蹴ってしまうため、あえて緩くしている
+# (どのみち開くだけで、間違っていればブラウザ側で分かる)。
+_YOUTUBE_URL_RE = re.compile(
+    r"^(?:https?://)?(?:[\w-]+\.)*(?:youtube\.com|youtu\.be|youtube-nocookie\.com)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def resolve_youtube_url(text):
+    """入力欄の文字列を、ブラウザで開けるYouTubeのURLに正規化する。
+    YouTubeのURLでも動画IDでもないと判断したら None を返す(呼び出し側は
+    そのときYouTubeのトップを開く)。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if _YOUTUBE_ID_RE.match(text):
+        return "https://www.youtube.com/watch?v=" + text
+    if _YOUTUBE_URL_RE.match(text):
+        # スキームを省いて貼られた場合、そのまま webbrowser に渡すと
+        # ローカルのパス扱いになりかねないので必ず https:// を補う。
+        if not text.lower().startswith(("http://", "https://")):
+            return "https://" + text
+        return text
+    return None
 
 # The process-level holding pen for still-running worker threads (and the
 # detach helper that moves them into it) now lives in neotja/worker_util.py,
@@ -126,6 +161,16 @@ class NewProjectDialog(QDialog):
         self.ed_url = QLineEdit()
         self.ed_url.setPlaceholderText("https://www.youtube.com/watch?v=...")
         url_row.addWidget(self.ed_url, 1)
+        # URLを手元に持っていない人がここで手が止まってしまうので、
+        # 「参照」ボタンと同じ位置(入力欄の右端)からYouTubeへ飛べるようにする。
+        # URLが入っているときはその動画を開く動作に変わり、貼ったURLが
+        # 目的の動画かどうかをダウンロード前に確認できる。
+        self.btn_open_youtube = QPushButton()
+        self.btn_open_youtube.clicked.connect(self._open_youtube)
+        url_row.addWidget(self.btn_open_youtube)
+        # 入力の変化に合わせてラベル/ツールチップを切り替える。
+        self.ed_url.textChanged.connect(self._update_open_youtube_button)
+        self._update_open_youtube_button()
         v.addLayout(url_row)
 
         folder_row = QHBoxLayout()
@@ -239,6 +284,31 @@ class NewProjectDialog(QDialog):
             self.chk_auto_detect.setChecked(False)
             self.chk_ai_gen.setChecked(False)
 
+    def _update_open_youtube_button(self, _text=None):
+        """入力欄の中身に応じてボタンの意味が変わるので、押す前に
+        どちらの動作になるかが分かるようラベルとツールチップを更新する。"""
+        url = resolve_youtube_url(self.ed_url.text())
+        if url:
+            self.btn_open_youtube.setText("この動画を開く")
+            self.btn_open_youtube.setToolTip(
+                "入力されたURLの動画をブラウザで開きます。\n" + url
+            )
+        else:
+            self.btn_open_youtube.setText("YouTubeを開く")
+            self.btn_open_youtube.setToolTip(
+                "YouTubeをブラウザで開きます。動画のURLをここにコピーしてください。"
+            )
+
+    def _open_youtube(self):
+        # URLが未入力/YouTubeのものと判断できないときはトップページへ。
+        url = resolve_youtube_url(self.ed_url.text()) or YOUTUBE_HOME_URL
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            # ブラウザが見つからない環境などで落とす必要はないので、
+            # 状態表示だけに留めてダイアログの操作は続行できるようにする。
+            self.status_label.setText(f"ブラウザを開けませんでした: {e}")
+
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.ed_folder.text())
         if folder:
@@ -251,10 +321,10 @@ class NewProjectDialog(QDialog):
         url = self.ed_url.text().strip()
         folder = self.ed_folder.text().strip()
         if not url:
-            QMessageBox.warning(self, "確認", "YouTubeのURLを入力してください。")
+            QMessageBox.warning(self, "警告", "YouTubeのURLを入力してください。")
             return
         if not folder:
-            QMessageBox.warning(self, "確認", "保存先フォルダを選択してください。")
+            QMessageBox.warning(self, "警告", "保存先フォルダを選択してください。")
             return
         if not os.path.isdir(folder):
             try:
@@ -430,11 +500,11 @@ class NewProjectDialog(QDialog):
             return
 
         if not self.result_wave_path:
-            QMessageBox.warning(self, "確認", "先に音声のダウンロードを完了してください。")
+            QMessageBox.warning(self, "警告", "先に音声のダウンロードを完了してください。")
             return
         title = self.ed_title.text().strip()
         if not title:
-            QMessageBox.warning(self, "確認", "TITLEを入力してください。")
+            QMessageBox.warning(self, "警告", "TITLEを入力してください。")
             return
         self.result_title = title
         self.result_subtitle = self.ed_subtitle.text().strip()
