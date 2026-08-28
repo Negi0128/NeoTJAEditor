@@ -156,12 +156,6 @@ class MainWindow(QMainWindow):
     def __init__(self, app):
         super().__init__()
         self.app = app
-        # Alt単独の押下/離しでメニューバーへフォーカスが移る既定動作を止める
-        # (eventFilter 参照)。QApplication へ登録するアプリ全体フィルタは、
-        # QMenuBar が MainWindow へ独自に張っているオブジェクト個別フィルタ
-        # (Alt単独リリースでメニューをハイライトする内蔵動作)より先に呼ばれる
-        # ので、そちらへ生の Alt イベントが渡る前にここで握りつぶせる。
-        self.app.installEventFilter(self)
 
         self.config_data = settings_mod.load_settings()
         apply_theme(app, self.config_data.get("theme", "dark"))
@@ -211,6 +205,8 @@ class MainWindow(QMainWindow):
         # 自動保存は打鍵のたびに走るので、同じ理由でスキップし続ける間は
         # 警告を出し直さない(モーダルは絶対に出さない)。
         self._last_autosave_encode_warning = None
+        # ゲーム風プレビューの素材の先読みを予約したか(paintEvent 参照)。
+        self._skin_warm_armed = False
 
         self._metronome_timer = QTimer(self)
         self._metronome_timer.setSingleShot(True)
@@ -242,6 +238,10 @@ class MainWindow(QMainWindow):
         # updater is waiting on (see _run_update_download).
         self._updating = False
 
+        # 開いている動画書き出しダイアログ(モーダルではないので、こちらで
+        # 参照を持っていないと GC で消える)。二重起動よけの目印も兼ねる。
+        self._record_dialog = None
+
         self._build_editor()
         self._build_toolbars()
         self._build_sidebar()
@@ -262,6 +262,19 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
         self._restore_window_state()
         self.new_file(confirm=False)
+
+        # Alt単独の押下/離しでメニューバーへフォーカスが移る既定動作を止める
+        # (eventFilter 参照)。QApplication へ登録するアプリ全体フィルタは、
+        # QMenuBar が MainWindow へ独自に張っているオブジェクト個別フィルタ
+        # (Alt単独リリースでメニューをハイライトする内蔵動作)より先に呼ばれる
+        # ので、そちらへ生の Alt イベントが渡る前にここで握りつぶせる。
+        #
+        # 登録を組み立ての**あと**にしているのは速さのため。ここまでの組み立てで
+        # アプリへ流れるイベントは(子の追加・整形など)3400 件あり、以前は
+        # その全部が Python の eventFilter を通っていた(実測 20ms)。この
+        # フィルタが握りつぶすのは Alt キーの生イベントだけで、それは利用者が
+        # 触れるようになってからしか来ないので、遅らせても挙動は変わらない。
+        self.app.installEventFilter(self)
 
         # A failed update can only be reported now: the batch that applies it
         # runs after the previous process is gone.
@@ -1709,6 +1722,32 @@ class MainWindow(QMainWindow):
             return
         self._open_path(path)
 
+    def paintEvent(self, event):
+        """最初にウィンドウが描けた時点で、遅らせてある素材の読み込みを予約する。
+
+        ゲーム風プレビューの素材(実測 400ms 強)は起動の道から外してあるが、
+        利用者が開いたときに待たされては意味が無いので、**画面が出たあとの
+        手すきに**読ませる。0ms のタイマーにするのは、この paintEvent から
+        直に呼ぶと今描いているコマがそのぶん止まってしまうため。
+
+        予約の起点を showEvent ではなく paintEvent にしているのは、
+        showEvent は「まだ1画素も出ていない」時点でも来るため — そこで
+        予約すると、最初の描画より先に 400ms の読み込みが割り込みかねない。"""
+        super().paintEvent(event)
+        if not self._skin_warm_armed:
+            self._skin_warm_armed = True
+            QTimer.singleShot(0, self._warm_preview_skin)
+
+    def _warm_preview_skin(self):
+        # 起動直後に1回だけ。以降は PreviewDock 側が「もう読んだ」を見て
+        # 素通りするので、取りこぼしても二重読みにはならない。
+        try:
+            self.preview_dock.warm_skin()
+        except Exception:  # noqa: BLE001
+            # 先読みは速さのためだけの仕掛けなので、ここで転んでも起動は
+            # 続けさせる。必要になった時点で描画側が読み直す。
+            traceback.print_exc()
+
     def eventFilter(self, obj, event):
         # Alt はドン/カの大音符入力(Alt+F/J)、Alt+0〜9 のカスタムショートカット、
         # 命令挿入(Alt+B/D/G/L/R)など、このアプリでは修飾キーとして多用している。
@@ -1726,6 +1765,24 @@ class MainWindow(QMainWindow):
         # _updating means the unsaved check already ran and the updater batch is
         # armed and waiting on this process to exit - vetoing here would hang it.
         if self._updating or self._unsaved_check():
+            # 動画の書き出しは裏で走っている(RecordDialog はモーダルではない)
+            # ので、気づかずに閉じようとすることがある。中止してよいか聞く。
+            # 保存の確認より後に聞くのは、そちらで終了を取りやめたときに
+            # 書き出しだけ道連れにしないため。
+            if not self._updating and self._is_recording():
+                if QMessageBox.question(
+                        self, "動画を書き出す",
+                        "動画の書き出しが進行中です。中止して終了しますか？\n"
+                        "（書きかけの動画は残りません）") != QMessageBox.Yes:
+                    event.ignore()
+                    return
+            # ダイアログが開いていれば、走っていてもいなくてもここで畳む。
+            # abort_now() はワーカースレッドの終わりまで見届けるので、
+            # 窓は消えたのにプロセスが残る、という状態にはならない。
+            if self._record_dialog is not None:
+                self._record_dialog.abort_now()
+                self._record_dialog.close()
+                self._record_dialog = None
             # 終了が確定したこの時点で音声デバイスを確定的に閉じる。以前は
             # MixerAudioEngine.close() を誰も呼んでおらず、PortAudio の
             # ストリームがプロセス終了任せになっていた。
@@ -2141,11 +2198,42 @@ class MainWindow(QMainWindow):
         from neotja.dialogs.help_window import HelpWindow
         HelpWindow(self).exec()
 
+    def _is_recording(self):
+        """動画の書き出しが進行中か(ダイアログが開いているだけは含まない)。"""
+        dlg = self._record_dialog
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.is_busy())
+        except RuntimeError:
+            # C++ 側が既に破棄されていた。
+            self._record_dialog = None
+            return False
+
     def open_video_recorder(self):
         """えぬいーさん次郎の画面を動画(mp4)として書き出す。
 
         書き出すのは「いまプレビューで見ているコース/分岐」。画面キャプチャでは
-        なく1コマずつ描き直すので、書き出し中にアプリを触っても影響しない。"""
+        なく1コマずつ描き直すので、書き出し中にアプリを触っても影響しない。
+
+        ダイアログはモーダルにしない(exec() ではなく show())。書き出しは
+        始めた時点の譜面の写しに対して行われるので、走らせたまま編集や再生を
+        続けられる。"""
+        if self._is_recording():
+            # 2本同時には走らせない。同じ描画用ウィジェットと ffmpeg を
+            # 取り合って、どちらの動画も壊れるため。
+            self._record_dialog.raise_()
+            self._record_dialog.activateWindow()
+            QMessageBox.information(
+                self, "動画を書き出す",
+                "すでに動画の書き出しが進行中です。\n"
+                "終わるか、中止してからもう一度お試しください。")
+            return
+        if self._record_dialog is not None:
+            # 開きっぱなしだが走ってはいない。ここで作り直すのは、
+            # 書き出す譜面が「メニューを選んだ時点の内容」であってほしいため。
+            self._record_dialog.close()
+            self._record_dialog = None
         content = self.editor.toPlainText()
         if not self.courses_info:
             QMessageBox.warning(self, "動画を書き出す", "有効なコースが見つかりません。")
@@ -2168,10 +2256,20 @@ class MainWindow(QMainWindow):
         if not out_dir or not os.path.isdir(out_dir):
             out_dir = os.path.expanduser("~")
         from neotja.dialogs.record_dialog import RecordDialog
-        RecordDialog(
+        dlg = RecordDialog(
             self, preview_data, self.preview_dock.spin_offset.value(), wave,
             self.preview_dock.duration_seconds(), out_dir,
-        ).exec()
+        )
+        # 閉じられたら参照を手放す。持ったままだと画面外の描画用ウィジェット
+        # (スキンのピクスマップ一式)が居座る。
+        dlg.finished.connect(self._on_record_dialog_finished)
+        self._record_dialog = dlg
+        dlg.show()
+
+    def _on_record_dialog_finished(self, _result=0):
+        dlg, self._record_dialog = self._record_dialog, None
+        if dlg is not None:
+            dlg.deleteLater()
 
     def open_scroll_splitter(self):
         cursor, txt = self._get_selection()

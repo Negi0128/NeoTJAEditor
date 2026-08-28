@@ -15,6 +15,9 @@ class SettingsDialog(QDialog):
     # (_save が書き込むキーと同じ顔ぶれ)。ここに無いもの — recent_files,
     # window_geometry, splitter_state, 各種音量, theme, roll_speed など — は
     # 別の場所で決まる状態なので、環境設定の初期化では触らない。
+    # system_dir(素材の在りか)もあえて外してある。空へ戻すと次の起動で
+    # 素材が見つからず「フォルダを選んでください」からやり直しになり、
+    # 初期化ボタンが起動できない状態を作ってしまうため。
     _RESET_KEYS = (
         "run_config", "custom_shortcuts",
         "font_family", "font_size",
@@ -315,6 +318,50 @@ class SettingsDialog(QDialog):
         form.addRow(self._hint("ここで指定した場所が常に既定になります。未指定のときだけ"
                                "「前回書き出した場所 → TJAと同じフォルダ」が使われます。"))
 
+        # --- 素材(System フォルダ) ---
+        # 音符・背景・打音の出どころ。起動時にここから素材を取り出して
+        # キャッシュへ展開する(neotja/skin_cache.py)ので、変えたぶんが
+        # 反映されるのは次の起動から。未指定なら exe の隣などを自動で探す。
+        form = self._group(outer, "素材(System フォルダ)")
+        self.system_dir_edit = QLineEdit(cfg.get("system_dir", ""))
+        self.system_dir_edit.setReadOnly(True)
+
+        def browse_system_dir():
+            p = QFileDialog.getExistingDirectory(
+                self, "TNDE の System フォルダを選択", self.system_dir_edit.text())
+            if not p:
+                return
+            # 妥当性はここで見る。保存してから次の起動で怒られるより、
+            # 選んだその場で言われたほうが直しやすい。
+            from neotja import skin_cache
+            if not skin_cache.is_valid_system_dir(p):
+                QMessageBox.warning(
+                    self, "System フォルダではありません",
+                    "選ばれたフォルダの中に TNDE-R\\Graphics と TNDE-R\\Sounds が"
+                    "見つかりません。\n「System」という階層を選んでください。")
+                return
+            self.system_dir_edit.setText(p)
+
+        form.addRow("System フォルダ", self._path_row(self.system_dir_edit,
+                                                     browse_system_dir))
+        form.addRow(self._hint(
+            "音符・背景・打音などの素材は、TNDE に付属する System フォルダから"
+            "読み込みます(素材は再配布できないためアプリには同梱していません)。"
+            "未指定のときは exe と同じ場所やデスクトップ配下を自動で探します。"
+            "※変更の反映にはアプリの再起動が必要です。"))
+
+        # 展開のやり直しは自動でも起きる(System の中身が変わったときや、
+        # キャッシュのファイルが消えているとき)が、それでも直らないときの
+        # 逃げ道が UI に1つも無かった。キャッシュフォルダを自分で探して消す
+        # しか手が無い、という状態は利用者に強いるものではない。
+        rebuild_btn = QPushButton("素材を再展開する")
+        rebuild_btn.clicked.connect(self._rebuild_skin_cache)
+        form.addRow("", rebuild_btn)
+        form.addRow(self._hint(
+            "上の System フォルダから素材を取り出し直します(数秒かかります)。"
+            "絵や音がおかしいとき、素材を差し替えても反映されないときに"
+            "お試しください。"))
+
         # --- その他 ---
         form = self._group(outer, "その他")
         self.check_updates_check = QCheckBox("起動時に自動で更新を確認する")
@@ -435,6 +482,61 @@ class SettingsDialog(QDialog):
     # 保存・初期化
     # ------------------------------------------------------------------
 
+    def _rebuild_skin_cache(self):
+        """素材キャッシュを作り直す。ダイアログの「保存して適用」とは独立で、
+        押したその場で走る(保存を挟むと、まだ確定していない他のタブの入力まで
+        一緒に書かれてしまう)。
+
+        使う System は、この画面でいま指しているフォルダ。まだ選んでいない
+        ときだけ、起動時と同じ自動探索に任せる。"""
+        from neotja import skin_cache
+
+        picked = self.system_dir_edit.text().strip()
+        if picked:
+            if not skin_cache.is_valid_system_dir(picked):
+                QMessageBox.warning(
+                    self, "System フォルダが使えません",
+                    "指定されている System フォルダが見つからないか、中身が"
+                    "TNDE の System ではありません。\n\n　%s" % picked)
+                return
+            system_dir = picked
+        else:
+            system_dir, searched, _unusable = skin_cache.find_system_dir(
+                self.main_window.config_data)
+            if system_dir is None:
+                QMessageBox.warning(
+                    self, "System フォルダが見つかりません",
+                    "素材の取り出し元が見つかりませんでした。上の「参照...」から"
+                    "TNDE の System フォルダを指定してください。\n\n"
+                    "探した場所:\n" + "\n".join("　・%s" % p for p in searched))
+                return
+
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = skin_cache.ensure_cache(system_dir, force=True)
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+        if res.get("error"):
+            QMessageBox.critical(
+                self, "再展開できませんでした",
+                "素材を展開するフォルダに書き込めませんでした。\n\n　%s"
+                % res.get("error", ""))
+            return
+        if res.get("failed"):
+            QMessageBox.warning(
+                self, "一部の素材を取り出せませんでした",
+                "%d 件を取り出しました（%d 件は失敗）。\n\n"
+                "失敗したぶんは本来と違う見た目・音になります。対応していない"
+                "版の TNDE か、System フォルダが壊れている可能性があります。"
+                % (res.get("ok", 0), res["failed"]))
+            return
+        QMessageBox.information(
+            self, "再展開しました",
+            "素材 %d 件を取り出し直しました（%.1f 秒）。\n\n"
+            "見た目に反映されるのはアプリの再起動後です。"
+            % (res.get("ok", 0), res.get("elapsed", 0.0)))
+
     def _save(self):
         cfg = self.main_window.config_data
         for k, (name_edit, path_edit) in self.run_entries.items():
@@ -459,6 +561,7 @@ class SettingsDialog(QDialog):
         cfg["note_input_sound"] = self.note_input_sound_check.isChecked()
 
         cfg["record_output_dir"] = self.rec_dir_edit.text()
+        cfg["system_dir"] = self.system_dir_edit.text()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()

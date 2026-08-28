@@ -12,7 +12,10 @@ from PySide6.QtWidgets import (
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
 from neotja.worker_util import detach_worker
 from neotja.bpm_tap import BpmTapper
-from neotja.chart_preview_widget import ChartPreviewWidget
+from neotja.chart_preview_widget import (
+    ChartPreviewWidget, SPEED_STEPS as _SPEED_STEPS, snap_speed,
+    snap_speed_index,
+)
 from neotja.tja_analyzer import balloon_pop_spans
 from neotja import theme
 
@@ -29,8 +32,11 @@ from neotja.waveform_widget import WaveformWidget
 LANE_BUTTON_H = 26
 LANE_BUTTON_FONT_PX = 12
 
-# 再生速度の範囲(%)。スライダーとレーン側のクランプで同じ値を使う。
-SPEED_MIN_PCT, SPEED_MAX_PCT = 25, 200
+# 再生速度の段階。レーン側(chart_preview_widget)と同じ並びを使い回す。
+# スライダーの値は「倍率そのもの」ではなく SPEED_STEPS の番号(0〜3)で、
+# 整数レンジにすることで中途半端な位置に止まらない=段階スナップになる。
+SPEED_STEPS = _SPEED_STEPS
+SPEED_DEFAULT = 1.00
 
 
 class ChartInfoBar(QWidget):
@@ -609,6 +615,8 @@ class PreviewDock(QDockWidget):
         self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
         # 起動時のモード復元中は settings.json へ書き戻さない(_save_bottom_mode)。
         self._restoring_mode = False
+        # 同じく、再生速度の復元中も書き戻さない(_save_speed)。
+        self._restoring_speed = False
 
         self.title_label = QLabel("(WAVEファイルなし)")
         layout.addWidget(self.title_label)
@@ -630,7 +638,8 @@ class PreviewDock(QDockWidget):
             # tick を完全に黙らせる(レガシー経路のみ従来通りエンジンを渡す)。
             hit_sound_engine=None if self._mixer_active else self.hit_sounds,
             branch_select_cb=self.branch_select_cb,
-            # フェーズ3: Tab で下部パネルのモード循環、[ ] で再生速度微調整。
+            # フェーズ3: Tab で下部パネルのモード循環、Z / C で再生速度を
+            # 1 段階ずつ移動(段階は chart_preview_widget.SPEED_STEPS の 4 つ)。
             cycle_bottom_mode_cb=self.cycle_bottom_mode,
             set_speed_cb=self._on_speed_from_key,
         )
@@ -764,6 +773,8 @@ class PreviewDock(QDockWidget):
         # 先に倍率を決めておくと refit が1回で済む)。
         self.set_zoom(self.config_data.get("preview_zoom", 100), save=False)
         self._restore_bottom_mode()
+        # 前回の再生速度(4 段階のいずれか)へ戻す。
+        self._restore_speed()
 
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -890,6 +901,20 @@ class PreviewDock(QDockWidget):
         # ミキサー初期化に失敗してレガシーへ退避した場合の非ブロッキング通知。
         if self._backend_notice:
             self.status_label.setText(self._backend_notice)
+
+    def warm_skin(self):
+        """ゲーム風プレビューの素材を、まだなら今のうちに読んでおく。
+
+        レーンと画面の素材(合わせて実測 400ms 強)は、起動時ではなく
+        「実際に描く直前」まで遅らせてある(ChartPreviewWidget._ensure_skin /
+        GameScreenWidget._ensure_skin)。ただしそのままだと、利用者が
+        ゲーム風プレビューを初めて開いたときにそのぶん待たされてしまう。
+
+        そこでメインウィンドウが最初の描画を終えた直後の手すきに、ここから
+        先に読ませておく(MainWindow.paintEvent)。起動は素材ぶん速くなり、
+        開いたときの待ちは以前と変わらない、というのが狙い。"""
+        self.chart_preview._ensure_skin()
+        self.game_screen._ensure_skin()
 
     def set_game_preview_visible(self, visible: bool):
         if visible:
@@ -1104,22 +1129,29 @@ class PreviewDock(QDockWidget):
         self._tp_subtitle.setVisible(bool(subtitle))
 
     def _build_speed_row(self) -> QWidget:
-        """再生速度スライダー(0.25〜2.0)。作譜モード専用ではなく、下部パネルの
-        どのモードでも常に見えるよう、モードスタックの外に置く。"""
+        """再生速度スライダー(×0.25 / ×0.50 / ×0.75 / ×1.00 の 4 段階)。
+        作譜モード専用ではなく、下部パネルのどのモードでも常に見えるよう、
+        モードスタックの外に置く。"""
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
         h.addWidget(QLabel("再生速度:"))
         self.speed_slider = QSlider(Qt.Horizontal)
-        # 25〜200 の整数レンジ → /100 で 0.25〜2.00 倍。ミキサーは read_pos の
-        # 増分が変わるだけでピッチも変化する(作譜モードの仕様)。
-        self.speed_slider.setRange(SPEED_MIN_PCT, SPEED_MAX_PCT)
-        self.speed_slider.setValue(100)
-        # Space/Tab/[ ] をレーンに残すためスライダーはフォーカスを取らない。
+        # スライダーの値 = SPEED_STEPS の番号。倍率(%)を直に持たせると
+        # つまみが段階の間で止まってしまうので、段階そのものをレンジにする。
+        # ミキサーは read_pos の増分が変わるだけでピッチも変化する(仕様)。
+        self.speed_slider.setRange(0, len(SPEED_STEPS) - 1)
+        self.speed_slider.setSingleStep(1)
+        self.speed_slider.setPageStep(1)
+        # 目盛りを出して「4 段階しかない」ことを見て分かるようにする。
+        self.speed_slider.setTickPosition(QSlider.TicksBelow)
+        self.speed_slider.setTickInterval(1)
+        self.speed_slider.setValue(snap_speed_index(SPEED_DEFAULT))
+        # Space/Tab/Z/C をレーンに残すためスライダーはフォーカスを取らない。
         self.speed_slider.setFocusPolicy(Qt.NoFocus)
         self.speed_slider.valueChanged.connect(self._on_speed_slider_changed)
         h.addWidget(self.speed_slider, 1)
-        self.lbl_speed = QLabel("×1.00")
+        self.lbl_speed = QLabel("×%.2f" % SPEED_DEFAULT)
         h.addWidget(self.lbl_speed)
         return row
 
@@ -1200,7 +1232,8 @@ class PreviewDock(QDockWidget):
         通常再生は録画と同じ 1280x720(どんちゃん・下の背景・フッターまで出る)。
         ほかのモードは上半分(1280x360)に縮めて、下の背景があった場所に
         そのモードのペイン(音声波形/作譜/情報)を置く — あそこは屋台の絵より
-        波形や情報を出したい場所なので、下の背景ごと譲る。
+        波形や情報を出したい場所なので、下の背景ごと譲る。レーンの描き方は
+        軽量と同じ(set_lite)にそろえる。
 
         軽量モードは通常再生と同じ 1280x720(縦横比を揃えたいという要望)。
         ただし背景の絵は上下とも出さず黒で埋め、どんちゃん・魂ゲージ・
@@ -1209,11 +1242,18 @@ class PreviewDock(QDockWidget):
         self.mode_button.setText(self._mode_names[idx])
         # 録画ボタンは通常再生モード専用。
         self.record_button.setVisible(idx == self.MODE_TITLE)
-        self.game_screen.set_compact(idx != self.MODE_TITLE)
+        # 軽量は下にペインを置かないので 1280x720 のまま(縦横比を通常再生と
+        # 揃えたいという要望)。縮めるのはペインを置くモードだけ。
+        self.game_screen.set_compact(
+            idx != self.MODE_TITLE and idx != self.MODE_LITE)
         # 軽量の入り切りは compact の切替より後に。set_lite が静的キャッシュを
         # 捨てるので、先に呼ぶと set_compact が焼き直した直後のキャッシュを
         # また捨てることになり、無駄が1枚ぶん増える。
-        self.game_screen.set_lite(idx == self.MODE_LITE)
+        # 通常再生**以外**はすべて軽量の描き方にする。音声波形/作譜/情報の
+        # ときは画面が上半分に縮んでいて、どんちゃんも下の背景も元々見えない。
+        # それなら魂ゲージや魂の飛翔・スコア加算まで落として軽量と同じレーンに
+        # 揃えたほうが、モードを行き来しても見え方が変わらず、そのぶん軽い。
+        self.game_screen.set_lite(idx != self.MODE_TITLE)
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
         # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
         show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)
@@ -1265,9 +1305,11 @@ class PreviewDock(QDockWidget):
 
     def _on_speed_slider_changed(self, value: int):
         # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の
-        # レートを更新する。
-        rate = value / 100.0
+        # レートを更新する。値は段階の番号なので、倍率へ引き直してから配る。
+        value = max(0, min(len(SPEED_STEPS) - 1, int(value)))
+        rate = SPEED_STEPS[value]
         self.lbl_speed.setText(f"×{rate:.2f}")
+        self._save_speed(rate)
         self.audio.set_playback_rate(rate)
         self.chart_preview.set_playback_rate(rate)
         # 打音/メトロノームのレイテンシ補正は実時間basisなので、音声時間で
@@ -1276,9 +1318,41 @@ class PreviewDock(QDockWidget):
         self.metronome.set_playback_rate(rate)
 
     def _on_speed_from_key(self, rate: float):
-        # chart_preview の [ ] キーから来る目標倍率。スライダー値を動かすと
+        # chart_preview の Z / C キーから来る目標倍率。スライダー値を動かすと
         # valueChanged 経由で audio/chart_preview に反映される(スライダーと同期)。
-        self.speed_slider.setValue(int(round(rate * 100)))
+        # 段階外の値が来ても snap_speed_index が丸めるので、ここでは弾かない。
+        self.speed_slider.setValue(snap_speed_index(rate))
+
+    # ------------------------------------------------------------------
+    # 再生速度の保存/復元(settings.json の preview_speed)
+
+    def _save_speed(self, rate: float):
+        """選ばれた段階を settings.json へ書き戻す。倍率が変わっていなければ
+        書かない(スライダーを触るたびに保存が走らないように)。"""
+        if self._restoring_speed:
+            return
+        if self.config_data.get("preview_speed") == rate:
+            return
+        self.config_data["preview_speed"] = rate
+        if self.save_settings_cb is not None:
+            self.save_settings_cb()
+
+    def _restore_speed(self):
+        """前回の再生速度を復元する。1.00 より速い値や 4 段階に無い値
+        (旧版の 1.50 / 2.00 や手書きの 0.4 など)は snap_speed が段階へ丸める
+        ので、そのまま渡してよい。復元中は保存しない(起動しただけで
+        settings.json を書き換えないため。丸めた値は次に速度を変えたときに
+        書き戻される)。"""
+        self._restoring_speed = True
+        try:
+            rate = snap_speed(self.config_data.get("preview_speed", SPEED_DEFAULT))
+            idx = snap_speed_index(rate)
+            self.speed_slider.setValue(idx)
+            # 既定値と同じ段階なら valueChanged が飛ばないので、レーンと音声へ
+            # 明示的に配っておく(初期化の取りこぼし防止)。
+            self._on_speed_slider_changed(idx)
+        finally:
+            self._restoring_speed = False
 
     def set_expanded(self, expanded: bool):
         self._content_widget.setVisible(expanded)

@@ -19,12 +19,13 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 だけの 1280x360。どちらも同じ座標系なので、切り替えても位置がずれない。
 """
 
+import bisect
 import math
 import os
 
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QImage,
-                           QPainter, QPainterPath, QPen, QPixmap)
+                           QPainter, QPainterPath, QPen, QPixmap, QTransform)
 from PySide6.QtWidgets import QWidget
 
 from neotja import chara as chara_mod
@@ -115,6 +116,22 @@ DRUM_POS = (208, 209)                # 太鼓 120x133
 COMBO_OFFSET = (-3, -3)              # 太鼓の左上から見たコンボの基準
 COMBO_ANCHOR = (DRUM_POS[0] + COMBO_OFFSET[0], DRUM_POS[1] + COMBO_OFFSET[1])
 NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ出す)
+# 銘板に書き込むプレイヤー名。TNDE の銘板素材は「空の白い板」で、名前は
+# ゲーム側がフォントで書く作りなので、こちらでも板の上に書く(旧 skin の
+# NamePlate.png は「どんちゃん」が絵として焼き込まれていた)。将来ここを
+# 差し替えられるよう定数にしてあるが、設定項目にはしていない。
+NAMEPLATE_NAME = "どんちゃん"
+# 以下は旧素材 skin/NamePlate.png(280x79)の「どんちゃん」を実測した値。
+# 縁取りまで含めた文字の外形が x=95..194 / y=27..49(100x23)だったので、
+# その中心と大きさに合わせる。座標は **銘板素材の左上から見た相対** に
+# しておくと、NAMEPLATE_POS を動かしても文字が置いていかれない。
+NAMEPLATE_NAME_CENTER = (144.5, 38.0)
+# 勘亭流で「どんちゃん」を組むと、字の外形は だいたい 4.86*px × 0.945*px。
+# 縁取りの太さ(4)を足して 100x23 になるのが px=20。
+NAMEPLATE_NAME_SIZE = 20
+NAMEPLATE_NAME_COLOR = "#ffffff"
+NAMEPLATE_NAME_OUTLINE = "#000000"
+NAMEPLATE_NAME_OUTLINE_W = 4.0
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
 COMBO_X_OFF = 0
@@ -162,7 +179,47 @@ GAUGE_BLOCKS = gauge_mod.GAUGE_MAX // gauge_mod.GAUGE_STEP
 #   沈ませ、届いたら白く光らせる。最初これが逆で「明るすぎる」状態だった。
 GAUGE_CLEAR_GLYPH = ((61, 44), (3, 44), 45, 22)
 GAUGE_CLEAR_STEP_X = 547      # 素材の中でクリア圏(背の高い側)が始まる x
+# Gauge.png は 700px あるが、絵が入っている(不透明な)のは x=1..695 の 695px
+# だけで、右端の 4px は余白。以前はここを 700 とみなして 50 等分していたので
+# 1本 14.0px となり、満タンで本家より 5px 長く伸びていた。実測に合わせる。
+GAUGE_FILL_X0 = 1             # 塗りが始まる x(左の余白)
+GAUGE_FILL_W = 695            # 50本ぶんの実寸(1本 13.9px)
 GAUGE_CLEAR_TEXT_OFF = (3, 1)     # 段の始まりからの微調整
+# --- ノルマに届いたあとの脈打ち ------------------------------------------
+# 実機キャプチャ (1920x1080 / 60fps / G:\Captures\...\2026-08-26 12-41-48.mp4)
+# をコマ送りで実測した。ゲージは 1920 換算で左端 x=738、1本 21px = 素材の
+# 14px の 1.5 倍で、素材と 1:1 で対応する。
+#   * 素材の段差(金色・背の高い側)は 50本中 39本目から始まる(素材 x=546 /
+#     695 = 78.6%)。ノルマは 40本目(80%)なので、**段差より1本あと**。
+#     実測でも、39本のコマ(#169〜#286)は「クリア」の字が灰のままで金色も
+#     1本も出ず、40本目が入ったコマ(#287)で
+#       - 金色のブロックが1本ぶん(素材 10px)顔を出し
+#       - 「クリア」の字が灰 → 白に変わり
+#       - 同じコマから下の脈打ちが始まる。
+#     いまの実装の「wpx > 547 なら点灯」がちょうどこの境目なので、脈打ちも
+#     同じ条件で出す。
+#   * 脈打ちは「通常圏(赤)のブロック全体が一斉に金色へ染まって戻る」。
+#     地(未達の部分)とクリア圏の金色のブロックはまったく変わらない。
+#     x=60 でも x=840 でも同じコマで同じ色 = 波ではなく全体が同時に染まる。
+#   * 山は 33コマ = 0.550秒ごとにきっちり繰り返す(#293 から #1217 まで
+#     29回、間隔はすべて 33コマ)。1回の山は 12コマ = 0.200秒。
+#   * 混ざり具合を緑成分から逆算(赤 #f83606 の G=54、金 #faf805 の G=248 を
+#     0 と 1 に取って 29周期を平均)すると、山の頂を 0 コマとして
+#       -6:0  -5:.17  -4:.41  -3:.43  -2:.68  -1:.85  0:1.0
+#       +1:.85  +2:.61  +3:.59  +4:.34  +5:.17  +6:0
+#     直線 1-|k|/6 (0, .17, .33, .50, .67, .83, 1.0) とほぼ重なる。
+#     ところどころ同じ値が2コマ続くのは本家側が 30fps 刻みで色を更新して
+#     いるためで、そこまで真似る意味は無いので三角波で足りる。
+#   * 頂はクリアのコマ(#287)の 6コマ後(#293)。位相の原点をクリアの時刻に
+#     取り、その半分ぶんあとを頂にすると実機と揃う。
+GAUGE_PULSE_PERIOD_SEC = 33.0 / 60.0
+GAUGE_PULSE_HALF_SEC = 6.0 / 60.0
+# 金色版を焼くときに敷き直す種。Gauge.png のクリア圏 10本ぶん (x=546..686,
+# 上から 22px) をそのまま通常圏へ並べる。縞の区切りは素材の中で 14px 間隔
+# (実測: 中心が 12.5 + 14k)なので、140px ずつ左へずらすだけで縞が揃う
+# (端で 0.5px ずれるだけ)。上から 22px を取るのは、クリア圏の上端
+# ハイライト(白っぽい 4px)を通常圏の上端ハイライトへ重ねるため。
+GAUGE_GOLD_SRC = (546, 0, 140, 22)
 # 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
 SOUL_FLY_SEC = 0.42
 # 弧のてっぺん(道のりの半分の地点)が通る点。y=0 なら音符の中心が画面の
@@ -281,6 +338,149 @@ BG_LIGHT_PERIOD = 2.4        # ゆらぎの周期(秒)
 BG_LIGHT_MIN, BG_LIGHT_MAX = 0.55, 1.0   # 不透明度の下限/上限
 BACKGROUND_TOP_COLOR = "#000000"
 
+# --- 下背景の踊り子 (skin/2_Dancer/Normal/) -------------------------------
+# 素材は TNDE の 5_Game/2_Dancer/Normal/2(犬の踊り子)。16コマ 0..15、全コマ
+# 213x306 の同寸で、中身は 0.png で (30,45)-(190,267)。
+#
+# 実機キャプチャ (G:\Captures\CBK譜面ジャーのお部屋\超人\2026-08-26 12-41-48.mp4、
+# 1920x1080 / 60fps。曲は「永遠なる絆と想いのキセキ」、クリアは #288) を
+# コマ送りで実測して決めた。以下すべて **1280 換算** の値。
+#
+#  * 横位置: クリア前(4体)の区間で、下背景の帯の時間差分を取ると動く列が
+#    4か所 — 中心 215 / 417 / 628 / 844。クリア後(5体)のコマを目で拾うと
+#    右端がもう1体 増えて 1053。間隔はおよそ 210px で、真ん中の3体
+#    (417/628/844)の中心が 628 ≒ 画面の中央。
+#  * 大きさ: 動く行は y=441..675。足元は 675 = フッターの上端(676)ぴったり。
+#    素材の立ち姿(14.png)は中身が y=50..267 の 217px で、足元を 676 に
+#    置くと頭が 459 に来る — 実機の 456〜460 と一致するので **等倍**。
+#  * コマ送り: 左端の1体を 288 コマぶん分類すると、7つの姿勢を
+#    「12コマかけて往き → 12コマ止める → 12コマかけて還り → 12コマ止める」
+#    の 48コマ周期で繰り返していた(振り付けが変わっても 12コマの止めは
+#    変わらない)。レーンを流れる音符の間隔 236px と流れる速さ 1152px/秒 から
+#    音符の間隔は 0.205 秒 = 8分。つまり 12コマ = 0.200 秒 = 8分で、
+#    **踊りは拍に同期している**(48コマ = 2拍)。よって 16コマを 2拍で1周する。
+#  * 出てくるとき: 5体目はクリアの次のコマ(#289)に画面の下から顔を出し、
+#    #296 で立ち位置より 32px ほど高く跳ね上がり、#300 頃に落ち着く。
+#    = 下から跳び出して一度行き過ぎてから収まる、約 12コマ(0.2秒 = 8分)。
+#    実機は跳ねながら一回転するが、その絵は Normal/ の16コマには無いので
+#    (TNDE には別に 2_Dancer/In/2 の31コマがある)、こちらは上下の跳ねだけで
+#    真似る。
+# 踊り子は既定で出さない。動きが本家と違うという作者の判断で一旦しまった。
+# 実装(素材の読み込み・立ち位置・出てくる演出・コマ送りの重み)と、実機
+# キャプチャから測った値はすべて下に残してあるので、True にすれば戻る。
+SHOW_DANCERS = False
+DANCER_FRAMES = 16
+DANCER_CELL_W, DANCER_CELL_H = 213, 306
+#: 素材の中の「体の中心 x」と「足元 y」。ここを画面の立ち位置に合わせる。
+DANCER_ANCHOR_IN_CELL = (106, 267)
+#: 立ち位置(中心 x)。左から順。
+DANCER_SLOT_X = (215, 417, 628, 844, 1053)
+#: 最初から居る3体 / 33% で増える1体 / クリアで増える1体。
+DANCER_SLOTS_INITIAL = (1, 2, 3)
+DANCER_SLOT_AT_RATIO = 0
+DANCER_SLOT_AT_CLEAR = 4
+#: 4体目が出る魂ゲージの割合(作者の指定)。
+DANCER_JOIN_RATIO = 0.33
+#: 足元を置く y。フッターの上端に合わせる(実機もここで脚が切れる)。
+DANCER_FEET_Y = FOOTER_Y
+DANCER_SCALE = 1.0
+#: 16コマを何拍で1周するか。実機の 48コマ = 2拍 に合わせる。
+DANCER_BEATS_PER_LOOP = 4.0
+#: BPM が読めないときのコマ送り(秒/1周)。BPM150 の 2拍 = 0.8 秒。
+DANCER_FALLBACK_LOOP_SEC = 0.8
+# コマ送りは**等間隔ではない**。実機キャプチャ
+# (G:\Captures\2025-10-26 00-17-07.mp4、1920x1080/60fps、この犬の踊り子が
+# 写っている)から測った:
+#  * 1周は自己相関で **121コマ = 2.017秒**(lag 121 が突出して最良。前後の
+#    lag より差が 1.5 倍以上小さい)。
+#  * 背景を中央値で作って引き、踊り子だけのシルエットにして1周ぶんを
+#    数えると、姿勢は 14種類ほど。多くは **3〜5コマずつ**で送られるのに対し、
+#    **2つの姿勢だけ 18〜25コマ止まる**。「動いて、止めて、動いて、止めて」
+#    という振り付けで、等間隔で回すと別物に見える。
+#  * 素材の16コマは 3と12・4と11・8と9 が同じ絵。0→15 がすでに往復
+#    (ピンポン)になっていて、**折り返しの両端＝0 と 8 が「止め」**と読むのが
+#    素直で、実測の「1周に長い止めが2回」と数も合う。
+# そこで各コマに「重み」を持たせ、0 と 8 だけ長く出す。合計の重みで1周を
+# 割るので、下の DANCER_LOOP_SEC を変えれば全体の速さだけが変わる。
+DANCER_HOLD_FRAMES = (0, 8)      # 長く止まるコマ
+DANCER_HOLD_WEIGHT = 4.5         # 止めは通常の何倍の長さか(実測 19/4.3 ≒ 4.4)
+DANCER_LOOP_SEC = 121.0 / 60.0   # 1周(秒)。実測 2.017 秒
+DANCER_USE_BEATS = False         # True にすると拍に同期させる(下の拍数で1周)
+#: 出てくるときの跳ね。かかる時間 / 出はじめの沈み / 行き過ぎる高さ /
+#: 頂点が来る位置(0..1)。
+DANCER_IN_SEC = 0.20
+DANCER_IN_DROP = 230.0
+DANCER_IN_RISE = 32.0
+DANCER_IN_PEAK = 0.55
+
+# --- クリア(ノルマ到達)後の背景 -----------------------------------------
+# 実機キャプチャ(G:\Captures\CBK譜面ジャーのお部屋\超人\2026-08-26 12-41-48.mp4、
+# 1920x1080 / 60fps)をコマごとに見て決めた。ゲージが40本目に届くのは #288 で、
+# その前後で起きるのは次の3つ。
+#
+#  1. 下背景が夜の縁日(あの映像は Bg_down/5 セット)から金色のクリア背景へ
+#     **クロスフェード**で入れ替わる。幕も群衆も光の演出も挟まらない。
+#     下背景の平均色(緑成分)を測ると 75 -> 192 へ #288..#296 の 8コマで
+#     ほぼ直線に上がりきる = 0.133 秒。
+#  2. 上背景も赤 -> 金へ変わる。こちらは同じ測り方で #288..#308 の 20コマ
+#     = 0.333 秒と、下背景よりゆっくり。
+#  3. 入れ替わったあとのクリア背景は**コマ送りではなく、左へ流れる**。
+#     踊り子のいない行(映像 y=560..640)だけで総当たりに突き合わせると
+#     基準コマ #326 から +10/+20/+30/+60/+90 コマで -16/-32/-48/-96/-144 画素
+#     (縦は 0)。1920 幅の値なので 1280 換算で -64px/秒。クリア前の下背景は
+#     同じ測り方で 0 画素 = 止まっているので、「クリアすると背景が動き出す」
+#     のもこの演出の一部。
+# ゴーゴーとは混ざらない(映像はゴーゴー中にクリアしているが、下背景の絵は
+# クリアのほうで完全に置き換わる)。ゴーゴーの火花はもともと別の層なので、
+# こちらは何も足さない。
+SHOW_BACKGROUND_CLEAR = True
+BG_CLEAR_FADE_SEC = 0.133        # 下背景が入れ替わるのにかける時間
+BG_CLEAR_TOP_FADE_SEC = 0.333    # 上背景の色が変わるのにかける時間
+BG_CLEAR_SCROLL_VX = -64.0       # クリア後の下背景が流れる速さ (px/秒)
+# クリア背景を描き始める y。レーン枠の下端 = SE帯の下端(355) + 枠の下辺 9px。
+# BG_DOWN_Y(360) より 4px 下なので、ここを守らないと黒帯が痩せて見える。
+BG_CLEAR_TOP_Y = LANE_Y + LANE_H + SE_STRIP_H + 9
+# 素材は画面と同じ 1280 幅なので、流すには横に繰り返すしかない。継ぎ目
+# (市松の位相が飛ぶ縦線)は隠しようがないが、**実機にも同じものが出る**。
+# 映像の踊り子がかからない帯(1280換算 y=380..420)で列ごとの段差を拾うと、
+# #990 で x=823、以降 15コマごとに 16px ずつ左へ移る縦線が最後まで残る
+# (= 64px/秒。上で測った流れる速さとも一致する)。20秒に1度画面を横切る。
+# クリア後の上背景の色。Bg_up/3 のシートは 1駒 = 1色で3色ぶん入っていて、
+# 0=赤(1P) 1=青(2P) 2=金。金だけがふだん使われないまま余っていた —
+# Bg_up/1 が Normal_*/Clear_*、Bg_up/2 が *_Clear* とクリア用を別ファイルで
+# 持っているのに対し、セット3はクリア用のファイルが無い。3色目がその
+# 代わりだと読むのが素直で、実機の「赤 -> 金」とも向きが合う。
+BG_CLEAR_UP_COLOR_ROW = 2
+
+# Bg_down_Clear.png (= TNDE の Bg_down/c/0/Clear.png、1280x3212) は1枚絵では
+# なく、透明な行で仕切られた層の縦置きアトラス。不透明な行のかたまりを拾うと
+# 7本あり(skin_map.py の同名の項目に一覧)、それを重ねて 1280x360 の背景を
+# 組み立てる。
+#: 地の市松だけ。素材の 0..449 のうち下辺 385..449 は金雲なので、そこは外す。
+BG_CLEAR_BASE_BAND = (0, 385)
+#: その金雲の帯。実機では画面の**上**から下向きにぶら下がっているので y=0 に置く。
+BG_CLEAR_CLOUD_BAND = (385, 449)
+#: その金雲を上下反転して置くか。解析の覚書は「素材のままだと雲の膨らみが
+#: 上を向くので反転する」としていたが、素材を見ると逆だった — 帯 385..449 は
+#: 上辺が平ら(素材 0..449 の一枚絵を途中で切った断面)で、**下辺が雲の
+#: ふくらみ**(そこから下は透明)。つまり素材のままで「上からぶら下がる」形に
+#: なっている。反転すると平らな断面が下に来て、帯の下端に横一直線の切れ目が
+#: 出る。実機 #430 と並べると、雲のふくらみの下端は 帯の y≒55..60 で、
+#: 反転しない側だけが一致した(反転させると y=64 に直線が残り、実機には
+#: そんな線は無い)。戻したくなったらここを True にする。
+BG_CLEAR_CLOUD_FLIP = False
+#: 奥から手前へ。((素材の上端, 下端), 画面の帯の中での y)。
+#: y は実機の #430 コマと並べて目で合わせた値。金雲の帯はこの全部より手前
+#: (いちばん最後)に描く。
+BG_CLEAR_LAYERS = (
+    ((1584, 1971), 55),    # 大きな金雲
+    ((1190, 1412), 10),    # 松と桜
+    ((553, 871), 215),     # 笹(+ 金雲と松桜。下半分はフッターに隠れる)
+    ((2865, 3098), 110),   # 独楽(水色・右)
+    ((2188, 2397), 140),   # 独楽(赤)
+    ((2672, 2843), 170),   # 独楽(水色)
+)
+
 # 連打数と判定文字「良」はレーンより上(黒枠の帯の上)に出す。レーンの
 # ウィジェットは帯ぴったりの高さしか無く、上へはみ出して描けないので、
 # この2つは画面側(親)が描く。判定円の真上、魂ゲージの左に収まる位置。
@@ -299,7 +499,11 @@ GOGO_SPLASH_BOTTOM = LANE_Y + LANE_H   # 火花の足元をレーン下端に置
 # Rainbow/<コース>/0..11.png 696x44。マスクがゲージ本体と dx=0,dy=0 で一致
 # するので、ゲージと同じ位置にそのまま重ねるだけでよい。
 GAUGE_RAINBOW_FRAMES = 12
-GAUGE_RAINBOW_FRAME_SEC = 1.0 / 20.0
+# 速さは実機キャプチャ(2026-08-26 12-41-48.mp4、虹は #1233 から)で測った。
+# ゲージの1点(x=200 付近)の色の自己相関を取ると 42/84/126 コマで揃うので、
+# 12枚で一巡 = 42コマ = 0.700秒。1枚あたり 3.5コマ。
+# (以前は 1/20 秒 = 一巡 0.600秒 で、実機より 17% 速かった)
+GAUGE_RAINBOW_FRAME_SEC = 42.0 / 60.0 / GAUGE_RAINBOW_FRAMES
 
 # 1P_Explosion.png 3240x180 = 180x180 が18コマ。先頭2コマは完全に透明。
 # 12個の丸が輪になって広がるワンショット。中心アンカー。
@@ -318,11 +522,11 @@ SOUL_BURST_SCALE = 1.0
 # 1280 換算で幅 120px 前後。素材の絵は 231px 幅なので約 0.52 倍で置く。
 ROLL_FAN_CELL = (334, 204)
 ROLL_FAN_FRAMES = 5
-ROLL_FAN_SCALE = 0.884           # 0.52 の 1.7 倍
+ROLL_FAN_SCALE = 0.928           # 0.52 の 1.7 倍をさらに 5% 大きく
 ROLL_FAN_CENTER_X = 413          # 扇の中心 x
 ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
-ROLL_NUM_SCALE = 0.81            # 1.5倍(0.90)からさらに 90%
+ROLL_NUM_SCALE = 0.851           # 1.5倍(0.90)からさらに 90%、扇に合わせて 5% 大きく
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 # 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
 # しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
@@ -359,7 +563,7 @@ TITLE_FONT_FILE = "Kanteiryu.otf"
 TITLE_FONT_FALLBACKS = ("FOT-大江戸勘亭流 Std E", "FOT-OedoKtr Std E",
                         "DFPKanteiryu-XB", "DFP勘亭流")
 TITLE_RECT = (603, 31, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
-TITLE_SIZE = 41                   # 大きさは曲名の長さによらず一定(34の1.2倍)
+TITLE_SIZE = 39                   # 大きさは曲名の長さによらず一定(34の1.2倍を5%詰めた)
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
 TITLE_COLOR = "#ffffff"
@@ -367,7 +571,7 @@ TITLE_COLOR = "#ffffff"
 # 文字の輪郭をなぞる線なので、下が何色でも読める。太さは線の幅で、外へ
 # 出るのはその半分。
 TITLE_OUTLINE = "#000000"
-TITLE_OUTLINE_W = 9.0
+TITLE_OUTLINE_W = 10.0
 
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
@@ -388,11 +592,16 @@ class _FlightOverlay(QWidget):
 
     飛び始めは判定円の上、つまりレーンの中にいる。親(画面)は子(レーン)より
     先に描かれるので親に描くとその間だけレーンに隠れて、途中から湧いて出た
-    ように見える。「良」と同じくレーンの兄弟として重ねて手前に出す。"""
+    ように見える。「良」と同じくレーンの兄弟として重ねて手前に出す。
 
-    def __init__(self, screen):
+    どんちゃんと風船も同じ板の仕組みで描くが、そちらは「良」より**手前**に
+    出すので別インスタンスにしてある(what="chara")。風船を割ったどんちゃんは
+    大きく前へ出てきて「良」と重なるため。"""
+
+    def __init__(self, screen, what="flights"):
         super().__init__(screen)
         self._screen = screen
+        self._what = what
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -400,10 +609,15 @@ class _FlightOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # どんちゃん → 風船 → 飛んでいく音符 の順。後のものほど手前。
-        self._screen.draw_chara_front(p, self.x(), self.y())
-        self._screen.draw_balloon_front(p, self.x(), self.y())
-        self._screen.draw_soul_flights(p, self.x(), self.y())
+        # 何を描く板かは作るときに決める。どんちゃんと風船は「良」より**手前**、
+        # 飛んでいく音符は「良」より奥に置きたいので、同じ絵を1枚に描けない
+        # (板の前後でしか順番を作れないため)。
+        if self._what == "chara":
+            # どんちゃん → 風船 の順。後のものほど手前。
+            self._screen.draw_chara_front(p, self.x(), self.y())
+            self._screen.draw_balloon_front(p, self.x(), self.y())
+        else:
+            self._screen.draw_soul_flights(p, self.x(), self.y())
         p.end()
 
 
@@ -487,10 +701,26 @@ class GameScreenWidget(QWidget):
         self._skin = {}
         self._score_timeline = None
         self._gauge = None
+        self._gauge_pulse = None
         self._clear_time = None
+        # 4体目の踊り子が出る時刻(魂ゲージが DANCER_JOIN_RATIO に届く音符の
+        # 時刻)と、時刻→累計拍の対応表。どちらも set_chart が作る。
+        self._dancer_join_time = None
+        self._beat_marks = None
         self._course_key = None
         self._course_sym = None
-        self._load_skin()
+        # 素材は **ここでは読まない**。読むのは _ensure_skin()(説明はそちら)。
+        # ここに入れておくのは「素材が1枚も無かったとき」と同じ値で、
+        # 描画側はどれも None を見て自前の絵へ落ちるようにできている。
+        self._skin_ready = False
+        self._combo_text_bands = None
+        self._gauge_rainbow = None
+        self._dancer = None
+        self._dancer_cum = None
+        self._chara = None
+        self._title = ""
+        self._title_family = None
+        self._nameplate_path = None
 
         chart_preview.setParent(self)
         # レーンの寸法を本家に合わせる。上下の余白は 0 にして、レーン本体と
@@ -525,8 +755,11 @@ class GameScreenWidget(QWidget):
         self._bg_up_cache = {}
         # 上背景3層を焼いた帯(画面幅+余白)と、それを焼いたときの位相。
         # 位相が同じだけ進んでいる間は、この帯から窓を切って貼るだけで済む。
-        self._bg_strip = None
-        self._bg_strip_keys = None
+        # クリアで色が赤 -> 金へ変わるので、シートの色(行)ごとに1本ずつ持つ。
+        # 中身は 色 -> (帯, 焼いたときの位相の鍵)。
+        self._bg_strips = {}
+        # クリア後の下背景を組み立てて焼いた帯(画面2枚ぶん)。作るのは1回だけ。
+        self._bg_clear_strip = None
         # 白く染めた音符(着弾の白飛ばし用)。文字 -> QPixmap
         self._white_note_cache = {}
         # 虹の先端に乗せる顔と、虹の帯の中心の高さ(列ごと)。どちらも1回だけ。
@@ -547,7 +780,7 @@ class GameScreenWidget(QWidget):
         # 「良」はレーンにかぶるので、レーンより手前の板に描く。
         # 飛んでいく音符も、判定円(レーンの中)から出るのでレーンより手前。
         # 「良」より奥にしたいので先に作って先に raise する。
-        self._flight_overlay = _FlightOverlay(self)
+        self._flight_overlay = _FlightOverlay(self, "flights")
         self._flight_overlay.setGeometry(*SOUL_FLY_RECT)
         self._flight_overlay.raise_()
 
@@ -556,6 +789,11 @@ class GameScreenWidget(QWidget):
         self._judge_overlay.setGeometry(LANE_X + JUDGE_X_IN_LANE + ox, oy, ow, oh)
         self._judge_overlay.raise_()
 
+        # どんちゃんと風船は「良」より手前。最後に raise するのでいちばん上。
+        self._chara_overlay = _FlightOverlay(self, "chara")
+        self._chara_overlay.setGeometry(*SOUL_FLY_RECT)
+        self._chara_overlay.raise_()
+
         self._hud_timer = QTimer(self)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
         self._hud_timer.timeout.connect(self._tick_hud)
@@ -563,6 +801,9 @@ class GameScreenWidget(QWidget):
         # まま render() されるだけなので、そこでタイマーを回す意味がない。
 
     def showEvent(self, event):
+        # 見える直前に素材を揃える(_ensure_skin の説明を参照)。ふつうは
+        # 起動直後の手すきに済んでいるので、ここは真偽値を1つ見るだけ。
+        self._ensure_skin()
         super().showEvent(event)
         self._hud_timer.start()
 
@@ -626,6 +867,17 @@ class GameScreenWidget(QWidget):
         self.update(0, 0, SCREEN_W, LANE_Y)
         # 左パネル: スコア・コース記号・太鼓・コンボ・銘板
         self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
+        # 下背景の帯: クリア後の金色へのクロスフェード・左流れ・提灯の光の
+        # ゆらぎ・(出すなら)踊り子。ここは今まで塗り直していなかったので、
+        # 等倍(ScaledHost が素通しになる 100%)では下半分が最初のコマで
+        # 止まっていた。踊り子の有無で条件を付けてはいけない
+        # (SHOW_DANCERS = False の今は _dancer が必ず None なので、
+        # 付けるとこの行が一度も実行されず、クリア演出が画面でだけ動かない
+        # = 録画や 75%/50% と絵が食い違う)。縮小表示のときは ScaledHost が
+        # 画面ごと描き直しているので、これは重ならない(同じ矩形を2度描く
+        # ことにはならない)。
+        if not self._compact and not self._lite:
+            self.update(0, BG_DOWN_Y, SCREEN_W, self.height() - BG_DOWN_Y)
         # 「良」の板(レーンの手前)。判定ポップが出ていない間は中身が空なので、
         # 毎フレーム更新する必要がない(半透明の子ウィジェットの再描画は親の
         # 巻き込み再描画も呼ぶ)。消え際を残さないよう、「前フレームは出ていた」
@@ -643,19 +895,44 @@ class GameScreenWidget(QWidget):
                 now, SOUL_FLY_SEC + SOUL_LAND_SEC))
             if not flying and self._chara is not None:
                 flying = self._chara.state() in chara_mod.TIME_BASED_STATES
-            if not flying and self._lite:
-                # 軽量ではどんちゃんを描かない = anim.update() を回さないので、
-                # 上の「風船中のどんちゃん」判定が効かない。板の中身は風船の絵
-                # だけになるので、風船が判定枠に居るかを直接見る。これが無いと
-                # 風船の絵が最初のコマで固まる(板が塗り直されないため)。
+            if not flying:
+                # どんちゃんを描かない = anim.update() を回さない場面では、
+                # 上の「風船中のどんちゃん」判定が効かない(state() が永久に
+                # 通常のまま)。軽量モードだけでなく、1_Chara を持たない
+                # スキンでも同じことが起きる。風船が判定枠に居るかを直接
+                # 見ておく。これが無いと風船の絵が最初のコマで固まる
+                # (風船中は判定線を通る音符も無いので、板が塗り直されない)。
                 flying = self.chart_preview.balloon_sprite_frame(now) is not None
         except Exception:  # noqa: BLE001
             flying = False
         if flying or self._flight_was_active:
+            # どんちゃん/風船 と 飛んでいく音符 は別の板に分かれているので、
+            # 塗り直しも両方に投げる(片方だけだと風船やどんちゃんが固まる)。
             self._flight_overlay.update()
+            self._chara_overlay.update()
         self._flight_was_active = flying
 
     # ------------------------------------------------------------------
+    def _ensure_skin(self):
+        """画面が使う絵を読む。2回目以降は何もしない。
+
+        **なぜ __init__ から追い出したのか**
+        ここで読むのは 30枚ほどの PNG と、どんちゃんの連番の枚数調べで、
+        実測 316ms(chara の枚数調べを直したあとで 210ms)かかっていた。
+        だがこの画面が入っている GamePreviewWindow は、利用者が「ゲーム風
+        プレビュー」を開くまで**一度も表示されない**。起動時に払う理由が無い。
+
+        呼ぶのは showEvent と paintEvent の頭(= 実際に見える直前)と、
+        メインウィンドウが最初に描き終わったあとの手すき
+        (MainWindow.paintEvent 参照)。前者があるので「読む前に描かれる」ことは
+        起こらず、後者があるので利用者が開いたときには既に読み終わっている。
+        録画(recorder.py)は窓を出さずに render() するが、それも paintEvent を
+        通るのでここで揃う。"""
+        if self._skin_ready:
+            return
+        self._skin_ready = True
+        self._load_skin()
+
     def _load_skin(self):
         """skin/ から使う絵を読む。無ければ None のままで、描画側が黙って飛ばす
         (スキンは同梱しない外部パックなので、無くても動くのが前提)。"""
@@ -664,6 +941,7 @@ class GameScreenWidget(QWidget):
             ("bg_top", "Background.png"),
             ("bg_down", "Bg_down.png"),
             ("bg_down_light", "Bg_down_Light.png"),
+            ("bg_down_clear", "Bg_down_Clear.png"),
             ("bg_up_base", os.path.join("Bg_up", "Base.png")),
             ("bg_up_chara", os.path.join("Bg_up", "Chara.png")),
             ("bg_up_flower", os.path.join("Bg_up", "Flower.png")),
@@ -697,12 +975,22 @@ class GameScreenWidget(QWidget):
                     self._skin[key] = pm
         self._combo_text_bands = self._measure_combo_text_bands()
         self._gauge_rainbow = self._load_gauge_rainbow()
+        # 下背景の踊り子。16コマを中身の大きさまで刈り込んで持つ。
+        self._dancer = self._load_dancer()
+        # スキンを読み直したら引き当て表も作り直す。
+        self._dancer_cum = None
+        # クリア後の脈打ちに使う「金色に染めたゲージ」。素材が読めたここで
+        # 1枚だけ焼いておく(毎コマ作ると当然重い)。
+        self._gauge_pulse = self._build_gauge_pulse()
         # どんちゃん。連番はコマ単位で遅延読みするので、ここでは枚数を
         # 数えるだけ(素材が無ければ available() が False になる)。
         self._chara = chara_mod.CharaAnimator()
         self._chara.beats_per_loop = CHARA_BEATS_PER_LOOP
         self._title = ""
         self._title_family = self._load_title_font()
+        # 銘板の名前は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
+        # フォントが差し替わるここで捨てて、次の描画で組み直させる。
+        self._nameplate_path = None
 
     def draw_chara_front(self, p, ox=0, oy=0):
         """風船中のどんちゃんだけを、レーンより手前に描く。
@@ -821,6 +1109,40 @@ class GameScreenWidget(QWidget):
         p.fillPath(path, QColor(TITLE_COLOR))
         p.restore()
 
+    def _draw_nameplate_name(self, p):
+        """銘板の白い板に NAMEPLATE_NAME を書く。
+
+        字形は曲名と同じ勘亭流。旧素材に焼かれていた「どんちゃん」も同じ
+        書体だったので、板だけ差し替わっても見た目が揃う。"""
+        if not NAMEPLATE_NAME:
+            return
+        path = self._nameplate_path
+        if path is None:
+            f = QFont(self._title_family) if self._title_family else QFont()
+            f.setPixelSize(NAMEPLATE_NAME_SIZE)
+            path = QPainterPath()
+            path.addText(QPointF(0.0, 0.0), f, NAMEPLATE_NAME)
+            # 原点は文字送りの基準(ベースライン左端)なので、そのままだと
+            # 上下も左右もずれる。**実際に描かれる外形**の中心を測って、
+            # それが NAMEPLATE_NAME_CENTER に来るよう平行移動しておく。
+            # 縁取りは外形の周りに均等に付くので、中心はこれで合う。
+            r = path.boundingRect()
+            path.translate(NAMEPLATE_NAME_CENTER[0] - r.center().x(),
+                           NAMEPLATE_NAME_CENTER[1] - r.center().y())
+            self._nameplate_path = path
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 座標は銘板素材の左上を原点にしてある。板の位置を動かせば文字も
+        # 一緒に動く。
+        p.translate(NAMEPLATE_POS[0], NAMEPLATE_POS[1])
+        # 曲名と同じく、黒でなぞってから白で塗る。塗りと線を一度に出すと
+        # 線が内側へも太って、勘亭流の細い所が黒く埋まってしまう。
+        p.strokePath(path, QPen(QColor(NAMEPLATE_NAME_OUTLINE),
+                                NAMEPLATE_NAME_OUTLINE_W,
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.fillPath(path, QColor(NAMEPLATE_NAME_COLOR))
+        p.restore()
+
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
         base = os.path.join(str(settings_mod.skin_dir()), "GaugeRainbow")
@@ -834,6 +1156,207 @@ class GameScreenWidget(QWidget):
                 return None
             out.append(pm)
         return out
+
+    # --- 下背景の踊り子 -------------------------------------------------
+    def _load_dancer(self):
+        """skin/2_Dancer/Normal/0..15.png を読む。1枚でも欠けたら None。
+
+        素材(213x306)は中身の周りに透明な余白が広く、そのまま貼ると1体
+        あたり 65000 画素ぶんのアルファ合成になる。5体×毎フレームで効いて
+        くるので、読んだところで中身の矩形まで刈り込んで、貼る位置のずれを
+        添えて持つ。刈り込んだ結果は 160x230 前後 = 面積で 4割ほど減る。
+        戻り値は [(絵, 画布の中でその絵が始まる x, 同 y), ...]。"""
+        if not SHOW_DANCERS:
+            return None
+        base = os.path.join(str(settings_mod.skin_dir()), "2_Dancer", "Normal")
+        out = []
+        for i in range(DANCER_FRAMES):
+            path = os.path.join(base, "%d.png" % i)
+            if not os.path.exists(path):
+                return None
+            pm = QPixmap(path)
+            if pm.isNull():
+                return None
+            box = self._opaque_box(pm)
+            if box is not None:
+                x0, y0, x1, y1 = box
+                pm = pm.copy(QRect(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+            else:
+                x0, y0 = 0, 0
+            if abs(DANCER_SCALE - 1.0) > 1e-6:
+                pm = pm.scaled(max(1, int(round(pm.width() * DANCER_SCALE))),
+                               max(1, int(round(pm.height() * DANCER_SCALE))),
+                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                x0 = int(round(x0 * DANCER_SCALE))
+                y0 = int(round(y0 * DANCER_SCALE))
+            out.append((pm, x0, y0))
+        return out
+
+    @staticmethod
+    def _opaque_box(pm):
+        """絵の中で不透明な画素が入っている矩形 (x0, y0, x1, y1)。測れなければ None。"""
+        try:
+            import numpy as np
+            img = pm.toImage().convertToFormat(QImage.Format_RGBA8888)
+            w, h = img.width(), img.height()
+            a = np.frombuffer(memoryview(img.constBits()), dtype=np.uint8)
+            a = a.reshape(h, img.bytesPerLine() // 4, 4)[:, :w, 3] > 0
+            cols = np.flatnonzero(a.any(axis=0))
+            rows = np.flatnonzero(a.any(axis=1))
+            if not cols.size or not rows.size:
+                return None
+            return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _build_beat_marks(preview_data):
+        """時刻 -> 累計拍 を引くための表を作る。
+
+        踊りは拍で送るので「その時刻が曲の頭から何拍目か」が要る。BPM が
+        途中で変わる譜面でも位相が飛ばないよう、BPM 変化の各点で累計拍を
+        先に足しておき、あとは直近の点からの直線で求める。どんちゃん
+        (chara.py)のように前のコマからの差分を貯め込む作りにしないのは、
+        シークしても録画(オフライン描画)でも同じ絵が出るようにするため。
+        戻り値は (時刻のリスト, [(時刻, その時点の累計拍, BPM), ...])。"""
+        changes = sorted((preview_data or {}).get("bpm_changes") or [])
+        if not changes:
+            return None
+        times, marks, beats = [], [], 0.0
+        prev_t, prev_bpm = None, None
+        for t, bpm in changes:
+            try:
+                t, bpm = float(t), float(bpm)
+            except (TypeError, ValueError):
+                continue
+            if prev_t is not None:
+                beats += (t - prev_t) * prev_bpm / 60.0
+            times.append(t)
+            marks.append((t, beats, bpm))
+            prev_t, prev_bpm = t, bpm
+        return (times, marks) if marks else None
+
+    def _beats_at(self, now):
+        """曲の頭から何拍目か。BPM が読めなければ None。"""
+        table = self._beat_marks
+        if not table:
+            return None
+        times, marks = table
+        i = max(0, bisect.bisect_right(times, now) - 1)
+        t0, b0, bpm = marks[i]
+        return b0 + (now - t0) * bpm / 60.0
+
+    @staticmethod
+    def _dancer_rise(el):
+        """出てくるときの跳ねで、立ち位置からどれだけ縦にずれるか(正=下)。
+
+        実機は画面の下から跳び出して、立ち位置より少し上まで行ってから
+        落ちてくる。出はじめはフッターに隠れる高さ(DANCER_IN_DROP)から
+        一気に上がるので、行きは強めに緩ませる。"""
+        if el is None or el >= DANCER_IN_SEC:
+            return 0.0
+        u = max(0.0, el) / DANCER_IN_SEC
+        if u < DANCER_IN_PEAK:
+            q = u / DANCER_IN_PEAK
+            return DANCER_IN_DROP + (-DANCER_IN_RISE - DANCER_IN_DROP) * (
+                1.0 - (1.0 - q) ** 3)
+        q = (u - DANCER_IN_PEAK) / max(1e-6, 1.0 - DANCER_IN_PEAK)
+        return -DANCER_IN_RISE * (1.0 - q * q)
+
+    def _draw_dancers(self, p, now, ratio):
+        """下背景の踊り子を5体まで描く。
+
+        コマ送りは等間隔ではない(DANCER_HOLD_FRAMES の覚書を参照)。
+
+        クリアすると下背景は金色のクリア背景に変わって左へ流れるが、踊り子は
+        流れに乗らずその場で踊る。**呼ぶのはクリア背景を貼ったあと**
+        (_draw_bg_clear より手前)。足元はフッターの上端に置くので、跳ねて
+        出てくる途中の脚はフッターに隠す = 帯の中だけに切って描く。"""
+        frames = self._dancer
+        if frames is None:
+            return
+        self._ensure_dancer_table()
+        beats = self._beats_at(now)
+        if DANCER_USE_BEATS and beats is not None:
+            phase = beats / max(1e-6, DANCER_BEATS_PER_LOOP)
+        else:
+            phase = now / max(1e-6, DANCER_LOOP_SEC)
+        pm, sx, sy = frames[self._dancer_frame(phase)]
+        ax, ay = DANCER_ANCHOR_IN_CELL
+        # 立ち位置(中心x, 足元y)から、刈り込んだ絵の左上へ。
+        bx = sx - int(round(ax * DANCER_SCALE))
+        by = sy - int(round(ay * DANCER_SCALE))
+        p.save()
+        p.setClipRect(QRect(0, BG_DOWN_Y, SCREEN_W, FOOTER_Y - BG_DOWN_Y))
+        for slot in range(len(DANCER_SLOT_X)):
+            if slot == DANCER_SLOT_AT_RATIO:
+                if ratio < DANCER_JOIN_RATIO:
+                    continue
+                t0 = self._dancer_join_time
+            elif slot == DANCER_SLOT_AT_CLEAR:
+                if ratio < GAUGE_CLEAR_RATIO:
+                    continue
+                t0 = self._clear_time
+            elif slot not in DANCER_SLOTS_INITIAL:
+                continue
+            else:
+                t0 = None
+            dy = self._dancer_rise(None if t0 is None else now - t0)
+            blit_sprite(p, DANCER_SLOT_X[slot] + bx, DANCER_FEET_Y + by + dy,
+                        pm, self._dpr)
+        p.restore()
+
+    def _build_gauge_pulse(self):
+        """通常圏(赤)をクリア圏(金)の色で塗り替えたゲージを1枚だけ焼く。
+
+        クリア後の脈打ちは「赤の上に金色版を不透明度αで重ねる」で作る
+        (合成の結果は素材どうしの線形補間になり、実機で測った色の動き
+        — 赤 #f83606 と金 #faf805 の間を行き来する — とそのまま一致する)。
+        色を計算で作るのではなく素材のクリア圏をそのまま敷き直すので、
+        縞・区切りの暗い列・上端のハイライトまで本家と同じ形で揃う。
+        素材が無い/短いときは None。"""
+        fill = self._skin.get("gauge")
+        sx, sy, sw, sh = GAUGE_GOLD_SRC
+        if fill is None or fill.width() < sx + sw or fill.height() < GAUGE_BAR_H:
+            return None
+        pm = QPixmap(fill.size())
+        pm.fill(Qt.transparent)
+        q = QPainter(pm)
+        q.drawPixmap(0, 0, fill)
+        # 金の段より左を、クリア圏 10本(140px)ずつ左へ敷き詰めて埋める。
+        # 縦は下揃え(GAUGE_BAR_H - sh = 22)。通常圏は下 22px しか無いので、
+        # そこへクリア圏の上 22px を重ねるとハイライトの位置が合う。
+        x = sx - sw
+        while x > -sw:
+            q.drawPixmap(x, GAUGE_BAR_H - sh, fill, sx, sy, sw, sh)
+            x -= sw
+        # 敷き足したぶんが素材の外形からはみ出さないよう、元の形で抜く
+        # (左端の丸みや上下の縁が四角く出てしまうのを防ぐ)。
+        q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        q.drawPixmap(0, 0, fill)
+        q.end()
+        return pm
+
+    def _gauge_pulse_alpha(self, now):
+        """クリア後の脈打ちで、金色をどれだけ重ねるか(0..1)。
+
+        位相の原点はクリアに届いた時刻。実機ではその 6コマ後(0.100秒)が頂
+        で、前後 6コマで 0 に戻る三角。山と山の間は 0 のまま。
+
+        クリアの時刻が採れなかった(note_time() が範囲外で None)ときは
+        0 を返して脈打ちを出さない。now をそのまま位相に使うと、クリア到達
+        とまるで関係ない曲頭基準の位相で光ってしまう。"""
+        t0 = self._clear_time
+        if t0 is None:
+            return 0.0
+        ph = now - t0
+        ph = math.fmod(ph, GAUGE_PULSE_PERIOD_SEC)
+        if ph < 0.0:
+            ph += GAUGE_PULSE_PERIOD_SEC
+        d = abs(ph - GAUGE_PULSE_HALF_SEC)
+        if d >= GAUGE_PULSE_HALF_SEC:
+            return 0.0
+        return 1.0 - d / GAUGE_PULSE_HALF_SEC
 
     def _measure_combo_text_bands(self):
         """Combo/Text.png の「コンボ」2つ(通常色/金色)の縦位置を測る。
@@ -882,6 +1405,20 @@ class GameScreenWidget(QWidget):
             self._clear_time = self.chart_preview.note_time(self._gauge.notes_to_clear)
         except Exception:  # noqa: BLE001
             self._clear_time = None
+        # 4体目の踊り子が出る時刻。出す/出さないの判定そのものは
+        # _draw_gauge と同じ ratio(= GaugeModel.ratio(叩いた数))で行うので、
+        # ここで求めるのは跳ねて出てくる演出の起点だけ。同じ GaugeModel から
+        # 「割合が DANCER_JOIN_RATIO に届く音符の番号」を逆算して、その音符の
+        # 時刻を採る(クリアの時刻 _clear_time とまったく同じ求め方)。
+        self._dancer_join_time = None
+        try:
+            need = -(-int(gauge_mod.GAUGE_MAX * DANCER_JOIN_RATIO)
+                     // max(1, self._gauge.rank))
+            self._dancer_join_time = self.chart_preview.note_time(need)
+        except Exception:  # noqa: BLE001
+            self._dancer_join_time = None
+        # 踊りは拍で送るので、時刻→累計拍の表を先に作っておく。
+        self._beat_marks = self._build_beat_marks(preview_data)
         self._course_key = course_key or (preview_data or {}).get("course_key")
         self._course_sym = None
         if self._course_key:
@@ -1054,6 +1591,10 @@ class GameScreenWidget(QWidget):
         np_ = self._skin.get("nameplate")
         if np_ is not None:
             blit_sprite(p, NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_, self._dpr)
+            # 板は空なので、名前はここで書く。板と同じ「毎フレーム描く側」に
+            # 置くのがみそで、静的キャッシュ(_static_layer)へ描くと板だけが
+            # 焼き直されて文字が取り残される事故が起きる(曲名で一度やった)。
+            self._draw_nameplate_name(p)
 
     def _draw_gauge(self, p, ratio, now):
         """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
@@ -1065,13 +1606,29 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(gx, gy, base, 0, 0, base.width(), GAUGE_BAR_H)
         # 1本ぶんの幅に切り下げる。中途半端に伸びず、素材の縞と揃って
         # 「カチッ、カチッ」と1本ずつ増える。
-        step = fill.width() / float(GAUGE_BLOCKS) if fill is not None else 0.0
+        step = GAUGE_FILL_W / float(GAUGE_BLOCKS) if fill is not None else 0.0
         blocks = int(ratio * GAUGE_BLOCKS + 1e-9)
         wpx = 0
-        if fill is not None:
-            wpx = int(round(blocks * step))
+        if fill is not None and blocks > 0:
+            # 左の余白ぶんを足してから切り出す(0本のときは何も描かない)。
+            wpx = GAUGE_FILL_X0 + int(round(blocks * step))
             if wpx > 0:
                 p.drawPixmap(gx, gy, fill, 0, 0, wpx, GAUGE_BAR_H)
+        # ノルマに届いたかどうか。実機では「金色のブロックが1本でも出たら」
+        # = 塗った幅が段差を越えたらで、「クリア」の字の点灯と脈打ちが
+        # 同じコマで始まる。下の文字もこの判定を使い回す。
+        lit = wpx > GAUGE_CLEAR_STEP_X if fill is not None else False
+        maxed = ratio >= 1.0 and bool(self._gauge_rainbow)
+        # クリアしたあとは、通常圏の赤が周期的に金色へ染まって戻る。
+        # 金色版を不透明度αで重ねるだけなので、増えるのは1コマにつき
+        # drawPixmap 1回だけ(しかも山の間の 21/33 コマは α=0 で何も描かない)。
+        # 入魂して虹になっているあいだは虹が上から全部塗り替えるので描かない。
+        if lit and not maxed and self._gauge_pulse is not None:
+            a = self._gauge_pulse_alpha(now)
+            if a > 0.0:
+                p.setOpacity(a)
+                p.drawPixmap(gx, gy, self._gauge_pulse, 0, 0, wpx, GAUGE_BAR_H)
+                p.setOpacity(1.0)
         # 入魂(満タン)のあいだはゲージが虹色になる。素材のマスクがゲージ本体と
         # 一致しているので、同じ位置に重ねるだけで色だけ入れ替わる。
         if ratio >= 1.0 and self._gauge_rainbow:
@@ -1082,7 +1639,6 @@ class GameScreenWidget(QWidget):
         src = fill if fill is not None else base
         if src is not None:
             (lx, ly), (dx_, dy_), gw, gh = GAUGE_CLEAR_GLYPH
-            lit = wpx > GAUGE_CLEAR_STEP_X if fill is not None else False
             sx, sy = (dx_, dy_) if lit else (lx, ly)
             p.drawPixmap(gx + GAUGE_CLEAR_STEP_X + GAUGE_CLEAR_TEXT_OFF[0],
                          gy + GAUGE_CLEAR_TEXT_OFF[1], src, sx, sy, gw, gh)
@@ -1290,6 +1846,29 @@ class GameScreenWidget(QWidget):
                          num, QRect(int(c) * nw, 0, nw, nh))
             x += step
 
+    def _ensure_dancer_table(self):
+        """コマの重みから「位相 -> コマ番号」の引き当て表を1回だけ作る。
+
+        毎フレーム重みを足し直すのは無駄なので、累計を持っておいて bisect で
+        引く。表は 16 個しかないので探索も一瞬。"""
+        if getattr(self, "_dancer_cum", None) is not None:
+            return
+        w = [DANCER_HOLD_WEIGHT if i in DANCER_HOLD_FRAMES else 1.0
+             for i in range(DANCER_FRAMES)]
+        total = sum(w)
+        cum, acc = [], 0.0
+        for v in w:
+            acc += v / total
+            cum.append(acc)
+        cum[-1] = 1.0
+        self._dancer_cum = cum
+
+    def _dancer_frame(self, phase):
+        """位相(0..1 で1周)から、いま出すコマ番号を返す。"""
+        f = phase - math.floor(phase)
+        cum = self._dancer_cum
+        return min(bisect.bisect_right(cum, f), DANCER_FRAMES - 1)
+
     def set_compact(self, compact: bool):
         compact = bool(compact)
         if compact == self._compact:
@@ -1321,9 +1900,13 @@ class GameScreenWidget(QWidget):
         return self._lite
 
     def _screen_height(self) -> int:
-        if self._lite:
-            return SCREEN_H_LITE
-        return SCREEN_H_COMPACT if self._compact else SCREEN_H_FULL
+        # compact が最優先。軽量は「通常再生と縦横比を揃えたい」という理由で
+        # 720 のままにしてあるが、音声波形/情報モードは下にペインを置くので、
+        # そこで 720 を通すとレーンの下の黒い余白のぶんだけ窓がむやみに高く
+        # なる(実測 748 -> 1048)。あの黒い場所はペインに譲る。
+        if self._compact:
+            return SCREEN_H_COMPACT
+        return SCREEN_H_LITE if self._lite else SCREEN_H_FULL
 
     def _apply_geometry(self):
         """画面の高さを、いまの compact/lite に合わせ直す。"""
@@ -1483,9 +2066,12 @@ class GameScreenWidget(QWidget):
     #: 67px/秒 で流れるので 384px ≒ 5.7 秒ぶん。
     BG_STRIP_MARGIN = 384
 
-    def _bg_up_layers(self):
-        """上背景の3層(奥→手前)。素材が無ければ None を含む。"""
-        row = BG_UP_COLOR_ROW
+    def _bg_up_layers(self, row=BG_UP_COLOR_ROW):
+        """上背景の3層(奥→手前)。素材が無ければ None を含む。
+
+        `row` はシートの色。ふだんは 0(赤=1P)で、クリア後は
+        BG_CLEAR_UP_COLOR_ROW(金)。切り出しは同じ式のままで、駒の場所だけが
+        変わる。"""
         return (self._bg_up_cell("bg_up_base", BG_UP_BASE_CELL, row, 0),
                 self._bg_up_cell("bg_up_flower", BG_UP_FLOWER_ROW, 0, row),
                 self._bg_up_cell("bg_up_chara", BG_UP_CHARA_ROW, 0, row))
@@ -1511,7 +2097,7 @@ class GameScreenWidget(QWidget):
         return tuple((math.floor(f), math.ceil(f))
                      for pm, f in zip(layers, phases) if pm is not None)
 
-    def _draw_bg_top_layers(self, p, now):
+    def _draw_bg_top_layers(self, p, now, row=BG_UP_COLOR_ROW):
         """上背景を3枚重ねで描く。3枚とも同じ速さで左へ流れる。
 
         3枚を毎フレーム敷き詰めると 11 回の drawPixmap(うち2枚はアルファ付き
@@ -1525,18 +2111,22 @@ class GameScreenWidget(QWidget):
         わずかにアルファ 253/254 の画素があり(全体の 0.03%)、下が透ける作りに
         なっているため — 不透明に潰すとそこだけ色が変わる。SourceOver は
         結合則が成り立つので、3枚を先に重ねてから1回で貼っても、1枚ずつ
-        貼ったのと同じ絵になる。"""
-        layers = self._bg_up_layers()
+        貼ったのと同じ絵になる。
+
+        帯は色(`row`)ごとに別に持つ。クリアのクロスフェード中は赤と金の
+        2本を重ねて貼るので、1本を共有すると毎コマ焼き直しになってしまう。"""
+        layers = self._bg_up_layers(row)
         if layers[0] is None:
             return
         phases = self._bg_up_phases(layers, now)
         keys = self._bg_up_keys(layers, phases)
+        strip, strip_keys = self._bg_strips.get(row, (None, None))
         d = None
-        if (self._bg_strip is not None and self._bg_strip_keys is not None
-                and len(self._bg_strip_keys) == len(keys)):
+        if (strip is not None and strip_keys is not None
+                and len(strip_keys) == len(keys)):
             # 全層の floor/ceil が同じだけ進んでいれば平行移動と同じ。
             ds = set()
-            for (a, b), (a0, b0) in zip(keys, self._bg_strip_keys):
+            for (a, b), (a0, b0) in zip(keys, strip_keys):
                 ds.add(a - a0)
                 ds.add(b - b0)
             if len(ds) == 1:
@@ -1544,11 +2134,11 @@ class GameScreenWidget(QWidget):
                 if 0 <= dd <= self.BG_STRIP_MARGIN:
                     d = dd
         if d is None:
-            self._bake_bg_strip(layers, phases, keys)
+            strip = self._bake_bg_strip(row, layers, phases, keys)
             d = 0
-        p.drawPixmap(0, 0, self._bg_strip, d, 0, SCREEN_W, BG_TOP_H)
+        p.drawPixmap(0, 0, strip, d, 0, SCREEN_W, BG_TOP_H)
 
-    def _bake_bg_strip(self, layers, phases, keys):
+    def _bake_bg_strip(self, row, layers, phases, keys):
         """上背景3層を、画面幅+余白の帯1枚に焼く。"""
         sw = SCREEN_W + self.BG_STRIP_MARGIN
         img = QImage(sw, BG_TOP_H, QImage.Format_ARGB32_Premultiplied)
@@ -1557,8 +2147,9 @@ class GameScreenWidget(QWidget):
         for pm, f in zip(layers, phases):
             self._tile_row(q, pm, f, sw)
         q.end()
-        self._bg_strip = QPixmap.fromImage(img)
-        self._bg_strip_keys = keys
+        strip = QPixmap.fromImage(img)
+        self._bg_strips[row] = (strip, keys)
+        return strip
 
     def _rainbow_head(self):
         """虹の先端に乗せる大ドンの顔(Notes.png から1枚切って覚える)。"""
@@ -1652,7 +2243,110 @@ class GameScreenWidget(QWidget):
         blit_sprite(p, 0, BG_DOWN_Y, lit, self._dpr)
         p.restore()
 
+    # --- クリア(ノルマ到達)後の背景 -----------------------------------------
+    def _clear_elapsed(self, now):
+        """クリアに届いてから何秒たったか。まだ届いていなければ None。
+
+        軽量では背景そのものを描かないので、ここで断って以降を全部止める
+        (新しい演出も軽量には出さない、という決め事)。"""
+        if not SHOW_BACKGROUND_CLEAR or self._lite:
+            return None
+        t0 = self._clear_time
+        if t0 is None:
+            return None
+        el = now - t0
+        return el if el >= 0.0 else None
+
+    @staticmethod
+    def _clear_fade(el, sec):
+        """経過 el 秒を、sec 秒かけたクロスフェードの割合(0..1)に直す。"""
+        if el is None:
+            return 0.0
+        if sec <= 0.0:
+            return 1.0
+        return min(1.0, max(0.0, el / sec))
+
+    def _bg_clear_strip_pm(self):
+        """クリア背景を 1280x360 に組み立て、横に2枚並べた帯へ焼く(1回だけ)。
+
+        素材(Bg_down_Clear.png)は透明な行で仕切られた縦置きアトラスなので、
+        毎コマ帯を切り出して7枚重ねるとそれだけで背景の意味がなくなる。
+        組み上がりは動かない絵なので1枚に焼いてしまい、流れる動きは
+        「焼いた帯のどこを切って貼るか」だけで作る。2枚ぶん並べておけば
+        どの位相でも画面幅ぶんが足りるので、貼り付けは常に1回で済む。
+
+        焼くのは実寸(DPR 1)。上背景の帯(_bake_bg_strip)と同じ扱いで、
+        録画(DPR 1.5)では貼るときに拡大される。"""
+        pm = self._bg_clear_strip
+        if pm is not None:
+            return pm
+        sheet = self._skin.get("bg_down_clear")
+        if sheet is None:
+            return None
+        w = SCREEN_W
+        one = QImage(w, BG_DOWN_H, QImage.Format_ARGB32_Premultiplied)
+        one.fill(Qt.transparent)
+        q = QPainter(one)
+        b0, b1 = BG_CLEAR_BASE_BAND          # 地の市松(下辺の金雲は外してある)
+        q.drawPixmap(0, 0, sheet, 0, b0, w, b1 - b0)
+        for (s0, s1), y in BG_CLEAR_LAYERS:  # 奥から手前へ
+            q.drawPixmap(0, y, sheet, 0, s0, w, s1 - s0)
+        # 金雲だけは画面の**上**からぶら下がるので y=0 に置き、全部より手前
+        # (いちばん最後)に描く。上下反転は BG_CLEAR_CLOUD_FLIP 参照。
+        c0, c1 = BG_CLEAR_CLOUD_BAND
+        cloud = sheet.copy(QRect(0, c0, w, c1 - c0))
+        if BG_CLEAR_CLOUD_FLIP:
+            cloud = cloud.transformed(QTransform().scale(1.0, -1.0))
+        q.drawPixmap(0, 0, cloud)
+        q.end()
+        strip = QImage(w * 2, BG_DOWN_H, QImage.Format_ARGB32_Premultiplied)
+        strip.fill(Qt.transparent)
+        q = QPainter(strip)
+        q.drawImage(0, 0, one)
+        q.drawImage(w, 0, one)
+        q.end()
+        pm = QPixmap.fromImage(strip)
+        self._bg_clear_strip = pm
+        return pm
+
+    def _draw_bg_clear(self, p, el):
+        """クリア後の下背景。焼いた帯から窓を1回切って貼るだけ。
+
+        クリア前の屋台の上へ不透明な絵を重ねる形なので、割合を上げていけば
+        そのままクロスフェードになる(提灯の光もいっしょに隠れて消える)。"""
+        if not (SHOW_BACKGROUND and SHOW_BACKGROUND_CLEAR):
+            return
+        a = self._clear_fade(el, BG_CLEAR_FADE_SEC)
+        if a <= 0.0:
+            return
+        pm = self._bg_clear_strip_pm()
+        if pm is None:
+            return
+        # 左へ流れる。絵は画面幅で一巡するので、2枚ぶんの帯の中で窓を位相ぶん
+        # 右へずらせば、繋ぎ目なく流れて見える。
+        x = int((el * -BG_CLEAR_SCROLL_VX) % SCREEN_W)
+        p.save()
+        # クリア前の下背景はレーン枠の**下**に敷かれるが、こちらは静的キャッシュ
+        # の上から貼るので、そのままだと枠の下辺(y=360..363)を塗り潰して黒帯が
+        # 9px から 5px へ痩せる。枠の下端から下だけに限る。
+        p.setClipRect(QRect(0, BG_CLEAR_TOP_Y, SCREEN_W,
+                            BG_DOWN_Y + BG_DOWN_H - BG_CLEAR_TOP_Y))
+        if a < 1.0:
+            p.setOpacity(a)
+        p.drawPixmap(0, BG_DOWN_Y, pm, x, 0, SCREEN_W, BG_DOWN_H)
+        if a < 1.0:
+            p.setOpacity(1.0)
+        p.restore()
+        # フッターは静的キャッシュに焼いてあるので、いま上から塗り潰した。
+        # 貼り直して手前に戻す(実機でも笹の下半分はフッターに隠れる)。
+        ft = self._skin.get("footer")
+        if ft is not None:
+            p.drawPixmap(0, FOOTER_Y, ft)
+
     def paintEvent(self, event):
+        # 録画は窓を出さずに render() するので、showEvent を通らない経路がある。
+        # ここでも揃えておけば、どちらから来ても同じ絵になる。
+        self._ensure_skin()
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         # この1コマの実効 devicePixelRatio。画面は 1.0、録画(1080p)は 1.5。
@@ -1673,7 +2367,18 @@ class GameScreenWidget(QWidget):
                 bg_now = self.chart_preview.game_state()[0]
             except Exception:  # noqa: BLE001
                 bg_now = 0.0
-            self._draw_bg_top_layers(p, bg_now)
+            # クリアすると上背景も赤 -> 金へ変わる。下背景よりゆっくりで、
+            # 途中は2色を重ねたクロスフェード。変わりきったら金だけを貼る。
+            ta = self._clear_fade(self._clear_elapsed(bg_now),
+                                  BG_CLEAR_TOP_FADE_SEC)
+            if ta < 1.0:
+                self._draw_bg_top_layers(p, bg_now)
+            if ta > 0.0:
+                if ta < 1.0:
+                    p.setOpacity(ta)
+                self._draw_bg_top_layers(p, bg_now, BG_CLEAR_UP_COLOR_ROW)
+                if ta < 1.0:
+                    p.setOpacity(1.0)
             # 虹は上背景の上、レーン一式より奥。キャッシュを被せる前に描く
             # (1枚絵の上背景のときはキャッシュが不透明なので出ない)。
             self._draw_rainbow(p, bg_now)
@@ -1688,6 +2393,9 @@ class GameScreenWidget(QWidget):
         except Exception:  # noqa: BLE001
             now, combo, recent = 0.0, 0, None
         score = self._score_timeline.at(now) if self._score_timeline else 0
+        # 魂ゲージの満ち具合。ゲージ本体と踊り子(4体目=33% / 5体目=クリア)が
+        # 同じ値を見るよう、ここで1回だけ出して両方へ渡す。
+        ratio = self._gauge.ratio(combo) if self._gauge else 0.0
         # 魂ゲージは「叩いた数 × ランク / 10000」。音符数で決まるランクが
         # 1個あたりの点なので、譜面の7割半ばで入魂して以降は満タンのまま
         # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
@@ -1698,7 +2406,15 @@ class GameScreenWidget(QWidget):
         # どちらも「譜面を読む」のに要らないわりに重い。素材(1_Chara /
         # Bg_down_Light.png)が入っている環境では、ここが軽量の効きの大半。
         if not self._compact and not self._lite:
-            self._draw_bg_light(p, now)
+            # クリア背景が完全に被さったら、その下の提灯の光は1画素も見えない。
+            # 加算合成の全面貼りなので、見えないぶんはまるごと省く。
+            el = self._clear_elapsed(now)
+            if self._clear_fade(el, BG_CLEAR_FADE_SEC) < 1.0:
+                self._draw_bg_light(p, now)
+            self._draw_bg_clear(p, el)
+            # 踊り子はクリア背景より**手前**。流れる背景に乗らず、その場で
+            # 踊る(実機のキャプチャでもそう見える)。
+            self._draw_dancers(p, now, ratio)
             self._draw_chara(p, now)
         self._draw_left_panel(p, combo, score, recent, now)
         # 軽量では魂ゲージ(+「クリア」+ 虹)を出さない。ゲージは 400px 超の
@@ -1707,7 +2423,7 @@ class GameScreenWidget(QWidget):
         # 要らない。連打・風船の金の扇(_draw_lane_readouts)は残す — あれは
         # 「今この連打を何回叩いたか」という譜面そのものの情報。
         if not self._lite:
-            self._draw_gauge(p, self._gauge.ratio(combo) if self._gauge else 0.0, now)
+            self._draw_gauge(p, ratio, now)
         self._draw_lane_readouts(p, now, recent)
 
         p.end()

@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -102,6 +103,61 @@ class RecordingError(Exception):
     """ffmpeg が失敗した / 曲が読めない など。"""
 
 
+class CancelToken:
+    """下ごしらえ(prepare_recording)を外から止めるための札。
+
+    曲のデコードは ffmpeg を待つだけの時間で、3分の曲でも1〜2秒、長い曲や
+    遅いディスクだともっとかかる。ここを **止められない** と、書き出しを
+    始めた直後にウィンドウを閉じた人はデコードが終わるまで待たされる
+    (GUI スレッドがワーカーの終わりを待つため画面ごと固まる)。
+
+    そこで走っている ffmpeg のプロセスをこの札に預けてもらい、cancel() で
+    まとめて kill する。押さえておくのは2点:
+
+      - 別スレッドから呼ばれる(cancel() は GUI スレッド、attach/detach は
+        ワーカースレッド)ので、中身はロックで守る。
+      - cancel() が attach() より先に来ることがある。そのときは attach() が
+        False を返し、呼び出し側がその場で殺す。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._proc = None
+
+    @property
+    def cancelled(self):
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self):
+        """中止を申し込む。走っている子プロセスがあれば殺す。"""
+        with self._lock:
+            self._cancelled = True
+            proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def attach(self, proc):
+        """子プロセスを預ける。既に中止されていれば False(呼び出し側が殺す)。"""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._proc = proc
+            return True
+
+    def detach(self):
+        """預けた子プロセスを外す(終わったので殺す相手が居なくなった)。"""
+        with self._lock:
+            self._proc = None
+
+    def raise_if_cancelled(self):
+        if self.cancelled:
+            raise RecordingCancelled()
+
+
 def _ffmpeg_exe() -> str:
     import imageio_ffmpeg
     return imageio_ffmpeg.get_ffmpeg_exe()
@@ -114,11 +170,17 @@ def _no_window():
     return {}
 
 
-def decode_song_pcm(path: str, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+def decode_song_pcm(path: str, sample_rate: int = SAMPLE_RATE,
+                    cancel=None) -> np.ndarray:
     """曲を (N, 2) float32 へデコードする。読めなければ RecordingError。
 
     アプリ本体は QAudioDecoder で読んでいるが、こちらは ffmpeg を直接叩く。
-    イベントループが要らず、同期で確実に読め、対応形式も広いため。"""
+    イベントループが要らず、同期で確実に読め、対応形式も広いため。
+
+    cancel に CancelToken を渡すと、ここで走らせる ffmpeg をその札へ預ける。
+    途中で cancel() されたら ffmpeg ごと殺され、RecordingCancelled を投げて
+    すぐ戻る(subprocess.run で待ち込むと止める手立てが無くなるため、
+    Popen + communicate で書いてある。読む中身は run と同じ)。"""
     if not path or not os.path.exists(path):
         return np.zeros((0, 2), dtype=np.float32)
     cmd = [
@@ -127,13 +189,29 @@ def decode_song_pcm(path: str, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
         "-ac", "2", "-ar", str(sample_rate), "-",
     ]
     try:
-        p = subprocess.run(cmd, capture_output=True, **_no_window())
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, **_no_window())
     except OSError as e:
         raise RecordingError(f"ffmpeg を起動できませんでした: {e}") from e
+    if cancel is not None and not cancel.attach(p):
+        # 預ける前に中止されていた。誰も殺してくれないので自分で。
+        try:
+            p.kill()
+        except OSError:
+            pass
+    try:
+        out, err = p.communicate()
+    finally:
+        if cancel is not None:
+            cancel.detach()
+    if cancel is not None:
+        # 殺されたぶんの returncode を「読めなかった」と誤解しないよう、
+        # 中止の判定を先に済ませる。
+        cancel.raise_if_cancelled()
     if p.returncode != 0:
-        msg = (p.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        msg = (err or b"").decode("utf-8", "replace").strip().splitlines()
         raise RecordingError("音源を読み込めませんでした: " + (msg[-1] if msg else "原因不明"))
-    pcm = np.frombuffer(p.stdout, dtype=np.float32)
+    pcm = np.frombuffer(out, dtype=np.float32)
     return pcm[: (pcm.size // 2) * 2].reshape(-1, 2).copy()
 
 
@@ -160,11 +238,15 @@ def hit_schedule_from_preview(preview_data: dict, offset: float):
 
 def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
                  don_path="", ka_path="", song_volume=0.8, sfx_volume=0.9,
-                 hit_sounds=True, sample_rate=SAMPLE_RATE) -> np.ndarray:
+                 hit_sounds=True, sample_rate=SAMPLE_RATE,
+                 cancel=None) -> np.ndarray:
     """[start_sec, end_sec) の音声を (N, 2) float32 で作る。
 
     実機の再生とまったく同じ MixerCore を、デバイスに繋がずに回すだけ。
-    そのため打音の鳴る位置は実際に聞いているものと1サンプルも違わない。"""
+    そのため打音の鳴る位置は実際に聞いているものと1サンプルも違わない。
+
+    cancel(CancelToken)を渡すと、ブロックを1つ作るごとに中止を見る。
+    長い曲だとここも数秒かかるので、デコードと同じく途中で降りられる。"""
     core = MixerCore(sample_rate, max_block=_AUDIO_BLOCK)
     core.post(("song", np.ascontiguousarray(song_pcm, dtype=np.float32), sample_rate))
     core.post(("sfx", "don", _load_hit_pcm(don_path, ensure_don_wav, sample_rate)))
@@ -182,6 +264,8 @@ def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
     out = np.zeros((total, 2), dtype=np.float32)
     done = 0
     while done < total:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         n = min(_AUDIO_BLOCK, total - done)
         out[done:done + n] = core.render(n)
         done += n
@@ -383,6 +467,74 @@ class FrameCostProbe:
         return (self._elapsed / n * 1000.0) if n else 0.0
 
 
+class RecordingPlan:
+    """録画の「下ごしらえ」だけを持つ入れ物。曲のデコードと音声の合成の結果。
+
+    VideoRecording から切り出してあるのは、**この部分だけが Qt に一切
+    触らない**ため。絵を描くのは GUI スレッドからしかできない(QWidget.render)
+    が、曲のデコード(ffmpeg)と音声のオフライン合成(MixerCore)は純粋な
+    計算なので、ワーカースレッドで先に済ませておける。3分の曲で 2秒ほど
+    かかるところなので、ここを別スレッドへ追い出せると「書き出すボタンを
+    押した瞬間にアプリが固まる」のが無くなる。
+
+    出来上がりの音声は先に丸ごと作ってしまう。映像フレーム i と音声サンプルは
+    どちらも同じ仮想時計から出るので、途中で何が起きても音ズレは発生しない。
+    """
+
+    def __init__(self, tmp_dir, audio_path, start_sec, end_sec, fps, total_frames):
+        self.tmp_dir = tmp_dir
+        self.audio_path = audio_path
+        self.start_sec = start_sec
+        self.end_sec = end_sec
+        self.fps = fps
+        self.total_frames = total_frames
+
+    def discard(self):
+        """使わずに捨てる(用意し終わる前に中止された等)。一時音声を消す。"""
+        if self.tmp_dir:
+            _cleanup(self.tmp_dir)
+            self.tmp_dir = None
+
+
+def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
+                      end_sec=None, fps=60, don_path="", ka_path="",
+                      song_volume=0.8, sfx_volume=0.9, hit_sounds=True,
+                      cancel=None):
+    """曲を読み、音声を作り、RecordingPlan を返す。**Qt には触らない**ので
+    ワーカースレッドから呼んでよい(GUI スレッドから呼んでも同じ結果)。
+
+    cancel(CancelToken)を渡すと途中で降りられる。降りるときは
+    RecordingCancelled を投げ、**作りかけの一時ファイルは自分で片付ける**
+    (中止されたということは、受け取って discard() してくれる相手がもう
+    居ないため。数十MB の audio.f32 が %TEMP% に居座るのを防ぐ)。"""
+    song = decode_song_pcm(song_path, cancel=cancel)
+    song_sec = song.shape[0] / float(SAMPLE_RATE) if song.shape[0] else 0.0
+    if end_sec is None:
+        end_sec = song_sec
+    start_sec = max(0.0, float(start_sec))
+    end_sec = max(start_sec, float(end_sec))
+    if end_sec - start_sec < 1.0 / fps:
+        raise RecordingError("録画する範囲が短すぎます。")
+
+    hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
+    audio = render_audio(song, hit_times, hit_kinds, start_sec=start_sec,
+                         end_sec=end_sec, don_path=don_path, ka_path=ka_path,
+                         song_volume=song_volume, sfx_volume=sfx_volume,
+                         hit_sounds=hit_sounds, cancel=cancel)
+    tmp_dir = tempfile.mkdtemp(prefix="neotja_rec_")
+    audio_path = os.path.join(tmp_dir, "audio.f32")
+    with open(audio_path, "wb") as f:
+        f.write(np.ascontiguousarray(audio, dtype=np.float32).tobytes())
+    del audio, song
+    plan = RecordingPlan(tmp_dir, audio_path, start_sec, end_sec, int(fps),
+                         int(round((end_sec - start_sec) * fps)))
+    if cancel is not None and cancel.cancelled:
+        # 書き終えた直後に中止された。渡す先がもう居ないので自分で捨てる。
+        plan.discard()
+        raise RecordingCancelled()
+    return plan
+
+
 class VideoRecording:
     """少しずつ進められる録画セッション。
 
@@ -392,42 +544,32 @@ class VideoRecording:
     step() で数コマずつ描き、あいだにイベントループへ戻れるようにしてある。
     呼び出し側は QTimer で step() を回し、進捗表示と中止を面倒みる。
 
-    音声は先に丸ごと作ってしまう(オフライン合成は 3分でも 1秒程度)。
-    映像フレーム i と音声サンプルはどちらも同じ仮想時計から出るので、
-    途中で何が起きても音ズレは発生しない。
+    音声は plan(RecordingPlan)として先に用意しておく。plan を渡さなければ
+    ここで作る(GUI 無しの同期版・テスト用の従来どおりの呼び方)。
     """
 
-    def __init__(self, widget, out_path, *, preview_data, offset, song_path,
-                 start_sec=0.0, end_sec=None, fps=60, canvas="720p",
-                 don_path="", ka_path="", song_volume=0.8, sfx_volume=0.9,
-                 hit_sounds=True, crf=18, supersample=1, preset="medium"):
-        song = decode_song_pcm(song_path)
-        song_sec = song.shape[0] / float(SAMPLE_RATE) if song.shape[0] else 0.0
-        if end_sec is None:
-            end_sec = song_sec
-        start_sec = max(0.0, float(start_sec))
-        end_sec = max(start_sec, float(end_sec))
-        if end_sec - start_sec < 1.0 / fps:
-            raise RecordingError("録画する範囲が短すぎます。")
+    def __init__(self, widget, out_path, *, plan=None, preview_data=None,
+                 offset=0.0, song_path="", start_sec=0.0, end_sec=None, fps=60,
+                 canvas="720p", don_path="", ka_path="", song_volume=0.8,
+                 sfx_volume=0.9, hit_sounds=True, crf=18, supersample=1,
+                 preset="medium"):
+        if plan is None:
+            plan = prepare_recording(
+                preview_data=preview_data, offset=offset, song_path=song_path,
+                start_sec=start_sec, end_sec=end_sec, fps=fps,
+                don_path=don_path, ka_path=ka_path, song_volume=song_volume,
+                sfx_volume=sfx_volume, hit_sounds=hit_sounds)
 
         self.widget = widget
         self.out_path = out_path
-        self.start_sec = start_sec
-        self.fps = int(fps)
-        self.total_frames = int(round((end_sec - start_sec) * fps))
+        self.start_sec = plan.start_sec
+        self.fps = plan.fps
+        self.total_frames = plan.total_frames
         self.frame = 0
         self._done = False
-
-        hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
-        audio = render_audio(song, hit_times, hit_kinds, start_sec=start_sec,
-                             end_sec=end_sec, don_path=don_path, ka_path=ka_path,
-                             song_volume=song_volume, sfx_volume=sfx_volume,
-                             hit_sounds=hit_sounds)
-        self._tmp_dir = tempfile.mkdtemp(prefix="neotja_rec_")
-        audio_path = os.path.join(self._tmp_dir, "audio.f32")
-        with open(audio_path, "wb") as f:
-            f.write(np.ascontiguousarray(audio, dtype=np.float32).tobytes())
-        del audio, song
+        self._tmp_dir = plan.tmp_dir
+        audio_path = plan.audio_path
+        fps = plan.fps
 
         w, h = widget.width(), widget.height()
         if w <= 0 or h <= 0:
@@ -510,15 +652,28 @@ class VideoRecording:
         self._teardown()
         _unlink(self.out_path)
 
+    def detach_widget(self):
+        """描画用ウィジェットを offline モードから戻す。**GUI スレッド専用**。
+
+        finish()/abort() から切り離してあるのは、そちらをワーカースレッドへ
+        回せるようにするため。ffmpeg がファイルを閉じ切るのを待つ数百 ms は
+        Qt に一切関係ないので裏でやれるが、ウィジェットに触るこの一行だけは
+        GUI スレッドに残さなければならない。先にここを呼んでおけば、
+        _teardown はスレッドの区別なく呼べる。"""
+        if getattr(self, "_widget_detached", False):
+            return
+        self._widget_detached = True
+        try:
+            self.widget.end_offline_render()
+        except RuntimeError:
+            pass                      # ウィジェットが先に消えていた
+
     def _teardown(self):
         if getattr(self, "_torn", False):
             return b"", self._proc.returncode
         self._torn = True
         self._done = True
-        try:
-            self.widget.end_offline_render()
-        except RuntimeError:
-            pass                      # ウィジェットが先に消えていた
+        self.detach_widget()
         try:
             self._proc.stdin.close()
         except OSError:

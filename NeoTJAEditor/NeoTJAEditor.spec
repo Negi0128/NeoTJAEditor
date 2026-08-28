@@ -25,6 +25,10 @@ a = Analysis(
     datas=[
         (_ffmpeg_bin_dir, 'imageio_ffmpeg/binaries'),
         (_portaudio_dir, '_sounddevice_data/portaudio-binaries'),
+        # 素材は TNDE の System フォルダから読むので同梱しないが、この2つは
+        # 作者の自作物(デモ用の譜面と無音WAV)なので入れる。skin_cache が
+        # キャッシュへ展開するときの取り出し元になる。
+        ('neotja/assets', 'neotja/assets'),
     ],
     hiddenimports=[
         'PySide6.QtCore',

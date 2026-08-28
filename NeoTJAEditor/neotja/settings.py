@@ -13,11 +13,15 @@ _SETTINGS_KEYS = (
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
-    "preview_zoom",
+    "preview_zoom", "preview_speed",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
     "record_output_dir", "record_last_dir",
+    # 利用者が用意した TNDE の System フォルダ。ここと default_settings() の
+    # 両方に書くこと(片方だけだと再起動のたびに空へ戻る。上の
+    # record_output_dir が実際にそうなっていた)。
+    "system_dir",
 )
 
 
@@ -36,6 +40,11 @@ def default_settings() -> dict:
         # ころは、環境設定で保存先を決めても一度別の場所へ書き出すだけで
         # 上書きされ、二度と戻らなかった。
         "record_last_dir": "",
+        # 利用者が用意した TNDE の System フォルダ。絵・音・フォントはすべて
+        # ここから取り出してキャッシュへ展開する(neotja/skin_cache.py)。
+        # 空 = 未指定で、そのときは exe の隣やよくある置き場を自動で探す。
+        # 見つからなければ起動時に案内を出してアプリを終了する。
+        "system_dir": "",
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,
@@ -98,6 +107,10 @@ def default_settings() -> dict:
         # えぬいーさん次郎の表示倍率(%)。100/75/50/25 を循環する。
         # 小さい画面で 720px の絵が入りきらないとき用。
         "preview_zoom": 100,
+        # 再生速度の倍率。0.25 / 0.50 / 0.75 / 1.00 の 4 段階だけを取り、
+        # 等倍より速い再生は無い。旧版で 1.50 や 2.00 が保存されていても、
+        # 読み込み時に chart_preview_widget.snap_speed() が段階へ丸める。
+        "preview_speed": 1.00,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
@@ -114,7 +127,7 @@ def default_settings() -> dict:
     }
 
 
-def settings_path() -> Path:
+def _primary_settings_path() -> Path:
     # Resolve next to the frozen exe (PyInstaller) or the project root when
     # running from source, instead of the original's bare-relative-path
     # (process-cwd-dependent) behavior.
@@ -123,6 +136,41 @@ def settings_path() -> Path:
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "settings.json"
+
+
+def _fallback_settings_path() -> Path:
+    """exe の隣へ書けなかったときの退避先。%LOCALAPPDATA%\\NeoTJAEditor\\。
+
+    素材キャッシュ(skin_cache.cache_dir())と同じ親を使う — 利用者から見て
+    「このアプリの持ち物」が1か所にまとまるほうが、消したいときに分かりやすい。"""
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        base = Path(local)
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "NeoTJAEditor" / "settings.json"
+
+
+def settings_path() -> Path:
+    """設定ファイルの在りか。ふだんは exe の隣。
+
+    **なぜ退避先があるのか**
+    exe を Program Files 配下へ入れられていると、その隣には書けない。以前は
+    save_settings() が例外を握りつぶして黙って何もしなかったので、起動時に
+    System フォルダを選び直しても保存されず、**次の起動でまた同じダイアログ**
+    という抜け出せない状態になっていた。
+
+    「保存できませんでした」と伝えるだけにする案もあったが、利用者にできる
+    ことが「アプリを別の場所へ入れ直す」しかなく、逃げ道になっていない。
+    そこで書ける場所へ退避する方を採った。
+
+    退避先が一度できたら、以降は読み書きともそちらを見る。両方あるときに
+    exe の隣を優先すると、書き込みは退避先・読み込みは隣という食い違いが
+    起きて、保存したはずの設定が戻らなくなる。"""
+    fallback = _fallback_settings_path()
+    if fallback.exists():
+        return fallback
+    return _primary_settings_path()
 
 
 def _coerce(default, loaded):
@@ -180,30 +228,49 @@ def load_settings() -> dict:
     return data
 
 
-def save_settings(config_data: dict) -> None:
-    """設定を保存する。一時ファイルに書いてから置き換えるので、書き込みの途中で
+def _write_settings(path: Path, config_data: dict) -> bool:
+    """1か所へ書く。一時ファイルに書いてから置き換えるので、書き込みの途中で
     失敗しても settings.json が空や壊れた状態にはならない(そうなると次回起動で
     設定が全部初期値へ戻ってしまう)。保存は音量スライダー等からも頻繁に
     呼ばれるぶん、当たる機会も多い。"""
-    path = settings_path()
     tmp = None
     try:
         import tempfile
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".neotja_cfg_", suffix=".tmp",
-                                   dir=str(Path(path).parent))
+                                   dir=str(path.parent))
         os.close(fd)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
         tmp = None
-    except Exception:
-        pass
+        return True
+    except Exception:  # noqa: BLE001 — 呼び出し側へは戻り値で伝える。
+        return False
     finally:
         if tmp:
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def save_settings(config_data: dict) -> bool:
+    """設定を保存する。書けたかどうかを返す。
+
+    ふだんの置き場(exe の隣)へ書けなかったときは %LOCALAPPDATA% 側へ退避する
+    — 理由は settings_path() の説明のとおり。退避が起きたあとは
+    settings_path() もそちらを返すので、読み書きが食い違うことはない。
+
+    戻り値を見ない呼び出しがほとんどだが(音量を動かすたびに知らせても
+    仕方がない)、起動時の System フォルダの選び直しのように「保存できないと
+    利用者が同じところで足止めされる」場面だけは確かめている。"""
+    if _write_settings(settings_path(), config_data):
+        return True
+    fallback = _fallback_settings_path()
+    if fallback == settings_path():
+        return False  # 退避先そのものが書けなかった。もう行き先が無い。
+    return _write_settings(fallback, config_data)
 
 
 def notes_png_path() -> Path:
@@ -223,22 +290,25 @@ def icon_path() -> Path:
 
 
 def skin_dir() -> Path:
-    """The optional `skin` folder next to the exe (project root in dev). A
-    self-contained pack the author distributes out-of-band: note art plus hit
-    sounds. Nothing here is bundled/committed (copyright), and everything is
-    optional - the app draws its own 本家風 notes and synths its own hit
-    sounds when the folder or a file is absent."""
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).resolve().parent.parent
-    return base / "skin"
+    """素材(音符・背景・打音・フォント)を読むフォルダ。
+
+    中身は TNDE の素材そのもので再配布できないため、アプリには一切同梱せず、
+    **利用者が用意した System フォルダから起動時に取り出したキャッシュ**を
+    ここで返す(展開は neotja/skin_cache.py、実体は
+    %LOCALAPPDATA%\\NeoTJAEditor\\skin_cache)。中の並びは以前 exe の隣に
+    置いてもらっていた skin/ とまったく同じなので、これを読む側
+    (game_screen.py / chart_preview_widget.py / chara.py)は何も変わらない。
+
+    ファイルが欠けていても描画側は自前の本家風の絵と合成音へ落ちるので、
+    1枚足りないだけで落ちることはない。"""
+    from neotja import skin_cache
+    return skin_cache.cache_dir()
 
 
 def skin_notes_path() -> Path:
-    """Note skin the preview uses if present (OpenTaiko-style Notes.png). Kept
-    in skin/ rather than the bare `notes.png` the image-export reads, so the
-    two never collide on case-insensitive Windows."""
+    """プレビューが使う音符の絵(Notes.png)。画像書き出しが読む素の
+    `notes.png` とは別物で、大文字小文字を区別しない Windows でぶつからない
+    ようキャッシュ側に置いてある。"""
     return skin_dir() / "Notes.png"
 
 
@@ -251,9 +321,12 @@ def _first_existing(directory: Path, names) -> str:
 
 
 def skin_sound_paths():
-    """(don, ka) hit-sound paths from the skin folder if the author packed
-    them, else ("", ""). Accepts a few common filenames so the pack is
-    forgiving about naming."""
+    """キャッシュから取れる打音 (don, ka) のパス。無ければ ("", "")。
+
+    System の ogg をデコードしたものが入る想定だが、ffmpeg が使えない等で
+    展開できていないこともあるので、存在しない場合は空を返して呼び出し側の
+    合成音へ落とす。名前は数通り許す(以前 exe の隣に置いてもらっていた
+    skin/ の流儀をそのまま残してある)。"""
     d = skin_dir()
     don = _first_existing(d, ("don.wav", "dong.wav", "Don.wav", "Dong.wav"))
     ka = _first_existing(d, ("ka.wav", "katsu.wav", "Ka.wav", "Katsu.wav"))
@@ -261,12 +334,13 @@ def skin_sound_paths():
 
 
 def effective_hit_sound_paths(cfg):
-    """(don, ka) actually used for hit sounds: the user's own files if both
-    exist, else the skin pack's, else ("", "") meaning the built-in synth.
+    """実際に鳴らす打音 (don, ka)。環境設定で指定した自前の WAV が両方とも
+    実在すればそれ、無ければキャッシュのもの、それも無ければ ("", "") =
+    内蔵の合成音。
 
-    Playback and the video export must agree on this - reading the config
-    alone would give the recording the synth whenever the sound comes from a
-    skin pack, which is not what the user hears while editing."""
+    再生と動画書き出しはここで足並みを揃える必要がある。設定だけを見ると、
+    音がキャッシュ由来のときに録画だけ合成音になってしまい、編集中に
+    聞こえている音と違うものが書き出される。"""
     cfg_don = (cfg or {}).get("hit_sound_don_path", "") or ""
     cfg_ka = (cfg or {}).get("hit_sound_ka_path", "") or ""
     if cfg_don and cfg_ka and os.path.exists(cfg_don) and os.path.exists(cfg_ka):

@@ -1,19 +1,35 @@
 """えぬいーさん次郎(ゲームプレビュー)の動画書き出しダイアログ。
 
 書き出し本体は neotja/recorder.py。ここは範囲・fps・画面サイズを決めて、
-別スレッドで走らせ、進捗と中止を面倒みるだけ。
+進捗と中止を面倒みるだけ。
 
-画面を録画するのではなく1コマずつ描き直すので、書き出し中にアプリを
-触っても、他のウィンドウを重ねても、出来上がりには一切影響しない。
+**書き出し中もエディタを使える**ようにしてある。そのための作りは3つ:
+
+  1) このダイアログはモーダルにしない(main_window は exec() ではなく
+     show() で出す)。以前は exec() で出していたので、書き出しが終わるまで
+     メインウィンドウのクリックもキー入力も一切通らなかった。
+  2) 絵を描くところ(QWidget.render)は Qt の決まりで GUI スレッドからしか
+     呼べない。ここは動かしようがないので、従来どおり QTimer で数コマずつ
+     描いてはイベントループへ返す(_SLICE_SEC)。だから書き出し中も
+     入力・再生・保存は普通に通る(描画のぶんだけ全体は少し重くなる)。
+  3) Qt に触らない重い部分 — 曲のデコードと音声のオフライン合成、それに
+     最後に ffmpeg がファイルを閉じ切るのを待つところ — はワーカースレッドへ
+     追い出した(_Task)。ここは以前 GUI スレッドで同期に走らせていて、
+     3分の曲だと開始時に2秒ほど完全に固まっていた。
+
+画面を録画するのではなく1コマずつ描き直すので、書き出し中に譜面を編集しても、
+他のウィンドウを重ねても、出来上がりには一切影響しない。
 """
 
 import os
+import threading
+import traceback
 
 import time
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
     QPushButton, QSpinBox, QVBoxLayout,
 )
@@ -58,6 +74,113 @@ _PROBE_SAMPLES = 24
 _PROBE_CHUNK = 3
 
 
+class _Task(QThread):
+    """裏で1つだけ仕事をして、結果かエラーを返すだけのスレッド。
+
+    録画のうち **Qt に一切触らない部分** をここへ載せる。具体的には
+    recorder.prepare_recording(曲のデコードと音声合成)と、
+    VideoRecording.finish()/abort()(ffmpeg の閉じ待ち)。どちらも
+    subprocess と numpy しか使わないので、GUI スレッドの外で安全に走る。
+
+    逆に絵を描く step() は絶対にここへ載せない。QWidget.render() は GUI
+    スレッド専用で、別スレッドから呼ぶとその場で落ちる。
+
+    結果は Signal で返す。別スレッドから GUI スレッドの QObject へ繋いだ
+    シグナルは Qt が自動でキュー接続にしてくれるので、受け側(スロット)は
+    GUI スレッドで動く = そこでウィジェットを触ってよい。
+
+    **中止できる**: cancel に「仕事を中断させる呼び出し」を渡しておくと
+    cancel() でそれを呼ぶ(下ごしらえなら recorder.CancelToken.cancel で
+    ffmpeg を殺す)。中断させたぶんのエラーは ng では返さない — 頼んだのは
+    こちらなので、失敗として見せるとおかしなことになる。代わりに
+    cancelled を出す。
+
+    **やりかけの後始末**: 中止が間に合わず仕事が仕上がってしまったときは、
+    もう受け取り手が居ない。放っておくと一時ファイルが %TEMP% に残るので、
+    discard(結果を捨てる呼び出し)を渡してもらってここで片付ける。"""
+
+    ok = Signal(object)
+    ng = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, fn, parent=None, cancel=None, discard=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._cancel_fn = cancel
+        self._discard_fn = discard
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._result = None          # 渡しそびれた結果(discard_result が捨てる)
+
+    def cancel(self):
+        """中止を頼む(GUI スレッドから呼ぶ)。すぐ返る。
+
+        worker_util.detach_worker も cancel があれば呼んでくれるので、
+        待ち切れずに待機所へ預けたワーカーもここで止まる。"""
+        self._cancelled.set()
+        if self._cancel_fn is None:
+            return
+        try:
+            self._cancel_fn()
+        except BaseException:           # noqa: BLE001  止められなくても進む
+            traceback.print_exc()
+
+    def discard_result(self):
+        """渡しそびれた結果を捨てる。無ければ何もしない(何度呼んでもよい)。"""
+        with self._lock:
+            result, self._result = self._result, None
+        if result is None or self._discard_fn is None:
+            return
+        try:
+            self._discard_fn(result)
+        except BaseException:           # noqa: BLE001
+            traceback.print_exc()
+
+    def run(self):
+        try:
+            result = self._fn()
+        except BaseException as e:      # noqa: BLE001  何が出ても UI へ返す
+            if self._cancelled.is_set():
+                self.cancelled.emit()   # こちらが止めたのだから失敗ではない
+                return
+            traceback.print_exc()
+            self.ng.emit(str(e) or e.__class__.__name__)
+            return
+        if self._cancelled.is_set():
+            # 止める前に仕上がってしまった。受け側は畳んだあとなので後始末する。
+            with self._lock:
+                self._result = result
+            self.discard_result()
+            self.cancelled.emit()
+            return
+        # 出来上がりをここにも控えておく。emit した直後に窓が閉じられると
+        # キューに積んだシグナルは配られずに捨てられ、受け側が discard()
+        # する機会が無くなるため(abort_now が discard_result で拾う)。
+        with self._lock:
+            self._result = result
+        self.ok.emit(result)
+
+
+def _join_task(task, timeout_ms=5000):
+    """走っているワーカーを畳む。終わらなければ待機所へ預ける。
+
+    アプリ終了時にここで無条件に待ち続けると「閉じたのにプロセスが残る」に
+    なるし、待たずに捨てると QThread が
+    "Destroyed while thread is still running" でアプリごと落とす。そこで
+    しばらく待ち、それでも終わらなければ worker_util の待機所へ移して
+    自力で終わってもらう(参照が残るので GC されない)。"""
+    if task is None:
+        return
+    try:
+        if not task.isRunning():
+            return
+    except RuntimeError:
+        return
+    if not task.wait(timeout_ms):
+        from neotja.worker_util import detach_worker
+        detach_worker(task)
+
+
 def _estimate_text(seconds):
     """所要時間の目安の文言。速い/きれいといった言い回しではなく、
     実際にどれだけ待つのかを分で出す。"""
@@ -71,11 +194,26 @@ class RecordDialog(QDialog):
 
     描画に使うウィジェットは、いま見えているプレビューとは別に画面外へ用意する
     (recorder.make_offline_widget)。そのため書き出し中も再生位置やコースは
-    動かないし、途中で編集しても出来上がりは始めた時点の譜面のまま。"""
+    動かないし、途中で編集しても出来上がりは始めた時点の譜面のまま。
+
+    **譜面のスナップショットについて**: ここへ渡ってくる preview_data は
+    main_window.open_video_recorder が analyzer.build_preview_timeline で
+    その場から作り直した新しい dict で、数値と文字列の入れ子しか入っていない
+    (エディタの状態を指す参照は持たない)。つまり渡された時点で既に
+    「開いたときの譜面の写し」になっている。だから deepcopy はしない —
+    数万音符ぶんを丸ごと複製する費用に見合わないうえ、書き換える者が
+    いないものを守っても意味がないため。画面外ウィジェットにもこの写しを
+    そのまま持たせるので、書き出し中にエディタで譜面をいくら編集しても
+    出来上がりは変わらない。"""
 
     def __init__(self, main_window, preview_data, offset, song_path,
                  song_seconds, default_dir, parent=None):
         super().__init__(parent or main_window)
+        # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
+        # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
+        # なく show() で出すこと)。
+        self.setModal(False)
+        self.setWindowModality(Qt.NonModal)
         self._mw = main_window
         self._preview = preview_data or {}
         self._offset = offset
@@ -84,6 +222,10 @@ class RecordDialog(QDialog):
         self._widget = None         # 画面外の描画用ウィジェット
         self._cancel = False
         self._t0 = 0.0
+        # 裏で回している下ごしらえ / 後始末。どちらか動いていれば「書き出し中」。
+        self._prep_task = None
+        self._fin_task = None
+        self._pending = None        # 下ごしらえ待ちのあいだ覚えておく (出力先, 画質)
         # 所要時間の見積もり用。supersample ごとに「1コマ何ms か」の実測を貯める
         # (720p と 1080p は supersample が違うので別々に測るが、1080p の 60fps と
         # 120fps は同じ大きさを描くので測り直さない)。
@@ -310,6 +452,18 @@ class RecordDialog(QDialog):
     # ------------------------------------------------------------------
     def _begin_measure(self):
         """描画用ウィジェットを用意し、画質ごとの1コマの重さを測り始める。"""
+        # 書き出しが始まっていたら測らない。捨て描きと本番は同じウィジェットを
+        # 使うので、割り込むと offline モードの入り切りがぶつかり、どんちゃんの
+        # コマ送り(GameScreenWidget が render() の呼ばれ方で進める)まで
+        # ずれて、出来上がりの絵が変わってしまう。ダイアログを開いた直後に
+        # 書き出しを始めたときだけ起こりうる(この singleShot が届く前に
+        # ボタンが押された場合)。
+        if self.is_busy():
+            return
+        # 既に測っている最中なら二重に始めない(_finish から測り直しを仕掛ける
+        # ようになったので、走っているところへ重ねて来ることがある)。
+        if self._probe is not None or self._probe_queue:
+            return
         if self._widget is None:
             cfg = self._mw.config_data
             self._widget = recorder.make_offline_widget(
@@ -391,8 +545,8 @@ class RecordDialog(QDialog):
         tail = ("この画質にかかる時間を見積もり中です..." if est is None
                 else f"この画質だと目安で 約{_estimate_text(est)} ほどかかります。")
         self.lbl_status.setText(
-            "画面を録画するのではなく1コマずつ描き直すので、書き出し中に\n"
-            "アプリを操作しても出来上がりには影響しません。\n"
+            "書き出しは裏で進みます。そのあいだもエディタで編集・再生できます\n"
+            "（出来上がるのは書き出しを始めた時点の譜面です）。\n"
             + tail)
 
     def _browse(self):
@@ -402,7 +556,20 @@ class RecordDialog(QDialog):
             self.ed_path.setText(path)
 
     # ------------------------------------------------------------------
+    def is_busy(self):
+        """書き出し(下ごしらえ・描画・仕上げのどれか)が進行中か。
+
+        二重に始めさせないため、そしてアプリを閉じてよいかの判断のために、
+        外(main_window)からも見る。"""
+        return (self._prep_task is not None or self._rec is not None
+                or self._fin_task is not None)
+
     def _start(self):
+        if self.is_busy():
+            # 二重起動よけの最後の砦。ふつうはボタンが「中止」に化けているので
+            # ここへは来ないが、状態の取りこぼしで2本走ると同じウィジェットを
+            # 取り合って絵が混ざる。
+            return
         out = self.ed_path.text().strip()
         if not out:
             QMessageBox.warning(self, "動画を書き出す", "保存先を指定してください。")
@@ -450,44 +617,101 @@ class RecordDialog(QDialog):
             self._widget = recorder.make_offline_widget(
                 self._preview, self._offset, cfg.get("se_text_enabled", True))
 
-        # 曲のデコードと音声合成はここで済ませる(3分の曲でも 2秒ほど)。
-        # そのあいだ画面が固まるので、先に「準備中」を出しておく。
+        self._cancel = False
         self._set_running(True)
         self.lbl_status.setText("音声を用意しています...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        QApplication.processEvents()
         # 最初の1コマだけはフォントの読み込みや各種キャッシュの用意で 100ms 前後
-        # かかる。録画が始まってからだとそこだけ引っかかるので、「準備中」を
-        # 出しているこの間に1枚捨て描きして済ませておく。ふつうは見積もりの
-        # 捨て描きで済んでいるが、見積もりが終わる前に押されることもある。
+        # かかる。録画が始まってからだとそこだけ引っかかるので、下ごしらえに
+        # 入る前に1枚捨て描きして済ませておく。ふつうは見積もりの捨て描きで
+        # 済んでいるが、見積もりが終わる前に押されることもある。
         from PySide6.QtGui import QImage as _QImage
         self._widget.render(_QImage(self._widget.width(), self._widget.height(),
                                     _QImage.Format_RGB32))
         # 選んだ小節を音源時刻に直して渡す。曲全体なら (0.0, None) が返るので、
         # end_sec=None ＝ 音源そのものの長さ、という従来どおりの書き出しになる。
         start_sec, end_sec = self._range_secs()
+        # 曲のデコードと音声合成(3分の曲で2秒ほど)は裏へ回す。ここは Qt に
+        # 触らないので別スレッドで走らせて構わない。
+        # **渡す値はここで全部ただの数値・文字列にしておく**。向こうのスレッドで
+        # チェックボックスやスピンボックスを読みに行ってはいけない(ウィジェットは
+        # GUI スレッド専用)し、待っているあいだに触られた値が混ざるのも困る。
+        #
+        # 音量は**再生と同じ設定**を渡す。既定値も settings.py / main_window の
+        # 復元と同じ数字にしておくこと(曲 preview_volume=0.8、打音
+        # sfx_volume=0.9)。ここだけ違う数字を書いていると、スライダーを一度も
+        # 触っていない人の動画が、聞いているのと違う音量で出来上がる。
+        # master_volume は掛けない — あれは手元で聞くときの音量つまみで、
+        # 出来上がるファイルの中身とは関係がないため。
+        prep_kwargs = dict(
+            preview_data=self._preview, offset=self._offset,
+            song_path=self._song, start_sec=start_sec, end_sec=end_sec,
+            fps=q["fps"], don_path=rec_don, ka_path=rec_ka,
+            song_volume=float(cfg.get("preview_volume", 0.8)),
+            sfx_volume=float(cfg.get("sfx_volume", 0.9)),
+            hit_sounds=self.chk_hit.isChecked())
+        self._pending = (out, q)
+        self._t0 = time.perf_counter()
+        # 下ごしらえは途中で止められるようにしておく。止めないと、書き出しを
+        # 始めた直後に閉じた人がデコードの終わりまで待たされる(_Task.cancel /
+        # recorder.CancelToken)。
+        token = recorder.CancelToken()
+        self._start_task("_prep_task",
+                         lambda: recorder.prepare_recording(cancel=token,
+                                                            **prep_kwargs),
+                         self._on_prepared, self._on_prep_failed,
+                         cancel=token.cancel,
+                         discard=lambda plan: plan.discard(),
+                         on_cancelled=self._on_prep_cancelled)
+
+    def _start_task(self, attr, fn, on_ok, on_ng, cancel=None, discard=None,
+                    on_cancelled=None):
+        """裏の仕事を1つ始めて、self.<attr> に持たせる(_Task の説明を参照)。"""
+        task = _Task(fn, self, cancel=cancel, discard=discard)
+        task.ok.connect(on_ok)
+        task.ng.connect(on_ng)
+        if on_cancelled is not None:
+            task.cancelled.connect(on_cancelled)
+        setattr(self, attr, task)
+        task.start()
+        return task
+
+    def _on_prep_cancelled(self):
+        """下ごしらえの最中に中止された。一時ファイルは _Task が捨てている。"""
+        self._prep_task = None
+        self._pending = None
+        self._finish()
+        self.lbl_status.setText("中止しました。")
+
+    def _on_prep_failed(self, msg):
+        self._prep_task = None
+        self._pending = None
+        self._finish()
+        self.lbl_status.setText("失敗しました。")
+        QMessageBox.warning(self, "動画を書き出す", f"書き出しを開始できませんでした:\n{msg}")
+
+    def _on_prepared(self, plan):
+        """音声が出来たので、ここから先(描画)を GUI スレッドで始める。"""
+        self._prep_task = None
+        pending, self._pending = self._pending, None
+        if self._cancel or self._widget is None or pending is None:
+            # 用意しているあいだに中止された。作った一時音声だけ捨てる。
+            plan.discard()
+            self._finish()
+            self.lbl_status.setText("中止しました。")
+            return
+        out, q = pending
         try:
             self._rec = recorder.VideoRecording(
-                self._widget, out,
-                preview_data=self._preview, offset=self._offset, song_path=self._song,
-                start_sec=start_sec, end_sec=end_sec,
-                fps=q["fps"], canvas=q["canvas"],
-                supersample=q["supersample"], preset=q["preset"],
-                don_path=rec_don,
-                ka_path=rec_ka,
-                sfx_volume=float(cfg.get("sfx_volume", 0.7)),
-                hit_sounds=self.chk_hit.isChecked(),
-            )
+                self._widget, out, plan=plan, canvas=q["canvas"],
+                supersample=q["supersample"], preset=q["preset"])
         except Exception as e:  # noqa: BLE001
-            import traceback
             traceback.print_exc()
+            plan.discard()
             self._finish()
             QMessageBox.warning(self, "動画を書き出す", f"書き出しを開始できませんでした:\n{e}")
             return
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        self._cancel = False
+        # 見積もりの目安ではなく実測で残り時間を出したいので、時計はここで
+        # 引き直す(下ごしらえのぶんを1コマ目の所要に混ぜない)。
         self._t0 = time.perf_counter()
         self._timer.start()
 
@@ -498,9 +722,14 @@ class RecordDialog(QDialog):
             return
         if self._cancel:
             self._timer.stop()
-            self._rec.abort()
-            self._finish()
-            self.lbl_status.setText("中止しました。")
+            rec, self._rec = self._rec, None
+            self.lbl_status.setText("中止しています...")
+            # ウィジェットを戻すのは GUI スレッドで。ffmpeg の後始末(待ちが
+            # ある)だけ裏へ回す。終わるまでボタンは戻さない — 2本目が
+            # 前の ffmpeg の店じまい中に走り出すのを防ぐため。
+            rec.detach_widget()
+            self._start_task("_fin_task", rec.abort, self._on_aborted,
+                             self._on_aborted)
             return
 
         t0 = time.perf_counter()
@@ -517,17 +746,32 @@ class RecordDialog(QDialog):
         self._timer.stop()
         rec, self._rec = self._rec, None
         # 最後に ffmpeg が動画を閉じ切るのを待つ数百 ms は、こちらからは
-        # 縮められない。無言で固まったように見えないよう先に表示を出す。
+        # 縮められない。裏へ回してしまえば待っている間も窓は動く。
         self.bar.setValue(100)
         self.lbl_status.setText("仕上げています...")
-        QApplication.processEvents()
-        try:
-            path = rec.finish()
-        except Exception as e:  # noqa: BLE001
-            self._finish()
-            self.lbl_status.setText("失敗しました。")
-            QMessageBox.warning(self, "動画を書き出す", f"書き出しに失敗しました:\n{e}")
-            return
+        # 仕上げのあいだは「中止」を押させない。押しても止める相手(_rec も
+        # _timer も)が既に居らず、_cancel が立つだけで ffmpeg はそのまま
+        # 書き終える。「中止しています...」と出したあとに成功のダイアログが
+        # 出る、という食い違いになる。
+        self.btn_start.setEnabled(False)
+        rec.detach_widget()               # ウィジェットに触るのはここだけ(GUI)
+        self._start_task("_fin_task", rec.finish, self._on_finished,
+                         self._on_finish_failed)
+
+    def _on_aborted(self, _result=None):
+        """中止の後始末が済んだ。ここで初めてボタンを戻す。"""
+        self._fin_task = None
+        self._finish()
+        self.lbl_status.setText("中止しました。")
+
+    def _on_finish_failed(self, msg):
+        self._fin_task = None
+        self._finish()
+        self.lbl_status.setText("失敗しました。")
+        QMessageBox.warning(self, "動画を書き出す", f"書き出しに失敗しました:\n{msg}")
+
+    def _on_finished(self, path):
+        self._fin_task = None
         el = time.perf_counter() - self._t0
         self._finish()
         self.lbl_status.setText(f"書き出しました({el:.0f} 秒): {path}")
@@ -539,7 +783,10 @@ class RecordDialog(QDialog):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
 
     def _set_running(self, running):
-        for wdg in (self.chk_hit, self.ed_path, self.sp_start, self.sp_end):
+        # 画質も止めておく。始めた時点の値で走っているので、途中で変えられると
+        # 表示と中身が食い違って見える。
+        for wdg in (self.chk_hit, self.ed_path, self.sp_start, self.sp_end,
+                    self.cb_quality):
             if wdg is not None:            # 小節が無いときは範囲の入力欄も無い
                 wdg.setEnabled(not running)
         self.bar.setVisible(running)
@@ -558,6 +805,10 @@ class RecordDialog(QDialog):
         self._cancel = True
         self.btn_start.setEnabled(False)
         self.lbl_status.setText("中止しています...")
+        # 下ごしらえ(曲のデコード・音声合成)の最中なら、その場で降ろす。
+        # 描画中なら次の _tick が _cancel に気づいて畳む。
+        if self._prep_task is not None:
+            self._prep_task.cancel()
 
     def _on_progress(self, done, total):
         if total > 0:
@@ -571,19 +822,87 @@ class RecordDialog(QDialog):
     def _finish(self):
         self._timer.stop()
         self._rec = None
+        self._prep_task = None
+        self._fin_task = None
+        self._pending = None
         # 画面外ウィジェットはダイアログを閉じるまで持ったままにする。続けて
         # 別の画質でもう一度書き出すことがあり、そのたびにスキンを読み直すのは
         # 無駄(閉じるときに closeEvent で手放す)。
         self.btn_start.setEnabled(True)
         self._set_running(False)
+        # 見積もりを取りこぼしていたら測り直す(_schedule_measure)。
+        self._schedule_measure()
+
+    def _schedule_measure(self):
+        """まだ数字の出ていない画質があれば、見積もりを測り直す。
+
+        _begin_measure は「書き出し中なら測らない」で降りる(捨て描きと本番が
+        同じウィジェットを取り合うため)。ダイアログを開いた直後に「書き出す」を
+        押されるとそこへ入るので、そのままだと画質の欄が「見積もり中...」の
+        まま二度と変わらない。書き出しが終わったこの時点で仕掛け直す。
+        閉じたあとに測り始めても意味がない(手放したウィジェットを作り直して
+        しまう)ので、見えているときだけ。"""
+        if self.is_busy() or not self.isVisible():
+            return
+        if all(self._estimate_for(i) is not None
+               for i in range(len(QUALITY_PRESETS))):
+            return
+        QTimer.singleShot(0, self._begin_measure)
+
+    def abort_now(self):
+        """書き出しを中止し、裏のスレッドまで畳んでから返る(同期)。
+
+        アプリを閉じるときに main_window から呼ぶ。閉じると決まったあとなら
+        数百 ms 待たされても構わないので、ここは裏へ回さず待ち切る —
+        走ったままのスレッドを残すと、プロセスが終わらなかったり
+        "QThread: Destroyed while thread is still running" で落ちたりする。"""
+        self._cancel = True
+        self._cancel_measure()
+        self._timer.stop()
+        rec, self._rec = self._rec, None
+        if rec is not None:
+            rec.detach_widget()        # まだ GUI スレッドにいるうちに戻す
+            rec.abort()                # 書きかけの mp4 は消える
+        # 下ごしらえは先に**止めてから**待つ。ただ待つだけだと、曲のデコードが
+        # 終わるまで(長い曲なら数秒)GUI スレッドごと止まってしまう。
+        # cancel() が中の ffmpeg を殺すので、待ちはすぐ明ける。
+        prep, self._prep_task = self._prep_task, None
+        if prep is not None:
+            prep.cancel()
+            _join_task(prep)
+            # 止める寸前に仕上がっていたら、その一時ファイルを捨てる。窓を
+            # 閉じたあとでは ok シグナルが配られず、受け側が捨てられない。
+            prep.discard_result()
+        _join_task(self._fin_task)
+        self._fin_task = None
+        self._pending = None
+
+    def _confirm_abort(self):
+        """書き出し中に閉じられようとしたとき、本当に中止してよいか聞く。
+
+        黙って畳んでいた頃と違い、いまは裏で走っていて他の作業ができるので、
+        窓を閉じるつもりでうっかり ESC を押した、が起こりやすい。長い曲だと
+        十数分の書き出しが一瞬で消えるので、ひと言確認する。"""
+        return QMessageBox.question(
+            self, "動画を書き出す",
+            "書き出しの途中です。中止して閉じますか？\n"
+            "（書きかけの動画は残りません）") == QMessageBox.Yes
+
+    def reject(self):
+        # QDialog.reject() は closeEvent を通らない。ESC で窓だけ消えて裏の
+        # 書き出しが走り続ける、ということが無いようここでも畳んでおく。
+        if self.is_busy() and not self._confirm_abort():
+            return
+        self.abort_now()
+        self._widget = None
+        super().reject()
 
     def closeEvent(self, event):
-        # 書き出し中に閉じられたら、その場で畳んで書きかけを消す。すべて
-        # GUI スレッド上なので、待たされることも取り残されることもない。
-        self._cancel_measure()
-        if self._rec is not None:
-            self._timer.stop()
-            self._rec.abort()
-            self._rec = None
+        # 書き出し中に閉じられたら、その場で畳んで書きかけを消す。裏のスレッドも
+        # ここで待ち切るので、閉じたあとに何かが走り続けることはない。
+        if self.is_busy() and not self._confirm_abort():
+            event.ignore()
+            return
+        self.abort_now()
         self._widget = None            # 画面外ウィジェットを解放
         super().closeEvent(event)

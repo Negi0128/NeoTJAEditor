@@ -82,9 +82,16 @@ def _arrow_image_url(color_hex: str, up: bool) -> str:
     三角に上書きする。data URI は QSS の url() で確実にデコードされないため、
     実ファイル参照にしている。PNG はコア機能で描けるので SVG プラグイン非依存。"""
     key = color_hex.lstrip("#").lower()
-    name = f"neotja_arrow_{'up' if up else 'down'}_{key}.png"
+    # ファイル名に版番号(v1)を入れてある。下の描き方を変えたら上げること —
+    # 名前が同じままだと、前の版の絵が残っている環境で作り直されない。
+    name = f"neotja_arrow_v1_{'up' if up else 'down'}_{key}.png"
     path = os.path.join(tempfile.gettempdir(), "neotja_theme", name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # 同じ色・同じ版の絵が既にあるなら描き直さない。中身は色と下の式だけで
+    # 決まるので、描き直しても1ビットも変わらない。起動のたびに 4 枚
+    # (build_qss が 2 回 × 上下)描いて保存しており、実測 25ms かかっていた。
+    if os.path.exists(path):
+        return path.replace("\\", "/")
     # 2x スケールで描いて縮小し、小さな三角でもエッジを滑らかに。
     scale = 2
     w, h = 9 * scale, 6 * scale

@@ -18,6 +18,40 @@ NOTE_COLOR = {"1": "don", "2": "ka", "3": "don", "4": "ka"}
 NOTE_BIG = {"3", "4"}
 GOGO_TINT = QColor(255, 90, 90, 55)
 DEFAULT_BPM = 120.0
+
+#: 再生速度の段階。以前は 25〜200% を 1% 刻みで選べたが、等倍より速い再生は
+#: 打音のスケジュールもレーンの見かけも実用にならず、細かい刻みも使い道が
+#: なかったので、譜面確認に使う 4 段階だけに絞った。スライダー・キー操作・
+#: 設定の読み戻しはすべてこの並び(昇順であることが前提)を単一の出所とする。
+SPEED_STEPS = (0.25, 0.50, 0.75, 1.00)
+
+
+def snap_speed(rate: float) -> float:
+    """任意の倍率を SPEED_STEPS のいずれかへ丸める。
+
+    段階の中間(例: 0.875)はより遅い側へ落とす「安全側」の丸め。速すぎて譜面が
+    見えないより、遅すぎるほうが確認作業の邪魔にならないため。範囲外の値は
+    両端へクランプされるので、古い設定に残った 1.50 や 2.00 は 1.00 になる。"""
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        return 1.00
+    if rate != rate:  # NaN は比較が全部 False になるので先に弾く
+        return 1.00
+    best = SPEED_STEPS[0]
+    for step in SPEED_STEPS:
+        # 「その段階以下」を満たす最大の段階を採る = 中間値は遅い側へ。
+        # 浮動小数の誤差(0.75 が 0.7500000000000001 になる等)で 1 段階
+        # 落ちないよう、ごく小さな余裕を持たせて比較する。
+        if step <= rate + 1e-9:
+            best = step
+    return best
+
+
+def snap_speed_index(rate: float) -> int:
+    """snap_speed() と同じ丸めをしたうえで、SPEED_STEPS 上の位置を返す。
+    スライダー(値=段階の番号)やキー操作の 1 段移動はこちらを使う。"""
+    return SPEED_STEPS.index(snap_speed(rate))
 # 判定文字「良」の色。本家太鼓の GOOD 判定と同じ金色。テーマに依らず固定
 # (レーンは常にダーク基調のため)。このプレビューは全ノーツを自動で・正確な
 # 時刻に叩く静的可視化なので、判定は常に「良」になる(可/不可は出ない)。
@@ -532,26 +566,20 @@ class ChartPreviewWidget(QWidget):
         self._se_scaled_cache = {}
         # 直近に渡されたプレビューデータ(set_lane_geometry の組み直し用)。
         self._preview_data_cache = None
-        # レーンの地と打音表記帯の素材(あれば自前の塗りより優先して使う)。
-        self._skin_lane_main = self._load_skin_pixmap("Lane_Main.png")
-        self._skin_lane_gogo = self._load_skin_pixmap("Lane_GoGo.png")
-        self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
-        # 打音表記の文字も素材で描く(自前のフォント描きは細くて本家と違う)。
-        self._skin_se = self._load_se_sprites()
-        # 叩いた瞬間の火花。
-        self._skin_explosion = self._load_explosion_sprites()
-        # 判定円。Notes.png の左上1コマ目がそれ(音符ではない)。
-        self._skin_judge_ring = self._load_judge_ring()
-        # 風船が膨らんで割れるまで (Breaking_0..5.png)。
-        self._skin_balloon_seq = [self._load_skin_pixmap('Breaking_%d.png' % i) for i in range(6)]
-        if any(b is None for b in self._skin_balloon_seq):
-            self._skin_balloon_seq = None
-        # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png 360x370 が7コマ)。
-        self._skin_gogo_fire = self._load_sheet('GoGoFire.png', 7, 360, 370)
-        # 切った矩形の原点を覚えておく。中身で切ると絵の重心が変わるので、
-        # 置くときは「切る前のセル中心」を基準に戻す(そうしないと判定円から
-        # ずれる)。大きさだけ中身の幅で決める。
-        self._skin_gogo_fire, self._gogo_fire_org = self._crop_frames(self._skin_gogo_fire)
+        # 素材(レーンの地・打音表記・火花・判定円・風船・炎・音符)は
+        # **ここでは読まない**。読むのは _ensure_skin()。理由はそちらの説明を
+        # 参照。ここでは「素材が無かったとき」と同じ値を入れておく — 万一
+        # 読む前に描画へ来ても、自前の絵で描かれるだけで例外にはならない。
+        self._skin_ready = False
+        self._skin_lane_main = None
+        self._skin_lane_gogo = None
+        self._skin_lane_sub = None
+        self._skin_se = None
+        self._skin_explosion = None
+        self._skin_judge_ring = None
+        self._skin_balloon_seq = None
+        self._skin_gogo_fire = None
+        self._gogo_fire_org = (0, 0)
         # レーン内のコンボパネルを描かない(本家レイアウトでは左パネルへ移す)。
         self._hide_lane_combo = False
         # True にすると、叩いた音符の飛び去りをレーン側で描かない
@@ -574,17 +602,13 @@ class ChartPreviewWidget(QWidget):
         self._apply_timer_interval()
         self._timer.timeout.connect(self._on_tick)
 
-        self._sprites_small, self._sprites_big = self._load_sprites()
-        # Optional 良 judge sprite (skin/Judge.png). None -> drawn text fallback.
-        self._skin_judge_good = self._load_skin_judge()
-        # Optional balloon sprite (for 風船/くす玉). None -> procedural circle.
-        self._skin_balloon = self._load_skin_balloon()
-        # Optional 黄色連打 sprite. None -> procedural bar.
-        self._skin_roll = self._load_skin_roll()
-
-        # 風船/くす玉の破裂音 (skin/balloon.wav)。打数を叩ききって割れた瞬間に
-        # 1回だけ鳴らす。無ければ無音(演出だけ)。
-        self._pop_sound = self._load_pop_sound()
+        # 音符・良・風船・連打・破裂音も _ensure_skin() へ回す。ここは
+        # 「素材が無かったとき」と同じ値(音符だけは空の辞書 = 1枚も無い)。
+        self._sprites_small, self._sprites_big = {}, {}
+        self._skin_judge_good = None
+        self._skin_balloon = None
+        self._skin_roll = None
+        self._pop_sound = None
         # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
         # これを跨いだ瞬間に _pop_sound を鳴らす。set_preview_data で再構築。
         self._pop_times = []
@@ -600,6 +624,59 @@ class ChartPreviewWidget(QWidget):
             self._show_fps = True
         self._fps_ema = 0.0
         self._fps_last_wall = None
+
+    def _ensure_skin(self):
+        """レーンが使う素材を読む。2回目以降は何もしない。
+
+        **なぜ __init__ から追い出したのか**
+        ここで読む絵は 20枚あまりで、キャッシュ(%LOCALAPPDATA%)からの
+        読み込みと PNG のデコードに実測 210ms かかっていた。ところがこの
+        ウィジェットは起動直後には**1画素も見えていない** — GameScreenWidget
+        の中に入り、その画面はさらに別窓(GamePreviewWindow)の中で、その窓は
+        利用者が開くまで隠れているため。つまり起動時に払う必要が無い。
+
+        呼ぶのは paintEvent の頭(= 実際に描く直前)と、メインウィンドウが
+        最初に描き終わったあとの手すき(MainWindow.paintEvent 参照)。前者が
+        あるので「読む前に描かれる」ことは起こらず、後者があるので利用者が
+        再生窓を開いたときには既に読み終わっている。どちらから来ても
+        同じ絵になるので、見た目は以前と1画素も変わらない。
+
+        録画(recorder.py)は窓を出さずに render() するが、render() も
+        paintEvent を通るので同じ経路で揃う。"""
+        if self._skin_ready:
+            return
+        self._skin_ready = True
+        # レーンの地と打音表記帯の素材(あれば自前の塗りより優先して使う)。
+        self._skin_lane_main = self._load_skin_pixmap("Lane_Main.png")
+        self._skin_lane_gogo = self._load_skin_pixmap("Lane_GoGo.png")
+        self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
+        # 打音表記の文字も素材で描く(自前のフォント描きは細くて本家と違う)。
+        self._skin_se = self._load_se_sprites()
+        # 叩いた瞬間の火花。
+        self._skin_explosion = self._load_explosion_sprites()
+        # 判定円。Notes.png の左上1コマ目がそれ(音符ではない)。
+        self._skin_judge_ring = self._load_judge_ring()
+        # 風船が膨らんで割れるまで (Breaking_0..5.png)。
+        self._skin_balloon_seq = [self._load_skin_pixmap('Breaking_%d.png' % i) for i in range(6)]
+        if any(b is None for b in self._skin_balloon_seq):
+            self._skin_balloon_seq = None
+        # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png 360x370 が7コマ)。
+        self._skin_gogo_fire = self._load_sheet('GoGoFire.png', 7, 360, 370)
+        # 切った矩形の原点を覚えておく。中身で切ると絵の重心が変わるので、
+        # 置くときは「切る前のセル中心」を基準に戻す(そうしないと判定円から
+        # ずれる)。大きさだけ中身の幅で決める。
+        self._skin_gogo_fire, self._gogo_fire_org = self._crop_frames(self._skin_gogo_fire)
+
+        self._sprites_small, self._sprites_big = self._load_sprites()
+        # Optional 良 judge sprite (skin/Judge.png). None -> drawn text fallback.
+        self._skin_judge_good = self._load_skin_judge()
+        # Optional balloon sprite (for 風船/くす玉). None -> procedural circle.
+        self._skin_balloon = self._load_skin_balloon()
+        # Optional 黄色連打 sprite. None -> procedural bar.
+        self._skin_roll = self._load_skin_roll()
+        # 風船/くす玉の破裂音 (skin/balloon.wav)。打数を叩ききって割れた瞬間に
+        # 1回だけ鳴らす。無ければ無音(演出だけ)。
+        self._pop_sound = self._load_pop_sound()
 
     def _apply_timer_interval(self):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
@@ -1492,33 +1569,26 @@ class ChartPreviewWidget(QWidget):
         cx = cy = d / 2.0
         big_r = r * ss
 
+        # 素材(Notes.png)が無いときの自前の絵。**譜面画像生成と同じ、
+        # べた塗り＋フチだけの素直な丸**にしてある(要望)。以前は放射
+        # グラデーションと光沢を足して本家の立体感に寄せていたが、
+        # 譜面画像(tja_image_export の `draw.ellipse(fill, outline, width=2)`)
+        # と見た目が揃わず、拡大すると自前の絵だけ浮いていた。
         base = self._color(color_key)
-        highlight = self._blend(base, QColor(255, 255, 255), 0.55)
-        rim = base.darker(170)
         ring = QColor("#fbf3e0")       # 本家のクリーム色のフチ
         outline = QColor(54, 32, 30)
 
-        # thin dark outline, then the cream ring inside it
+        # 細い暗いフチ → クリーム色のフチ → べた塗りの本体、の順で重ねる。
+        # 暗いフチは譜面画像には無いが、こちらはレーンの地が明暗さまざまで、
+        # 無いと薄い地の上で輪郭が消えるため残す。
         p.setBrush(outline)
         p.drawEllipse(QRectF(cx - big_r, cy - big_r, 2 * big_r, 2 * big_r))
         p.setBrush(ring)
         p.drawEllipse(QRectF(cx - big_r + ss, cy - big_r + ss,
                              2 * (big_r - ss), 2 * (big_r - ss)))
-
-        # colored body: radial gradient lit from the upper-left
         inner_r = big_r - max(2.0 * ss, big_r * 0.16)
-        fx, fy = cx - inner_r * 0.33, cy - inner_r * 0.33
-        grad = QRadialGradient(fx, fy, inner_r * 1.5, fx, fy)
-        grad.setColorAt(0.0, highlight)
-        grad.setColorAt(0.55, base)
-        grad.setColorAt(1.0, rim)
-        p.setBrush(QBrush(grad))
+        p.setBrush(base)
         p.drawEllipse(QRectF(cx - inner_r, cy - inner_r, 2 * inner_r, 2 * inner_r))
-
-        # soft specular gloss near the top
-        p.setBrush(QColor(255, 255, 255, 95))
-        gw, gh = inner_r * 0.80, inner_r * 0.48
-        p.drawEllipse(QRectF(cx - gw / 2, cy - inner_r * 0.60, gw, gh))
         p.end()
 
         return QPixmap.fromImage(
@@ -1722,12 +1792,13 @@ class ChartPreviewWidget(QWidget):
         if key == Qt.Key_End:
             self.seek_to_last_measure()
             return
-        # 再生速度(z/↓ で遅く、c/↑ で速く)。
+        # 再生速度(z/↓ で 1 段階遅く、c/↑ で 1 段階速く)。段階は
+        # SPEED_STEPS の 4 つだけで、両端では止まる。
         if key in (Qt.Key_Z, Qt.Key_Down):
-            self._adjust_speed(-0.05)
+            self._step_speed(-1)
             return
         if key in (Qt.Key_C, Qt.Key_Up):
-            self._adjust_speed(0.05)
+            self._step_speed(+1)
             return
         super().keyPressEvent(event)
 
@@ -1754,30 +1825,36 @@ class ChartPreviewWidget(QWidget):
             self.seek_relative_measure(direction)
         self._feedback("ka")
 
-    #: 再生速度の下限/上限。
-    SPEED_MIN, SPEED_MAX = 0.25, 2.0
+    #: 再生速度の下限/上限。SPEED_STEPS の両端と必ず一致させること
+    #: (外から範囲だけを見たい箇所のための別名)。
+    SPEED_MIN, SPEED_MAX = SPEED_STEPS[0], SPEED_STEPS[-1]
 
     def _apply_speed(self, rate: float) -> float:
-        """目標倍率(SPEED_MIN〜SPEED_MAX にクランプ・小数2桁に丸め)を適用して、実際に
-        適用された値を返す。スライダー配線済みなら set_speed_cb 経由(→
-        スライダー値変更→valueChanged で audio/chart_preview 双方に同期反映)、
-        未配線(単体使用)なら自分の _playback_rate を直接更新するフォール
-        バック。"""
-        rate = round(max(self.SPEED_MIN, min(self.SPEED_MAX, rate)), 2)
+        """目標倍率を SPEED_STEPS の段階へ丸めて適用し、実際に適用された値を返す。
+        スライダー配線済みなら set_speed_cb 経由(→スライダー値変更→
+        valueChanged で audio/chart_preview 双方に同期反映)、未配線(単体使用)
+        なら自分の _playback_rate を直接更新するフォールバック。"""
+        rate = snap_speed(rate)
         if self._set_speed_cb:
             self._set_speed_cb(rate)
         else:
             self.set_playback_rate(rate)
         return rate
 
-    def _adjust_speed(self, delta: float, toast: bool = False):
-        rate = self._apply_speed(self._playback_rate + delta)
+    def _step_speed(self, direction: int, toast: bool = False):
+        """再生速度を 1 段階ぶん動かす。段階が 4 つしかないので、以前のように
+        0.05 ずつ足すのではなく段階の番号で動かす。両端では動かず、そこで止まる
+        (端でもトーストは出す。押しても変わらない理由が分かるように)。"""
+        idx = snap_speed_index(self._playback_rate) + direction
+        idx = max(0, min(len(SPEED_STEPS) - 1, idx))
+        rate = self._apply_speed(SPEED_STEPS[idx])
         if toast:
             self.show_toast(f"再生速度 : ×{rate:.2f}")
 
     def set_playback_rate(self, rate: float):
-        """再生速度倍率(SPEED_MIN〜SPEED_MAX)を設定。再生中の時間外挿に使う。"""
-        self._playback_rate = max(self.SPEED_MIN, min(self.SPEED_MAX, rate))
+        """再生速度倍率(SPEED_STEPS のいずれか)を設定。再生中の時間外挿に使う。
+        段階外の値が来ても丸めて受け入れる。"""
+        self._playback_rate = snap_speed(rate)
 
     def set_loading(self, loading: bool):
         """音源の読み込み中(=再生できない)かどうか。レーンに幕を出す。"""
@@ -2692,6 +2769,9 @@ class ChartPreviewWidget(QWidget):
             painter.drawEllipse(int(x - r), int(cy - r), r * 2, r * 2)
 
     def paintEvent(self, event):
+        # 素材は起動時ではなくここで揃える(_ensure_skin の説明を参照)。
+        # 2回目以降は真偽値を1つ見るだけなので、コマごとの負担にはならない。
+        self._ensure_skin()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         # Sample note/roll/balloon sprites at sub-pixel offsets so a note gliding
