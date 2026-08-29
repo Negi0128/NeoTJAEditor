@@ -108,97 +108,32 @@ def is_valid_system_dir(path) -> bool:
     return True
 
 
-def _auto_search_roots():
-    """自動探索の出発点。デスクトップ(OneDrive 配下も含む)とダウンロード。
-    TNDE は「解凍してデスクトップに置いてある」ことが圧倒的に多い。"""
-    roots = []
-    home = Path.home()
-    for rel in ("Desktop", "Downloads", "OneDrive/Desktop", "OneDrive/デスクトップ"):
-        p = home / rel
-        if p.is_dir():
-            roots.append(p)
-    return roots
-
-
-#: 掘り進む先を絞り込むための名前の断片(小文字で比較)。TNDE の配布物は
-#: 「太鼓さん次郎/TaikoNijiiroDondaEX Ver4.1/…」のように同じ名前が何段も
-#: 入れ子になっていることがあるので、深さは必要なぶんだけ取ってある。
-_NAME_HINTS = ("太鼓", "taiko", "donda", "tnde", "nijiiro")
-#: デスクトップ配下を無制限に掘ると起動が待たされるので、深さと総数で頭打ちに
-#: する。実測でこの範囲なら数十ミリ秒で終わる。
-_MAX_DEPTH = 5
-_MAX_VISITS = 400
-
-#: 自動探索に使ってよい時間の上限(秒)。訪問数だけでは頭打ちにならない —
-#: 切断済みの UNC やオンラインのみの OneDrive フォルダは、**1回の is_dir() が
-#: 数秒ブロックする**ことがあるので、400件で数十秒かかりうる。この間はまだ
-#: ウィンドウが1つも出ていないので、利用者からは「起動しない」ようにしか
-#: 見えない。見つからないなら案内を出すほうがましなので、時間で打ち切る。
-_SEARCH_BUDGET_SEC = 2.0
-
-
-def _auto_search(searched):
-    """よくある置き場から System を探す。見つかれば Path、無ければ None。
-
-    幅優先で潜り、深さ _MAX_DEPTH・訪問 _MAX_VISITS・時間 _SEARCH_BUDGET_SEC で
-    打ち切る。名前に太鼓関係の手がかりが無いフォルダへは掘り進まない —
-    デスクトップに無関係な巨大フォルダがあると、それだけで起動が待たされる
-    ため。以前は `depth == 0` の条件が付いていて1段目にしか効いておらず、
-    手がかりのあるフォルダを1つ通り抜けたあとは無関係な木を無制限に
-    掘っていた(コメントの意図とずれていた)。
-
-    ただし「一度でも手がかりに当たった木の中」は素直に掘る。TNDE の配布物は
-    `太鼓さん次郎/TaikoNijiiroDondaEX Ver4.1/…/System` のように、途中に
-    `data` `bin` のような手がかりの無い名前が挟まりうるため。木の中に入って
-    しまえば規模はたかが知れているので、深さと訪問数の頭打ちで足りる。
-
-    列挙に os.scandir を使うのは、Windows では列挙のついでにフォルダかどうかが
-    返ってきて、子1件ごとの追加の問い合わせが要らないため(Path.iterdir() +
-    is_dir() は1件ずつ聞き直すので、遅いパスではそのぶん待たされる)。"""
-    started = time.monotonic()
-    visits = 0
-    # 3つ目は「手がかりのある木の中にもう入っているか」。
-    queue = [(r, 0, False) for r in _auto_search_roots()]
-    while queue and visits < _MAX_VISITS:
-        if time.monotonic() - started > _SEARCH_BUDGET_SEC:
-            _log.warning("System の自動探索が %.1f 秒を超えたので打ち切る",
-                         _SEARCH_BUDGET_SEC)
-            break
-        cur, depth, inside = queue.pop(0)
-        visits += 1
-        cand = cur / "System"
-        if cand.is_dir():
-            searched.append(str(cand))
-            if is_valid_system_dir(cand):
-                return cand
-        if depth >= _MAX_DEPTH:
-            continue
-        try:
-            with os.scandir(str(cur)) as it:
-                children = [(e.name, e.path) for e in it
-                            if e.is_dir(follow_symlinks=False)]
-        except OSError:
-            continue
-        for name, path in children:
-            hit = any(h in name.lower() for h in _NAME_HINTS)
-            if not hit and not inside:
-                continue
-            queue.append((Path(path), depth + 1, inside or hit))
-    return None
-
-
 def find_system_dir(cfg=None):
     """System フォルダを探す。
 
     戻り値は (見つかった Path または None, 探した場所, 使えなかった指定 or None)。
 
-    順番は「利用者がはっきり指定したもの → 案内している置き場 → 自動探索」。
-    探した場所の一覧は、見つからなかったときのダイアログでそのまま並べる
-    (「どこを見たのか」が分からないと利用者は直しようがない)。
+    探すのは「利用者がはっきり指定したもの」と「案内している置き場(exe の
+    隣)」の2つだけ。探した場所の一覧は、見つからなかったときのダイアログで
+    そのまま並べる(「どこを見たのか」が分からないと利用者は直しようがない)。
 
-    3つ目は「環境設定で指定されているのに使えなかったパス」。以前はこれを
-    黙って読み飛ばして次の候補へ進んでいたので、外付けや NAS が繋がっていない
-    起動で、警告も無くデスクトップの別の TNDE の素材に差し替わっていた
+    **なぜデスクトップ等の自動探索をやめたのか**
+    以前はここに3段目として、デスクトップ・ダウンロード・OneDrive 配下を
+    幅優先で掘って System を探す処理があった。やめた理由は3つ:
+      * 起動のたびに、まだウィンドウが1つも出ていない状態でディスクを
+        なめることになる。オンラインのみの OneDrive や切断済みの UNC が
+        混ざると 1回の is_dir() が数秒ブロックし、利用者からは
+        「起動しない」ようにしか見えなかった(打ち切りの仕掛けを何段も
+        足してもこの気持ち悪さは消えない)。
+      * 拾ってくるのが**利用者の意図しない System** でありうる。TNDE を
+        複数版デスクトップに置いている人は、どれが使われたのか分からない。
+      * 見つからなくても起動できるようになった(呼び出し側が内蔵スキンへ
+        落とす)ので、無理に探し当てる必要そのものが無くなった。
+    置き場が違うなら、案内のダイアログか環境設定から選んでもらう。
+
+    3つ目の戻り値は「環境設定で指定されているのに使えなかったパス」。以前は
+    これを黙って読み飛ばして次の候補へ進んでいたので、外付けや NAS が
+    繋がっていない起動で、警告も無く別の System の素材に差し替わっていた
     (絵が変わった理由が利用者に分からない)。呼び出し側で伝えられるよう返す。"""
     searched = []
     unusable = None
@@ -218,10 +153,6 @@ def find_system_dir(cfg=None):
         if is_valid_system_dir(cand):
             return cand, searched, unusable
 
-    # 3. よくある場所の自動探索。
-    found = _auto_search(searched)
-    if found is not None:
-        return found, searched, unusable
     return None, searched, unusable
 
 
@@ -383,6 +314,17 @@ def _count_cache_files(dest: Path) -> int:
         except OSError:
             continue
     return n
+
+
+def cached_file_count() -> int:
+    """いまキャッシュに残っている素材の数。
+
+    System が見つからないときの案内で使う。0 なら描画側は本当に自前の絵
+    (= 内蔵スキン)だけで動くが、前に別の System から展開したものが残って
+    いれば、それはそのまま使われる。どちらなのかを黙っていると
+    「内蔵スキンで起動したはずなのに絵が出ている」ことになるので、
+    文面を出し分けるために数える。"""
+    return _count_cache_files(cache_dir())
 
 
 def _cache_is_usable(dest: Path, want: dict) -> bool:

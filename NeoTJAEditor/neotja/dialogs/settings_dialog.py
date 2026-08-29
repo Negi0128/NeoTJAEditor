@@ -16,8 +16,8 @@ class SettingsDialog(QDialog):
     # window_geometry, splitter_state, 各種音量, theme, roll_speed など — は
     # 別の場所で決まる状態なので、環境設定の初期化では触らない。
     # system_dir(素材の在りか)もあえて外してある。空へ戻すと次の起動で
-    # 素材が見つからず「フォルダを選んでください」からやり直しになり、
-    # 初期化ボタンが起動できない状態を作ってしまうため。
+    # 素材が見つからず、内蔵スキンで起動することになる — 初期化ボタンを
+    # 押しただけで絵と音が変わるのは、利用者の意図とかけ離れているため。
     _RESET_KEYS = (
         "run_config", "custom_shortcuts",
         "font_family", "font_size",
@@ -28,6 +28,8 @@ class SettingsDialog(QDialog):
         "hit_sound_don_path", "hit_sound_ka_path",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
         "peepo_chart_edit",
+        # 起動時の案内。これは初期化で戻してよい(戻ると「知らせる」= 既定)。
+        "warn_missing_system",
     )
 
     def __init__(self, main_window, parent=None):
@@ -321,7 +323,9 @@ class SettingsDialog(QDialog):
         # --- 素材(System フォルダ) ---
         # 音符・背景・打音の出どころ。起動時にここから素材を取り出して
         # キャッシュへ展開する(neotja/skin_cache.py)ので、変えたぶんが
-        # 反映されるのは次の起動から。未指定なら exe の隣などを自動で探す。
+        # 反映されるのは次の起動から。未指定なら exe の隣だけを見る
+        # (デスクトップ配下の自動探索はやめた)。どこにも無ければ内蔵スキンで
+        # 起動するので、ここは「別の場所の System を使いたい人」の入口。
         form = self._group(outer, "素材(System フォルダ)")
         self.system_dir_edit = QLineEdit(cfg.get("system_dir", ""))
         self.system_dir_edit.setReadOnly(True)
@@ -347,8 +351,18 @@ class SettingsDialog(QDialog):
         form.addRow(self._hint(
             "音符・背景・打音などの素材は、TNDE に付属する System フォルダから"
             "読み込みます(素材は再配布できないためアプリには同梱していません)。"
-            "未指定のときは exe と同じ場所やデスクトップ配下を自動で探します。"
+            "未指定のときは exe と同じ場所だけを見ます。どこにも無いときは"
+            "内蔵スキン(アプリが自前で描く絵と合成打音)で起動します。"
             "※変更の反映にはアプリの再起動が必要です。"))
+
+        # 起動時の案内を黙らせたあと、戻す手段がここにしか無い。案内側の
+        # 「次回から表示しない」は押せば消えるが、押した本人が気が変わった
+        # ときに settings.json を手で開かせるのは筋が悪い。
+        self.warn_missing_system_check = QCheckBox(
+            "素材が見つからないときに起動時に知らせる")
+        self.warn_missing_system_check.setChecked(
+            cfg.get("warn_missing_system", True))
+        form.addRow(self.warn_missing_system_check)
 
         # 展開のやり直しは自動でも起きる(System の中身が変わったときや、
         # キャッシュのファイルが消えているとき)が、それでも直らないときの
@@ -488,7 +502,7 @@ class SettingsDialog(QDialog):
         一緒に書かれてしまう)。
 
         使う System は、この画面でいま指しているフォルダ。まだ選んでいない
-        ときだけ、起動時と同じ自動探索に任せる。"""
+        ときだけ、起動時と同じ探し方(exe の隣)に任せる。"""
         from neotja import skin_cache
 
         picked = self.system_dir_edit.text().strip()
@@ -562,6 +576,7 @@ class SettingsDialog(QDialog):
 
         cfg["record_output_dir"] = self.rec_dir_edit.text()
         cfg["system_dir"] = self.system_dir_edit.text()
+        cfg["warn_missing_system"] = self.warn_missing_system_check.isChecked()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
