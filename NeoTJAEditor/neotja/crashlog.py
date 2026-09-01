@@ -101,11 +101,15 @@ def install():
             INSTALL_ERROR = where or "書き込める場所が見つかりませんでした"
             return None
         LOG_PATH = where
-        import os as _os
-        f.write("\n===== 起動 %s  %s  [frozen=%s selftest=%r]\n"
-                % (datetime.datetime.now(), " ".join(sys.argv),
-                   getattr(sys, "frozen", False),
-                   _os.environ.get("NEOTJA_CRASH_SELFTEST")))
+        try:
+            from neotja.constants import VERSION as _ver
+        except Exception:  # noqa: BLE001
+            _ver = "?"
+        # 版も残す。手元のビルドと配ったリリースがずれることがあり、
+        # 「どの版で落ちたのか」が分からないと調べようがない。
+        f.write("\n===== 起動 %s  v%s  [frozen=%s]  %s\n"
+                % (datetime.datetime.now(), _ver,
+                   getattr(sys, "frozen", False), " ".join(sys.argv)))
         faulthandler.enable(file=f, all_threads=True)
 
         def _write(head, exc_type, exc, tb):
