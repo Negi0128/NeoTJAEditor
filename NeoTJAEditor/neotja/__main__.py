@@ -1,6 +1,11 @@
+import atexit
 import importlib
 import sys
 import threading
+
+from neotja import crashlog                   # noqa: E402
+
+
 
 
 def _prewarm(module_name):
@@ -45,14 +50,52 @@ def _prewarm(module_name):
 # 991ms(中央値)の 11ms しか変わらなかった。その 11ms のために、案内を出す
 # 判断(見つからない/使えない/取り出せなかった)を主スレッドへ戻す配線を
 # 増やす価値は無いと判断した。
-for _mod in ("sounddevice", "numpy"):
-    threading.Thread(target=_prewarm, args=(_mod,), daemon=True).start()
+_PREWARM_THREADS = [
+    threading.Thread(target=_prewarm, args=(_mod,), daemon=True)
+    for _mod in ("sounddevice", "numpy")
+]
+for _t in _PREWARM_THREADS:
+    _t.start()
 
 from PySide6.QtCore import Qt                 # noqa: E402
 from PySide6.QtGui import QCursor, QIcon      # noqa: E402
 from PySide6.QtWidgets import (               # noqa: E402
     QApplication, QCheckBox, QMessageBox,
 )
+
+# 先読みスレッドは、終了処理に入る前に合流させる。
+#
+# なぜ必要か: デーモンスレッドはインタプリタの終了処理で**任意の場所で**
+# 打ち切られる。import の途中で打ち切られると、読み込みかけの拡張モジュール
+# (PortAudio の DLL)を掴んだまま解放が進み、アクセス違反でプロセスごと落ちる。
+# 起動してすぐ閉じた場合に 5回中5回 再現した(障害モジュール
+# libportaudio64bit.dll_unloaded / 0xc0000005)。
+#
+# なぜ atexit なのか: ここで素直に join すると、Qt の import を終えた主
+# スレッドが先読みの残りを待つことになり、実測 200ms 起動が遅くなった
+# (先読みは起動を速くするために入れたものなので本末転倒)。atexit の
+# コールバックはデーモンスレッドが打ち切られる**前**に走るので、置き場所を
+# そこにすれば起動は 1ms も遅くならず、危ない打ち切りだけが無くなる。
+# ふつうに使えば終了時にはとうに終わっているので、join は即座に返る。
+#
+# 待ち時間の上限は、音声機器の事情で PortAudio の初期化が戻ってこない環境で
+# 終了できなくならないようにするためのもの。
+def _join_prewarm():
+    for t in _PREWARM_THREADS:
+        try:
+            t.join(timeout=5.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_join_prewarm)
+
+
+
+# Qt が言い残すこと(qFatal の文言など)もログへ。Qt の import より後で
+# ないと掛けられないので、フック本体(neotja/__init__.py で有効化済み)
+# とは別にここで呼ぶ。
+crashlog.install_qt()
 
 from neotja import settings as settings_mod   # noqa: E402
 from neotja import skin_cache                 # noqa: E402
@@ -68,22 +111,15 @@ def _missing_system_text(searched):
     出る」ときに手の打ちようがない — 実際に見に行ったパスをそのまま並べれば、
     一段深く置いてしまった等の食い違いが自分で分かる。
 
-    前に別の System から展開した素材がキャッシュに残っていれば、それは
-    そのまま使われる。「内蔵スキンで再生」と言いながら絵が出ることになるので、
-    そのときは一言添える(黙っていると挙動の説明がつかない)。"""
+    前に別の System から展開した素材がキャッシュに残っていても、この起動
+    では読みに行かない(skin_cache.use_bundled_only)。案内と実際の
+    見た目を食い違わせないため。"""
     places = "\n".join("　・%s" % p for p in searched) or "　（なし）"
-    if skin_cache.cached_file_count() > 0:
-        tail = (
-            "このまま起動すると、前回取り出した素材がキャッシュに残っている"
-            "ぶんはそのまま使われ、足りないところは内蔵スキン（アプリが自前で"
-            "描く絵と合成打音）になります。"
-        )
-    else:
-        tail = (
-            "このまま起動すると、内蔵スキン（アプリが自前で描く絵と合成打音）"
-            "で動きます。編集・保存・譜面画像生成・動画の書き出しは"
-            "そのまま使えますが、見た目と音は本家と違うものになります。"
-        )
+    tail = (
+        "このまま起動すると、内蔵スキン（アプリが自前で描く絵と合成打音）"
+        "で動きます。編集・保存・譜面画像生成・動画の書き出しは"
+        "そのまま使えますが、見た目と音は本家と違うものになります。"
+    )
     return (
         "音符・背景・打音などの素材が入った System フォルダが"
         "見つかりませんでした。\n\n"
@@ -202,7 +238,12 @@ def _prepare_skin(cfg):
     できなかった)。ここでやるのは案内を出すことだけ。"""
     system_dir, searched, unusable = skin_cache.find_system_dir(cfg)
     if system_dir is None:
-        # 内蔵スキンで続ける。案内は「次回から表示しない」で黙らせられる。
+        # 内蔵スキンで続ける。前に展開した TNDE の素材がキャッシュに
+        # 残っていても読みに行かない — 案内した内容(内蔵スキンで動く)と
+        # 実際の見た目が食い違ってしまうため。中身は消さないので、
+        # System を置き直せば次の起動でそのまま戻る。
+        skin_cache.use_bundled_only(True)
+        # 案内は「次回から表示しない」で黙らせられる。
         if cfg.get("warn_missing_system", True):
             _warn_missing_system(cfg, searched)
         return

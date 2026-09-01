@@ -594,6 +594,13 @@ class ChartPreviewWidget(QWidget):
         self._dpr = 1.0
         self._dev_off = (0.0, 0.0)
 
+        # 実際に描けているコマ数の計測用。paintEvent が呼ばれた回数を数える
+        # だけで、割り算は見る側(preview_dock の FPS 表示)が受け持つ。
+        # タイマーの間隔ではなく paintEvent を数えるのは、**間隔どおりに
+        # 描けているとは限らない**ため — 重い譜面や縮小表示ではコマが落ちる。
+        # 知りたいのは設定値ではなく出ている実測値。
+        self.frames_painted = 0
+
         self._timer = QTimer(self)
         # PreciseTimer is required on Windows to actually tick faster than the
         # ~15.6 ms default timer granularity - without it, sub-16 ms intervals
@@ -2769,6 +2776,7 @@ class ChartPreviewWidget(QWidget):
             painter.drawEllipse(int(x - r), int(cy - r), r * 2, r * 2)
 
     def paintEvent(self, event):
+        self.frames_painted += 1
         # 素材は起動時ではなくここで揃える(_ensure_skin の説明を参照)。
         # 2回目以降は真偽値を1つ見るだけなので、コマごとの負担にはならない。
         self._ensure_skin()

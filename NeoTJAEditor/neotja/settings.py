@@ -162,6 +162,16 @@ def _fallback_settings_path() -> Path:
     return base / "NeoTJAEditor" / "settings.json"
 
 
+def crash_log_path() -> Path:
+    """落ちた理由を書き残す先。%LOCALAPPDATA%\\NeoTJAEditor\\crash.log。
+
+    設定や素材キャッシュと同じ親に置く — 利用者から見て「このアプリの
+    持ち物」が1か所にまとまるほうが、送ってもらうときに案内しやすい。
+    exe の隣にしないのは、Program Files 配下だと書けないため(そこで
+    書けないと、いちばん記録が欲しい環境で何も残らないことになる)。"""
+    return _fallback_settings_path().parent / "crash.log"
+
+
 def settings_path() -> Path:
     """設定ファイルの在りか。ふだんは exe の隣。
 

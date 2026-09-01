@@ -160,8 +160,8 @@ def find_system_dir(cfg=None):
 # キャッシュ
 # ----------------------------------------------------------------------
 
-def cache_dir() -> Path:
-    """展開先。%LOCALAPPDATA%\\NeoTJAEditor\\skin_cache。
+def _store_dir() -> Path:
+    """展開先の実体。%LOCALAPPDATA%\\NeoTJAEditor\\skin_cache。
 
     LOCALAPPDATA を選んだ理由:
       * 中身は System から**いつでも作り直せる**派生物なので、漫遊
@@ -177,6 +177,32 @@ def cache_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
     return base / "NeoTJAEditor" / "skin_cache"
+
+
+# System が見つからなかった起動では、キャッシュを**見に行かない**ようにする印。
+# キャッシュは前に展開した TNDE の素材がそのまま残っているので、これが無いと
+# 「System が無いので内蔵スキンで起動します」と案内した直後に本家の絵が出て
+# しまう(案内と実際が食い違ううえ、素材を消したつもりの利用者に古い素材を
+# 使わせ続けることになる)。中身は消さない — System を置き直せば指紋が一致して
+# そのまま使えるので、消すと 2 秒の展開をやり直させるだけになる。
+_bundled_only = False
+
+
+def use_bundled_only(flag: bool = True) -> None:
+    """このプロセスのあいだ、キャッシュを無視して内蔵スキンだけで動かす。"""
+    global _bundled_only
+    _bundled_only = bool(flag)
+
+
+def cache_dir() -> Path:
+    """素材を読む場所。描画側(settings.skin_dir)はここだけを見る。
+
+    内蔵スキンで動かすと決めた起動では、実在しないパスを返して読み取りを
+    すべて空振りさせる。描画側はもともと 1 枚ごとに「無ければ自前の絵」へ
+    落ちる作りなので、これだけで全体が内蔵スキンに揃う。"""
+    if _bundled_only:
+        return _store_dir().parent / "skin_cache_unused"
+    return _store_dir()
 
 
 def _bundled_dir() -> Path:
@@ -324,7 +350,7 @@ def cached_file_count() -> int:
     いれば、それはそのまま使われる。どちらなのかを黙っていると
     「内蔵スキンで起動したはずなのに絵が出ている」ことになるので、
     文面を出し分けるために数える。"""
-    return _count_cache_files(cache_dir())
+    return _count_cache_files(_store_dir())
 
 
 def _cache_is_usable(dest: Path, want: dict) -> bool:
@@ -505,7 +531,9 @@ def ensure_cache(system_dir, force: bool = False) -> dict:
     穏やかに終われるようにするため、書き込みの失敗も error に載せて返す。
     """
     started = time.perf_counter()
-    dest = cache_dir()
+    # 展開先は実体のほう。内蔵スキンで動いている最中に環境設定から
+    # 「取り出し直す」を押されたときも、ちゃんと本物のキャッシュへ書く。
+    dest = _store_dir()
     total = len(skin_map_mod.SKIN_MAP)
 
     def result(**kw):
@@ -518,6 +546,7 @@ def ensure_cache(system_dir, force: bool = False) -> dict:
     want = _fingerprint(system_dir)
 
     if not force and _cache_is_usable(dest, want):
+        use_bundled_only(False)
         return result(skipped=True, trusted=True)
 
     system_dir = Path(system_dir)
@@ -612,4 +641,7 @@ def ensure_cache(system_dir, force: bool = False) -> dict:
         _log.warning("展開がほとんど成功しなかったので指紋を書かない: "
                      "ok=%d failed=%d", ok, failed)
 
+    if ok:
+        # 1 枚でも置けたなら、もう内蔵スキンだけで動く理由が無い。
+        use_bundled_only(False)
     return result(ok=ok, failed=failed, unknown=unknown, trusted=trusted)

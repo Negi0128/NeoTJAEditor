@@ -725,8 +725,7 @@ class PreviewDock(QDockWidget):
 
         # レーン右上に並べる3つのボタン。右から「モード切替」「コース」「録画」。
         # どれもフォーカスは奪わない(Space/Tab/PgUp/PgDn の操作対象はレーンの
-        # ままにする)。録画は通常再生モードのときだけ出す — 作譜/情報モードは
-        # 画面下が別物なので、そこから録画を始められると何を録るのか紛らわしい。
+        # ままにする)。録画を出すモードは set_bottom_mode 側で決めている。
         # ページ番号は上のスタック組み立てと連動させる(作譜が無効なら3つで
         # 循環)。増減したらここだけ見ればよいように名前を付ける。
         self.MODE_TITLE, self.MODE_LITE, self.MODE_WAVE = 0, 1, 2
@@ -764,7 +763,38 @@ class PreviewDock(QDockWidget):
         self.zoom_button = self._lane_button("表示: 100%", 96,
                                              "再生ウィンドウの表示倍率を切り替えます(100/75/50%)")
         self.zoom_button.move(left, 6)
+        left += 96 + 6
         self.zoom_button.clicked.connect(self.cycle_zoom)
+
+        # いま出ているコマ数。押せるものではないので QLabel。
+        #
+        # **録画した動画には入らない。** 書き出しは画面外に専用の
+        # GameScreenWidget を作って描いており(recorder.py)、この表示は
+        # 再生ウィンドウの入れ物(ScaledHost)の子なので、そちらには存在しない。
+        #
+        # 数えているのは ChartPreviewWidget.paintEvent が呼ばれた回数
+        # (frames_painted)。タイマーの設定値ではなく**実際に描けた数**なので、
+        # 重い譜面でコマが落ちていればそのぶん下がる。
+        self.fps_label = QLabel("-- fps", self.game_preview_window.scaled_host)
+        self.fps_label.setFixedSize(74, LANE_BUTTON_H)
+        self.fps_label.setAlignment(Qt.AlignCenter)
+        self.fps_label.setToolTip(
+            "再生プレビューが実際に描けているコマ数(録画には出ません)")
+        _f = self.fps_label.font()
+        _f.setPixelSize(LANE_BUTTON_FONT_PX)
+        self.fps_label.setFont(_f)
+        self.fps_label.setStyleSheet(
+            "color: #9fb4c8; background: rgba(0,0,0,140);"
+            " border: 1px solid rgba(255,255,255,40); border-radius: 3px;")
+        self.fps_label.move(left, 6)
+        self.fps_label.raise_()
+
+        # 0.5 秒ごとに数え直す。刻みを細かくすると数字が落ち着かず読めないし、
+        # 粗くすると引っかかりに気づけない。
+        self._fps_prev = (_time.perf_counter(), self.chart_preview.frames_painted)
+        self._fps_timer = QTimer(self)
+        self._fps_timer.timeout.connect(self._update_fps_label)
+        self._fps_timer.start(500)
 
         # 起動時は前回終了時のモードへ戻す(既定は通常再生)。ここで一度
         # 通しておかないと、画面が compact のまま(どんちゃんも下の背景も
@@ -1184,6 +1214,23 @@ class PreviewDock(QDockWidget):
         b.raise_()          # 等倍のときは中身が子として乗るので、その上へ
         return b
 
+    def _update_fps_label(self):
+        """出ているコマ数を数え直して表示する。
+
+        前回からの「描けた回数の差」を「経過時間」で割るだけ。タイマーが
+        遅れて呼ばれても経過時間の方も伸びるので、値は狂わない。"""
+        now = _time.perf_counter()
+        frames = self.chart_preview.frames_painted
+        prev_t, prev_f = self._fps_prev
+        dt = now - prev_t
+        self._fps_prev = (now, frames)
+        if dt <= 0:
+            return
+        fps = (frames - prev_f) / dt
+        # 止まっているときは 0 ではなく「-」。0fps と書くと不具合に見えるが、
+        # 実際は描く必要が無いだけなので。
+        self.fps_label.setText("-- fps" if fps < 0.5 else "%.0f fps" % fps)
+
     def _on_record_clicked(self):
         if self.record_cb:
             self.record_cb()
@@ -1240,8 +1287,14 @@ class PreviewDock(QDockWidget):
         魂の飛翔・スコア加算も落とす(set_lite)。下にペインは置かない。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
-        # 録画ボタンは通常再生モード専用。
-        self.record_button.setVisible(idx == self.MODE_TITLE)
+        # 録画ボタンを出すモード。書き出しの中身はモードに一切左右されない
+        # (recorder は画面外に専用の GameScreenWidget(1280x720)を作って描く)
+        # ので、これは純粋に「どこから始められるか」の話。音声波形は譜面を
+        # 見ながら録りたい場面がそのまま録画したい場面なので出す。作譜と情報の
+        # ときは出さない — 画面下が別物なので、そこから始めると何が録れるのか
+        # 紛らわしい。
+        self.record_button.setVisible(
+            idx == self.MODE_TITLE or idx == self.MODE_WAVE)
         # 軽量は下にペインを置かないので 1280x720 のまま(縦横比を通常再生と
         # 揃えたいという要望)。縮めるのはペインを置くモードだけ。
         self.game_screen.set_compact(

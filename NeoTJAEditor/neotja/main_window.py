@@ -1796,8 +1796,13 @@ class MainWindow(QMainWindow):
             # "QThread: Destroyed while thread is still running" でアプリごと
             # 落ちうる。detach_worker は終了済み/None を安全に無視する。
             from neotja.worker_util import detach_worker
+            # _taikojiro_scan は MainWindow を親にした QThread で、起動直後に
+            # ディスクを走査している(打音のパスが未設定/古いときだけ動く)。
+            # ここに入れていなかったので、走査中に閉じると親ごと破棄されて
+            # "QThread: Destroyed while thread is still running" になっていた。
             for attr in ("_bpm_detect_worker", "_update_check_worker",
-                         "_update_download_worker", "_new_project_chart_gen_worker"):
+                         "_update_download_worker", "_new_project_chart_gen_worker",
+                         "_taikojiro_scan"):
                 detach_worker(getattr(self, attr, None))
             # 解析スレッドは常駐なので必ずここで畳む。走行中のジョブは最長でも
             # 1 パスぶん(数百 ms)で終わるので、その完了を待ってから抜ける。
