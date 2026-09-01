@@ -179,3 +179,33 @@ class WaveformMips:
         np.clip(ind, 0, sub.size - 1, out=ind)
         out[vi] = np.maximum.reduceat(sub, ind)
         return out
+
+
+def bar_grid_clicks(bars):
+    """bar_times([(time, bpm, scroll, visible)] = 権威的な小節境界)から、波形の
+    グリッド用クリック [(chart_time, is_measure)] を作る。
+
+    各小節は先頭を小節線(True)にし、その小節の BPM の4分音符ぶんだけ次の
+    小節境界までビート線(False)で刻む。小節境界そのものは bar_times に一致
+    するので、音符/レーンと必ず揃う。
+
+    もとは preview_dock の中にあったが、録画側(recorder)でも同じグリッドを
+    引く必要が出たのでここへ移した。Qt に触らないので置き場所はここが適切。"""
+    clicks = []
+    n = len(bars)
+    for i in range(n):
+        t = float(bars[i][0])
+        bpm = float(bars[i][1]) if bars[i][1] else 0.0
+        clicks.append((t, True))
+        if i + 1 >= n or bpm <= 0:
+            continue
+        t_next = float(bars[i + 1][0])
+        quarter = 60.0 / bpm
+        k = 1
+        while k < 64:
+            bt = t + k * quarter
+            if bt >= t_next - 1e-4:
+                break
+            clicks.append((bt, False))
+            k += 1
+    return clicks

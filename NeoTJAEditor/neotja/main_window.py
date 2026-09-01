@@ -2261,9 +2261,13 @@ class MainWindow(QMainWindow):
         if not out_dir or not os.path.isdir(out_dir):
             out_dir = os.path.expanduser("~")
         from neotja.dialogs.record_dialog import RecordDialog
+        # 録画を始めたときのモードで、何を録るかが決まる。音声波形モードなら
+        # 画面と同じ「上=ゲーム画面 / 下=波形・譜面・命令」で録る。
+        pd = self.preview_dock
+        layout = "wave" if pd.bottom_stack.currentIndex() == pd.MODE_WAVE else "game"
         dlg = RecordDialog(
-            self, preview_data, self.preview_dock.spin_offset.value(), wave,
-            self.preview_dock.duration_seconds(), out_dir,
+            self, preview_data, pd.spin_offset.value(), wave,
+            pd.duration_seconds(), out_dir, layout=layout,
         )
         # 閉じられたら参照を手放す。持ったままだと画面外の描画用ウィジェット
         # (スキンのピクスマップ一式)が居座る。

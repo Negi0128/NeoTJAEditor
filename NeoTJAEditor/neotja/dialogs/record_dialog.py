@@ -207,7 +207,7 @@ class RecordDialog(QDialog):
     出来上がりは変わらない。"""
 
     def __init__(self, main_window, preview_data, offset, song_path,
-                 song_seconds, default_dir, parent=None):
+                 song_seconds, default_dir, parent=None, layout="game"):
         super().__init__(parent or main_window)
         # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
         # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
@@ -218,6 +218,10 @@ class RecordDialog(QDialog):
         self._preview = preview_data or {}
         self._offset = offset
         self._song = song_path
+        # 何を録るか。"game" は本家レイアウトの 1280x720、"wave" は音声波形
+        # モードの見た目(上=ゲーム画面 / 下=波形・譜面・命令)。録画を始めた
+        # ときのモードで決まる。
+        self._layout = layout if layout in ("game", "wave") else "game"
         self._rec = None            # 進行中の VideoRecording
         self._widget = None         # 画面外の描画用ウィジェット
         self._cancel = False
@@ -256,15 +260,30 @@ class RecordDialog(QDialog):
         # OFFSET を引いて音源時刻に直す(VideoRecording の start_sec/end_sec は
         # 音源時刻)。0秒より前・曲の終わりより後ろに出る小節もあるので、
         # ここで曲の長さの中へ押し込んでおく。
+        # 上を曲の長さで頭打ちにはしない。譜面のほうが音源より長いことは
+        # ふつうにあり(音源が途中で切れている等)、丸めてしまうと終わりの
+        # 数小節がすべて同じ時刻に潰れて選べなくなる。
         self._bar_starts = [
-            min(max(float(t) - float(offset), 0.0), song_seconds)
+            max(float(t) - float(offset), 0.0)
             for t, *_rest in (self._preview.get("bar_times") or [])
         ]
         self._bar_count = len(self._bar_starts)
+        # 譜面そのものの終わり(=最終小節が終わる時刻、音源時刻)。
+        #
+        # bar_times は小節の**開始**時刻しか持っていないので、最終小節の
+        # 終わりは自分で足す必要がある。1小節の長さは 240/BPM × 拍子 なので、
+        # 最後の小節線の BPM と、その時点の #MEASURE から出す。
+        #
+        # これを「曲全体」の終わりに使う。音源は譜面が終わったあとも
+        # 鳴り続けていることが多く(フェードアウトや後奏)、そこまで録ると
+        # 何も起きない映像が延々と続くため。
+        self._chart_end_sec = self._compute_chart_end(offset, song_seconds)
 
         layout = QVBoxLayout(self)
         course = self._preview.get("course_label") or self._preview.get("course_key") or "-"
-        head = QLabel(f"対象コース: {course}    曲の長さ: {song_seconds:.1f} 秒")
+        head = QLabel(
+            f"対象コース: {course}    曲の長さ: {song_seconds:.1f} 秒"
+            f"    譜面の長さ: {self._chart_end_sec:.1f} 秒")
         head.setStyleSheet("font-weight: bold;")
         layout.addWidget(head)
 
@@ -304,7 +323,8 @@ class RecordDialog(QDialog):
             box.addWidget(self.lbl_range)
             form.addRow("範囲", box)
         else:
-            self.lbl_range.setText(f"曲全体（0 〜 {song_seconds:.1f} 秒）")
+            self.lbl_range.setText(
+                f"譜面全体（0 〜 {self._chart_end_sec:.1f} 秒）")
             self.lbl_range.setStyleSheet("font-weight: bold;")
             form.addRow("範囲", self.lbl_range)
         self._update_range_label()
@@ -381,6 +401,44 @@ class RecordDialog(QDialog):
             tail = f"_m{self.sp_start.value()}-{self.sp_end.value()}"
         return f"{base}{('_' + course) if course else ''}{tail}.mp4"
 
+    def _compute_chart_end(self, offset, song_seconds):
+        """最終小節が終わる時刻(音源時刻)。求められなければ曲の長さを返す。"""
+        bars = self._preview.get("bar_times") or []
+        if not bars:
+            return song_seconds
+        last_t = float(bars[-1][0])
+        bpm = float(bars[-1][1]) if len(bars[-1]) > 1 and bars[-1][1] else 0.0
+        if bpm <= 0:
+            return song_seconds
+        # その時点の拍子。#MEASURE が無ければ 4/4。
+        num, den = 4.0, 4.0
+        for entry in (self._preview.get("measure_changes") or []):
+            try:
+                t, n, d = float(entry[0]), float(entry[1]), float(entry[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if t <= last_t + 1e-6 and d:
+                num, den = n, d
+        bar_len = (240.0 / bpm) * (num / den) if den else (240.0 / bpm)
+        end = last_t + bar_len - float(offset)
+        # 譜面が音源より長いことも短いこともある。0 より前へは行かせない。
+        return max(0.0, end)
+
+    def _make_widget(self):
+        """画面外の描画用ウィジェットを作る。録画を始めたときのモードで
+        中身が変わる。
+
+        音声波形モードのときは波形(WaveformMips)が要るが、それは曲を
+        デコードして初めて手に入る。ここではまだ無いので波形の線は出ない
+        まま作り、下ごしらえが済んだ時点(_on_prepared)で流し込む。見積もりの
+        捨て描きはこの時点で始まるので、待たせないためにこうしてある。"""
+        cfg = self._mw.config_data
+        se = cfg.get("se_text_enabled", True)
+        if self._layout == "wave":
+            return recorder.make_offline_wave_widget(
+                self._preview, self._offset, mips=None, se_text_enabled=se)
+        return recorder.make_offline_widget(self._preview, self._offset, se)
+
     # ------------------------------------------------------------------
     # 書き出す区間
     # ------------------------------------------------------------------
@@ -393,16 +451,19 @@ class RecordDialog(QDialog):
     def _range_secs(self):
         """書き出す区間を音源時刻の (start_sec, end_sec) で返す。
 
-        曲全体のときは (0.0, None) を返す。end_sec=None は VideoRecording 側で
-        「音源そのものの長さ」になるので、小節線から秒を作り直すことで
-        従来の書き出しと 1 サンプルでも変わってしまうのを避けられる。"""
+        全体のときは (0.0, 譜面の終わり)。以前はここで (0.0, None) を返して
+        「音源そのものの長さ」に任せていたが、譜面が終わったあとも鳴り続ける
+        音源だと、何も起きない映像が後奏のぶんだけ続いてしまう。"""
         if self._is_full_range():
-            return 0.0, None
+            # 譜面の終わりで切る。音源が続いていても、最終小節が終わったら
+            # そこで終わり(後奏の無音を延々と録らないため)。
+            return 0.0, self._chart_end_sec
         s = self.sp_start.value()
         e = self.sp_end.value()
         start = self._bar_starts[s - 1]
         # 終了小節の「終わり」は次の小節線。最終小節を選んだときは曲の終わりまで。
-        end = self._bar_starts[e] if e < self._bar_count else self._song_seconds
+        end = (self._bar_starts[e] if e < self._bar_count
+               else self._chart_end_sec)
         return start, max(start, end)
 
     def _range_span(self):
@@ -465,9 +526,7 @@ class RecordDialog(QDialog):
         if self._probe is not None or self._probe_queue:
             return
         if self._widget is None:
-            cfg = self._mw.config_data
-            self._widget = recorder.make_offline_widget(
-                self._preview, self._offset, cfg.get("se_text_enabled", True))
+            self._widget = self._make_widget()
         # 測るのは supersample 違いだけ。1080p の 60fps と 120fps は同じ大きさを
         # 描くので(違うのはコマ数だけ)、測り直しても同じ数字にしかならない。
         seen = []
@@ -614,8 +673,7 @@ class RecordDialog(QDialog):
         # 作り直さないのは、スキンの読み込みぶんだけ待ちが増えるのと、
         # 「開いた時点の譜面で書き出す」という約束がそのまま守られるため。
         if self._widget is None:
-            self._widget = recorder.make_offline_widget(
-                self._preview, self._offset, cfg.get("se_text_enabled", True))
+            self._widget = self._make_widget()
 
         self._cancel = False
         self._set_running(True)
@@ -627,8 +685,8 @@ class RecordDialog(QDialog):
         from PySide6.QtGui import QImage as _QImage
         self._widget.render(_QImage(self._widget.width(), self._widget.height(),
                                     _QImage.Format_RGB32))
-        # 選んだ小節を音源時刻に直して渡す。曲全体なら (0.0, None) が返るので、
-        # end_sec=None ＝ 音源そのものの長さ、という従来どおりの書き出しになる。
+        # 選んだ小節を音源時刻に直して渡す。全体を選んでいるときは
+        # (0.0, 最終小節の終わり) が返る。
         start_sec, end_sec = self._range_secs()
         # 曲のデコードと音声合成(3分の曲で2秒ほど)は裏へ回す。ここは Qt に
         # 触らないので別スレッドで走らせて構わない。
@@ -648,7 +706,8 @@ class RecordDialog(QDialog):
             fps=q["fps"], don_path=rec_don, ka_path=rec_ka,
             song_volume=float(cfg.get("preview_volume", 0.8)),
             sfx_volume=float(cfg.get("sfx_volume", 0.9)),
-            hit_sounds=self.chk_hit.isChecked())
+            hit_sounds=self.chk_hit.isChecked(),
+            want_mips=(self._layout == "wave"))
         self._pending = (out, q)
         self._t0 = time.perf_counter()
         # 下ごしらえは途中で止められるようにしておく。止めないと、書き出しを
@@ -700,6 +759,13 @@ class RecordDialog(QDialog):
             self.lbl_status.setText("中止しました。")
             return
         out, q = pending
+        # 音声波形モードの録画は、ここで初めて曲の波形が手に入る。
+        # 流し込まないと下画面の波形の線だけが出ないまま録れてしまう。
+        if self._layout == "wave" and getattr(plan, "mips", None) is not None:
+            try:
+                self._widget.wave.set_mips(plan.mips)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self._rec = recorder.VideoRecording(
                 self._widget, out, plan=plan, canvas=q["canvas"],

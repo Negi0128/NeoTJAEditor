@@ -29,6 +29,7 @@ import time
 
 import numpy as np
 from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QWidget
 
 from neotja.audio_engine import ensure_don_wav, ensure_ka_wav
 from neotja.mixer_engine import MixerCore, _load_sfx, _load_sfx_or_none
@@ -93,6 +94,107 @@ def make_offline_widget(preview_data, offset, se_text_enabled=True):
     gs = GameScreenWidget(cp, compact=False)
     gs.set_chart(data, data.get("course_key"))
     return gs
+
+
+class _WaveRecordScreen(QWidget):
+    """音声波形モードの見た目そのままで録画するための画面。
+
+    上半分(1280x360)は compact のゲーム画面、下半分は音声波形モードの下画面
+    (波形・譜面・命令の3段)。画面で見ているものと同じ構成にしてある。
+
+    **画面のウィジェットを使い回さない**のは通常の録画と同じ理由で、書き出しは
+    再生位置を勝手に動かすため(make_offline_widget の説明を参照)。
+
+    高さを 720 にしているのは、実際の窓(692)と数十 px しか違わないうえ、
+    720p の入れ物にぴったり収まって余白の付け足しが要らないため。差の 28px は
+    波形の下の何も描かない場所に足されるだけなので見た目は変わらない。
+
+    「合成」「OFFSET調整」ボタンは出さない。あれは触るためのものであって
+    録りたい中身(波形・譜面・命令)ではない。
+    """
+
+    #: 上のゲーム画面。1280x360(compact)。
+    GAME_H = 360
+    #: 下画面での波形の位置と大きさ。画面(preview_dock._build_wave_page)の
+    #: 余白 10/8 をそのまま写したもの。
+    WAVE_RECT = (10, GAME_H + 8, 1260, 170)
+    #: 背景。下画面の何も描かない場所を塗る色で、ffmpeg 側の余白と同じ。
+    BG = "#0d1117"
+
+    def __init__(self, game_screen, waveform, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(1280, 720)
+        self.setStyleSheet("background-color: %s;" % self.BG)
+        self.game = game_screen
+        self.game.setParent(self)
+        self.game.setGeometry(0, 0, 1280, self.GAME_H)
+        self.wave = waveform
+        self.wave.setParent(self)
+        self.wave.setGeometry(*self.WAVE_RECT)
+
+    # ---- オフライン描画。GameScreenWidget と同じ約束 ----
+    def begin_offline_render(self):
+        self.game.begin_offline_render()
+
+    def set_render_time(self, seconds):
+        # 上のレーンと下の波形へ**同じ時刻**を配る。画面では
+        # preview_dock._on_preview_frame が同じことをしている。
+        self.game.set_render_time(seconds)
+        # set_position ではなく smooth のほう。あちらは 30fps に間引く仕掛けが
+        # 入っていて、1コマずつ時刻を与える書き出しとは相性が悪い。画面の
+        # 音声波形モードも smooth 側で駆動している(preview_dock._on_preview_frame)。
+        self.wave.set_position_smooth(seconds)
+
+    def end_offline_render(self):
+        self.game.end_offline_render()
+
+
+def make_offline_wave_widget(preview_data, offset, mips=None,
+                             se_text_enabled=True):
+    """音声波形モードの見た目で録画するための画面を、画面外に1つ組み立てる。
+
+    返すのは 1280x720 の _WaveRecordScreen。上が compact のゲーム画面、下が
+    波形・譜面・命令の3段で、画面で見ているものと同じ配線・同じデータを流す。
+
+    mips(WaveformMips)は曲の波形。無ければ波形の線だけが出ず、譜面と命令の帯は
+    そのまま出る(音源が読めなかったときでも録画は成立させる)。
+    """
+    from neotja.chart_preview_widget import ChartPreviewWidget
+    from neotja.game_screen import GameScreenWidget
+    from neotja.waveform_data import bar_grid_clicks
+    from neotja.waveform_widget import WaveformWidget
+
+    data = preview_data or {}
+    cp = ChartPreviewWidget()
+    cp.set_se_text_enabled(bool(se_text_enabled))
+    cp.set_preview_data(data)
+    cp.set_offset(offset)
+    # 画面の音声波形モードと同じ「軽量の描き方」にそろえる。あちらは
+    # set_lite(True)+set_compact(True) で、どんちゃんも下の背景も出ない。
+    gs = GameScreenWidget(cp, compact=True)
+    gs.set_chart(data, data.get("course_key"))
+    gs.set_lite(True)
+
+    wf = WaveformWidget(force_dark=True)
+    # 触るためのボタンは録画には要らない(録りたいのは波形・譜面・命令)。
+    wf.btn_stereo.hide()
+    wf.btn_offset.hide()
+    if mips is not None:
+        wf.set_mips(mips)
+    wf.set_stereo_view(False)          # 画面の既定と同じ「合成」
+    wf.set_follow_window(6.0)          # 画面の既定と同じ表示幅(秒)
+    bars = data.get("bar_times") or []
+    bpm = float(bars[0][1]) if bars and bars[0][1] else 120.0
+    wf.set_beat_grid(bpm, offset, bar_grid_clicks(bars))
+    wf.set_notes(list(data.get("notes", [])))
+    wf.set_spans(list(data.get("rolls", [])),
+                 list(data.get("balloons", [])),
+                 list(data.get("kusudamas", [])))
+    wf.set_commands(list(data.get("bpm_changes", [])),
+                    list(data.get("scroll_changes", [])),
+                    list(data.get("measure_changes", [])),
+                    list(data.get("gogo_regions", [])))
+    return _WaveRecordScreen(gs, wf)
 
 
 class RecordingCancelled(Exception):
@@ -481,13 +583,19 @@ class RecordingPlan:
     どちらも同じ仮想時計から出るので、途中で何が起きても音ズレは発生しない。
     """
 
-    def __init__(self, tmp_dir, audio_path, start_sec, end_sec, fps, total_frames):
+    def __init__(self, tmp_dir, audio_path, start_sec, end_sec, fps, total_frames,
+                 mips=None):
         self.tmp_dir = tmp_dir
         self.audio_path = audio_path
         self.start_sec = start_sec
         self.end_sec = end_sec
         self.fps = fps
         self.total_frames = total_frames
+        # 音声波形モードの録画で下画面に描く波形(WaveformMips)。要らない
+        # ときは None。ここで作るのは、曲の PCM がこの時点にしか無いから
+        # (下ごしらえが済むと捨ててしまう)。WaveformMips は Qt に触らない
+        # ので、ワーカースレッドで作れる。
+        self.mips = mips
 
     def discard(self):
         """使わずに捨てる(用意し終わる前に中止された等)。一時音声を消す。"""
@@ -499,7 +607,7 @@ class RecordingPlan:
 def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
                       end_sec=None, fps=60, don_path="", ka_path="",
                       song_volume=0.8, sfx_volume=0.9, hit_sounds=True,
-                      cancel=None):
+                      cancel=None, want_mips=False):
     """曲を読み、音声を作り、RecordingPlan を返す。**Qt には触らない**ので
     ワーカースレッドから呼んでよい(GUI スレッドから呼んでも同じ結果)。
 
@@ -525,9 +633,18 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
     audio_path = os.path.join(tmp_dir, "audio.f32")
     with open(audio_path, "wb") as f:
         f.write(np.ascontiguousarray(audio, dtype=np.float32).tobytes())
+    # 波形は曲の PCM からしか作れないので、捨てる前にここで作る。
+    mips = None
+    if want_mips:
+        try:
+            from neotja.waveform_data import WaveformMips
+            mips = WaveformMips.build(song, SAMPLE_RATE)
+        except Exception:  # noqa: BLE001
+            # 波形が出ないだけで録画そのものは成立する。ここで諦めない。
+            mips = None
     del audio, song
     plan = RecordingPlan(tmp_dir, audio_path, start_sec, end_sec, int(fps),
-                         int(round((end_sec - start_sec) * fps)))
+                         int(round((end_sec - start_sec) * fps)), mips=mips)
     if cancel is not None and cancel.cancelled:
         # 書き終えた直後に中止された。渡す先がもう居ないので自分で捨てる。
         plan.discard()

@@ -23,6 +23,7 @@ from neotja import theme
 # 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
 _DARK = theme.THEMES["dark"]
 from neotja.chart_edit_widget import ChartEditWaveform
+from neotja.waveform_data import bar_grid_clicks
 from neotja.waveform_widget import WaveformWidget
 
 
@@ -1920,29 +1921,9 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     @staticmethod
     def _bar_grid_clicks(bars):
-        """bar_times([(time,bpm,scroll,vis)] = 権威的な小節境界)から作譜波形の
-        グリッド用クリック [(chart_time, is_measure)] を作る。各小節は先頭を
-        小節線(True)にし、その小節の BPM の4分音符ぶんだけ次の小節境界まで
-        ビート線(False)で刻む。小節境界そのものは bar_times に一致するので、
-        音符/レーンと必ず揃う。"""
-        clicks = []
-        n = len(bars)
-        for i in range(n):
-            t = float(bars[i][0])
-            bpm = float(bars[i][1]) if bars[i][1] else 0.0
-            clicks.append((t, True))
-            if i + 1 >= n or bpm <= 0:
-                continue
-            t_next = float(bars[i + 1][0])
-            quarter = 60.0 / bpm
-            k = 1
-            while k < 64:
-                bt = t + k * quarter
-                if bt >= t_next - 1e-4:
-                    break
-                clicks.append((bt, False))
-                k += 1
-        return clicks
+        """波形のグリッド用クリックを作る。中身は waveform_data へ移した
+        (録画側でも同じグリッドを引くため)。ここは呼び出し口だけ残す。"""
+        return bar_grid_clicks(bars)
 
     def _set_game_grid(self, bpm, offset):
         """作譜波形のグリッドを bar_times 由来のクリックで引き直す。データが
