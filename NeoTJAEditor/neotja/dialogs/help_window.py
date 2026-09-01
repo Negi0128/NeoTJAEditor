@@ -841,8 +841,20 @@ class HelpWindow(QDialog):
             html += "<p>" + body.replace("\n", "<br>") + "</p>"
 
         # どのページを見ていても、ヘルプの対応バージョンが分かるようにする。
+        # 落ちた理由の記録(neotja/crashlog.py)がこの環境で働いているか。
+        # 「落ちたのにログが無い」と言われたときに、推測ではなくその場で
+        # 確かめられるようにここへ出す。実際、書けていないのに気づけずに
+        # 何度も取り逃した。
+        from neotja import crashlog as _cl
+        if _cl.LOG_PATH is not None:
+            rec = f"記録の書き出し先: {_cl.LOG_PATH}"
+        elif _cl.INSTALL_ERROR:
+            rec = f"記録は無効です（{_cl.INSTALL_ERROR}）"
+        else:
+            rec = "記録は無効です"
         html += (
             f'<hr><p style="color:{COLORS["fg_dim"]}; font-size:9pt;">'
-            f"ヘルプ対応バージョン: v{HELP_FOR_VERSION} ／ 実行中: v{VERSION}</p>"
+            f"ヘルプ対応バージョン: v{HELP_FOR_VERSION} ／ 実行中: v{VERSION}"
+            f"<br>{rec}</p>"
         )
         self.browser.setHtml(html)

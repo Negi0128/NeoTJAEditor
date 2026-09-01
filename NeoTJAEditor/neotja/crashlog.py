@@ -38,12 +38,56 @@ import threading
 
 # 開いているログ。install() が一度だけ開く。None なら仕掛けられなかった。
 LOG = None
+#: 実際に書き出せた場所。書けなかったら None。ヘルプの末尾に出しているので、
+#: 「記録が残らない」と言われたときに、利用者の環境でこの仕掛けが働いて
+#: いるのかどうかをその場で確かめられる(推測しなくて済む)。
+LOG_PATH = None
+#: 仕掛けられなかったときの理由。同じくヘルプに出す。
+INSTALL_ERROR = None
 _installed = False
+
+
+def _candidate_paths():
+    """書き出し先の候補を、良い順に。
+
+    ふだんは %LOCALAPPDATA%\\NeoTJAEditor\\crash.log。そこへ書けない事情
+    (ウイルス対策・ディスク・権限・環境変数が渡っていない)があっても、
+    **どこにも残らない**のがいちばん困るので、退避先を2つ用意しておく。
+    """
+    out = []
+    try:
+        from neotja import settings as _s
+        out.append(_s.crash_log_path())
+    except Exception:  # noqa: BLE001
+        pass
+    import tempfile
+    from pathlib import Path
+    out.append(Path(tempfile.gettempdir()) / "NeoTJAEditor" / "crash.log")
+    try:
+        out.append(Path(sys.argv[0]).resolve().parent / "crash.log")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _open_log():
+    """候補を順に試して、開けたものを (ファイル, パス) で返す。全部だめなら
+    (None, 最後の理由)。"""
+    last = None
+    for path in _candidate_paths():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            f = open(str(path), "a", buffering=1, encoding="utf-8",
+                     errors="replace")
+            return f, path
+        except Exception as exc:  # noqa: BLE001
+            last = "%s: %s (%s)" % (type(exc).__name__, exc, path)
+    return None, last
 
 
 def install():
     """フックを掛ける。二度目以降は何もしない。戻り値はログのファイル。"""
-    global LOG, _installed
+    global LOG, LOG_PATH, INSTALL_ERROR, _installed
     if _installed:
         return LOG
     _installed = True
@@ -51,14 +95,17 @@ def install():
         import datetime
         import faulthandler
         import traceback
-        from neotja import settings as _s
 
-        path = _s.crash_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        f = open(str(path), "a", buffering=1, encoding="utf-8",
-                 errors="replace")
-        f.write("\n===== 起動 %s  %s =====\n"
-                % (datetime.datetime.now(), " ".join(sys.argv)))
+        f, where = _open_log()
+        if f is None:
+            INSTALL_ERROR = where or "書き込める場所が見つかりませんでした"
+            return None
+        LOG_PATH = where
+        import os as _os
+        f.write("\n===== 起動 %s  %s  [frozen=%s selftest=%r]\n"
+                % (datetime.datetime.now(), " ".join(sys.argv),
+                   getattr(sys, "frozen", False),
+                   _os.environ.get("NEOTJA_CRASH_SELFTEST")))
         faulthandler.enable(file=f, all_threads=True)
 
         def _write(head, exc_type, exc, tb):
@@ -88,7 +135,10 @@ def install():
         threading.excepthook = _thread_hook
         sys.unraisablehook = _unraisable
         LOG = f
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # ここで黙って諦めると、いちばん記録が欲しい環境で「なぜか残らない」
+        # ことになる(実際に起きた)。理由を持っておいてヘルプに出す。
+        INSTALL_ERROR = "%s: %s" % (type(exc).__name__, exc)
         LOG = None
     return LOG
 

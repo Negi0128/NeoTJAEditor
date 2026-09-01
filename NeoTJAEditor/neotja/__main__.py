@@ -1,5 +1,6 @@
 import atexit
 import importlib
+import os
 import sys
 import threading
 
@@ -276,6 +277,26 @@ def _prepare_skin(cfg):
             _warn_partial_extract(res)
 
 
+def _selftest_crash():
+    """わざとアクセス違反を起こして、記録の仕掛けが働くことを確かめる。
+
+    環境変数 NEOTJA_CRASH_SELFTEST=1 のときだけ、起動から3秒後に走る。
+
+    **なぜこんなものが要るのか**
+    faulthandler は「アクセス違反が起きたら全スレッドの Python スタックを
+    書き出す」仕掛けだが、それが**配布している exe の中でも本当に働くか**は、
+    実際に落としてみるまで分からない(PyInstaller のブートローダが自分の
+    例外処理を挟んでいる可能性がある)。落ちるのを待って確かめるのでは、
+    働いていなかったときに何度も取り逃す。ここを通せば、手元で一度に
+    確かめられる。
+
+    ふだんの起動には一切影響しない(環境変数を立てない限り呼ばれない)。"""
+    import faulthandler
+    if crashlog.LOG is not None:
+        crashlog.LOG.write("--- ここから自己診断。わざと落とします ---\n")
+    faulthandler._sigsegv()
+
+
 def main():
     app = QApplication(sys.argv)
     icon_path = settings_mod.icon_path()
@@ -288,6 +309,11 @@ def main():
     _prepare_skin(cfg)
     win = MainWindow(app)
     win.show()
+    if os.environ.get("NEOTJA_CRASH_SELFTEST") == "1":
+        # 窓が出てから落とす。import の途中ではなく、ふだん落ちているのと
+        # 同じ「Qt が回っている最中」で確かめたいため。
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(3000, _selftest_crash)
     sys.exit(app.exec())
 
 
