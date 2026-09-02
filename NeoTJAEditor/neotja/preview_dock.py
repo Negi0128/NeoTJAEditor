@@ -3,11 +3,15 @@ import os
 import time as _time
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QRegion
+from PySide6.QtGui import (QKeySequence, QMouseEvent, QPainter,
+                           QRegion, QShortcut)
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
     QMessageBox, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
+
+#: Qt の「上限なし」。setFixedSize で入った上下限を外すのに使う。
+_QWIDGETSIZE_MAX = 16777215
 
 from neotja.audio_engine import AudioEngine, HitSoundEngine, MetronomeEngine, SongDecodeWorker
 from neotja.worker_util import detach_worker
@@ -248,7 +252,11 @@ class ScaledHost(QWidget):
         return self._scale
 
     def set_scale(self, s: float):
-        s = max(0.1, min(1.0, float(s)))
+        # 上限を 1.0 から 4.0 へ。全画面(鑑賞会用)では 1280x720 の絵を画面
+        # いっぱいまで**拡大**する必要がある。描き方は縮小のときと同じで、
+        # 倍率をかけた painter に描かせるだけなので、拡大でも中間画像は要らず
+        # 絵も滑らかに出る(1280 -> 4K でも 3倍まで)。
+        s = max(0.1, min(4.0, float(s)))
         if abs(s - self._scale) < 1e-6:
             return
         self._scale = s
@@ -261,7 +269,9 @@ class ScaledHost(QWidget):
         self.refit()
 
     def _passthrough(self) -> bool:
-        return self._scale >= 0.999
+        # 等倍のときだけ素通り。以前は「0.999 以上」= 拡大も素通り扱いで、
+        # 全画面で倍率を上げても絵が大きくならなかった。
+        return abs(self._scale - 1.0) < 0.001
 
     def refit(self):
         """中身の大きさが変わった/倍率が変わったときに自分の大きさを取り直す。"""
@@ -360,10 +370,20 @@ class GamePreviewWindow(QWidget):
         self.scaled_host = ScaledHost(chart_preview, self)
         layout.addWidget(self.scaled_host)
         layout.addWidget(bottom_widget)
+        self._fullscreen = False
+        self._fs_scale = 1.0
+        self._fs_geometry = None
         self._refit()
         # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
         # 窓の固定サイズも取り直す。
         self._lane.heightChanged.connect(self._on_preview_height_changed)
+        # F11 で全画面、Esc で戻る。窓かその子にフォーカスがあれば効く
+        # (レーンがフォーカスを持っているので keyPressEvent では拾えない)。
+        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
+                        (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
+            sc = QShortcut(seq, self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(fn)
 
     def refit(self):
         """中身の高さが変わったときに窓の固定サイズを取り直す。
@@ -373,6 +393,12 @@ class GamePreviewWindow(QWidget):
         self._refit()
 
     def _refit(self):
+        if self._fullscreen:
+            # 全画面のあいだは窓の大きさを固定しない(固定すると画面いっぱいの
+            # 表示が壊れる)。モード切替で中身の高さが変わったときは、倍率を
+            # 取り直すだけでよい。
+            self._fit_fullscreen()
+            return
         # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
         # モード切替のたびに窓がガタつくので、呼び出し側で最も高いページに合わせて
         # 固定済み。その固定高さ(=minimumHeight)を使って窓サイズも一定に保つ。
@@ -386,6 +412,82 @@ class GamePreviewWindow(QWidget):
         self.scaled_host.refit()
         self.setFixedSize(max(self.scaled_host.width(), self._bottom_widget.minimumWidth()),
                           self.scaled_host.height() + self._bottom_widget.minimumHeight())
+
+    # ------------------------------------------------------------------
+    # 全画面(鑑賞会用)
+    # ------------------------------------------------------------------
+    def toggle_fullscreen(self):
+        if self._fullscreen:
+            self.exit_fullscreen()
+        else:
+            self.enter_fullscreen()
+
+    def enter_fullscreen(self):
+        """画面いっぱいにゲーム画面だけを出す。
+
+        下部パネル(速度スライダー・波形・情報)とレーン上のボタン類は隠す。
+        鑑賞会で見せたいのは絵だけで、操作するものが写り込むと邪魔になる。
+        隠しても困らないのは、モード切替(Tab)・再生(Space)・コース切替が
+        すべてキーで足りるため。"""
+        if self._fullscreen:
+            return
+        self._fullscreen = True
+        self._fs_geometry = self.saveGeometry()
+        self._fs_scale = self.scaled_host.scale()
+        self._bottom_widget.hide()
+        self.set_overlay_visible(False)
+        # setFixedSize で入っている上下限を外さないと全画面にならない。
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        self.showFullScreen()
+        # 画面の大きさが確定してから倍率を決める(showFullScreen の直後は
+        # まだ元の大きさのことがある)。
+        QTimer.singleShot(0, self._fit_fullscreen)
+
+    def exit_fullscreen(self):
+        if not self._fullscreen:
+            return
+        self._fullscreen = False
+        self.scaled_host.set_scale(self._fs_scale)
+        self._bottom_widget.show()
+        self.set_overlay_visible(True)
+        self.showNormal()
+        self._refit()
+        if self._fs_geometry is not None:
+            self.restoreGeometry(self._fs_geometry)
+
+    def _fit_fullscreen(self):
+        """画面に収まる最大の倍率にして、中央へ置く。"""
+        if not self._fullscreen:
+            return
+        content = self._chart_preview
+        cw, ch = max(1, content.width()), max(1, content.height())
+        avail = self.size()
+        scale = min(avail.width() / float(cw), avail.height() / float(ch))
+        self.scaled_host.set_scale(max(0.05, scale))
+        self.layout().setAlignment(self.scaled_host, Qt.AlignCenter)
+
+    def set_overlay_visible(self, visible: bool):
+        """レーンの上に浮かせているボタン類(モード/コース/録画/倍率/FPS)の
+        表示。全画面のときに隠すためのもの。
+
+        ScaledHost の直接の子のうち、中身(ゲーム画面)以外がそれにあたる。
+        preview_dock 側がどのボタンを置いたかをここで知らずに済むよう、
+        名指しではなく「中身以外の子」でまとめて扱う。"""
+        for child in self.scaled_host.children():
+            if not isinstance(child, QWidget):
+                continue
+            if child is self._chart_preview:
+                continue
+            child.setVisible(visible)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 全画面へ移るとき、showFullScreen() の直後はまだ元の大きさのことが
+        # ある。倍率をそこで決めると等倍のままになるので(実測)、大きさが
+        # 確定したこのタイミングで決め直す。
+        if self._fullscreen:
+            self._fit_fullscreen()
 
     def _on_preview_height_changed(self, _h):
         self._refit()
