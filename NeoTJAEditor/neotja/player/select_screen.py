@@ -112,6 +112,14 @@ CARD_INDEX = {"Easy": 0, "Normal": 1, "Hard": 2, "Oni": 3, "Edit": 4}
 #: 表示の並び順(やさしいものから)。
 COURSE_ORDER = ("Easy", "Normal", "Hard", "Oni", "Edit")
 
+#: 譜面を開いていないときの案内。空のパネルだけ出ていると何をすればいいのか
+#: 分からない、と言われたので、いちばん目に入る曲名の場所へ置く。
+EMPTY_TITLE = "TJAを選んでください"
+EMPTY_SUBTITLE = "ドラッグ＆ドロップでも読み込めます"
+
+#: 譜面に無いコースのカードをどれだけ暗くするか。
+MISSING_DIM = 150
+
 
 class SelectScreen(QWidget):
     """コースを選ぶ画面。選ばれたら courseChosen を出す。"""
@@ -128,7 +136,8 @@ class SelectScreen(QWidget):
         self._title = ""
         self._subtitle = ""
         # スロットごとの候補。[[かんたん], [ふつう], [むずかしい], [おに, うら]]
-        self._slots = []
+        # 譜面を開く前も4つ分の空スロットを持たせて、カードを薄暗く出す。
+        self._slots = [[] for _ in SLOT_COURSES]
         self._slot_side = 0         # おに のスロットで今どちらを見せているか
         # おに と うら を選んでいる最中か(押されたら2枚を出して選ばせる)。
         self._picking = False
@@ -152,17 +161,19 @@ class SelectScreen(QWidget):
         self._title = title or ""
         self._subtitle = subtitle or ""
         known = {c.get("key"): c for c in (courses or []) if c.get("key")}
-        # スロットごとに「そこに置けるコース」を集める。おに のスロットには
-        # おに と うら の両方が入りうる(めくって切り替える)。
+        # スロットは**常に4つ**。譜面に無いコースも薄暗く出す。
+        # 出したり引っ込めたりすると、譜面ごとに並びが動いて目が迷う。
+        # おに のスロットには おに と うら の両方が入りうる。
         self._slots = []
         for keys in SLOT_COURSES:
-            have = [known[k] for k in keys if k in known]
-            if have:
-                self._slots.append(have)
+            self._slots.append([known[k] for k in keys if k in known])
         # おに のスロットは、うらがあっても最初は おに を見せる。
         self._slot_side = 0
         self._picking = False
-        self._cursor = max(0, len(self._slots) - 1)
+        self._pick_t = 0.0
+        # いちばん難しい「実際に入っているもの」に合わせる。
+        have = [i for i, c in enumerate(self._slots) if c]
+        self._cursor = have[-1] if have else 0
         self.update()
 
     def current_course(self):
@@ -174,6 +185,8 @@ class SelectScreen(QWidget):
         if not (0 <= i < len(self._slots)):
             return None
         cand = self._slots[i]
+        if not cand:
+            return None                 # 譜面に無いコース(薄暗く出すだけ)
         if len(cand) > 1:
             return cand[self._slot_side % len(cand)]
         return cand[0]
@@ -265,6 +278,8 @@ class SelectScreen(QWidget):
         i = self._card_at(pt)
         if i is None:
             return
+        if not self._slots[i]:
+            return                      # 譜面に無いコースは押しても何もしない
         self._cursor = i
         # うらがある譜面の おに は、押すと「おに と うら の2枚」を出して
         # 選ばせる。小さな切り替えボタンを付けてみたが、絵が何を意味するのか
@@ -283,7 +298,7 @@ class SelectScreen(QWidget):
             return
         # どれを押そうとしているかが分かるように、指したものを大きくする。
         i = self._card_at(event.position().toPoint())
-        if i is not None and i != self._cursor:
+        if i is not None and self._slots[i] and i != self._cursor:
             self._cursor = i
             self.update()
 
@@ -356,21 +371,9 @@ class SelectScreen(QWidget):
         return None
 
     def _card_rects(self):
-        """カードの位置。本家と同じ4つの場所に置く。
-
-        コースが4つ揃っていない譜面(おに だけ、等)は、右端に1枚だけ
-        ぽつんと残ると壊れて見えるので、本家の並びの中で中央へ寄せる。
-        置く場所と間隔そのものは本家のままなので、4つ揃っていれば
-        実機と1pxも変わらない。"""
-        n = len(self._slots)
-        if n == 0:
-            return []
-        first = (len(CARD_SLOT_X) - n) / 2.0
-        out = []
-        for i in range(n):
-            x = CARD_SLOT_X[0] + (first + i) * (CARD_SLOT_X[1] - CARD_SLOT_X[0])
-            out.append(QRect(int(round(x)), CARD_Y, CARD_W, CARD_H))
-        return out
+        """カードの位置。本家と同じ4つの場所。譜面に何が入っていても動かない。"""
+        return [QRect(int(round(x)), CARD_Y, CARD_W, CARD_H)
+                for x in CARD_SLOT_X]
 
     # ------------------------------------------------------------------
     def paintEvent(self, event):
@@ -396,11 +399,13 @@ class SelectScreen(QWidget):
         # 曲名の帯は Difficulty_Back の絵に含まれているので、文字だけ置く。
         name = self._title_font or "Meiryo"
         cx = PANEL_RECT.center().x()
-        if self._title:
-            self._draw_outlined(p, self._title, cx, TITLE_BASELINE, 40, name)
-        if self._subtitle:
-            self._draw_outlined(p, self._subtitle, cx, SUBTITLE_BASELINE,
-                                22, name)
+        # まだ譜面を開いていないときは、曲名の場所に何をすればいいのかを出す。
+        # 空のパネルだけが出ていると「?」となる、という指摘を受けての対応。
+        title = self._title or EMPTY_TITLE
+        subtitle = self._subtitle or (EMPTY_SUBTITLE if not self._title else "")
+        self._draw_outlined(p, title, cx, TITLE_BASELINE, 40, name)
+        if subtitle:
+            self._draw_outlined(p, subtitle, cx, SUBTITLE_BASELINE, 22, name)
 
     @staticmethod
     def _draw_outlined(p, text, cx, baseline, size, family):
@@ -443,10 +448,14 @@ class SelectScreen(QWidget):
         rects = self._card_rects()
         for i, rect in enumerate(rects):
             course = self._course_in(i)
-            if course is None:
-                continue
-            idx = CARD_INDEX.get(course.get("key"), 3)
-            selected = (i == self._cursor)
+            # 譜面に無いコースも枠は出す。並びが譜面ごとに動くと目が迷うので、
+            # 「無い」ことも同じ場所で見せる。
+            missing = course is None
+            if missing:
+                idx = i if i < 3 else 3
+            else:
+                idx = CARD_INDEX.get(course.get("key"), 3)
+            selected = (not missing) and (i == self._cursor)
             # 選んでいるカードは少し持ち上げて大きく見せる。
             r = QRect(rect)
             if selected:
@@ -456,7 +465,12 @@ class SelectScreen(QWidget):
                 p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
             else:
                 p.fillRect(r, QColor("#c86"))
-            self._draw_level(p, r, int(course.get("level") or 0))
+            if missing:
+                # 薄暗くしてから レベルを ★- で置く。
+                p.fillRect(r, QColor(0, 0, 0, MISSING_DIM))
+                self._draw_level(p, r, None)
+            else:
+                self._draw_level(p, r, course.get("level"))
 
     def _draw_pick(self, p):
         """おに と うら の2枚を出す。
@@ -496,7 +510,20 @@ class SelectScreen(QWidget):
             """カード内の座標を、画面上の座標へ。"""
             return rect.x() + int(round(cx * sx)), rect.y() + int(round(cy * sy))
 
-        if num is not None and level > 0:
+        if level is None or level <= 0:
+            # レベルが分からない/コースが無い。素材の数字は 0-9 しか無いので、
+            # 「-」は自前で引く(数字と同じ白＋黒縁で、太さも高さに合わせる)。
+            _x, cy = px(0, CARD_STAR_CY)
+            x, _y2 = px(CARD_STAR_RIGHT + NUM_LEFT_GAP, 0)
+            w = int(round(12 * sx))
+            h = max(2, int(round(4 * sy)))
+            p.setPen(QPen(QColor(0, 0, 0, 220), max(1.0, 2.0 * sy)))
+            p.setBrush(QColor("#ffffff"))
+            p.drawRect(QRect(x, cy - h // 2, w, h))
+            p.setPen(Qt.NoPen)
+            p.setBrush(Qt.NoBrush)
+            return
+        if num is not None:
             digits = [int(c) for c in str(level)]
             widths = [NUM_BOUNDS[d][1] - NUM_BOUNDS[d][0] + 1 for d in digits]
             h = int(round(num.height() * sy))
@@ -510,7 +537,7 @@ class SelectScreen(QWidget):
                              QRect(NUM_BOUNDS[d][0], 0, w, num.height()))
                 x += dw + int(round(NUM_TRACK * sx))
 
-        if star is not None and level > 0:
+        if star is not None:
             # 帯は10個ぶんしか無い。★11 の譜面もあるので 10 で頭打ちにする。
             n = max(0, min(level, DOT_COUNT))
             sw = int(round(star.width() * sx))
