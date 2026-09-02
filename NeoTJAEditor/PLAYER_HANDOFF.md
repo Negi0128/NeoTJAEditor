@@ -37,8 +37,8 @@ Player は `PreviewDock` を1つ作り、その `game_preview_window` を見せ�
 - [x] **工程2** 全画面。F11 / Esc（`63bedf9`）
 - [x] **工程3** まとめて録画（`neotja/player/batch.py`）。3譜面を実際に書き出して確認
 - [x] **工程4** 曲を選ぶ一覧（`library.py`）。300譜面を 3.1 秒で走査、GUI は固まらない
-- [ ] **工程5** Editor 連携（Player を起動）。改名は完了（27箇所）
-- [ ] **工程6** `NeoTJAPlayer.spec` でビルド、通し確認
+- [x] **工程5** Editor 連携（実行メニュー → NeoTJAPlayer を別ウィンドウで開く）と改名27箇所
+- [x] **工程6** `NeoTJAPlayer.spec` でビルド。exe 109MB、実際に起動して確認
 
 ## いまのファイル構成
 

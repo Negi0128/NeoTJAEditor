@@ -675,6 +675,8 @@ class MainWindow(QMainWindow):
         for k in ("F2", "F3"):
             action = rm.addAction(f"{k}: {self.config_data['run_config'][k]['name']}", lambda key=k: self.run_simulator(key))
             self._run_actions[k] = action
+        rm.addSeparator()
+        rm.addAction("NeoTJAPlayer を別ウィンドウで開く", self.launch_player)
 
         sm = mb.addMenu("設定")
         sm.addAction("環境設定...", self.open_settings)
@@ -1816,6 +1818,58 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Simulator launch
     # ------------------------------------------------------------------
+    def launch_player(self):
+        """NeoTJAPlayer(別プロセス)を、いま開いている譜面で起動する。
+
+        **保存済みのファイルが要る。** Player は別プロセスなので、渡せるのは
+        パスだけ。編集中(未保存)の内容は渡らない。黙って古い内容を再生すると
+        「直したはずが直っていない」と見えるので、先に保存してもらう。
+
+        コースと再生位置も渡す。鑑賞会や録画のために開くとき、また頭から
+        探し直すのは無駄なので、いま見ているところがそのまま出る。
+        """
+        if not self.current_file or not os.path.exists(self.current_file):
+            QMessageBox.information(
+                self, "NeoTJAPlayer",
+                "先に譜面を保存してください。\n\n"
+                "NeoTJAPlayer は別のプログラムなので、渡せるのは保存された"
+                "ファイルだけです。編集中の内容はそのままでは開けません。")
+            return
+        exe = self._find_player()
+        if not exe:
+            QMessageBox.warning(
+                self, "NeoTJAPlayer",
+                "NeoTJAPlayer が見つかりませんでした。\n\n"
+                "NeoTJAEditor.exe と同じ場所に NeoTJAPlayer.exe を置いてください。")
+            return
+        args = list(exe) + [self.current_file]
+        course = self._preview_course_override
+        if course:
+            args += ["--course", str(course)]
+        try:
+            at = self.preview_dock.audio.position() / 1000.0
+        except Exception:  # noqa: BLE001
+            at = 0.0
+        if at > 0.5:
+            args += ["--at", "%.3f" % at]
+        try:
+            subprocess.Popen(args)
+        except OSError as exc:
+            QMessageBox.warning(self, "NeoTJAPlayer",
+                                "起動できませんでした:\n%s" % exc)
+
+    @staticmethod
+    def _find_player():
+        """Player の起動コマンドを組み立てる。見つからなければ空。
+
+        配布物では exe の隣に NeoTJAPlayer.exe が居る。開発中(ソースから
+        動かしているとき)は同じ Python で -m neotja.player を叩く。"""
+        if getattr(sys, "frozen", False):
+            here = os.path.dirname(sys.executable)
+            exe = os.path.join(here, "NeoTJAPlayer.exe")
+            return [exe] if os.path.exists(exe) else []
+        return [sys.executable, "-m", "neotja.player"]
+
     def run_simulator(self, key):
         path = self.config_data["run_config"][key]["path"]
         if path and os.path.exists(path):
