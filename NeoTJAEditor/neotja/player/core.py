@@ -96,6 +96,10 @@ class PlayerCore:
         # 「頭出し」もこのタイマーが引き受ける(長さが分かるまで待つ)。
         from PySide6.QtCore import QTimer
         self._loop_timer = QTimer()
+        # 20ms ごとに見る。250ms にしていたら折り返しが最大 0.25 秒遅れて、
+        # 曲の切れ目に無音が空いた。見るだけの処理なので細かくしても軽い。
+        from PySide6.QtCore import Qt as _Qt
+        self._loop_timer.setTimerType(_Qt.PreciseTimer)
         self._loop_timer.timeout.connect(self._tick_loop)
 
         self.dock = PreviewDock(
@@ -175,7 +179,7 @@ class PlayerCore:
         except Exception:  # noqa: BLE001
             return
         self._pending_seek = float(at_sec)
-        self._loop_timer.start(250)
+        self._loop_timer.start(20)
 
     def _tick_loop(self):
         """流している音が終わりまで来たら、始めの所へ戻す。
@@ -194,7 +198,9 @@ class PlayerCore:
             self._pending_seek = None
             return
         pos = self.dock.audio.position() / 1000.0
-        if pos >= dur - 0.15:
+        # 終わりきる**手前**で戻す。鳴り終わってから戻すと、そのぶんの無音が
+        # そのまま切れ目になる。0.05 秒手前なら耳では気づかない。
+        if pos >= dur - 0.05:
             self.dock.audio.seek(int(self._loop[0] * 1000))
             self.dock.audio.play()
 

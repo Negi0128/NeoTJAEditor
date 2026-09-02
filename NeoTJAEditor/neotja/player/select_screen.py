@@ -134,8 +134,11 @@ class SelectScreen(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(int(SCREEN_W * SCREEN_SCALE),
-                          int(SCREEN_H * SCREEN_SCALE))
+        # 見せるのはパネルのぶんだけ。1280x720 のまま出すとパネルの外側が
+        # 黒く空いて、余白ばかりの画面になる(そういう指摘を受けた)。
+        # 中で使う座標は 1280x720 のままで、描くときに原点をずらす。
+        self.setFixedSize(int(PANEL_RECT.width() * SCREEN_SCALE),
+                          int(PANEL_RECT.height() * SCREEN_SCALE))
         self.setFocusPolicy(Qt.StrongFocus)
         # 押せるものの上でカーソルを変えるために、押していなくても
         # マウスの動きを受け取る。
@@ -331,8 +334,10 @@ class SelectScreen(QWidget):
 
     @staticmethod
     def _to_screen(posf):
-        """ウィジェット上の座標を、描画に使っている 1280x720 の座標へ戻す。"""
-        return (posf / SCREEN_SCALE).toPoint()
+        """ウィジェット上の座標を、描画に使っている 1280x720 の座標へ戻す。
+        倍率で割ってから、切り詰めたぶんの原点を足す。"""
+        pt = (posf / SCREEN_SCALE).toPoint()
+        return pt + PANEL_RECT.topLeft()
 
     def _clickable_at(self, pt):
         """そこに押せるものがあるか。"""
@@ -423,8 +428,10 @@ class SelectScreen(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.fillRect(self.rect(), QColor("#0d1117"))
-        # ここから先は 1280x720 の座標で描く。倍率は painter に持たせる。
+        # ここから先は 1280x720 の座標で描く。倍率と原点のずれは painter に
+        # 持たせるので、実測して合わせた座標はそのまま使える。
         p.scale(SCREEN_SCALE, SCREEN_SCALE)
+        p.translate(-PANEL_RECT.x(), -PANEL_RECT.y())
 
         panel = self._skin.get("Select_Panel")
         if panel is not None:
@@ -527,8 +534,7 @@ class SelectScreen(QWidget):
             return
         # しっかり暗くする。薄いと後ろのカードが2枚のあいだから覗いて、
         # 何枚あるのか分からない絵になる(実際にそうなった)。
-        p.fillRect(QRect(0, 0, SCREEN_W, SCREEN_H),
-                   QColor(0, 0, 0, int(210 * self._pick_t)))
+        p.fillRect(PANEL_RECT, QColor(0, 0, 0, int(210 * self._pick_t)))
         for j, r in enumerate(rects):
             course = self._slots[self._cursor][j]
             idx = CARD_INDEX.get(course.get("key"), 3)
