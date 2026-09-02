@@ -15,7 +15,8 @@ TJA を1つ開いたら、まずここでコースを選ぶ。単発のファイ
 
 import os
 
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import (QEasingCurve, QRect, Qt, Signal,
+                            QVariantAnimation)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
@@ -101,6 +102,9 @@ PARTS_ROW_Y = ((5, 194), (205, 394))     # 0=おに(桃) 1=うら(紫)
 #: 少し大きくするのは、「別の場面が開いた」と分かるようにするため。
 PICK_SCALE = 1.18
 PICK_GAP = 40
+#: 2枚が出てくるのにかける時間(ミリ秒)。押した手応えが出るぶんだけで、
+#: 待たされたと感じない長さ。
+PICK_ANIM_MS = 150
 
 #: TJA のコースキー → Difficulty_Bar の何枚目か。
 CARD_INDEX = {"Easy": 0, "Normal": 1, "Hard": 2, "Oni": 3, "Edit": 4}
@@ -128,6 +132,14 @@ class SelectScreen(QWidget):
         self._slot_side = 0         # おに のスロットで今どちらを見せているか
         # おに と うら を選んでいる最中か(押されたら2枚を出して選ばせる)。
         self._picking = False
+        # 出てくる動きの進み具合 0.0(閉じている) 〜 1.0(出きった)。
+        # 押した場所から広がるので、どのカードを押したのかが目で追える。
+        self._pick_t = 0.0
+        self._pick_anim = QVariantAnimation(self)
+        self._pick_anim.setDuration(PICK_ANIM_MS)
+        self._pick_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._pick_anim.valueChanged.connect(self._on_pick_anim)
+        self._pick_anim.finished.connect(self._on_pick_anim_done)
         self._cursor = 0
         self._skin = {}
         self._skin_ready = False
@@ -234,13 +246,14 @@ class SelectScreen(QWidget):
             for j, rect in enumerate(self._pick_rects()):
                 if rect.contains(pt):
                     self._picking = False
+                    self._pick_t = 0.0
+                    self._pick_anim.stop()
                     self._slot_side = j
                     self.update()
                     self.courseChosen.emit(self._slots[self._cursor][j]["key"])
                     return
             # 外を押したら閉じるだけ(選ばずに戻れる道を必ず残す)。
-            self._picking = False
-            self.update()
+            self._start_pick(False)
             return
 
         if self._back_rect().contains(pt):
@@ -258,7 +271,7 @@ class SelectScreen(QWidget):
         # 伝わらなかった。押したら候補が出てくるほうが、説明が要らない。
         if self._has_flip(i):
             self._picking = True
-            self.update()
+            self._start_pick(True)
             return
         self.update()
         c = self._course_in(i)
@@ -274,19 +287,47 @@ class SelectScreen(QWidget):
             self._cursor = i
             self.update()
 
-    def _pick_rects(self):
-        """おに / うら の2枚を出す場所。画面の中央に並べる。
+    def _on_pick_anim(self, v):
+        self._pick_t = float(v)
+        self.update()
 
-        もとのカードの位置に出すと、後ろのカード列と重なって「どれが今の
-        話なのか」が分からなくなる。中央に少し大きく出して、他を暗くする。"""
+    def _on_pick_anim_done(self):
+        # 閉じきったところで初めて「選んでいない」状態に戻す。途中で戻すと
+        # 縮んでいる最中に後ろのカードが押せてしまう。
+        if self._pick_t <= 0.001:
+            self._picking = False
+        self.update()
+
+    def _start_pick(self, opening):
+        self._pick_anim.stop()
+        self._pick_anim.setStartValue(self._pick_t)
+        self._pick_anim.setEndValue(1.0 if opening else 0.0)
+        self._pick_anim.start()
+
+    def _pick_rects(self):
+        """おに / うら の2枚を出す場所。押したカードから中央へ広がる。
+
+        いきなり中央に出すと、どこから出てきたのかが分からない。押した
+        カードの場所から動かすと、目が自然についていく。"""
         if not self._picking or not self._has_flip(self._cursor):
             return []
+        t = max(0.0, min(1.0, self._pick_t))
         w = int(CARD_W * PICK_SCALE)
         h = int(CARD_H * PICK_SCALE)
         total = w * 2 + PICK_GAP
-        x = (SCREEN_W - total) // 2
-        y = CARD_Y + (CARD_H - h) // 2
-        return [QRect(x, y, w, h), QRect(x + w + PICK_GAP, y, w, h)]
+        x0 = (SCREEN_W - total) // 2
+        y0 = CARD_Y + (CARD_H - h) // 2
+        finals = [QRect(x0, y0, w, h), QRect(x0 + w + PICK_GAP, y0, w, h)]
+        srcs = self._card_rects()
+        src = srcs[self._cursor] if self._cursor < len(srcs) else finals[0]
+        out = []
+        for f in finals:
+            out.append(QRect(
+                int(round(src.x() + (f.x() - src.x()) * t)),
+                int(round(src.y() + (f.y() - src.y()) * t)),
+                int(round(src.width() + (f.width() - src.width()) * t)),
+                int(round(src.height() + (f.height() - src.height()) * t))))
+        return out
 
     def _swap_rect(self, i):
         """めくるボタンの場所。カードの右上。"""
@@ -428,7 +469,7 @@ class SelectScreen(QWidget):
             return
         # しっかり暗くする。薄いと後ろのカードが2枚のあいだから覗いて、
         # 何枚あるのか分からない絵になる(実際にそうなった)。
-        p.fillRect(self.rect(), QColor(0, 0, 0, 210))
+        p.fillRect(self.rect(), QColor(0, 0, 0, int(210 * self._pick_t)))
         for j, r in enumerate(rects):
             course = self._slots[self._cursor][j]
             idx = CARD_INDEX.get(course.get("key"), 3)
