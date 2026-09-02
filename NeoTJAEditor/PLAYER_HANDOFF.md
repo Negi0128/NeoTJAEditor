@@ -76,9 +76,20 @@ preview_data, offset)`。`bar_times` は小節の**開始**しか持たないの
 
 ## 動かしかた
 
+**ふだんはソースから動かす。exe は作り直さない。**
+
 ```
-cd C:\Users\admin\Desktop\プログラミング\NeoTJAEditor\NeoTJAEditor\NeoTJAEditor
+cd <このリポジトリの NeoTJAEditor フォルダ>
 .venv\Scripts\python.exe -m neotja.player [譜面.tja] [--course Oni] [--at 12.3]
+```
+
+ビルドは1回 80〜110 秒かかるうえ、**開いたままの exe がファイルを掴んで
+いると失敗する**(実際に起きた)。手を入れて確かめる往復にはまったく
+向かない。exe を作るのは配るときだけ:
+
+```
+.venv\Scripts\python.exe -m PyInstaller NeoTJAPlayer.spec --noconfirm
+.venv\Scripts\python.exe -m PyInstaller NeoTJAEditor.spec --noconfirm
 ```
 
 ## 注意
