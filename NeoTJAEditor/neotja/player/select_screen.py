@@ -152,6 +152,8 @@ class SelectScreen(QWidget):
         self._cursor = 0
         self._skin = {}
         self._skin_ready = False
+        # 薄暗くしたカードの作り置き。毎コマ作ると重いので種類ごとに1枚。
+        self._dim_cache = {}
         self._title_font = None
 
     # ------------------------------------------------------------------
@@ -460,16 +462,17 @@ class SelectScreen(QWidget):
             r = QRect(rect)
             if selected:
                 r.adjust(-6, -12, 6, 6)
-            if cards is not None:
+            if missing:
+                dim = self._dim_card(idx)
+                if dim is not None:
+                    p.drawPixmap(r, dim)
+                self._draw_level(p, r, None)
+            elif cards is not None:
                 sx = int(round(CARD_X0 + idx * CARD_PITCH))
                 p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
+                self._draw_level(p, r, course.get("level"))
             else:
                 p.fillRect(r, QColor("#c86"))
-            if missing:
-                # 薄暗くしてから レベルを ★- で置く。
-                p.fillRect(r, QColor(0, 0, 0, MISSING_DIM))
-                self._draw_level(p, r, None)
-            else:
                 self._draw_level(p, r, course.get("level"))
 
     def _draw_pick(self, p):
@@ -491,6 +494,27 @@ class SelectScreen(QWidget):
                 sx = int(round(CARD_X0 + idx * CARD_PITCH))
                 p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
             self._draw_level(p, r, int(course.get("level") or 0))
+
+    def _dim_card(self, idx):
+        """薄暗くしたカード(譜面に無いコース用)。種類ごとに1枚だけ作り置く。
+
+        **矩形で上から黒を塗ってはいけない。** カードは角が丸いので、
+        その塗りが角からはみ出して四角い影が付く(実際にそうなっていた)。
+        カードの絵の上にだけ乗るよう SourceAtop で重ねる。"""
+        pm = self._dim_cache.get(idx)
+        if pm is not None:
+            return pm
+        cards = self._skin.get("Select_Cards")
+        if cards is None:
+            return None
+        sx = int(round(CARD_X0 + idx * CARD_PITCH))
+        pm = cards.copy(QRect(sx, 0, CARD_W, CARD_H))
+        q = QPainter(pm)
+        q.setCompositionMode(QPainter.CompositionMode_SourceAtop)
+        q.fillRect(pm.rect(), QColor(0, 0, 0, MISSING_DIM))
+        q.end()
+        self._dim_cache[idx] = pm
+        return pm
 
     def _draw_level(self, p, rect, level):
         """レベルの数字と、埋まっているぶんの★。
