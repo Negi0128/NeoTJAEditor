@@ -29,6 +29,9 @@ class WaveformWidget(QWidget):
     offsetCommitted = Signal(float)   # 確定値
     stereoToggled = Signal(bool)
     offsetModeToggled = Signal(bool)
+    # 追従モードの表示幅(秒)が Alt/Ctrl+ホイールで変わった。
+    # 受け側(preview_dock)が設定へ覚える。
+    followWindowChanged = Signal(float)
 
     MIN_ZOOM = 1.0
     MAX_ZOOM = 1000.0
@@ -507,6 +510,7 @@ class WaveformWidget(QWidget):
             self._follow_window = max(1.0, min(self._follow_window / factor, 60.0))
             self.set_position(self.position_sec)  # 追従位置を取り直して即反映
             self.update()
+            self.followWindowChanged.emit(self._follow_window)
             event.accept()
             return
         old_span = self._visible_span()

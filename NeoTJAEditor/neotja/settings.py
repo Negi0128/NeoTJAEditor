@@ -13,7 +13,7 @@ _SETTINGS_KEYS = (
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
-    "preview_zoom", "preview_speed",
+    "preview_zoom", "preview_speed", "waveform_window",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
@@ -122,6 +122,10 @@ def default_settings() -> dict:
         # 等倍より速い再生は無い。旧版で 1.50 や 2.00 が保存されていても、
         # 読み込み時に chart_preview_widget.snap_speed() が段階へ丸める。
         "preview_speed": 1.00,
+        # 音声波形モードで一度に見せる秒数(表示幅)。Alt/Ctrl+ホイールで
+        # 1〜60秒のあいだを変えられ、変えた値がそのまま次回の既定になる。
+        # 表示倍率(preview_zoom)やモードと同じ「触ったら覚える」扱い。
+        "waveform_window": 6.0,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための

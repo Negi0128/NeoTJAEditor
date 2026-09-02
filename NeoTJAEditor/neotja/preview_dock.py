@@ -992,7 +992,11 @@ class PreviewDock(QDockWidget):
         # 再生位置に追従スクロールさせる(スクロールする楽譜のような見え方)。
         self._wire_waveform(self.game_waveform, sync_stereo=False)
         self.game_waveform.set_stereo_view(False)     # 既定=合成
-        self.game_waveform.set_follow_window(6.0)      # 既定の表示幅(秒)。ホイールで変更可
+        # 表示幅(秒)は前回の値から始める。Alt/Ctrl+ホイールで変えると、
+        # その場で次回の既定になる(表示倍率やモードと同じ扱い)。
+        self.game_waveform.set_follow_window(self._waveform_window())
+        self.game_waveform.followWindowChanged.connect(
+            self._on_waveform_window_changed)
         # 素のホイールはレーンと同じ「小節移動」にする。向き(上=先へ)も、移動の
         # トゥイーンも、レーンの上で回したときと完全に同じになる。
         self.game_waveform.set_measure_step_cb(self.chart_preview.seek_relative_measure)
@@ -1035,7 +1039,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit = ChartEditWaveform(toggle_play_cb=self.audio.toggle_play_pause)
         self._wire_waveform(self.chart_edit, sync_stereo=False)
         self.chart_edit.set_stereo_view(False)
-        self.chart_edit.set_follow_window(6.0)
+        self.chart_edit.set_follow_window(self._waveform_window())
         # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
         self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
         self.chart_edit.setFixedHeight(170)
@@ -1245,6 +1249,33 @@ class PreviewDock(QDockWidget):
 
     # 25% は小さすぎて譜面が読めないので廃止した。
     ZOOM_STEPS = (100, 75, 50)
+
+    def _waveform_window(self) -> float:
+        """音声波形モードの表示幅(秒)。設定に無ければ 6 秒。
+
+        壊れた値(0 や文字列)が入っていても起動できるように、ここで範囲へ
+        押し込む。上限・下限は wheelEvent と同じ 1〜60 秒。"""
+        try:
+            v = float(self.config_data.get("waveform_window", 6.0))
+        except (TypeError, ValueError):
+            return 6.0
+        if v != v or v <= 0:          # NaN / 0 / 負
+            return 6.0
+        return max(1.0, min(v, 60.0))
+
+    def _on_waveform_window_changed(self, seconds: float):
+        """表示幅が変わったので次回の既定にする。
+
+        set_follow_window を呼び直しているのは、こちらが「既定値」も
+        更新するため(reset_zoom の戻り先がここで決まる)。呼ばないと、
+        戻す操作で前回の起動時の幅に戻ってしまう。"""
+        seconds = max(1.0, min(float(seconds), 60.0))
+        self.game_waveform.set_follow_window(seconds)
+        if self.config_data.get("waveform_window") == seconds:
+            return
+        self.config_data["waveform_window"] = seconds
+        if self.save_settings_cb is not None:
+            self.save_settings_cb()
 
     def cycle_zoom(self):
         """表示倍率を 100 -> 75 -> 50 -> 100 と回す。"""
