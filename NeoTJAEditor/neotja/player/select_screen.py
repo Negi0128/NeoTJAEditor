@@ -1,0 +1,479 @@
+"""難易度選択画面。本家の「曲を選んだあと」の画面をそのまま出す。
+
+TJA を1つ開いたら、まずここでコースを選ぶ。単発のファイルを開いて見る、
+という使い方が中心なので、曲の一覧を経由するより素直で、鑑賞会でそのまま
+見せられる絵にもなる。
+
+**素材はすべて System にあるものを使う。** 特に Difficulty_Bar.png は
+「戻る/設定のボタン2つ + コース5枚」が1枚に並んだもので、カードには
+アイコンも「かんたん」等の文字も星の帯も**最初から入っている**。だから
+こちらで描くのは、カードを並べることと、レベルの★・数字を重ねることだけ。
+
+座標は 1280x720 基準。ゲーム画面と同じ土俵なので、そのまま並べても
+見た目の縮尺が揃う。
+"""
+
+import os
+
+from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import QWidget
+
+from neotja import settings as settings_mod
+
+#: 画面の大きさ。ゲーム画面と同じ。
+SCREEN_W, SCREEN_H = 1280, 720
+
+#: Difficulty_Bar.png の中の位置(実測)。ボタン2つのあとにカードが5枚。
+CARD_W, CARD_H = 131, 237
+CARD_X0 = 176            # 1枚目(かんたん)の左端
+CARD_PITCH = 143.25      # カードの間隔
+
+#: 後ろのパネル(Difficulty_Back)の位置。
+#:
+#: 実機の画面を 1280x720 に直して測った。パネルの黒い縁は画面の
+#: (236,39)-(1045,540)。素材の中で縁は (23,13)-(833,514) にあるので、
+#: 素材の左上をここへ置くと1pxの狂いもなく重なる。
+#: 目分量で (211, 96) にしていたときは y が 68px もずれていた。
+PANEL_RECT = QRect(213, 26, 858, 528)
+
+#: 曲名と副題を置く高さ(ベースライン)。実機の文字の位置。
+TITLE_BASELINE = 145
+SUBTITLE_BASELINE = 181
+
+#: カードを置く場所。**本家の座標そのもの。**
+#:
+#: Change_OniUra/Oni_Panel.png は 1280x720 の画面の中に おに のカードだけを
+#: 置いた絵で、そのカードは (861, 270) にある。ここから本家の並びが決まる:
+#: おに が右端(861)で、間隔は Difficulty_Bar と同じ 143.25。逆算すると
+#: かんたん=431.25 / ふつう=574.5 / むずかしい=717.75 / おに=861。
+#: 目分量で中央に寄せていたときは、実機と縦も横もずれていた。
+CARD_Y = 270
+#: 全体を右へ寄せた分。実機は 1P の吹き出しと どんちゃんが左を埋めるが、
+#: こちらはどちらも出さないので、そのぶん右へ寄せたほうが収まりがよい。
+ROW_SHIFT = 20
+CARD_SLOT_X = tuple(x + ROW_SHIFT for x in (431.25, 574.5, 717.75, 861.0))
+
+#: スロットの並び。おに と うら は**同じ場所**を分け合い、めくって切り替える
+#: (本家と同じ)。5枚並べると横幅が足りず、左のボタンをカードで潰してしまう。
+SLOT_COURSES = (("Easy",), ("Normal",), ("Hard",), ("Oni", "Edit"))
+
+#: Select_Number.png の中の各数字の左右(実測)。18px 等間隔に置かれているが
+#: 字そのものは細いので、そのまま並べると字間が空いて「1 0」に見える。
+NUM_BOUNDS = ((3, 14), (22, 30), (39, 51), (57, 69), (74, 87),
+              (93, 104), (111, 122), (129, 141), (147, 159), (164, 176))
+#: 数字どうしの間隔。
+NUM_TRACK = 1
+
+# --- カードの中の位置(カード左上からの座標、実測) -----------------------
+# ★と点線の帯は**カードの絵に焼き込まれている**。こちらが描き足すのは
+# 「レベルの数字」と「埋まっているぶんの★」だけなので、焼き込まれたものに
+# 合わせないとずれる。目分量で置いていたときは実際にずれていた。
+#: 焼き込まれた大きな★の中心。
+CARD_STAR_CX, CARD_STAR_CY = 52, 176
+#: その★の右端。数字はここから右へ置く。
+CARD_STAR_RIGHT = 61
+#: 数字を★の右へ置くときの間隔。
+NUM_LEFT_GAP = 5
+#: 点線の帯: 10個、中心 x=20 から 10px 間隔、y=195。
+DOT_X0, DOT_STEP, DOT_COUNT, DOT_Y = 20, 10, 10, 195
+
+#: 左に置く2つのボタン(Difficulty_Bar の先頭2つ)。
+#:
+#: 実機と同じ「カードの左隣、カードと上をそろえる」位置。おに と うら を
+#: めくって切り替えることにしたので、カードは4枚に収まり、ここが空く。
+BTN_W, BTN_H = 77, 76
+BTN_BACK_SRC_X, BTN_CONF_SRC_X = 0, 88
+#:
+#: 実機はカードの左隣(232 と 324)だが、あちらは 1P の吹き出しと どんちゃんが
+#: 左を埋めているのでそれで収まる。こちらはどちらも出さないぶん左が空いて
+#: 見えるので、パネルの左端(236)と1枚目のカード(431)のあいだの中央へ寄せた。
+BTN_BACK_POS = (249 + ROW_SHIFT, 270)
+BTN_CONF_POS = (341 + ROW_SHIFT, 270)
+
+#: Select_OniUra_Parts.png の中の部品(実測)。横に 顔 / 輪 / 巴、縦に 桃・紫。
+PARTS_FACE = (10, 193)
+PARTS_RING = (211, 400)
+PARTS_TOMOE = (439, 580)
+PARTS_ROW_Y = ((5, 194), (205, 394))     # 0=おに(桃) 1=うら(紫)
+
+#: おに/うら を選ぶときに出す2枚の大きさ(ふつうのカードの何倍か)と間隔。
+#: 少し大きくするのは、「別の場面が開いた」と分かるようにするため。
+PICK_SCALE = 1.18
+PICK_GAP = 40
+
+#: TJA のコースキー → Difficulty_Bar の何枚目か。
+CARD_INDEX = {"Easy": 0, "Normal": 1, "Hard": 2, "Oni": 3, "Edit": 4}
+
+#: 表示の並び順(やさしいものから)。
+COURSE_ORDER = ("Easy", "Normal", "Hard", "Oni", "Edit")
+
+
+class SelectScreen(QWidget):
+    """コースを選ぶ画面。選ばれたら courseChosen を出す。"""
+
+    courseChosen = Signal(str)      # コースキー
+    cancelled = Signal()
+    #: レンチのボタン。NeoTJAPlayer の設定を開く。
+    settingsRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(SCREEN_W, SCREEN_H)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._title = ""
+        self._subtitle = ""
+        # スロットごとの候補。[[かんたん], [ふつう], [むずかしい], [おに, うら]]
+        self._slots = []
+        self._slot_side = 0         # おに のスロットで今どちらを見せているか
+        # おに と うら を選んでいる最中か(押されたら2枚を出して選ばせる)。
+        self._picking = False
+        self._cursor = 0
+        self._skin = {}
+        self._skin_ready = False
+        self._title_font = None
+
+    # ------------------------------------------------------------------
+    def set_song(self, title, subtitle, courses):
+        """曲名とコースを流し込む。courses は
+        [{"key": "Oni", "level": 10}, ...] の形(並びは問わない)。"""
+        self._title = title or ""
+        self._subtitle = subtitle or ""
+        known = {c.get("key"): c for c in (courses or []) if c.get("key")}
+        # スロットごとに「そこに置けるコース」を集める。おに のスロットには
+        # おに と うら の両方が入りうる(めくって切り替える)。
+        self._slots = []
+        for keys in SLOT_COURSES:
+            have = [known[k] for k in keys if k in known]
+            if have:
+                self._slots.append(have)
+        # おに のスロットは、うらがあっても最初は おに を見せる。
+        self._slot_side = 0
+        self._picking = False
+        self._cursor = max(0, len(self._slots) - 1)
+        self.update()
+
+    def current_course(self):
+        c = self._course_in(self._cursor)
+        return c.get("key") if c else None
+
+    def _course_in(self, i):
+        """スロット i で今見えているコース。"""
+        if not (0 <= i < len(self._slots)):
+            return None
+        cand = self._slots[i]
+        if len(cand) > 1:
+            return cand[self._slot_side % len(cand)]
+        return cand[0]
+
+    def _has_flip(self, i):
+        return 0 <= i < len(self._slots) and len(self._slots[i]) > 1
+
+    # ------------------------------------------------------------------
+    def _ensure_skin(self):
+        """素材はここで読む。起動時ではなく最初に描くときに揃えるのは、
+        ゲーム画面(_ensure_skin)と同じ考え方 — 使わない画面のぶんまで
+        起動を遅くしない。"""
+        if self._skin_ready:
+            return
+        self._skin_ready = True
+        d = settings_mod.skin_dir()
+        for name in ("Select_Cards", "Select_Panel", "Select_Star",
+                     "Select_Number", "Select_OniUra_Parts",
+                     "Select_Swap"):
+            p = os.path.join(str(d), name + ".png")
+            pm = QPixmap(p) if os.path.exists(p) else QPixmap()
+            self._skin[name] = None if pm.isNull() else pm
+        # 曲名の書体はゲーム画面のタイトルと同じものを使う(そろえないと
+        # 同じアプリの中で書体が混ざる)。
+        f = os.path.join(str(d), "Kanteiryu.otf")
+        if os.path.exists(f):
+            fid = QFontDatabase.addApplicationFont(f)
+            fams = QFontDatabase.applicationFontFamilies(fid) if fid != -1 else []
+            if fams:
+                self._title_font = fams[0]
+
+    # ------------------------------------------------------------------
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k in (Qt.Key_Left, Qt.Key_D, Qt.Key_F):
+            self._move(-1)
+        elif k in (Qt.Key_Right, Qt.Key_K, Qt.Key_J):
+            self._move(1)
+        elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            key = self.current_course()
+            if key:
+                self.courseChosen.emit(key)
+        elif k == Qt.Key_Escape:
+            self.cancelled.emit()
+        else:
+            super().keyPressEvent(event)
+
+    def _move(self, delta):
+        if not self._slots:
+            return
+        self._cursor = max(0, min(self._cursor + delta, len(self._slots) - 1))
+        self.update()
+
+    def flip(self):
+        """おに ⇄ うら をめくる。"""
+        if self._has_flip(self._cursor):
+            self._slot_side += 1
+            self.update()
+
+    def mousePressEvent(self, event):
+        """クリック1回で決まる。
+
+        「選ぶ」と「決める」を分けると、鑑賞会で見せている最中に2手かかる。
+        見る道具なので、押したものがそのまま始まるほうが素直。
+        """
+        pt = event.position().toPoint()
+
+        # おに/うら を選んでいる最中は、その2枚と「外側」しか押せない。
+        if self._picking:
+            for j, rect in enumerate(self._pick_rects()):
+                if rect.contains(pt):
+                    self._picking = False
+                    self._slot_side = j
+                    self.update()
+                    self.courseChosen.emit(self._slots[self._cursor][j]["key"])
+                    return
+            # 外を押したら閉じるだけ(選ばずに戻れる道を必ず残す)。
+            self._picking = False
+            self.update()
+            return
+
+        if self._back_rect().contains(pt):
+            self.cancelled.emit()
+            return
+        if self._conf_rect().contains(pt):
+            self.settingsRequested.emit()
+            return
+        i = self._card_at(pt)
+        if i is None:
+            return
+        self._cursor = i
+        # うらがある譜面の おに は、押すと「おに と うら の2枚」を出して
+        # 選ばせる。小さな切り替えボタンを付けてみたが、絵が何を意味するのか
+        # 伝わらなかった。押したら候補が出てくるほうが、説明が要らない。
+        if self._has_flip(i):
+            self._picking = True
+            self.update()
+            return
+        self.update()
+        c = self._course_in(i)
+        if c:
+            self.courseChosen.emit(c["key"])
+
+    def mouseMoveEvent(self, event):
+        if self._picking:
+            return
+        # どれを押そうとしているかが分かるように、指したものを大きくする。
+        i = self._card_at(event.position().toPoint())
+        if i is not None and i != self._cursor:
+            self._cursor = i
+            self.update()
+
+    def _pick_rects(self):
+        """おに / うら の2枚を出す場所。画面の中央に並べる。
+
+        もとのカードの位置に出すと、後ろのカード列と重なって「どれが今の
+        話なのか」が分からなくなる。中央に少し大きく出して、他を暗くする。"""
+        if not self._picking or not self._has_flip(self._cursor):
+            return []
+        w = int(CARD_W * PICK_SCALE)
+        h = int(CARD_H * PICK_SCALE)
+        total = w * 2 + PICK_GAP
+        x = (SCREEN_W - total) // 2
+        y = CARD_Y + (CARD_H - h) // 2
+        return [QRect(x, y, w, h), QRect(x + w + PICK_GAP, y, w, h)]
+
+    def _swap_rect(self, i):
+        """めくるボタンの場所。カードの右上。"""
+        rects = self._card_rects()
+        if not (0 <= i < len(rects)):
+            return QRect()
+        r = rects[i]
+        sx = r.width() / float(CARD_W)
+        sy = r.height() / float(CARD_H)
+        x, y, w, h = SWAP_RECT
+        return QRect(r.x() + int(x * sx), r.y() + int(y * sy),
+                     int(w * sx), int(h * sy))
+
+    @staticmethod
+    def _back_rect():
+        return QRect(BTN_BACK_POS[0], BTN_BACK_POS[1], BTN_W, BTN_H)
+
+    @staticmethod
+    def _conf_rect():
+        return QRect(BTN_CONF_POS[0], BTN_CONF_POS[1], BTN_W, BTN_H)
+
+    def _card_at(self, pt):
+        for i, rect in enumerate(self._card_rects()):
+            if rect.contains(pt):
+                return i
+        return None
+
+    def _card_rects(self):
+        """カードの位置。本家と同じ4つの場所に置く。
+
+        コースが4つ揃っていない譜面(おに だけ、等)は、右端に1枚だけ
+        ぽつんと残ると壊れて見えるので、本家の並びの中で中央へ寄せる。
+        置く場所と間隔そのものは本家のままなので、4つ揃っていれば
+        実機と1pxも変わらない。"""
+        n = len(self._slots)
+        if n == 0:
+            return []
+        first = (len(CARD_SLOT_X) - n) / 2.0
+        out = []
+        for i in range(n):
+            x = CARD_SLOT_X[0] + (first + i) * (CARD_SLOT_X[1] - CARD_SLOT_X[0])
+            out.append(QRect(int(round(x)), CARD_Y, CARD_W, CARD_H))
+        return out
+
+    # ------------------------------------------------------------------
+    def paintEvent(self, event):
+        self._ensure_skin()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.fillRect(self.rect(), QColor("#0d1117"))
+
+        panel = self._skin.get("Select_Panel")
+        if panel is not None:
+            p.drawPixmap(PANEL_RECT, panel)
+        else:
+            p.fillRect(PANEL_RECT, QColor("#5fd0bb"))
+
+        self._draw_title(p)
+        self._draw_buttons(p)
+        self._draw_cards(p)
+        if self._picking:
+            self._draw_pick(p)
+
+    def _draw_title(self, p):
+        # 曲名の帯は Difficulty_Back の絵に含まれているので、文字だけ置く。
+        name = self._title_font or "Meiryo"
+        cx = PANEL_RECT.center().x()
+        if self._title:
+            self._draw_outlined(p, self._title, cx, TITLE_BASELINE, 40, name)
+        if self._subtitle:
+            self._draw_outlined(p, self._subtitle, cx, SUBTITLE_BASELINE,
+                                22, name)
+
+    @staticmethod
+    def _draw_outlined(p, text, cx, baseline, size, family):
+        """白抜き＋黒縁の文字。drawText に縁取りは無いので、いったん
+        QPainterPath にしてから縁を先に描く(細い縁が潰れないよう
+        strokePath -> fillPath の順)。"""
+        f = QFont(family)
+        f.setPixelSize(size)
+        f.setBold(True)
+        path = QPainterPath()
+        from PySide6.QtGui import QFontMetricsF
+        fm = QFontMetricsF(f)
+        w = fm.horizontalAdvance(text)
+        path.addText(cx - w / 2.0, baseline, f, text)
+        pen = QPen(QColor(0, 0, 0, 235))
+        # 縁は太め。実機の曲名はかなりしっかり縁取られていて、細いと
+        # 明るいパネルの上で文字が沈む。
+        pen.setWidthF(max(4.0, size * 0.24))
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.strokePath(path, pen)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#ffffff"))
+        p.fillPath(path, QColor("#ffffff"))
+
+    def _draw_buttons(self, p):
+        """左の2つ(戻る / 設定)。Difficulty_Bar の先頭に入っているものを
+        そのまま使う。実機と同じ位置に置いてある。"""
+        cards = self._skin.get("Select_Cards")
+        if cards is None:
+            return
+        p.drawPixmap(self._back_rect(), cards,
+                     QRect(BTN_BACK_SRC_X, 0, BTN_W, BTN_H))
+        p.drawPixmap(self._conf_rect(), cards,
+                     QRect(BTN_CONF_SRC_X, 0, BTN_W, BTN_H))
+
+    def _draw_cards(self, p):
+        cards = self._skin.get("Select_Cards")
+        rects = self._card_rects()
+        for i, rect in enumerate(rects):
+            course = self._course_in(i)
+            if course is None:
+                continue
+            idx = CARD_INDEX.get(course.get("key"), 3)
+            selected = (i == self._cursor)
+            # 選んでいるカードは少し持ち上げて大きく見せる。
+            r = QRect(rect)
+            if selected:
+                r.adjust(-6, -12, 6, 6)
+            if cards is not None:
+                sx = int(round(CARD_X0 + idx * CARD_PITCH))
+                p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
+            else:
+                p.fillRect(r, QColor("#c86"))
+            self._draw_level(p, r, int(course.get("level") or 0))
+
+    def _draw_pick(self, p):
+        """おに と うら の2枚を出す。
+
+        後ろを暗くしてから出す。そうしないと、後ろのカード列と同じ重みで
+        並んで見えて「いま何を聞かれているのか」が伝わらない。"""
+        cards = self._skin.get("Select_Cards")
+        rects = self._pick_rects()
+        if not rects:
+            return
+        # しっかり暗くする。薄いと後ろのカードが2枚のあいだから覗いて、
+        # 何枚あるのか分からない絵になる(実際にそうなった)。
+        p.fillRect(self.rect(), QColor(0, 0, 0, 210))
+        for j, r in enumerate(rects):
+            course = self._slots[self._cursor][j]
+            idx = CARD_INDEX.get(course.get("key"), 3)
+            if cards is not None:
+                sx = int(round(CARD_X0 + idx * CARD_PITCH))
+                p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
+            self._draw_level(p, r, int(course.get("level") or 0))
+
+    def _draw_level(self, p, rect, level):
+        """レベルの数字と、埋まっているぶんの★。
+
+        ★も点線の帯もカードの絵に焼き込まれているので、こちらはその**上に
+        重ねるだけ**。位置はカードの絵から実測した定数(CARD_STAR_* / DOT_*)に
+        合わせる。目分量で置いていたときは、数字も星も明らかにずれていた。
+
+        カードは選択時に少し拡大するので、倍率をかけてから置く。
+        """
+        num = self._skin.get("Select_Number")
+        star = self._skin.get("Select_Star")
+        sx = rect.width() / float(CARD_W)
+        sy = rect.height() / float(CARD_H)
+
+        def px(cx, cy):
+            """カード内の座標を、画面上の座標へ。"""
+            return rect.x() + int(round(cx * sx)), rect.y() + int(round(cy * sy))
+
+        if num is not None and level > 0:
+            digits = [int(c) for c in str(level)]
+            widths = [NUM_BOUNDS[d][1] - NUM_BOUNDS[d][0] + 1 for d in digits]
+            h = int(round(num.height() * sy))
+            x, _y = px(CARD_STAR_RIGHT + NUM_LEFT_GAP, 0)
+            # 数字の高さの中心を、焼き込まれた★の中心に合わせる。
+            _x, cy = px(0, CARD_STAR_CY)
+            y = cy - h // 2
+            for d, w in zip(digits, widths):
+                dw = int(round(w * sx))
+                p.drawPixmap(QRect(x, y, dw, h), num,
+                             QRect(NUM_BOUNDS[d][0], 0, w, num.height()))
+                x += dw + int(round(NUM_TRACK * sx))
+
+        if star is not None and level > 0:
+            # 帯は10個ぶんしか無い。★11 の譜面もあるので 10 で頭打ちにする。
+            n = max(0, min(level, DOT_COUNT))
+            sw = int(round(star.width() * sx))
+            sh = int(round(star.height() * sy))
+            for i in range(n):
+                cx, cy = px(DOT_X0 + i * DOT_STEP, DOT_Y)
+                p.drawPixmap(cx - sw // 2, cy - sh // 2, sw, sh, star)

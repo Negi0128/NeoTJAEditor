@@ -36,7 +36,9 @@ Player は `PreviewDock` を1つ作り、その `game_preview_window` を見せ�
 - [x] **工程1** 骨組み。単独起動して1曲再生（`2640f95`）
 - [x] **工程2** 全画面。F11 / Esc（`63bedf9`）
 - [x] **工程3** まとめて録画（`neotja/player/batch.py`）。3譜面を実際に書き出して確認
-- [x] **工程4** 曲を選ぶ一覧（`library.py`）。300譜面を 3.1 秒で走査、GUI は固まらない
+- [x] **工程4** 難易度選択画面（`select_screen.py`）。本家の座標を実測して再現
+      曲一覧（`library.py`）も作ったが、単発ファイル中心という使い方に合わず
+      いまは窓から外してある（ファイルは残っている）
 - [x] **工程5** Editor 連携（実行メニュー → NeoTJAPlayer を別ウィンドウで開く）と改名27箇所
 - [x] **工程6** `NeoTJAPlayer.spec` でビルド。exe 109MB、実際に起動して確認
 
@@ -48,7 +50,8 @@ neotja/player/
   __main__.py    引数（譜面 / --course / --at）と素材の用意
   core.py        PlayerCore: PreviewDock を抱えて譜面を読む。Qt の窓は作らない
                  save_shared_settings(): 読み直して PLAYER_KEYS だけ書き戻す
-  window.py      PlayerWindow: タブ2枚（曲を選ぶ / まとめて録画）
+  window.py      PlayerWindow: タブ2枚（譜面を見る / まとめて録画）
+  select_screen.py  難易度選択画面。座標は実機のスクショと素材から実測
   library.py     LibraryPage: フォルダを覚えて譜面を並べる。走査は別スレッド
   batch.py       BatchPage: 待ち行列に積んで順番に書き出す
 ```

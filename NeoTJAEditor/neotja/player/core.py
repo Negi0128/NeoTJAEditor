@@ -54,6 +54,28 @@ def save_shared_settings(cfg):
         pass
 
 
+def read_courses(content, analyzer):
+    """譜面に入っているコースを [{"key","label","level"}, ...] で返す。
+
+    難易度選択画面へ渡すためのもの。レベルは parse_courses が持っていない
+    ので、library と同じ手(ヘッダの LEVEL: を拾う)を使う。
+    """
+    from neotja.player.library import _levels_by_course
+    try:
+        courses = analyzer.parse_courses(content) or []
+    except Exception:  # noqa: BLE001
+        return []
+    levels = _levels_by_course(content, analyzer)
+    out = []
+    for c in courses:
+        key = c.get("key")
+        if not key:
+            continue
+        out.append({"key": key, "label": c.get("label", key),
+                    "level": levels.get(key)})
+    return out
+
+
 class PlayerCore:
     """PreviewDock を1つ抱えて、譜面を読み込む係。
 
@@ -91,6 +113,21 @@ class PlayerCore:
     def window(self):
         """再生ウィンドウ。Player の主役。"""
         return self.dock.game_preview_window
+
+    def peek(self, path):
+        """譜面を**再生せずに**覗く。難易度選択画面へ出す材料を返す。
+
+        (曲名, サブタイトル, コース一覧) を返し、読めなければ None。
+        ここで音源を読み込まないのは、コースを選ぶ前に曲を鳴らし始めても
+        意味が無く、選び直すたびに読み直しが起きるため。"""
+        try:
+            content = read_text(path)
+        except OSError:
+            return None
+        from neotja.preview_dock import parse_preview_headers
+        h = parse_preview_headers(content)
+        sub = (h.get("subtitle") or "").lstrip("-")
+        return h.get("title") or "", sub, read_courses(content, self.analyzer)
 
     def load(self, path, course_key=None):
         """TJA を1つ読み込んで再生ウィンドウへ流す。成功したら True。

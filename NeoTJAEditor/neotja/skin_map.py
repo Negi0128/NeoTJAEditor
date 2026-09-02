@@ -857,6 +857,32 @@ SKIN_MAP = {
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/4_CourseSymbol/Oni.png", "rect": None, "exact": True, "note": None},
     "Footer.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/8_Footer/0.png", "rect": None, "exact": True, "note": None},
+    # --- 難易度選択画面(Player)。本家の選曲後の画面をそのまま出すための素材。
+    # Difficulty_Bar には「戻る/設定のボタン2つ + コース5枚」が1枚に並んでいる。
+    # カードは 131x237 で x=176 から 143.25 間隔(かんたん/ふつう/むずかしい/
+    # おに/うら)。アイコンも文字も星の帯もカードに含まれているので、切り出す
+    # だけで本家と同じ絵になる。
+    # おに⇄うら の切り替えに使う部品。1枚に「顔・金属の輪・巴マーク」が
+    # 横に3つ、桃(おに)と紫(うら)の2段で入っている。本家はこれを使って
+    # 「輪は止めたまま中の顔だけ入れ替える」動きをしている。
+    # おに⇄うら をめくるボタンの絵。両向きの矢印(⇕)が角丸の枠に入っている。
+    # 巴マークを使ってみたが「入れ替え」に見えず違和感が強かったので、
+    # 意味がそのまま伝わるこちらにした(90度回して⇔として使う)。
+    "Select_Swap.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/2_Config/Arrow.png", "rect": None, "exact": True, "note": None},
+    "Select_OniUra_Parts.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Change_OniUra/UraOniChange.png", "rect": None, "exact": True, "note": None},
+    "Select_Cards.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Bar.png", "rect": None, "exact": True, "note": None},
+    # 後ろの大きな角丸パネル。12色あるのはジャンル別だが、Player は
+    # ジャンルを持たないので実機の見た目に合う teal(10番)を1枚だけ使う。
+    "Select_Panel.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Back/Difficulty_Back_10.png", "rect": None, "exact": True, "note": None},
+    # レベルの★(埋まっているぶん)と、★の右に出る数字(0-9 の並び)。
+    "Select_Star.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Star.png", "rect": None, "exact": True, "note": None},
+    "Select_Number.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Number.png", "rect": None, "exact": True, "note": None},
     "Gauge.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/7_Gauge/1P.png", "rect": None, "exact": True, "note": None},
     "GaugeFire.png":
