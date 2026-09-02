@@ -982,11 +982,18 @@ class GameScreenWidget(QWidget):
         # クリア後の脈打ちに使う「金色に染めたゲージ」。素材が読めたここで
         # 1枚だけ焼いておく(毎コマ作ると当然重い)。
         self._gauge_pulse = self._build_gauge_pulse()
-        # どんちゃん。連番はコマ単位で遅延読みするので、ここでは枚数を
-        # 数えるだけ(素材が無ければ available() が False になる)。
+        # どんちゃん。連番はここで**全部**先読みする(裏スレッドで復号 ->
+        # GUI スレッドで QPixmap 化)。コマ単位の遅延読みだと、BPM120 で
+        # 毎秒 60枚の新しいコマが再生中に読まれることになり、1枚 7.5ms が
+        # そのまま締切落ちになって実効 fps が半分に落ちる
+        # (CharaSprites.preload の説明を参照)。
         self._chara = chara_mod.CharaAnimator()
         self._chara.beats_per_loop = CHARA_BEATS_PER_LOOP
-        self._title = ""
+        self._chara.sprites.preload()
+        # **曲名はここで消さない。** 曲名は譜面の情報であって素材ではない。
+        # ここで空にしていたせいで、素材の読み込みが set_chart より後になる
+        # 経路(NeoTJAPlayer は初回の描画で素材を読む)では曲名が消えていた。
+        # Editor は起動時に先読みするので、たまたま表に出ていなかっただけ。
         self._title_family = self._load_title_font()
         # 銘板の名前は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
         # フォントが差し替わるここで捨てて、次の描画で組み直させる。
@@ -1394,6 +1401,12 @@ class GameScreenWidget(QWidget):
         (毎フレーム計算しないで済むよう、時刻→点数の表を先に作る)。"""
         from neotja.score import ScoreTimeline
 
+        # 譜面が決まった = そう遠くないうちに再生される。どんちゃんの連番が
+        # まだなら、ここでも先読みを蹴っておく(素材の読み込みより先に譜面が
+        # 来る順序でも、再生中の遅延読みにならないように)。済んでいれば
+        # 何もしない。
+        if self._chara is not None:
+            self._chara.sprites.preload()
         self._score_timeline = ScoreTimeline(preview_data or {})
         # 魂ゲージの伸び方(おに基準)。譜面が決まればランクが決まる。
         self._gauge = gauge_mod.GaugeModel(preview_data or {})

@@ -377,9 +377,14 @@ class GamePreviewWindow(QWidget):
         # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
         # 窓の固定サイズも取り直す。
         self._lane.heightChanged.connect(self._on_preview_height_changed)
-        # F11 で全画面、Esc で戻る。窓かその子にフォーカスがあれば効く
-        # (レーンがフォーカスを持っているので keyPressEvent では拾えない)。
-        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
+        # F11 でボタン(モード切替・コース・録画・倍率・FPS)の表示を切り替える。
+        # 鑑賞会で見せたいのは絵だけなので、押せるものが写り込まないように
+        # できるとよい、という要望。全画面はここには置かない — 窓の大きさ
+        # そのものは変えたくないことが多い。
+        # Esc は全画面から戻る道(メニュー等から全画面にしたとき用)。
+        # 窓かその子にフォーカスがあれば効く(レーンがフォーカスを持っている
+        # ので keyPressEvent では拾えない)。
+        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_overlay),
                         (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
             sc = QShortcut(seq, self)
             sc.setContext(Qt.WindowShortcut)
@@ -416,6 +421,11 @@ class GamePreviewWindow(QWidget):
     # ------------------------------------------------------------------
     # 全画面(鑑賞会用)
     # ------------------------------------------------------------------
+    def toggle_overlay(self):
+        """レーンの上に浮かせているボタン類を隠す/出す。"""
+        self._overlay_shown = not getattr(self, "_overlay_shown", True)
+        self.set_overlay_visible(self._overlay_shown)
+
     def toggle_fullscreen(self):
         if self._fullscreen:
             self.exit_fullscreen()
