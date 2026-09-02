@@ -675,6 +675,9 @@ class PreviewDock(QDockWidget):
 
         self._wave_dir = None
         self._current_wave_path = None
+        # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
+        # _current_wave_path とは別に持つ。
+        self._audition_wave_path = None
         self._decode_worker = None
         self._waveform_mips = None
         self._editor_bpm = None
@@ -1664,9 +1667,15 @@ class PreviewDock(QDockWidget):
         同じ音源なら読み直さない(選び直すたびに鳴り止むのを避ける)。"""
         if not wave_path or not os.path.exists(wave_path):
             return False
-        if wave_path == self._current_wave_path:
+        if wave_path == self._audition_wave_path:
             return True
-        self._current_wave_path = wave_path
+        # **_current_wave_path は絶対に触らない。** あれは
+        # refresh_from_content(譜面から全部を組み直す経路)が「同じ曲なら
+        # 何もしないで戻る」判断に使っているもので、ここで先に埋めてしまうと、
+        # あとから本編を読むときにその早期リターンに入り、**OFFSET の適用と
+        # 打音・メトロノームの予定まで飛ばされる**。譜面が1小節ぶんずれる、
+        # という形で実際に起きた。試聴用の記録は自前で持つ。
+        self._audition_wave_path = wave_path
         self.audio.load(wave_path)
         self._start_waveform_decode(wave_path)
         return True
