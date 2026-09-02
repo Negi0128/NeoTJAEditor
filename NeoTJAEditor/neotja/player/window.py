@@ -59,8 +59,8 @@ class PlayerWindow(QMainWindow):
         self.batch = BatchPage(self.cfg, self._save)
         self.tabs.addTab(self.batch, "まとめて録画")
         self.setCentralWidget(self.tabs)
-        # 選曲画面(1287x792)がちょうど収まる大きさ。
-        self.resize(1310, 880)
+        # 選曲画面(858x528)がちょうど収まる大きさ。
+        self.resize(900, 620)
 
         self._build_menu()
         self.setAcceptDrops(True)
