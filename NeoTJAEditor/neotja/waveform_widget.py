@@ -46,7 +46,7 @@ class WaveformWidget(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self._toggle_play_cb = toggle_play_cb
-        # ゲーム窓(えぬいーさん次郎)の波形は常にダーク基調。force_dark の
+        # ゲーム窓(NeoTJAPlayer)の波形は常にダーク基調。force_dark の
         # ときは live COLORS ではなく固定のダークパレットを色源にする。
         self._force_dark = force_dark
         self._pal = theme.THEMES["dark"] if force_dark else COLORS

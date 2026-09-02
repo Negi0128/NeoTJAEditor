@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         self.courses_info = []
         self._preview_course_override = None
         self._preview_branch_level = "M"
-        # プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)が映す譜面テキスト。
+        # プレビュー(NeoTJAPlayer/情報/打音/メトロノーム)が映す譜面テキスト。
         # 入力中のバッファではなく、最後に保存/読込した内容を保持する。保存/開く/
         # 新規のときだけ更新し、打鍵では変えない(=プレビューは保存済みの譜面を
         # 映す)。_preview_courses はその内容のコース解析結果のキャッシュ。
@@ -622,7 +622,7 @@ class MainWindow(QMainWindow):
         self.btn_game_preview_toggle.setChecked(visible)
 
     def _on_f1(self):
-        """F1: launch the built-in game-style preview (えぬいーさん次郎)
+        """F1: launch the built-in game-style preview (NeoTJAPlayer)
         if it's not open yet; while it's open, F1 instead toggles hit
         sounds so the key never relaunches/duplicates the preview."""
         if not self.preview_dock.is_game_preview_visible():
@@ -670,7 +670,7 @@ class MainWindow(QMainWindow):
         # _on_f1), not an external simulator, so its label is fixed rather
         # than sourced from run_config and it isn't refreshed in
         # open_settings() below.
-        f1_action = rm.addAction("F1: えぬいーさん次郎(内蔵プレビュー)", self._on_f1)
+        f1_action = rm.addAction("F1: NeoTJAPlayer(内蔵プレビュー)", self._on_f1)
         self._run_actions["F1"] = f1_action
         for k in ("F2", "F3"):
             action = rm.addAction(f"{k}: {self.config_data['run_config'][k]['name']}", lambda key=k: self.run_simulator(key))
@@ -982,7 +982,7 @@ class MainWindow(QMainWindow):
         """計算済みの結果を画面へ貼る。ここは GUI スレッドなので、この所要時間が
         そのまま「操作が効かない時間」になる。だから貼る作業も
           (1) 構文ハイライト/サイドバー/索引
-          (2) プレビュー(えぬいーさん次郎/情報/打音)
+          (2) プレビュー(NeoTJAPlayer/情報/打音)
         の二つに分け、重い譜面では (2) を少し後ろへ回して一度の停止を半分にする。
         軽い譜面(下の PREVIEW_DEFER_SEC 未満)はこれまでどおり一度に貼る。"""
         content = self.editor.toPlainText()
@@ -1155,7 +1155,7 @@ class MainWindow(QMainWindow):
             self._preview_courses = self.analyzer.parse_courses(content)
 
     def _refresh_preview(self):
-        """プレビュー(えぬいーさん次郎/情報/打音/メトロノーム)を編集中(未保存)の
+        """プレビュー(NeoTJAPlayer/情報/打音/メトロノーム)を編集中(未保存)の
         エディタ内容から組み直す。保存を待たずにすぐ反映される。音源(WAVE)は
         refresh_from_content 側でパスが変わったときだけ読み直すので、編集中に
         鳴り直すことはない。OFFSET・波形の合わせ込みは別経路(OFFSETスピン
@@ -2216,7 +2216,7 @@ class MainWindow(QMainWindow):
             return False
 
     def open_video_recorder(self):
-        """えぬいーさん次郎の画面を動画(mp4)として書き出す。
+        """NeoTJAPlayer の画面を動画(mp4)として書き出す。
 
         書き出すのは「いまプレビューで見ているコース/分岐」。画面キャプチャでは
         なく1コマずつ描き直すので、書き出し中にアプリを触っても影響しない。

@@ -32,7 +32,7 @@ _SETTINGS_KEYS = (
 def default_settings() -> dict:
     return {
         "run_config": {
-            "F1": {"name": "えぬいーさん次郎", "path": ""},
+            "F1": {"name": "NeoTJAPlayer", "path": ""},
             **{k: {"name": f"シミュレータ{k}", "path": ""} for k in ("F2", "F3")},
         },
         "custom_shortcuts": {str(i): "" for i in range(10)},
@@ -115,7 +115,7 @@ def default_settings() -> dict:
         # 既定は本家どおりの「通常再生」。低スペック機は「軽量」を選んでおくと
         # 次回もその状態で開く。
         "preview_bottom_mode": "通常再生",
-        # えぬいーさん次郎の表示倍率(%)。100/75/50/25 を循環する。
+        # NeoTJAPlayer の表示倍率(%)。100/75/50/25 を循環する。
         # 小さい画面で 720px の絵が入りきらないとき用。
         "preview_zoom": 100,
         # 再生速度の倍率。0.25 / 0.50 / 0.75 / 1.00 の 4 段階だけを取り、

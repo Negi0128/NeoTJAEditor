@@ -544,7 +544,7 @@ class ChartPreviewWidget(QWidget):
         # Per-frame paint allocations (QColor/QFont) are cached once and reused
         # rather than reconstructed from theme strings/font family on every
         # frame, which matters a lot at 120 fps.
-        # えぬいーさん次郎(ゲーム風プレビュー)はアプリのテーマに関わらず
+        # NeoTJAPlayer(ゲーム風プレビュー)はアプリのテーマに関わらず
         # 常にダーク基調で描く。ライトテーマに切り替えても本家太鼓のような
         # 暗いレーンの見た目を保つため、live な COLORS ではなく固定の dark
         # パレットを色源にする。

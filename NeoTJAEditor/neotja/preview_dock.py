@@ -23,7 +23,7 @@ from neotja.chart_preview_widget import (
 from neotja.tja_analyzer import balloon_pop_spans
 from neotja import theme
 
-# えぬいーさん次郎(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
+# NeoTJAPlayer(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
 # 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
 _DARK = theme.THEMES["dark"]
 from neotja.chart_edit_widget import ChartEditWaveform
@@ -351,7 +351,7 @@ class GamePreviewWindow(QWidget):
         super().__init__(parent, Qt.Window | Qt.CustomizeWindowHint
                          | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
                          | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
-        self.setWindowTitle("えぬいーさん次郎")
+        self.setWindowTitle("NeoTJAPlayer")
         # アプリのテーマに関わらず窓全体をダーク基調に固定する。ウィジェット
         # 自身のスタイルシートは app 全体の QSS より優先されるので、ライト
         # テーマに切り替えても速度スライダー・ラベル・ボタン等はダークのまま。

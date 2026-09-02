@@ -1,4 +1,4 @@
-"""えぬいーさん次郎(ゲームプレビュー)の動画書き出しダイアログ。
+"""NeoTJAPlayer(ゲームプレビュー)の動画書き出しダイアログ。
 
 書き出し本体は neotja/recorder.py。ここは範囲・fps・画面サイズを決めて、
 進捗と中止を面倒みるだけ。
@@ -402,27 +402,10 @@ class RecordDialog(QDialog):
         return f"{base}{('_' + course) if course else ''}{tail}.mp4"
 
     def _compute_chart_end(self, offset, song_seconds):
-        """最終小節が終わる時刻(音源時刻)。求められなければ曲の長さを返す。"""
-        bars = self._preview.get("bar_times") or []
-        if not bars:
-            return song_seconds
-        last_t = float(bars[-1][0])
-        bpm = float(bars[-1][1]) if len(bars[-1]) > 1 and bars[-1][1] else 0.0
-        if bpm <= 0:
-            return song_seconds
-        # その時点の拍子。#MEASURE が無ければ 4/4。
-        num, den = 4.0, 4.0
-        for entry in (self._preview.get("measure_changes") or []):
-            try:
-                t, n, d = float(entry[0]), float(entry[1]), float(entry[2])
-            except (TypeError, ValueError, IndexError):
-                continue
-            if t <= last_t + 1e-6 and d:
-                num, den = n, d
-        bar_len = (240.0 / bpm) * (num / den) if den else (240.0 / bpm)
-        end = last_t + bar_len - float(offset)
-        # 譜面が音源より長いことも短いこともある。0 より前へは行かせない。
-        return max(0.0, end)
+        """最終小節が終わる時刻(音源時刻)。中身は recorder へ移した
+        (まとめて録画でも同じ計算が要るため)。"""
+        return recorder.chart_end_seconds(self._preview, offset,
+                                          fallback=song_seconds)
 
     def _make_widget(self):
         """画面外の描画用ウィジェットを作る。録画を始めたときのモードで

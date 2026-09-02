@@ -162,7 +162,7 @@ class SettingsDialog(QDialog):
         w, outer = self._tab_body()
         outer.addWidget(self._hint(
             "F2・F3キーで起動する外部シミュレータの名前とexeパスを設定します。"
-            "F1は内蔵プレビュー(えぬいーさん次郎)に固定されています。"))
+            "F1は内蔵プレビュー(NeoTJAPlayer)に固定されています。"))
 
         cfg = self.main_window.config_data["run_config"]
 
@@ -173,7 +173,7 @@ class SettingsDialog(QDialog):
         # 書いておく。
         form = self._group(outer, "F1 キーで起動")
         form.addRow(self._hint(
-            "内蔵プレビュー(えぬいーさん次郎)で固定です。変更できません。\n"
+            "内蔵プレビュー(NeoTJAPlayer)で固定です。変更できません。\n"
             "外部シミュレータを使いたい場合は F2・F3 に設定してください。"))
 
         self.run_entries = {}
@@ -302,7 +302,7 @@ class SettingsDialog(QDialog):
             "※設定した「連打秒速」が上記の補正値を上回る場合は、設定値（高い方）が優先されます。"))
 
         # --- 動画書き出し ---
-        # 動画書き出し(えぬいーさん次郎の録画ボタン)の保存先の既定。
+        # 動画書き出し(NeoTJAPlayer の録画ボタン)の保存先の既定。
         # 未指定なら「前回使った場所 → TJA と同じフォルダ」が使われる。
         # 「前回使った場所」は record_last_dir に分けてあるので、ここで指定した
         # 場所が書き出しのたびに勝手に書き換わることはない。

@@ -100,7 +100,7 @@ class PlayerCore:
         なくファイルから来ることだけ。
         """
         try:
-            content = _read_text(path)
+            content = read_text(path)
         except OSError:
             return False
         self.current_file = path
@@ -141,7 +141,7 @@ class PlayerCore:
             pass
 
 
-def _read_text(path):
+def read_text(path):
     """TJA を読む。cp932 の譜面が多いので、UTF-8 で読めなければそちらへ。"""
     with open(path, "rb") as f:
         raw = f.read()

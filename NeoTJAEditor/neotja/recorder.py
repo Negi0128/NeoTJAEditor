@@ -1,4 +1,4 @@
-"""えぬいーさん次郎(ゲームプレビュー)を動画ファイルとして書き出す。
+"""NeoTJAPlayer(ゲームプレビュー)を動画ファイルとして書き出す。
 
 画面をリアルタイムに録画するのではなく、**1コマずつ時刻を与えて描き直す**。
 音声も同じ時間軸でオフライン合成するので、
@@ -70,6 +70,37 @@ def probe_song_seconds(path: str) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def chart_end_seconds(preview_data, offset, fallback=0.0):
+    """譜面の終わり(=最終小節が終わる時刻)を音源時刻で返す。
+
+    bar_times は小節の**開始**時刻しか持っていないので、最後の小節線の BPM と
+    その時点の #MEASURE から 1 小節の長さ(240/BPM × 拍子)を足して求める。
+
+    これを録画の終わりに使う。音源は譜面が終わったあとも鳴っていることが多く
+    (フェードアウトや後奏)、そこまで録ると何も起きない映像が延々と続く。
+    求められないときは fallback(ふつうは曲の長さ)を返す。"""
+    bars = (preview_data or {}).get("bar_times") or []
+    if not bars:
+        return fallback
+    try:
+        last_t = float(bars[-1][0])
+        bpm = float(bars[-1][1]) if len(bars[-1]) > 1 and bars[-1][1] else 0.0
+    except (TypeError, ValueError, IndexError):
+        return fallback
+    if bpm <= 0:
+        return fallback
+    num, den = 4.0, 4.0
+    for entry in ((preview_data or {}).get("measure_changes") or []):
+        try:
+            t, n, d = float(entry[0]), float(entry[1]), float(entry[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if t <= last_t + 1e-6 and d:
+            num, den = n, d
+    bar_len = (240.0 / bpm) * (num / den) if den else (240.0 / bpm)
+    return max(0.0, last_t + bar_len - float(offset))
 
 
 def make_offline_widget(preview_data, offset, se_text_enabled=True):
