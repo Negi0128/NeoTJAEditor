@@ -25,7 +25,7 @@ PLAYER_KEYS = (
     "hit_sound_don_path", "hit_sound_ka_path",
     "wireless_offset_enabled", "wireless_offset_ms",
     "record_output_dir", "record_last_dir",
-    "player_folders", "player_last_file",
+    "player_folders", "player_last_file", "player_select_bgm",
 )
 
 
@@ -89,6 +89,14 @@ class PlayerCore:
         self.current_file = ""
         self.course_override = None
         self.branch_level = "M"
+        # 選曲画面で流している音の折り返し位置。None なら何も流していない。
+        self._loop = None
+        self._pending_seek = None
+        # 終わりまで来たかを見る番人。音源の読み込みが裏で進むので、
+        # 「頭出し」もこのタイマーが引き受ける(長さが分かるまで待つ)。
+        from PySide6.QtCore import QTimer
+        self._loop_timer = QTimer()
+        self._loop_timer.timeout.connect(self._tick_loop)
 
         self.dock = PreviewDock(
             # OFFSET を書き戻す先(エディタのヘッダ行)が無いので受け捨てる。
@@ -113,6 +121,82 @@ class PlayerCore:
     def window(self):
         """再生ウィンドウ。Player の主役。"""
         return self.dock.game_preview_window
+
+    # ------------------------------------------------------------------
+    # 選曲画面で鳴らすもの
+    # ------------------------------------------------------------------
+    def click_sound(self):
+        """ボタンやカードを押した合図。ドンを1つ鳴らす。"""
+        try:
+            self.dock.audio.hit_sounds.play_once("don")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def play_select_bgm(self):
+        """譜面を開いていないあいだの BGM。
+
+        曲を1つも選んでいない画面は無音だと止まって見える。環境設定
+        (player_select_bgm)で切れる — 録画の下ごしらえ中など、鳴ってほしく
+        ない場面があるため。
+
+        鳴らす仕掛けは譜面の音源とまったく同じ(ミキサーに PCM を渡すだけ)。
+        BGM 専用の再生経路を作ると、音量・出力デバイスの扱いが二重になる。
+        """
+        if not self.cfg.get("player_select_bgm", True):
+            return
+        path = settings_mod.skin_dir() / "SelectBgm.ogg"
+        if not path.exists():
+            return
+        self._loop = (0.0, None)
+        self._start_audio(str(path), 0.0)
+
+    def play_demo(self, path, demo_start):
+        """譜面の音源を DEMOSTART から流す。終わったらまた同じ所から。
+
+        本家の選曲画面と同じ聞こえ方にするため。DEMOSTART が無ければ頭から。
+        """
+        self._loop = (max(0.0, float(demo_start or 0.0)), None)
+        wave = _find_wave(path)
+        if wave:
+            self._start_audio(wave, self._loop[0])
+
+    def stop_audio(self):
+        self._loop = None
+        try:
+            self.dock.audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _start_audio(self, wave_path, at_sec):
+        """音源を読み込んで、指定の秒から流し始める。"""
+        try:
+            if not self.dock.load_wave_only(wave_path):
+                return
+        except Exception:  # noqa: BLE001
+            return
+        self._pending_seek = float(at_sec)
+        self._loop_timer.start(250)
+
+    def _tick_loop(self):
+        """流している音が終わりまで来たら、始めの所へ戻す。
+
+        音源の読み込みは裏で進むので、始めの秒へ飛ぶのも「長さが分かってから」
+        でないと効かない。同じタイマーで両方を見る。"""
+        if self._loop is None:
+            self._loop_timer.stop()
+            return
+        dur = self.dock.duration_seconds()
+        if dur <= 0:
+            return                      # まだ読み込み中
+        if self._pending_seek is not None:
+            self.dock.audio.seek(int(self._pending_seek * 1000))
+            self.dock.audio.play()
+            self._pending_seek = None
+            return
+        pos = self.dock.audio.position() / 1000.0
+        if pos >= dur - 0.15:
+            self.dock.audio.seek(int(self._loop[0] * 1000))
+            self.dock.audio.play()
 
     def peek(self, path):
         """譜面を**再生せずに**覗く。難易度選択画面へ出す材料を返す。
@@ -176,6 +260,45 @@ class PlayerCore:
             self.dock.shutdown_audio()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _find_wave(tja_path):
+    """TJA の WAVE: が指す音源。TJA と同じフォルダにある前提。
+
+    拡張子違い(ogg と書いてあるが wav しかない等)も見る — 手元で作った譜面
+    ではよくある。"""
+    try:
+        content = read_text(tja_path)
+    except OSError:
+        return ""
+    folder = os.path.dirname(tja_path)
+    for line in content.splitlines():
+        t = line.split("//")[0].strip()
+        if t.upper().startswith("WAVE:"):
+            name = t[5:].strip()
+            if not name:
+                return ""
+            p = name if os.path.isabs(name) else os.path.join(folder, name)
+            if os.path.exists(p):
+                return p
+            stem = os.path.splitext(p)[0]
+            for ext in (".ogg", ".wav", ".mp3", ".m4a"):
+                if os.path.exists(stem + ext):
+                    return stem + ext
+            return ""
+    return ""
+
+
+def demo_start_seconds(content):
+    """DEMOSTART: の秒数。無ければ 0。"""
+    for line in content.splitlines():
+        t = line.split("//")[0].strip()
+        if t.upper().startswith("DEMOSTART:"):
+            try:
+                return max(0.0, float(t.split(":", 1)[1].strip()))
+            except ValueError:
+                return 0.0
+    return 0.0
 
 
 def read_text(path):

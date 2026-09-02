@@ -43,6 +43,7 @@ class PlayerWindow(QMainWindow):
         self._pending_path = ""
 
         self.select = SelectScreen()
+        self.select.click_sound_cb = self.core.click_sound
         self.select.courseChosen.connect(self._on_course_chosen)
         self.select.cancelled.connect(self.pick_chart)
         self.select.settingsRequested.connect(self.open_settings)
@@ -62,6 +63,10 @@ class PlayerWindow(QMainWindow):
 
         self._build_menu()
         self.setAcceptDrops(True)
+        # 譜面を開くまでは選曲画面の BGM。窓が出てから鳴らす(組み立ての
+        # 途中で音を出すと、まだ何も見えていないのに音だけ始まる)。
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(300, self.core.play_select_bgm)
 
     def _save(self):
         save_shared_settings(self.cfg)
@@ -75,16 +80,23 @@ class PlayerWindow(QMainWindow):
         m.addAction("終了", self.close)
 
         v = self.menuBar().addMenu("表示")
-        a = v.addAction("全画面（再生画面）")
+        a = v.addAction("再生画面のボタンを隠す / 出す")
         a.setShortcut("F11")
-        a.triggered.connect(self._toggle_fullscreen)
+        a.triggered.connect(self._toggle_overlay)
 
         s = self.menuBar().addMenu("設定")
         s.addAction("環境設定...", self.open_settings)
 
-    def _toggle_fullscreen(self):
+    def _toggle_overlay(self):
+        """再生画面の上に浮いているボタン(モード切替・コース・録画・倍率・
+        FPS)を隠す/出す。
+
+        全画面ではなくこちらにしたのは、鑑賞会で見せたいのが「絵だけ」で
+        あって、窓の大きさそのものは変えたくないことが多いため。"""
         self.core.show()
-        self.core.window.toggle_fullscreen()
+        w = self.core.window
+        self._overlay_shown = not getattr(self, "_overlay_shown", True)
+        w.set_overlay_visible(self._overlay_shown)
 
     # ------------------------------------------------------------------
     def pick_chart(self):
@@ -118,6 +130,12 @@ class PlayerWindow(QMainWindow):
         self._pending_path = path
         self.cfg["player_last_file"] = path
         self._save()
+        # 選んだ譜面の音を DEMOSTART から流す(本家の選曲画面と同じ聞こえ方)。
+        from neotja.player.core import demo_start_seconds, read_text
+        try:
+            self.core.play_demo(path, demo_start_seconds(read_text(path)))
+        except Exception:  # noqa: BLE001
+            pass
         if course_key:
             return self._play(path, course_key, at_seconds)
         self.select.set_song(title, subtitle, courses)
@@ -130,6 +148,9 @@ class PlayerWindow(QMainWindow):
             self._play(self._pending_path, course_key, 0.0)
 
     def _play(self, path, course_key, at_seconds):
+        # 試聴を止めてから本編へ。止めないと、譜面の頭出しと試聴の折り返しが
+        # 取り合って再生位置が飛ぶ。
+        self.core.stop_audio()
         if not self.core.load(path, course_key=course_key):
             QMessageBox.warning(self, "NeoTJAPlayer",
                                 "譜面を読めませんでした:\n%s" % path)

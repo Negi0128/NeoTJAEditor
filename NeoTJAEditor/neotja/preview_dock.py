@@ -1654,6 +1654,23 @@ class PreviewDock(QDockWidget):
         self.audio.load(wave_path)
         self._start_waveform_decode(wave_path)
 
+    def load_wave_only(self, wave_path):
+        """譜面と切り離して、音源だけを読み込む。
+
+        NeoTJAPlayer の選曲画面で使う — 譜面を選ぶ前の BGM と、選んだ譜面の
+        DEMOSTART からの試聴。どちらも「譜面は関係なく音だけ鳴らしたい」ので、
+        refresh_from_content(譜面の中身から全部を組み直す経路)は通せない。
+
+        同じ音源なら読み直さない(選び直すたびに鳴り止むのを避ける)。"""
+        if not wave_path or not os.path.exists(wave_path):
+            return False
+        if wave_path == self._current_wave_path:
+            return True
+        self._current_wave_path = wave_path
+        self.audio.load(wave_path)
+        self._start_waveform_decode(wave_path)
+        return True
+
     def _start_waveform_decode(self, wave_path):
         # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
         # (波形表示用)を同時に得る。レガシー経路では PCM を無視してピークだけ使う。

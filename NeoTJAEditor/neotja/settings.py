@@ -14,6 +14,7 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom", "preview_speed", "waveform_window",
+    "player_select_bgm",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
@@ -126,6 +127,9 @@ def default_settings() -> dict:
         # 1〜60秒のあいだを変えられ、変えた値がそのまま次回の既定になる。
         # 表示倍率(preview_zoom)やモードと同じ「触ったら覚える」扱い。
         "waveform_window": 6.0,
+        # NeoTJAPlayer の選曲画面で、譜面を開いていないあいだ BGM を流すか。
+        # 音源は System の TNDE-R/Sounds/BGM/SongSelect.ogg。
+        "player_select_bgm": True,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための

@@ -872,6 +872,9 @@ SKIN_MAP = {
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/2_Config/Arrow.png", "rect": None, "exact": True, "note": None},
     "Select_OniUra_Parts.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Change_OniUra/UraOniChange.png", "rect": None, "exact": True, "note": None},
+    # 選曲画面の BGM。譜面を開いていないあいだ流す(環境設定で切れる)。
+    "SelectBgm.ogg":
+        {"kind": KIND_COPY, "source": "TNDE-R/Sounds/BGM/SongSelect.ogg", "rect": None, "exact": True, "note": None},
     "Select_Cards.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Bar.png", "rect": None, "exact": True, "note": None},
     # 後ろの大きな角丸パネル。12色あるのはジャンル別だが、Player は

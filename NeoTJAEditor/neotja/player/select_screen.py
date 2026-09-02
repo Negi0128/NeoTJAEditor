@@ -22,8 +22,11 @@ from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
 
-#: 画面の大きさ。ゲーム画面と同じ。
+#: 描くときの座標系。ゲーム画面と同じ 1280x720 で、そこへ倍率をかけて出す。
+#: 座標を全部書き換えずに大きくできるので、実測して合わせた位置はそのまま。
 SCREEN_W, SCREEN_H = 1280, 720
+#: 実際に見せる倍率。1280x720 のままだと小さいという指摘。
+SCREEN_SCALE = 1.5
 
 #: Difficulty_Bar.png の中の位置(実測)。ボタン2つのあとにカードが5枚。
 CARD_W, CARD_H = 131, 237
@@ -131,8 +134,14 @@ class SelectScreen(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(SCREEN_W, SCREEN_H)
+        self.setFixedSize(int(SCREEN_W * SCREEN_SCALE),
+                          int(SCREEN_H * SCREEN_SCALE))
         self.setFocusPolicy(Qt.StrongFocus)
+        # 押せるものの上でカーソルを変えるために、押していなくても
+        # マウスの動きを受け取る。
+        self.setMouseTracking(True)
+        #: 押したときに鳴らす音を出す係(PlayerCore が繋ぐ)。
+        self.click_sound_cb = None
         self._title = ""
         self._subtitle = ""
         # スロットごとの候補。[[かんたん], [ふつう], [むずかしい], [おに, うら]]
@@ -254,7 +263,9 @@ class SelectScreen(QWidget):
         「選ぶ」と「決める」を分けると、鑑賞会で見せている最中に2手かかる。
         見る道具なので、押したものがそのまま始まるほうが素直。
         """
-        pt = event.position().toPoint()
+        pt = self._to_screen(event.position())
+        if self._clickable_at(pt):
+            self._click_sound()
 
         # おに/うら を選んでいる最中は、その2枚と「外側」しか押せない。
         if self._picking:
@@ -296,13 +307,41 @@ class SelectScreen(QWidget):
             self.courseChosen.emit(c["key"])
 
     def mouseMoveEvent(self, event):
+        pt = self._to_screen(event.position())
+        # 押せるものの上ではカーソルを指の形にする。見ただけで押せると
+        # 分かるようにするため(絵だけでは押せるかどうか伝わらない)。
+        self.setCursor(Qt.PointingHandCursor if self._clickable_at(pt)
+                       else Qt.ArrowCursor)
         if self._picking:
             return
         # どれを押そうとしているかが分かるように、指したものを大きくする。
-        i = self._card_at(event.position().toPoint())
+        i = self._card_at(pt)
         if i is not None and self._slots[i] and i != self._cursor:
             self._cursor = i
             self.update()
+
+    def _click_sound(self):
+        """押した合図にドンを鳴らす。押せないものの上では鳴らさない
+        (鳴ったのに何も起きない、が起きないように)。"""
+        if self.click_sound_cb is not None:
+            try:
+                self.click_sound_cb()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _to_screen(posf):
+        """ウィジェット上の座標を、描画に使っている 1280x720 の座標へ戻す。"""
+        return (posf / SCREEN_SCALE).toPoint()
+
+    def _clickable_at(self, pt):
+        """そこに押せるものがあるか。"""
+        if self._picking:
+            return any(r.contains(pt) for r in self._pick_rects())
+        if self._back_rect().contains(pt) or self._conf_rect().contains(pt):
+            return True
+        i = self._card_at(pt)
+        return i is not None and bool(self._slots[i])
 
     def _on_pick_anim(self, v):
         self._pick_t = float(v)
@@ -384,6 +423,8 @@ class SelectScreen(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.fillRect(self.rect(), QColor("#0d1117"))
+        # ここから先は 1280x720 の座標で描く。倍率は painter に持たせる。
+        p.scale(SCREEN_SCALE, SCREEN_SCALE)
 
         panel = self._skin.get("Select_Panel")
         if panel is not None:
@@ -486,7 +527,8 @@ class SelectScreen(QWidget):
             return
         # しっかり暗くする。薄いと後ろのカードが2枚のあいだから覗いて、
         # 何枚あるのか分からない絵になる(実際にそうなった)。
-        p.fillRect(self.rect(), QColor(0, 0, 0, int(210 * self._pick_t)))
+        p.fillRect(QRect(0, 0, SCREEN_W, SCREEN_H),
+                   QColor(0, 0, 0, int(210 * self._pick_t)))
         for j, r in enumerate(rects):
             course = self._slots[self._cursor][j]
             idx = CARD_INDEX.get(course.get("key"), 3)
