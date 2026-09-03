@@ -35,11 +35,19 @@ class PlayerWindow(QMainWindow):
         self.setWindowTitle("NeoTJAPlayer")
 
         self.core = PlayerCore(self.cfg)
+        # 再生画面の「● 録画」ボタン。**PreviewDock は呼び先を渡されない限り
+        # 何もしない**ので、ここを配線しないとボタンが黙って効かない
+        # (Editor 側だけ配線してあり、Player では押しても無反応だった)。
+        self.core.dock.record_cb = self.open_video_recorder
+        self._record_dialog = None
         # 環境設定ダイアログ(SettingsDialog)は「渡された相手の config_data と
         # preview_dock を触る」だけの作りなので、その2つさえ持っていれば
         # Editor 用のものをそのまま開ける。専用の設定画面を作り直すと、
         # 同じ設定が2か所にある状態になって混乱するので避けた。
         self.config_data = self.cfg
+        # RecordDialog は渡された相手の config_data と **current_file** を見る
+        # (書き出すファイルの既定名をここから作る)。Editor の MainWindow に
+        # 合わせて、同じ名前で出しておく。
         self._pending_path = ""
 
         self.select = SelectScreen()
@@ -166,6 +174,83 @@ class PlayerWindow(QMainWindow):
         # 開いてから再生ボタンを押させる理由が無い。
         QTimer.singleShot(120, lambda: self.core.play_chart(at_seconds))
         return True
+
+    @property
+    def current_file(self):
+        """いま開いている譜面。RecordDialog が既定の出力名に使う。"""
+        return self.core.current_file
+
+    def _is_recording(self):
+        """書き出しが進行中か(ダイアログが開いているだけは含まない)。"""
+        dlg = self._record_dialog
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.is_busy())
+        except RuntimeError:
+            # C++ 側が既に破棄されていた。
+            self._record_dialog = None
+            return False
+
+    def open_video_recorder(self):
+        """再生画面の「● 録画」から、いま見ている譜面を mp4 に書き出す。
+
+        中身は Editor の open_video_recorder と同じ RecordDialog。違うのは
+        譜面がエディタの文字ではなくファイルから来ることだけ。ダイアログは
+        モーダルにしない(書き出しは始めた時点の写しに対して行われるので、
+        走らせたまま再生を続けられる)。"""
+        path = self.core.current_file
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "動画を書き出す",
+                                    "先に譜面を開いてください。")
+            return
+        if self._record_dialog is not None:
+            if self._is_recording():
+                # 2本同時には走らせない。同じ描画用ウィジェットと ffmpeg を
+                # 取り合って、どちらの動画も壊れる。
+                self._record_dialog.raise_()
+                self._record_dialog.activateWindow()
+                QMessageBox.information(
+                    self, "動画を書き出す",
+                    "すでに動画の書き出しが進行中です。" + "\n"
+                    "終わるか、中止してからもう一度お試しください。")
+                return
+            # 開きっぱなしだが走ってはいない。押した時点の譜面で作り直す。
+            self._record_dialog.close()
+            self._record_dialog = None
+
+        pd = self.core.dock
+        wave = pd.wave_path()
+        if not wave or not os.path.exists(wave):
+            QMessageBox.warning(
+                self, "動画を書き出す",
+                "音源(WAVE)が見つかりません。TJA の WAVE: を確認してください。")
+            return
+        from neotja.player.core import read_text
+        try:
+            content = read_text(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "動画を書き出す",
+                                "譜面を読めませんでした:" + "\n%s" % exc)
+            return
+        preview = self.core.analyzer.build_preview_timeline(
+            content, None, self.core.course_override,
+            branch_level=self.core.branch_level)
+        out_dir = os.path.dirname(path)
+        if not out_dir or not os.path.isdir(out_dir):
+            out_dir = os.path.expanduser("~")
+        # 録画を始めたときのモードで、何を録るかが決まる(Editor と同じ)。
+        layout = "wave" if pd.bottom_stack.currentIndex() == pd.MODE_WAVE else "game"
+        from neotja.dialogs.record_dialog import RecordDialog
+        dlg = RecordDialog(self, preview, pd.spin_offset.value(), wave,
+                           pd.duration_seconds(), out_dir, layout=layout)
+        dlg.finished.connect(self._on_record_dialog_finished)
+        self._record_dialog = dlg
+        dlg.show()
+
+    def _on_record_dialog_finished(self, *_a):
+        # 持ったままだと画面外の描画用ウィジェット(スキン一式)が居座る。
+        self._record_dialog = None
 
     @property
     def preview_dock(self):

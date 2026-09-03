@@ -109,7 +109,11 @@ a = Analysis(
     ] + collect_submodules('yt_dlp'),
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    # **PySide6 より先に**記録の仕掛けを掛ける。ここに書いたものは
+    # PyInstaller 自身のフック(pyi_rth_pyside6 など)より前に走る。
+    # shiboken の読み込みで落ちる件が crash.log に一行も残らなかったのは、
+    # 仕掛けが掛かるのが本体の import 時=PySide6 のあとだったため。
+    runtime_hooks=['rthook_crashlog.py'],
     # 純 Python 側の除外。QML/Quick/Pdf のバインディング(.pyd)と、
     # 対話 help 用の pydoc_data(約 0.7MB)は使わない。
     excludes=[
