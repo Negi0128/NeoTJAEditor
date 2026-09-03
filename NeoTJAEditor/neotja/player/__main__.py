@@ -10,6 +10,12 @@ Editor から呼ぶときもこの形。「Player の曲読み込みをすでに
 
 import sys
 
+# 重い依存(sounddevice 495ms / numpy 236ms)の import を裏で始める。
+# **いちばん最初に呼ぶ。** 下の import と重ならなければ意味が無い。
+from neotja import prewarm                       # noqa: E402
+
+prewarm.start()
+
 from neotja import crashlog                      # noqa: F401  (記録の仕掛け)
 from neotja import settings as settings_mod
 from neotja import skin_cache

@@ -1,62 +1,13 @@
-import atexit
-import importlib
 import os
 import sys
 import threading
 
 from neotja import crashlog                   # noqa: E402
+from neotja import prewarm                    # noqa: E402
+prewarm.start()
 
 
 
-
-def _prewarm(module_name):
-    """重い依存モジュールの import を裏で先に済ませておく。
-
-    **なぜこれで速くなるのか**
-    起動時に必ず通る import のうち、`sounddevice` は実測 408ms、`numpy` は
-    131ms かかる。sounddevice のぶんはミキサー音声(MixerAudioEngine)の
-    __init__ に丸ごと乗っていて、その中身は PortAudio の DLL 読み込みと
-    初期化だけ(デバイスを開く処理自体は 1ms もかかっていない)。
-
-    かといって音声エンジンごと後回しにすると「最初の再生でそのぶん待たされる」
-    だけで体感は良くならない。そこで **import だけ**を別スレッドへ出し、
-    主スレッドが PySide6 と neotja を読んでウィンドウを組み立てているあいだ
-    (実測 390ms ほど)に裏で終わらせる。本番の import 文へ来たときには
-    sys.modules に載っているので、そこはほぼ素通りになる。
-
-    2つを1本のスレッドに並べると、後ろに置いたほうの到着が遅れて
-    MixerAudioEngine を待たせてしまい差し引き損をした(実測)。別々の
-    スレッドにして主スレッドと三者同時に進めるのが一番速かった。
-    起動全体で 1133ms -> 937ms(中央値)。
-
-    まだ終わっていなければ import 機構がそこで待つだけなので、最悪でも
-    従来と同じ。失敗しても握りつぶす: 本番の import は MixerAudioEngine 側に
-    あり、そこで従来どおり例外を見てレガシー音声へ退避する(ここで先に
-    転んでも、あちらの判断は何も変わらない)。
-
-    importlib を使うのは `import x` だと未使用扱いで pyflakes に引っかかる
-    ため。読み込ませること自体が目的で、名前は要らない。"""
-    try:
-        importlib.import_module(module_name)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-# 下の import 群(Qt + neotja)だけで 400ms ほどかかる。先読みはその前に
-# 走らせないと重ならないので、モジュールの一番上で起動する。
-#
-# 素材の用意(設定の読み込み → System 探し → 指紋の照合、合わせて実測 55ms)も
-# Qt を使わないので同じように裏へ出してみたが、**やめた**。主スレッドの
-# import と GIL を取り合って import 側が同じだけ延び、起動全体では 1002ms ->
-# 991ms(中央値)の 11ms しか変わらなかった。その 11ms のために、案内を出す
-# 判断(見つからない/使えない/取り出せなかった)を主スレッドへ戻す配線を
-# 増やす価値は無いと判断した。
-_PREWARM_THREADS = [
-    threading.Thread(target=_prewarm, args=(_mod,), daemon=True)
-    for _mod in ("sounddevice", "numpy")
-]
-for _t in _PREWARM_THREADS:
-    _t.start()
 
 from PySide6.QtCore import Qt                 # noqa: E402
 from PySide6.QtGui import QCursor, QIcon      # noqa: E402
@@ -64,32 +15,6 @@ from PySide6.QtWidgets import (               # noqa: E402
     QApplication, QCheckBox, QMessageBox,
 )
 
-# 先読みスレッドは、終了処理に入る前に合流させる。
-#
-# なぜ必要か: デーモンスレッドはインタプリタの終了処理で**任意の場所で**
-# 打ち切られる。import の途中で打ち切られると、読み込みかけの拡張モジュール
-# (PortAudio の DLL)を掴んだまま解放が進み、アクセス違反でプロセスごと落ちる。
-# 起動してすぐ閉じた場合に 5回中5回 再現した(障害モジュール
-# libportaudio64bit.dll_unloaded / 0xc0000005)。
-#
-# なぜ atexit なのか: ここで素直に join すると、Qt の import を終えた主
-# スレッドが先読みの残りを待つことになり、実測 200ms 起動が遅くなった
-# (先読みは起動を速くするために入れたものなので本末転倒)。atexit の
-# コールバックはデーモンスレッドが打ち切られる**前**に走るので、置き場所を
-# そこにすれば起動は 1ms も遅くならず、危ない打ち切りだけが無くなる。
-# ふつうに使えば終了時にはとうに終わっているので、join は即座に返る。
-#
-# 待ち時間の上限は、音声機器の事情で PortAudio の初期化が戻ってこない環境で
-# 終了できなくならないようにするためのもの。
-def _join_prewarm():
-    for t in _PREWARM_THREADS:
-        try:
-            t.join(timeout=5.0)
-        except Exception:  # noqa: BLE001
-            pass
-
-
-atexit.register(_join_prewarm)
 
 
 

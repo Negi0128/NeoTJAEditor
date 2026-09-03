@@ -760,6 +760,8 @@ class GameScreenWidget(QWidget):
         self._title = ""
         self._title_family = None
         self._nameplate_path = None
+        # 焼いた文字の置き場(_baked_text)。倍率ごとに1枚。
+        self._text_cache = {}
 
         chart_preview.setParent(self)
         # レーンの寸法を本家に合わせる。上下の余白は 0 にして、レーン本体と
@@ -1125,6 +1127,51 @@ class GameScreenWidget(QWidget):
                 return fam
         return None
 
+    def _baked_text(self, p, key, path, outline_color, outline_w, fill_color):
+        """縁取りした文字を1枚の絵に焼いて、次からはそれを貼るだけにする。
+
+        **毎コマ縁取りしていたのを見直した。** 文字の輪郭を線でなぞる
+        strokePath は 1回 0.9ms かかり、曲名と銘板で毎フレーム2回呼んで
+        いた(実測: 1491コマで strokePath だけ 1.33 秒)。中身は変わらない
+        のだから、1回焼いて貼れば済む。
+
+        焼く倍率は painter の現在の倍率に合わせる。表示倍率を下げたときや
+        録画(1.5倍)でも輪郭が甘くならないようにするため。倍率ごとに別の
+        1枚を持つ(静的レイヤーと同じ考え方)。
+
+        戻り値は (絵, 貼る位置)。焼けなければ None。
+        """
+        try:
+            scale = float(p.transform().m11()) or 1.0
+        except Exception:  # noqa: BLE001
+            scale = 1.0
+        scale = max(0.25, min(4.0, scale))
+        ck = (key, round(scale, 3))
+        hit = self._text_cache.get(ck)
+        if hit is not None:
+            return hit
+        r = path.boundingRect().adjusted(-outline_w, -outline_w,
+                                         outline_w, outline_w)
+        w = max(1, int(math.ceil(r.width() * scale)))
+        h = max(1, int(math.ceil(r.height() * scale)))
+        if w > 4096 or h > 4096:
+            return None
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        q = QPainter(img)
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.scale(scale, scale)
+        q.translate(-r.x(), -r.y())
+        q.strokePath(path, QPen(QColor(outline_color), outline_w,
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        q.fillPath(path, QColor(fill_color))
+        q.end()
+        pm = QPixmap.fromImage(img)
+        pm.setDevicePixelRatio(scale)
+        hit = (pm, QPointF(r.x(), r.y()))
+        self._text_cache[ck] = hit
+        return hit
+
     def _draw_title(self, p):
         """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
         大きさは一定。長い曲名は縮めず、右端を揃えたまま左へ伸ばす。"""
@@ -1146,14 +1193,22 @@ class GameScreenWidget(QWidget):
         by = y + (h + fm.ascent() - fm.descent()) / 2.0
         path = QPainterPath()
         path.addText(QPointF(bx, by), f, self._title)
-        p.save()
-        p.setRenderHint(QPainter.Antialiasing, True)
-        # 先に黒でなぞってから、白で塗り潰す。塗りと線を同時に出すと線が
-        # 内側へも太って、勘亭流の細い所が黒く埋まってしまう。
-        p.strokePath(path, QPen(QColor(TITLE_OUTLINE), TITLE_OUTLINE_W,
-                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.fillPath(path, QColor(TITLE_COLOR))
-        p.restore()
+        # 先に黒でなぞってから白で塗る絵を1枚焼いて、次からはそれを貼る
+        # (塗りと線を同時に出すと線が内側へも太って、勘亭流の細い所が
+        # 黒く埋まってしまうので、なぞってから塗る順は変えない)。
+        baked = self._baked_text(p, ("title", self._title, bx, by),
+                                 path, TITLE_OUTLINE, TITLE_OUTLINE_W,
+                                 TITLE_COLOR)
+        if baked is None:
+            p.save()
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.strokePath(path, QPen(QColor(TITLE_OUTLINE), TITLE_OUTLINE_W,
+                                    Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.fillPath(path, QColor(TITLE_COLOR))
+            p.restore()
+            return
+        pm, at = baked
+        p.drawPixmap(at, pm)
 
     def _draw_nameplate_name(self, p):
         """銘板の白い板に NAMEPLATE_NAME を書く。
@@ -1181,12 +1236,19 @@ class GameScreenWidget(QWidget):
         # 座標は銘板素材の左上を原点にしてある。板の位置を動かせば文字も
         # 一緒に動く。
         p.translate(NAMEPLATE_POS[0], NAMEPLATE_POS[1])
-        # 曲名と同じく、黒でなぞってから白で塗る。塗りと線を一度に出すと
-        # 線が内側へも太って、勘亭流の細い所が黒く埋まってしまう。
-        p.strokePath(path, QPen(QColor(NAMEPLATE_NAME_OUTLINE),
-                                NAMEPLATE_NAME_OUTLINE_W,
-                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.fillPath(path, QColor(NAMEPLATE_NAME_COLOR))
+        # 曲名と同じく、黒でなぞってから白で塗った絵を1枚焼いて貼る。
+        baked = self._baked_text(p, ("nameplate", NAMEPLATE_NAME), path,
+                                 NAMEPLATE_NAME_OUTLINE,
+                                 NAMEPLATE_NAME_OUTLINE_W,
+                                 NAMEPLATE_NAME_COLOR)
+        if baked is None:
+            p.strokePath(path, QPen(QColor(NAMEPLATE_NAME_OUTLINE),
+                                    NAMEPLATE_NAME_OUTLINE_W,
+                                    Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.fillPath(path, QColor(NAMEPLATE_NAME_COLOR))
+        else:
+            pm, at = baked
+            p.drawPixmap(at, pm)
         p.restore()
 
     def _load_gauge_rainbow(self):
