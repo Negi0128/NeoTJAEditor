@@ -19,6 +19,7 @@
 """
 
 import bisect
+import math
 
 TARGET_SCORE = 1_000_000
 # 連打の打数を数えるときの秒間打数。表示用の roll_speed とは別物(上の説明参照)。
@@ -58,11 +59,19 @@ def compute_scoring(preview_data: dict, target: int = TARGET_SCORE) -> dict:
 
     bonus = (roll_hits + balloon_hits) * ROLL_HIT_SCORE
 
-    if note_count > 0:
-        raw = max(0.0, (target - bonus) / note_count)
-        per_note = int(round(raw / SCORE_UNIT)) * SCORE_UNIT
-    else:
-        per_note = 0
+    # 譜面に書いてあればそれが正解。自動計算は「書いていないとき」の代わり。
+    per_note = _score_init_per_note(data)
+    from_tja = per_note is not None
+    if not from_tja:
+        if note_count > 0:
+            raw = max(0.0, (target - bonus) / note_count)
+            # **切り上げる。** 全部良で叩いたときの満点が target を下回らない、
+            # いちばん小さい 10 点単位の値。切り捨て/四捨五入だと満点が
+            # 100万点に届かない譜面が出る(はやさいたま2000 の むずかしい で
+            # 実際にそうなった)。
+            per_note = int(math.ceil(raw / SCORE_UNIT)) * SCORE_UNIT
+        else:
+            per_note = 0
 
     return {
         "note_count": note_count,
@@ -70,8 +79,31 @@ def compute_scoring(preview_data: dict, target: int = TARGET_SCORE) -> dict:
         "balloon_hits": balloon_hits,
         "bonus": bonus,
         "per_note": per_note,
+        "from_tja": from_tja,
         "total": per_note * note_count + bonus,
     }
+
+
+def _score_init_per_note(data):
+    """譜面に書いてある真打の基礎点。無ければ None。
+
+    TJA の SCOREINIT は「旧配点の初期値, 真打の基礎点」の2つ組で、2つめが
+    1打あたりの点そのもの。譜面作者が本家の値を写していることが多く、
+    こちらの推定より確実なので、あればそれを使う。
+
+    1つしか書いていない場合は SCOREMODE:2(真打)のときだけ採る。旧配点
+    (0/1)の1つめは「コンボで増えていく配点の初期値」で意味が違うため。
+    """
+    init = data.get("score_init") or ()
+    mode = data.get("score_mode")
+    value = None
+    if len(init) >= 2:
+        value = init[1]
+    elif len(init) == 1 and mode == 2:
+        value = init[0]
+    if value is None or value <= 0:
+        return None
+    return int(value)
 
 
 class ScoreTimeline:

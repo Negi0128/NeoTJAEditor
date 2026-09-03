@@ -162,7 +162,11 @@ COMBO_TEXT_BAND_FALLBACK = ((26, 23), (76, 23))   # ((y, 高さ), ...)
 # コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
 COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 # 太鼓が光る時間(叩いた瞬間からの秒数)。本家もごく短い。
-DRUM_GLOW_SEC = 0.09
+DRUM_GLOW_SEC = 0.07
+# 光が消えるときの余韻。ここまでは明るさそのまま、そこから DRUM_GLOW_FADE_SEC
+# かけて消える。以前は最初の瞬間から線形に暗くしていたので、光った瞬間から
+# もう暗く、消え際も「ぷつっ」と切れて見えた。
+DRUM_GLOW_FADE_SEC = 0.05
 
 # --- 魂ゲージ ------------------------------------------------------------
 # Gauge.png / Gauge_Base.png は 700x68 だが、ゲージ本体は上の 44px だけ。
@@ -541,7 +545,7 @@ SOUL_BURST_SCALE = 1.0
 # 1280 換算で幅 120px 前後。素材の絵は 231px 幅なので約 0.52 倍で置く。
 ROLL_FAN_CELL = (334, 204)
 ROLL_FAN_FRAMES = 5
-ROLL_FAN_SCALE = 0.928           # 0.52 の 1.7 倍をさらに 5% 大きく
+ROLL_FAN_SCALE = 1.021           # 0.928 の 1.1 倍
 ROLL_FAN_CENTER_X = 413          # 扇の中心 x
 ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
@@ -1689,7 +1693,7 @@ class GameScreenWidget(QWidget):
             # 叩いた瞬間だけ、その音符の色で光らせる(面=赤 / 縁=水色)。
             if hit is not None:
                 elapsed, char, n = hit
-                if 0.0 <= elapsed < DRUM_GLOW_SEC:
+                if 0.0 <= elapsed < DRUM_GLOW_SEC + DRUM_GLOW_FADE_SEC:
                     glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
                     if glow is not None:
                         # 本家は両面同時ではなく片面ずつ。音符ごとに
@@ -1697,8 +1701,11 @@ class GameScreenWidget(QWidget):
                         gw, gh = glow.width(), glow.height()
                         half = gw // 2
                         sx = 0 if (n % 2 == 0) else half
-                        # 叩いた直後がいちばん明るく、すぐ消える。
-                        p.setOpacity(max(0.0, 1.0 - elapsed / DRUM_GLOW_SEC))
+                        # 光っているあいだは明るさそのまま。消えるときだけ
+                        # 短くフェードさせる。
+                        over = elapsed - DRUM_GLOW_SEC
+                        a = 1.0 if over <= 0.0 else 1.0 - over / DRUM_GLOW_FADE_SEC
+                        p.setOpacity(max(0.0, min(1.0, a)))
                         p.drawPixmap(dx + sx, dy, glow, sx, 0, gw - half, gh)
                         p.setOpacity(1.0)
 

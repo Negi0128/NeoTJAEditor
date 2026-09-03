@@ -863,24 +863,39 @@ class TJACourseAnalyzer:
         never removes a measure boundary from the underlying timeline."""
         lines = content.split('\n')
 
-        course_bounds = []  # (start, end, key, level)
+        course_bounds = []  # (start, end, key, level, scoreinit, scoremode)
         start = None
         cur_key = "Oni"
         cur_level = None
+        # 配点。SCOREINIT の2つめが真打の基礎点(1打あたりの点)で、譜面ごとに
+        # 違う。SCOREMODE は曲に1つ(コースの前)に書かれることが多いので、
+        # コースが変わってもリセットしない。
+        cur_init = ()
+        cur_mode = None
         for idx, raw in enumerate(lines, start=1):
             s = raw.split("//")[0].strip()
             if s.startswith("COURSE:"):
                 cur_key = self.DIFF.get(s[7:].strip(), "Oni")
                 cur_level = None
+                cur_init = ()
             elif s.startswith("LEVEL:"):
                 try:
                     cur_level = int(s[6:].strip())
                 except Exception:
                     pass
+            elif s.startswith("SCOREINIT:"):
+                cur_init = tuple(int(x.strip()) for x in s[10:].split(",")
+                                 if x.strip().lstrip("-").isdigit())
+            elif s.startswith("SCOREMODE:"):
+                try:
+                    cur_mode = int(s[10:].strip())
+                except Exception:
+                    pass
             elif s.startswith("#START"):
                 start = idx
             elif s.startswith("#END") and start is not None:
-                course_bounds.append((start, idx, cur_key, cur_level))
+                course_bounds.append((start, idx, cur_key, cur_level,
+                                      cur_init, cur_mode))
                 start = None
 
         empty = {
@@ -888,6 +903,7 @@ class TJACourseAnalyzer:
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "title": _header_value(content, "TITLE"),
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
+            "score_init": (), "score_mode": None,
             "course_key": None, "course_label": "", "course_color": COLORS["fg_bright"],
             "level": None, "available_courses": [], "has_branches": False, "branch_level": branch_level,
         }
@@ -896,7 +912,8 @@ class TJACourseAnalyzer:
 
         seen = set()
         available_courses = []
-        for _, _, k, _ in course_bounds:
+        for cb in course_bounds:
+            k = cb[2]
             if k not in seen:
                 seen.add(k)
                 available_courses.append({"key": k, "label": self.DIFF_LABEL.get(k, k), "color": self.DIFF_COLOR.get(k, COLORS["fg"])})
@@ -910,7 +927,8 @@ class TJACourseAnalyzer:
             target = next((cb for cb in course_bounds if cb[2] == course_key), None)
         if target is None and cursor_line is not None:
             target = next((cb for cb in course_bounds if cb[0] <= cursor_line <= cb[1]), None)
-        a, b, sel_key, sel_level = target if target is not None else course_bounds[0]
+        a, b, sel_key, sel_level, sel_init, sel_mode = (
+            target if target is not None else course_bounds[0])
 
         bpm = Decimal("120")
         for l in lines:
@@ -1190,6 +1208,11 @@ class TJACourseAnalyzer:
             "bpm_changes": [(float(t), float(v)) for t, v in bpm_changes],
             "measure_changes": [(float(t), int(num), int(den)) for t, num, den in measure_changes],
             "scroll_changes": [(float(t), float(v)) for t, v in scroll_changes],
+            # 配点。SCOREINIT の2つめが真打の基礎点で、譜面作者が本家の値を
+            # 書いていることが多い。書いてあればそれが正解なので、こちらの
+            # 自動計算より優先する(score.compute_scoring 参照)。
+            "score_init": sel_init,
+            "score_mode": sel_mode,
             "course_key": sel_key,
             "course_label": self.DIFF_LABEL.get(sel_key, sel_key),
             "course_color": self.DIFF_COLOR.get(sel_key, COLORS["fg"]),
