@@ -34,9 +34,12 @@ Game_Chara_Motion_* / Game_Chara_Beat_* を読むが、TNDE-R のスキンには
 
 import os
 
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QThread
+from PySide6.QtGui import QImage, QPixmap
 
 from neotja import settings as settings_mod
+
+from neotja import worker_util
 
 #: skin/ の下でキャラの連番を置くフォルダ。
 CHARA_DIR = "1_Chara"
@@ -54,6 +57,96 @@ STATES = (STATE_NORMAL, STATE_GOGO, STATE_GOGO_START,
 TIME_BASED_STATES = (STATE_BALLOON, STATE_BALLOON_BROKE)
 
 
+def _content_box_of(img):
+    """QImage の「中身(不透明な画素)の外接」(左, 上, 右, 下)。空なら None。
+
+    **なぜ numpy で見るのか**
+    以前はここを `img.pixelColor(x, y)` の二重ループで回していた。1コマ
+    360x184 でも 66,240 回、風船の 648x345 では 223,560 回の呼び出しになり、
+    実測で 1状態あたり 77ms かかっていた。しかもこれが走るのは「その状態が
+    初めて画面に出たコマ」— つまりゴーゴーに入った瞬間に 2状態ぶん 154ms
+    まとめて持っていかれ、そのコマだけ描画が止まって見える。
+
+    アルファ値だけ見れば済む話なので、画素の並びをそのまま numpy の配列に
+    して端を探す。実測 77ms -> 0.4ms。
+
+    numpy が無い環境でも動くようにフォールバックを残す(numpy はこのアプリの
+    必須依存ではあるが、ここで転んでキャラが出なくなるより、遅くても出る方が
+    まし)。フォールバックでも走るのは preload 中の裏スレッドなので、
+    再生中のコマには乗らない。"""
+    if img is None or img.isNull():
+        return None
+    w, h = img.width(), img.height()
+    if w <= 0 or h <= 0:
+        return None
+    try:
+        import numpy as np
+
+        # アルファの位置を固定するため、並びの分かっている形式へ揃える。
+        # 既に同じ形式なら Qt 側で複製は起きない。
+        conv = img.convertToFormat(QImage.Format_RGBA8888)
+        ptr = conv.constBits()
+        # bytesPerLine は 4 バイト境界へ切り上げられていることがあるので、
+        # 行の余りごと取ってから幅のぶんだけ切る。
+        stride = conv.bytesPerLine()
+        arr = np.frombuffer(ptr, dtype=np.uint8, count=stride * h)
+        arr = arr.reshape(h, stride // 4, 4)[:, :w, 3]
+        mask = arr > 8
+        rows = np.flatnonzero(mask.any(axis=1))
+        cols = np.flatnonzero(mask.any(axis=0))
+        if rows.size == 0 or cols.size == 0:
+            return None
+        return (int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1]))
+    except Exception:  # noqa: BLE001
+        pass
+    left, top, right, bottom = w, h, -1, -1
+    for y in range(h):
+        for x in range(w):
+            if img.pixelColor(x, y).alpha() > 8:
+                if x < left:
+                    left = x
+                if x > right:
+                    right = x
+                if y < top:
+                    top = y
+                if y > bottom:
+                    bottom = y
+    if right < 0:
+        return None
+    return (left, top, right, bottom)
+
+
+class _PreloadWorker(QThread):
+    """連番 PNG の復号を GUI スレッドの外でやるワーカー。
+
+    QPixmap は GUI スレッドでしか作れないが、QImage は作れる。重いのは
+    PNG の復号のほう(実測 1コマ 1.6ms、332コマで 530ms)なので、そこだけ
+    裏へ出して、GUI スレッドには「QImage -> QPixmap」(同 0.16ms)だけを
+    残す。
+
+    中身を持ち帰るのに Signal を使わないのは、332枚の QImage を Qt の
+    キューに載せる意味が無いため。走り終えたら `images` を読むだけでよい
+    (finished は GUI スレッドで受けるので、そこで読めば競合しない)。"""
+
+    def __init__(self, jobs, parent=None):
+        super().__init__(parent)
+        self._jobs = jobs
+        self._cancel = False
+        self.images = []            # [((state, index), QImage), ...]
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        out = []
+        for key, path in self._jobs:
+            if self._cancel:
+                return
+            img = QImage(path)
+            out.append((key, None if img.isNull() else img))
+        self.images = out
+
+
 class CharaSprites:
     """連番 PNG を必要になった順に読む。
 
@@ -66,8 +159,84 @@ class CharaSprites:
         self._counts = {}
         self._cache = {}
         self._boxes = {}
+        self._preloader = None
+        self._preloaded = False
         for state in STATES:
             self._counts[state] = self._count_frames(state)
+
+    # ------------------------------------------------------------------
+    def preload(self, on_done=None):
+        """全コマを再生前に読んでおく。裏スレッドで復号し、GUI スレッドで
+        QPixmap にする。すでに読んであれば何もしない。
+
+        **なぜ要るのか(遅延読みでは駄目な理由)**
+        コマ送りは「ふだんの絵の枚数 ÷ 4拍」で決まる(frames_per_beat)。
+        TNDE-R の素材は Normal が 119枚なので、BPM120 では **1秒あたり約60枚**
+        の新しいコマが要る。遅延読みだとその 60枚が再生中に1枚ずつ読まれる
+        ことになり、1枚の QPixmap 生成が実測 7.5ms — 120fps の締切 8.3ms を
+        まるごと使い切る。結果、2コマに1コマが締切落ちして実効 fps が
+        **125 -> 70 に半減**する。これが「ときどき 70fps に落ちる」の正体で、
+        しかも Normal(119枚)とゴーゴー(GoGoStart 53 + GoGo 118)で
+        **曲の頭 2秒とゴーゴー突入の 3秒**という、いちばん目立つ場所で起きる。
+
+        332枚を一度に抱えても実測 40MB 弱で、演奏画面を開いている間だけの
+        話なので、素直に全部持つ。
+
+        読み込みそのものを速くする道(縮小して持つ・アトラスに焼く)も考えたが、
+        絵が変わってしまう/焼くのに結局同じだけかかるので採らない。"""
+        if self._preloaded or self._preloader is not None:
+            return
+        if not self.available():
+            self._preloaded = True
+            if on_done:
+                on_done()
+            return
+        jobs = []
+        for state in STATES:
+            n = self._counts.get(state, 0)
+            for i in range(n):
+                if (state, i) not in self._cache:
+                    jobs.append(((state, i), os.path.join(self._state_dir(state),
+                                                          "%d.png" % i)))
+        if not jobs:
+            self._preloaded = True
+            if on_done:
+                on_done()
+            return
+        w = _PreloadWorker(jobs)
+        self._preloader = w
+        w.finished.connect(lambda: self._absorb(on_done))
+        w.start()
+
+    def _absorb(self, on_done=None):
+        """裏で復号した QImage を QPixmap に直して抱える(GUI スレッド)。
+
+        ついでに状態ごとの content_box もここで済ませる。再生中に初めて
+        測ると、その状態が出た最初のコマだけ止まって見えるため。"""
+        w = self._preloader
+        self._preloader = None
+        if w is None:
+            return
+        for key, img in w.images:
+            if key in self._cache:
+                continue
+            if img is None:
+                self._cache[key] = None
+                continue
+            pm = QPixmap.fromImage(img)
+            self._cache[key] = None if pm.isNull() else pm
+            if key[1] == 0 and key[0] not in self._boxes:
+                self._boxes[key[0]] = _content_box_of(img)
+        self._preloaded = True
+        if on_done:
+            on_done()
+
+    def cancel_preload(self):
+        """走っている先読みを切り離す(ウィジェットが消えるときなど)。"""
+        w = self._preloader
+        self._preloader = None
+        if w is not None:
+            worker_util.detach_worker(w)
 
     def _state_dir(self, state):
         return os.path.join(self._dir, state)
@@ -121,25 +290,11 @@ class CharaSprites:
         ので、コマごとの動き(跳ねる・移動する)はそのまま残る。"""
         if state in self._boxes:
             return self._boxes[state]
-        box = None
+        img = None
         pm = self.frame(state, 0)
         if pm is not None and not pm.isNull():
             img = pm.toImage()
-            w, h = img.width(), img.height()
-            left, top, right, bottom = w, h, -1, -1
-            for y in range(h):
-                for x in range(w):
-                    if img.pixelColor(x, y).alpha() > 8:
-                        if x < left:
-                            left = x
-                        if x > right:
-                            right = x
-                        if y < top:
-                            top = y
-                        if y > bottom:
-                            bottom = y
-            if right >= 0:
-                box = (left, top, right, bottom)
+        box = _content_box_of(img)
         self._boxes[state] = box
         return box
 

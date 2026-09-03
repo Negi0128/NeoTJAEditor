@@ -88,6 +88,11 @@ _HIT_PATH_FPS = 60.0
 #     HIT_PATH_SCALE = (LANE_HEIGHT / 2) / 409 ≈ 0.1296
 # これで弧の全体が固定枠の中に収まり、上がって・被さって・落ちてくる動きが
 # そのまま見える。レーンの比率は一切変えていない。
+#: preview_max_fps の既定値。settings.py の既定と同じものを指す
+# (_apply_timer_interval で「既定のままか、明示的に上げたか」を見分けるのに
+# 使うので、片方だけ動くと判断がずれる)。
+DEFAULT_MAX_FPS = 120
+
 _PEEPO_LANE_CONTENT_H = 195.0
 # 弧の頂点の、開始点からの上向き変位 (world units)。テーブルから直接求める。
 _HIT_PATH_APEX_RISE = _HIT_PATH_RAW[0][1] - min(y for _x, y in _HIT_PATH_RAW)  # 409
@@ -700,13 +705,14 @@ class ChartPreviewWidget(QWidget):
                     hz = r
         except Exception:
             pass
-        # Cap the redraw rate to keep CPU use down. Default 60 fps; tunable via
-        # settings "preview_max_fps" (20-144).
-        cap = 60
+        # Cap the redraw rate to keep CPU use down. Tunable via settings
+        # "preview_max_fps" (20-240; 既定は DEFAULT_MAX_FPS)。
+        cap = DEFAULT_MAX_FPS
         try:
-            cap = int(settings_mod.load_settings().get("preview_max_fps", 60))
+            cap = int(settings_mod.load_settings().get("preview_max_fps",
+                                                       DEFAULT_MAX_FPS))
         except Exception:
-            cap = 60
+            cap = DEFAULT_MAX_FPS
         cap = max(20, min(240, cap))
         # This is a plain software-rendered QWidget, so its redraw timer is NOT
         # synchronized to the display's vblank. Rendering at ~62.5 fps (the
@@ -721,7 +727,22 @@ class ChartPreviewWidget(QWidget):
         # disappears and frame-age jitter is halved. On a 60 Hz panel that's
         # 120 fps (8 ms); on a 144 Hz panel the cap keeps it at 144. Bounded by
         # the user's preview_max_fps so it can be dialed back for CPU.
-        target = min(float(cap), max(hz * 2.0, 60.0))
+        vsync_pref = max(hz * 2.0, 60.0)
+        # 既定値(DEFAULT_MAX_FPS)までは**従来どおり**この上限で頭打ちにする。
+        # 既定のまま使っている人の見え方を変えないため — 60Hz なら 120fps、
+        # 50Hz なら 100fps、下げて使っている人はその値のまま。
+        #
+        # 既定より大きい値を入れたときだけ、頭打ちを外して設定値をそのまま
+        # 使う。以前は min() が先に効くので、60Hz のモニタで 200 を指定しても
+        # 120 で止まり、「上げても何も変わらない」設定になっていた。
+        #
+        # ただし **60Hz の画面で 200fps 描いても見えるものは変わらない**。
+        # 画面が出せるのは毎秒 60 コマまでで、余分に描いたコマはそのまま
+        # 捨てられる(しかもこのウィジェットは vblank に同期していないので、
+        # 捨てられ方も一定ではなく、2倍から外れるぶん上の説明にある「うなり」が
+        # かえって戻ってくる)。上げて意味があるのは、高リフレッシュの
+        # モニタを使っている場合と、測定目的で内部の更新間隔を詰めたい場合。
+        target = float(cap) if cap > DEFAULT_MAX_FPS else min(float(cap), vsync_pref)
         hz = max(20.0, target)
         # Round to the nearest ms so the interval actually lands on the target
         # (8 ms for 120 fps) instead of being biased fast/slow.
