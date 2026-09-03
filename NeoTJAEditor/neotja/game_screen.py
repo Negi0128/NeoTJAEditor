@@ -672,6 +672,45 @@ class _JudgeOverlay(QWidget):
         p.end()
 
 
+def _column_centers(img):
+    """画像の列ごとに「不透明な画素の上端と下端の中点」を返す。無い列は None。
+
+    アルファだけ見れば済むので numpy で一度に処理する。pixelColor の
+    二重ループで書くと、虹(1160x325)で 377,200 回の呼び出しになり、
+    その1コマだけ 500ms 止まる。
+
+    numpy が使えない環境でも動くよう、素直な実装も残してある。"""
+    w, h = img.width(), img.height()
+    if w <= 0 or h <= 0:
+        return []
+    try:
+        import numpy as np
+
+        conv = img.convertToFormat(QImage.Format_RGBA8888)
+        stride = conv.bytesPerLine()
+        arr = np.frombuffer(conv.constBits(), dtype=np.uint8, count=stride * h)
+        alpha = arr.reshape(h, stride // 4, 4)[:, :w, 3]
+        mask = alpha > 8
+        any_col = mask.any(axis=0)
+        ys = np.arange(h)[:, None]
+        top = np.where(mask, ys, h).min(axis=0)
+        bottom = np.where(mask, ys, -1).max(axis=0)
+        mid = (top + bottom) / 2.0
+        return [float(mid[x]) if any_col[x] else None for x in range(w)]
+    except Exception:  # noqa: BLE001
+        pass
+    out = []
+    for x in range(w):
+        top, bottom = -1, -1
+        for y in range(h):
+            if img.pixelColor(x, y).alpha() > 8:
+                if top < 0:
+                    top = y
+                bottom = y
+        out.append(None if top < 0 else (top + bottom) / 2.0)
+    return out
+
+
 class GameScreenWidget(QWidget):
     """1280x720(または上半分だけの 1280x360)の画面を組み立てる。
 
@@ -2183,23 +2222,17 @@ class GameScreenWidget(QWidget):
         """虹の絵の col 列目で、帯の中心が上から何pxか。無ければ None。
 
         虹は弧なので、先端の高さは列ごとに違う。素材のアルファから列ごとに
-        1回だけ測って覚えておく(毎フレーム測ると重い)。"""
+        1回だけ測って覚えておく(毎フレーム測ると重い)。
+
+        測るのは風船が初めて割れたコマ。以前はここを pixelColor の二重ループで
+        回しており、377,200 回の呼び出しで **1コマだけ 500ms 前後止まって**
+        いた(実測。プロファイラで tottime の1位)。どんちゃんの外接計算と
+        まったく同じ書き方が残っていた。"""
         if self._rainbow_centers is None:
             pm = self._skin.get("rainbow")
             if pm is None:
                 return None
-            img = pm.toImage()
-            w, h = img.width(), img.height()
-            centers = []
-            for x in range(w):
-                top, bottom = -1, -1
-                for y in range(h):
-                    if img.pixelColor(x, y).alpha() > 8:
-                        if top < 0:
-                            top = y
-                        bottom = y
-                centers.append(None if top < 0 else (top + bottom) / 2.0)
-            self._rainbow_centers = centers
+            self._rainbow_centers = _column_centers(pm.toImage())
         if 0 <= col < len(self._rainbow_centers):
             return self._rainbow_centers[col]
         return None
