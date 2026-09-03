@@ -32,8 +32,10 @@ from neotja.player.core import read_text
 from neotja.preview_dock import parse_preview_headers
 from neotja.tja_analyzer import TJACourseAnalyzer
 
-#: 表の列。
-COL_NAME, COL_COURSE, COL_STATE, COL_NOTE = 0, 1, 2, 3
+#: 表の列。3つだけ。以前は「譜面/コース/状態/備考」の4つだったが、
+#: 情報が多すぎて何を見ればいいのか分からない、という指摘を受けて減らした。
+#: 失敗の理由は状態の欄にそのまま書く(別の列にすると横に長くなるだけ)。
+COL_NAME, COL_COURSE, COL_STATE = 0, 1, 2
 
 #: 待ち行列1件の状態。
 WAITING, RUNNING, DONE, FAILED, SKIPPED = "待機", "書き出し中", "完了", "失敗", "とばした"
@@ -48,8 +50,9 @@ class _Job:
         self.note = ""
         self.out_path = ""
         self.seconds = 0.0          # 書き出す長さ(見積もり用)
-        # 実際に使われたコース。表を作り直すと消えるので、表ではなく
-        # こちらが持つ(以前はセルへ直接書いていて、_reload_table で消えていた)。
+        # その譜面に入っているコース [{"key","label","level"}, ...] と、
+        # 選ばれているキー。積んだ時点で読んでおき、行のプルダウンに出す。
+        self.courses = []
         self.course = ""
 
 
@@ -92,33 +95,16 @@ class BatchPage(QWidget):
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
-        top = QHBoxLayout()
-        self.b_add_files = QPushButton("譜面を追加...")
-        self.b_add_files.clicked.connect(self.add_files)
-        top.addWidget(self.b_add_files)
-        self.b_add_folder = QPushButton("フォルダを追加...")
-        self.b_add_folder.clicked.connect(self.add_folder)
-        top.addWidget(self.b_add_folder)
-        self.b_remove = QPushButton("外す")
-        self.b_remove.clicked.connect(self.remove_selected)
-        top.addWidget(self.b_remove)
-        self.b_clear = QPushButton("全部消す")
-        self.b_clear.clicked.connect(self.clear_all)
-        top.addWidget(self.b_clear)
-        top.addStretch()
-        v.addLayout(top)
+        # 追加・削除のボタンは置かない。放り込むだけで積まれるほうが速いし、
+        # ボタンが並ぶとそれだけで「何かしないといけない画面」に見える。
+        # 消すのは行を選んで Delete。
+        self.lbl_drop = QLabel(
+            "ここに TJA ファイルやフォルダを放り込むと、下に積まれます。"
+            "（消すときは行を選んで Delete）")
+        self.lbl_drop.setWordWrap(True)
+        v.addWidget(self.lbl_drop)
 
         opts = QHBoxLayout()
-        opts.addWidget(QLabel("コース:"))
-        self.cb_course = QComboBox()
-        # 「譜面ごとにいちばん難しいもの」を既定にする。30譜面を撮るとき、
-        # 譜面によって入っているコースが違うので、固定にすると撮れないものが出る。
-        self.cb_course.addItem("いちばん難しいコース", "")
-        for key, label in (("Oni", "おに"), ("Edit", "うら"), ("Hard", "むずかしい"),
-                           ("Normal", "ふつう"), ("Easy", "かんたん")):
-            self.cb_course.addItem(label, key)
-        opts.addWidget(self.cb_course)
-
         opts.addWidget(QLabel("画質:"))
         self.cb_quality = QComboBox()
         for label, q in QUALITY_PRESETS:
@@ -144,16 +130,15 @@ class BatchPage(QWidget):
         out.addWidget(b_out)
         v.addLayout(out)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["譜面", "コース", "状態", "備考"])
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["譜面", "コース", "状態"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
         h.setSectionResizeMode(COL_COURSE, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(COL_STATE, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(COL_NOTE, QHeaderView.Stretch)
+        h.setSectionResizeMode(COL_STATE, QHeaderView.Stretch)
         v.addWidget(self.table, 1)
 
         self.bar = QProgressBar()
@@ -193,11 +178,11 @@ class BatchPage(QWidget):
                         if fn.lower().endswith(".tja"):
                             full = os.path.join(root, fn)
                             if full not in have:
-                                self.jobs.append(_Job(full))
+                                self.jobs.append(self._make_job(full))
                                 have.add(full)
                                 added += 1
             elif p.lower().endswith(".tja") and p not in have:
-                self.jobs.append(_Job(p))
+                self.jobs.append(self._make_job(p))
                 have.add(p)
                 added += 1
         if added:
@@ -205,6 +190,25 @@ class BatchPage(QWidget):
             self.lbl_status.setText("%d 件を追加しました（全 %d 件）。"
                                     % (added, len(self.jobs)))
         return added
+
+    def _make_job(self, path):
+        """1件ぶんを作る。コースの顔ぶれはここで読んでおく。
+
+        行のプルダウンに出すため。積んだあとに読むと、表を出してから
+        しばらく選べない時間ができて手が止まる。"""
+        job = _Job(path)
+        try:
+            from neotja.player.core import read_courses, read_text
+            job.courses = read_courses(read_text(path), self.analyzer)
+        except Exception:  # noqa: BLE001
+            job.courses = []
+        if job.courses:
+            # 既定はいちばん難しいもの。撮りたいのはたいていそれ。
+            order = ("Easy", "Normal", "Hard", "Oni", "Edit")
+            job.courses.sort(key=lambda c: order.index(c["key"])
+                             if c.get("key") in order else -1)
+            job.course = job.courses[-1]["key"]
+        return job
 
     def add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -217,6 +221,14 @@ class BatchPage(QWidget):
         d = QFileDialog.getExistingDirectory(self, "フォルダを追加")
         if d:
             self.add_paths([d])
+
+    def keyPressEvent(self, event):
+        # 消すのは Delete。ボタンを置かない代わりの道。
+        from PySide6.QtCore import Qt as _Qt
+        if event.key() in (_Qt.Key_Delete, _Qt.Key_Backspace):
+            self.remove_selected()
+            return
+        super().keyPressEvent(event)
 
     def remove_selected(self):
         if self._running:
@@ -234,6 +246,9 @@ class BatchPage(QWidget):
         self._reload_table()
 
     def _reload_table(self):
+        # 行数を変えるとセルに載せたプルダウンは捨てられるので、いったん
+        # 全部消してから作り直す(行がずれたまま古いプルダウンが残るのを防ぐ)。
+        self.table.clearContents()
         self.table.setRowCount(len(self.jobs))
         for i, job in enumerate(self.jobs):
             self._set_row(i, job)
@@ -247,9 +262,36 @@ class BatchPage(QWidget):
             item.setText(text)
 
         put(COL_NAME, os.path.basename(job.path))
-        put(COL_COURSE, job.course)
-        put(COL_STATE, job.state)
-        put(COL_NOTE, job.note)
+        # 状態と、失敗の理由は同じ欄に出す(列を増やすと横に長くなるだけ)。
+        put(COL_STATE, job.state if not job.note
+            else "%s: %s" % (job.state, job.note))
+
+        # コースは行ごとのプルダウン。譜面によって入っているコースが違うので、
+        # 全体でひとつ選ばせると撮れないものが出る。
+        box = self.table.cellWidget(i, COL_COURSE)
+        if box is None:
+            box = QComboBox()
+            box.setEnabled(not self._running)
+            self.table.setCellWidget(i, COL_COURSE, box)
+            box.currentIndexChanged.connect(
+                lambda _i, row=i: self._on_course_picked(row))
+        if box.count() != len(job.courses):
+            box.blockSignals(True)
+            box.clear()
+            for c in job.courses:
+                lv = c.get("level")
+                box.addItem("%s%s" % (c.get("label") or c["key"],
+                                      "" if lv is None else " ★%d" % lv),
+                            c["key"])
+            idx = box.findData(job.course)
+            if idx >= 0:
+                box.setCurrentIndex(idx)
+            box.blockSignals(False)
+
+    def _on_course_picked(self, row):
+        box = self.table.cellWidget(row, COL_COURSE)
+        if box is not None and 0 <= row < len(self.jobs):
+            self.jobs[row].course = box.currentData() or ""
 
     # ---- ドラッグ&ドロップ ----
     def dragEnterEvent(self, event):
@@ -312,10 +354,13 @@ class BatchPage(QWidget):
         self._finish_all()
 
     def _set_busy(self, busy):
-        for w in (self.b_add_files, self.b_add_folder, self.b_remove,
-                  self.b_clear, self.b_start, self.cb_course, self.cb_quality,
-                  self.cb_layout):
+        for w in (self.b_start, self.cb_quality, self.cb_layout):
             w.setEnabled(not busy)
+        # 行のプルダウンも、走っている間は触れないようにする。
+        for i in range(self.table.rowCount()):
+            box = self.table.cellWidget(i, COL_COURSE)
+            if box is not None:
+                box.setEnabled(not busy)
         self.b_stop.setEnabled(busy)
 
     def _next_job(self):
@@ -382,7 +427,7 @@ class BatchPage(QWidget):
             self._fail(job, "読めません: %s" % exc)
             return None
 
-        course = self.cb_course.currentData() or None
+        course = job.course or None
         preview = self.analyzer.build_preview_timeline(
             content, None, course, branch_level="M")
         if not preview.get("notes") and not preview.get("rolls"):

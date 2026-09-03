@@ -155,6 +155,11 @@ class SelectScreen(QWidget):
         self._slot_side = 0         # おに のスロットで今どちらを見せているか
         # おに と うら を選んでいる最中か(押されたら2枚を出して選ばせる)。
         self._picking = False
+        # いまカーソルが乗っているもの。"card:0".."card:3" / "back" / "conf"、
+        # 乗っていなければ None。**大きくするのはこれが乗っているものだけ。**
+        # 以前は「選んでいるカード」を常に大きくしていたが、カーソルを外して
+        # いるのに1枚だけ飛び出しているのは、押した状態のように見えて紛らわしい。
+        self._hover = None
         # 出てくる動きの進み具合 0.0(閉じている) 〜 1.0(出きった)。
         # 押した場所から広がるので、どのカードを押したのかが目で追える。
         self._pick_t = 0.0
@@ -317,13 +322,34 @@ class SelectScreen(QWidget):
         # 分かるようにするため(絵だけでは押せるかどうか伝わらない)。
         self.setCursor(Qt.PointingHandCursor if self._clickable_at(pt)
                        else Qt.ArrowCursor)
-        if self._picking:
-            return
-        # どれを押そうとしているかが分かるように、指したものを大きくする。
-        i = self._card_at(pt)
-        if i is not None and self._slots[i] and i != self._cursor:
-            self._cursor = i
+        hover = self._hover_at(pt)
+        if hover != self._hover:
+            self._hover = hover
             self.update()
+
+    def leaveEvent(self, event):
+        # 窓から出たら大きくしたものを戻す。出しっぱなしだと、触っていない
+        # のに1つだけ飛び出したままになる。
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
+
+    def _hover_at(self, pt):
+        """その座標にある「大きくして見せるもの」の名前。無ければ None。"""
+        if self._picking:
+            for j, r in enumerate(self._pick_rects()):
+                if r.contains(pt):
+                    return "pick:%d" % j
+            return None
+        if self._back_rect().contains(pt):
+            return "back"
+        if self._conf_rect().contains(pt):
+            return "conf"
+        i = self._card_at(pt)
+        if i is not None and self._slots[i]:
+            return "card:%d" % i
+        return None
 
     def _click_sound(self):
         """押した合図にドンを鳴らす。押せないものの上では鳴らさない
@@ -490,10 +516,13 @@ class SelectScreen(QWidget):
         cards = self._skin.get("Select_Cards")
         if cards is None:
             return
-        p.drawPixmap(self._back_rect(), cards,
-                     QRect(BTN_BACK_SRC_X, 0, BTN_W, BTN_H))
-        p.drawPixmap(self._conf_rect(), cards,
-                     QRect(BTN_CONF_SRC_X, 0, BTN_W, BTN_H))
+        # カードと同じで、カーソルが乗っているものだけ少し大きくする。
+        for name, rect, sx in (("back", self._back_rect(), BTN_BACK_SRC_X),
+                               ("conf", self._conf_rect(), BTN_CONF_SRC_X)):
+            r = QRect(rect)
+            if self._hover == name:
+                r.adjust(-4, -5, 4, 3)
+            p.drawPixmap(r, cards, QRect(sx, 0, BTN_W, BTN_H))
 
     def _draw_cards(self, p):
         cards = self._skin.get("Select_Cards")
@@ -507,7 +536,7 @@ class SelectScreen(QWidget):
                 idx = i if i < 3 else 3
             else:
                 idx = CARD_INDEX.get(course.get("key"), 3)
-            selected = (not missing) and (i == self._cursor)
+            selected = (not missing) and (self._hover == "card:%d" % i)
             # 選んでいるカードは少し持ち上げて大きく見せる。
             r = QRect(rect)
             if selected:
