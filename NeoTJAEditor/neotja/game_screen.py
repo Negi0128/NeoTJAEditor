@@ -95,10 +95,20 @@ CHARA_BEATS_PER_LOOP = 4.0
 # やめて画布(648x345)の左上をふだんの絵と同じ位置に置き、そこからずらす。
 # 中身で合わせると立ち姿(高さ195)の頭が画面の上へ出るため。
 CHARA_BALLOON_CANVAS_OFF = (41, 10)
-# 風船の絵だけは本家より大きく、位置も左下寄りに見えるので、足元を据えたまま
-# 縮めてから右上へずらす。ふだん/ゴーゴーの絵は素材どおりなので触らない。
+# 風船の絵だけは本家より大きく見えるので縮める。ふだん/ゴーゴーの絵は素材
+# どおりなので触らない。
+#
+# **口を支点に縮める。** 風船はレーンの判定円に結び目を合わせて描かれるので、
+# どんちゃんの口もそこに来ていないと「風船の先と口がずれている」ことになる。
+# 左上や足元を支点にすると、縮めたぶんだけ口が judge から離れてしまい、その
+# ずれを毎回手で足し直すことになる。支点を口そのものにしておけば、倍率を
+# いくつにしても口と風船の先はそろったまま。
 CHARA_BALLOON_SCALE = 0.80
-CHARA_BALLOON_OFF = (16, -16)    # 縮めたあとのずれ (右, 上が負)
+#: 口の位置(画布の中の座標)。素材は口が判定円に来るように置かれているので、
+#: 判定円の中心から画布の左上を引いた値がそのまま口の座標になる。
+CHARA_BALLOON_MOUTH = (LANE_X + JUDGE_X_IN_LANE - (CHARA_POS[0] + 41),
+                       LANE_Y + LANE_H // 2 - (CHARA_POS[1] + 10))
+CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
@@ -1071,11 +1081,12 @@ class GameScreenWidget(QWidget):
         bx, by = CHARA_BALLOON_CANVAS_OFF
         k = CHARA_BALLOON_SCALE
         dx, dy = CHARA_BALLOON_OFF
+        mx, my = CHARA_BALLOON_MOUTH
         w, h = pm.width() * k, pm.height() * k
-        # 足元を据えたまま縮める(下端を合わせる)。上端基準で縮めると、
-        # 立ち姿のどんちゃんが宙に浮いて見える。
-        x = CHARA_POS[0] + bx - ox + dx
-        y = CHARA_POS[1] + by - oy + (pm.height() - h) + dy
+        # 口(mx, my)を動かさずに縮める。画布の点 u は左上 + k*u へ移るので、
+        # 左上を (1-k)*口 だけずらせば、口だけがその場に残る。
+        x = CHARA_POS[0] + bx - ox + (1.0 - k) * mx + dx
+        y = CHARA_POS[1] + by - oy + (1.0 - k) * my + dy
         p.drawPixmap(QRectF(x, y, w, h), pm, QRectF(0, 0, pm.width(), pm.height()))
 
     def draw_balloon_front(self, p, ox=0, oy=0):
