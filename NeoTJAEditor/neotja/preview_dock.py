@@ -1710,7 +1710,10 @@ class PreviewDock(QDockWidget):
         worker.start()
 
     def _on_decoded(self, path, pcm, sr, peaks, duration, mips):
-        if path != self._current_wave_path:
+        # 本編の音源だけでなく、選曲画面の試聴/BGM(load_wave_only)で読んだ
+        # ものも受け取る。ここで弾いていたせいで、試聴用に読んだ音の長さが
+        # いつまでも 0 のままになり、**BGM が鳴らなくなっていた**。
+        if path not in (self._current_wave_path, self._audition_wave_path):
             return
         # ミップチェインは1本だけ作って両方の波形で共有する(コピーしない)。
         self._waveform_mips = mips

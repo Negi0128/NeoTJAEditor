@@ -19,6 +19,7 @@ import os
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidget,
@@ -32,10 +33,20 @@ from neotja.player.core import read_text
 from neotja.preview_dock import parse_preview_headers
 from neotja.tja_analyzer import TJACourseAnalyzer
 
-#: 表の列。3つだけ。以前は「譜面/コース/状態/備考」の4つだったが、
-#: 情報が多すぎて何を見ればいいのか分からない、という指摘を受けて減らした。
-#: 失敗の理由は状態の欄にそのまま書く(別の列にすると横に長くなるだけ)。
-COL_NAME, COL_COURSE, COL_STATE = 0, 1, 2
+#: 表の列は2つだけ。「譜面」と「コース」。
+#:
+#: 以前は状態と備考の列もあったが、情報が多すぎて何を見ればいいのか
+#: 分からない、という指摘を受けて落とした。いま何をしているかは下の1行に
+#: 出ていれば足りるし、終わったかどうかは行の色で分かる。
+COL_NAME, COL_COURSE = 0, 1
+
+#: 譜面名とコースの幅の比。
+COL_RATIO = (3, 1)
+
+#: 行の色。終わった/失敗した/いま書いている、を色だけで見せる。
+COLOR_DONE = "#5b8f5b"
+COLOR_FAILED = "#c05c5c"
+COLOR_RUNNING = "#d8b45a"
 
 #: 待ち行列1件の状態。
 WAITING, RUNNING, DONE, FAILED, SKIPPED = "待機", "書き出し中", "完了", "失敗", "とばした"
@@ -92,17 +103,19 @@ class BatchPage(QWidget):
     # ------------------------------------------------------------------
     def _build_ui(self):
         v = QVBoxLayout(self)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
+        # ゆったりめの余白と行間。詰まっていると設定画面のように見えて、
+        # 「放り込む場所」だと分かりにくい。
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(14)
 
-        # 追加・削除のボタンは置かない。放り込むだけで積まれるほうが速いし、
-        # ボタンが並ぶとそれだけで「何かしないといけない画面」に見える。
-        # 消すのは行を選んで Delete。
-        self.lbl_drop = QLabel(
-            "ここに TJA ファイルやフォルダを放り込むと、下に積まれます。"
-            "（消すときは行を選んで Delete）")
-        self.lbl_drop.setWordWrap(True)
-        v.addWidget(self.lbl_drop)
+        # 上は「何をすればいいか」の1行と、追加のボタンだけ。
+        head = QHBoxLayout()
+        self.lbl_drop = QLabel("TJAを追加してください。（D＆Dでも読み込めます。）")
+        head.addWidget(self.lbl_drop, 1)
+        self.b_add = QPushButton("TJAを追加")
+        self.b_add.clicked.connect(self.add_files)
+        head.addWidget(self.b_add)
+        v.addLayout(head)
 
         opts = QHBoxLayout()
         opts.addWidget(QLabel("画質:"))
@@ -114,36 +127,53 @@ class BatchPage(QWidget):
 
         opts.addWidget(QLabel("見た目:"))
         self.cb_layout = QComboBox()
-        self.cb_layout.addItem("通常再生（本家レイアウト）", "game")
-        self.cb_layout.addItem("音声波形（下に波形・譜面・命令）", "wave")
+        self.cb_layout.addItem("通常再生", "game")
+        self.cb_layout.addItem("音声波形", "wave")
         opts.addWidget(self.cb_layout)
         opts.addStretch()
         v.addLayout(opts)
 
         out = QHBoxLayout()
-        out.addWidget(QLabel("保存先:"))
-        self.lbl_out = QLabel(self._out_dir())
-        self.lbl_out.setWordWrap(True)
+        out.setSpacing(8)
+        self.lbl_out = QLabel(self._short_dir(self._out_dir()))
+        # 保存先は「変えたいときだけ見ればいい」ものなので、色を落として
+        # 1行に収める(折り返すと画面の主役が保存先になってしまう)。
+        self.lbl_out.setStyleSheet("color: #8a94a6;")
+        self.lbl_out.setToolTip(self._out_dir())
+        self.lbl_out.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        out.addWidget(QLabel("保存先"), 0)
         out.addWidget(self.lbl_out, 1)
-        b_out = QPushButton("変更...")
+        b_out = QPushButton("変更")
+        b_out.setFlat(True)
         b_out.clicked.connect(self.pick_out_dir)
-        out.addWidget(b_out)
+        out.addWidget(b_out, 0)
         v.addLayout(out)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["譜面", "コース", "状態"])
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["譜面", "コース"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         h = self.table.horizontalHeader()
+        # 譜面名とコースを 3:1 に。
+        #
+        # Stretch を2つ並べても**等分にしかならない**(実際にそうなった)。
+        # 名前側だけ伸ばし、コース側は幅を固定して、窓の大きさが変わるたびに
+        # 割合から計算し直す(resizeEvent)。
         h.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
-        h.setSectionResizeMode(COL_COURSE, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(COL_STATE, QHeaderView.Stretch)
+        h.setSectionResizeMode(COL_COURSE, QHeaderView.Fixed)
+        h.setStretchLastSection(False)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         v.addWidget(self.table, 1)
 
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
+        # 数字は下の1行に出るので、バーには出さない(同じことを2か所に
+        # 書くと視線が散る)。細くして線のように見せる。
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(4)
         v.addWidget(self.bar)
 
         self.lbl_status = QLabel("譜面を追加してください。")
@@ -163,6 +193,16 @@ class BatchPage(QWidget):
         v.addLayout(run)
 
         self.setAcceptDrops(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_column_ratio()
+
+    def _apply_column_ratio(self):
+        """コースの列幅を、表の幅の比(COL_RATIO)から決め直す。"""
+        total = max(120, self.table.viewport().width())
+        w = int(total * COL_RATIO[1] / float(sum(COL_RATIO)))
+        self.table.setColumnWidth(COL_COURSE, w)
 
     # ------------------------------------------------------------------
     # 待ち行列
@@ -262,9 +302,13 @@ class BatchPage(QWidget):
             item.setText(text)
 
         put(COL_NAME, os.path.basename(job.path))
-        # 状態と、失敗の理由は同じ欄に出す(列を増やすと横に長くなるだけ)。
-        put(COL_STATE, job.state if not job.note
-            else "%s: %s" % (job.state, job.note))
+        # 状態は色で見せる。列を1つ増やすより、行を見て分かるほうが速い。
+        # 失敗の理由はその行の吹き出し(ツールチップ)と、下の1行に出す。
+        item = self.table.item(i, COL_NAME)
+        color = {DONE: COLOR_DONE, FAILED: COLOR_FAILED,
+                 RUNNING: COLOR_RUNNING}.get(job.state)
+        item.setForeground(QColor(color) if color else QBrush())
+        item.setToolTip(job.note or "")
 
         # コースは行ごとのプルダウン。譜面によって入っているコースが違うので、
         # 全体でひとつ選ばせると撮れないものが出る。
@@ -311,11 +355,20 @@ class BatchPage(QWidget):
                 return d
         return os.path.expanduser("~")
 
+    def _short_dir(self, d):
+        """保存先を1行に収める。長い絶対パスをそのまま出すと折り返して、
+        画面の主役が保存先になってしまう。"""
+        d = d or ""
+        if len(d) <= 60:
+            return d
+        return d[:26] + " … " + d[-30:]
+
     def pick_out_dir(self):
         d = QFileDialog.getExistingDirectory(self, "保存先", self._out_dir())
         if d:
             self.cfg["record_output_dir"] = d
-            self.lbl_out.setText(d)
+            self.lbl_out.setText(self._short_dir(d))
+            self.lbl_out.setToolTip(d)
             if self.save_cb is not None:
                 self.save_cb()
 
@@ -599,9 +652,13 @@ class BatchPage(QWidget):
             % ("中止しました。" if self._cancel else "終わりました。",
                ok, ng, _fmt_duration(took)))
         if ng and not self._cancel:
+            # 理由は行の吹き出しにも出るが、それだけだと気づけないので
+            # ここでまとめて見せる。
+            lines = ["%s: %s" % (os.path.basename(j.path), j.note)
+                     for j in self.jobs if j.state == FAILED]
             QMessageBox.information(
                 self, "まとめて録画",
-                "%d 件が失敗しました。表の「備考」に理由が出ています。" % ng)
+                "%d 件が失敗しました。\n\n%s" % (ng, "\n".join(lines[:12])))
         self.finished.emit()
 
 
