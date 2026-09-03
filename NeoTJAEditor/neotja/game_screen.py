@@ -43,7 +43,7 @@ SCREEN_H_COMPACT = 360
 # 1280x260 にしていた。だが軽量に残すものが増えて、そこを使う要素が
 # 戻ってきた:
 #   ・連打/風船の打数の読み出し(金の扇は y≒22..202、風船の吹き出しも同じ辺り)
-#   ・判定文字「良」の板 (OVERLAY_RECT の上端が y=88)
+#   ・レーンより手前の板 _LaneOverlay (良・飛ぶ音符・どんちゃん・風船)
 # どちらも切り取り範囲に丸ごと入るので、切ると上が欠ける。「戻した要素が
 # 全部ちゃんと見えていること」を優先して、切り取りはやめて compact と同じ
 # 高さに戻した。左右は元から一切触っていないので、判定円の x・音符の
@@ -604,51 +604,25 @@ SCORE_GAIN_RISE = 16.0           # 昇る高さ
 SCORE_GAIN_SCALE = 0.902
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
-# 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
-# レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
-OVERLAY_RECT = (-130, 88, 260, 250)   # (dx, y, w, h) dx は判定円中心からの左端
 
 
-class _FlightOverlay(QWidget):
-    """叩いた音符が魂ゲージへ飛んでいくところだけを描く板。
+class _LaneOverlay(QWidget):
+    """レーンより手前に出すものを、**1枚の板にまとめて**描く。
 
-    飛び始めは判定円の上、つまりレーンの中にいる。親(画面)は子(レーン)より
-    先に描かれるので親に描くとその間だけレーンに隠れて、途中から湧いて出た
-    ように見える。「良」と同じくレーンの兄弟として重ねて手前に出す。
+    レーンは画面(親)の子ウィジェットで、親は子より先に描かれる。だから
+    「飛んでいく音符」「判定文字 良」「風船中のどんちゃんと風船」のように
+    レーンに重なるものは、親に描くとレーンの下に潜ってしまう。レーンの
+    兄弟として重ねた板に描くことで手前に出している。
 
-    どんちゃんと風船も同じ板の仕組みで描くが、そちらは「良」より**手前**に
-    出すので別インスタンスにしてある(what="chara")。風船を割ったどんちゃんは
-    大きく前へ出てきて「良」と重なるため。"""
+    **なぜ1枚なのか(以前は3枚だった)**
+    半透明の子ウィジェットは、塗り直すたびに Qt が下の親ぶんも巻き込んで
+    合成する。実測で、この板だけで **1コマ 1.77ms**(1コマ 6.84ms のうち)を
+    使っていた。画面本体の描画(1.18ms)より重い。3枚のうち2枚は 1280x520 の
+    全幅で、密度の高い譜面ではどれも毎コマ塗り直しになる。
 
-    def __init__(self, screen, what="flights"):
-        super().__init__(screen)
-        self._screen = screen
-        self._what = what
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # 何を描く板かは作るときに決める。どんちゃんと風船は「良」より**手前**、
-        # 飛んでいく音符は「良」より奥に置きたいので、同じ絵を1枚に描けない
-        # (板の前後でしか順番を作れないため)。
-        if self._what == "chara":
-            # どんちゃん → 風船 の順。後のものほど手前。
-            self._screen.draw_chara_front(p, self.x(), self.y())
-            self._screen.draw_balloon_front(p, self.x(), self.y())
-        else:
-            self._screen.draw_soul_flights(p, self.x(), self.y())
-        p.end()
-
-
-class _JudgeOverlay(QWidget):
-    """判定文字「良」だけを描く、レーンより手前の板。
-
-    「良」はレーンに少しかぶる位置に出したいが、親(画面)は子(レーン)より
-    先に描かれるので、親に描くとレーンに隠れてしまう。レーンの兄弟として
-    重ねることで手前に出す。背景は塗らない(下のレーン・黒枠が透ける)。
+    前後関係は板の重ね順でしか作れないと思って分けていたが、1枚の中でも
+    **描く順番**でそのまま作れる。飛んでいく音符 -> 良 -> どんちゃん -> 風船
+    の順に描けば、以前の3枚と1枚も違わない絵になる。合成は3回から1回へ。
     """
 
     def __init__(self, screen):
@@ -661,35 +635,12 @@ class _JudgeOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        recent = self._screen.judge_pop()
-        if recent is None:
-            p.end()
-            return
-        elapsed = recent[0]
-        if not (0.0 <= elapsed < JUDGE_POP_SEC):
-            p.end()
-            return
-        spr = self._screen.chart_preview.judge_sprite()
-        jp = elapsed / JUDGE_POP_SEC
-        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
-        if jp <= JUDGE_POP_FADE_FROM:
-            p.setOpacity(1.0)
-        else:
-            p.setOpacity(max(0.0, 1.0 - (jp - JUDGE_POP_FADE_FROM)
-                             / (1.0 - JUDGE_POP_FADE_FROM)))
-        cx = self.width() // 2
-        bottom = JUDGE_BOTTOM - self.y() - rise
-        if spr is not None:
-            w = int(spr.width() * JUDGE_SCALE)
-            h = int(spr.height() * JUDGE_SCALE)
-            p.drawPixmap(QRect(int(cx - w / 2), int(bottom - h), w, h), spr)
-        else:
-            p.setPen(QColor("#f5c518"))
-            f = p.font()
-            f.setPointSize(int(20 * JUDGE_SCALE))
-            f.setBold(True)
-            p.setFont(f)
-            p.drawText(int(cx - 40), int(bottom - 26), 80, 26, Qt.AlignCenter, "良")
+        ox, oy = self.x(), self.y()
+        # 後のものほど手前。
+        self._screen.draw_soul_flights(p, ox, oy)
+        self._screen.draw_judge_pop(p, ox, oy)
+        self._screen.draw_chara_front(p, ox, oy)
+        self._screen.draw_balloon_front(p, ox, oy)
         p.end()
 
 
@@ -811,7 +762,7 @@ class GameScreenWidget(QWidget):
         # 等倍ブリットにする。
         self._static_layer_dpr = 1.0
         # いま描いている面の devicePixelRatio。paintEvent が毎コマ更新する。
-        # 子の板(_FlightOverlay など)は親と同じ面へ描かれるのでこれを見る。
+        # 子の板(_LaneOverlay)は親と同じ面へ描かれるのでこれを見る。
         self._dpr = 1.0
         # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
         self._bg_up_cache = {}
@@ -830,7 +781,6 @@ class GameScreenWidget(QWidget):
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
         # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
-        self._judge_was_active = False
         # 飛んでいる音符が前フレームに居たか(同じく消し込みを1回だけ行う)
         self._flight_was_active = False
 
@@ -842,19 +792,9 @@ class GameScreenWidget(QWidget):
         # 「良」はレーンにかぶるので、レーンより手前の板に描く。
         # 飛んでいく音符も、判定円(レーンの中)から出るのでレーンより手前。
         # 「良」より奥にしたいので先に作って先に raise する。
-        self._flight_overlay = _FlightOverlay(self, "flights")
-        self._flight_overlay.setGeometry(*SOUL_FLY_RECT)
-        self._flight_overlay.raise_()
-
-        ox, oy, ow, oh = OVERLAY_RECT
-        self._judge_overlay = _JudgeOverlay(self)
-        self._judge_overlay.setGeometry(LANE_X + JUDGE_X_IN_LANE + ox, oy, ow, oh)
-        self._judge_overlay.raise_()
-
-        # どんちゃんと風船は「良」より手前。最後に raise するのでいちばん上。
-        self._chara_overlay = _FlightOverlay(self, "chara")
-        self._chara_overlay.setGeometry(*SOUL_FLY_RECT)
-        self._chara_overlay.raise_()
+        self._overlay = _LaneOverlay(self)
+        self._overlay.setGeometry(*SOUL_FLY_RECT)
+        self._overlay.raise_()
 
         self._hud_timer = QTimer(self)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
@@ -947,10 +887,7 @@ class GameScreenWidget(QWidget):
         # 巻き込み再描画も呼ぶ)。消え際を残さないよう、「前フレームは出ていた」
         # 場合だけもう1回だけ更新して消し込む。
         recent = self.judge_pop()
-        active = bool(recent is not None and 0.0 <= recent[0] < JUDGE_POP_SEC)
-        if active or self._judge_was_active:
-            self._judge_overlay.update()
-        self._judge_was_active = active
+        judge_active = bool(recent is not None and 0.0 <= recent[0] < JUDGE_POP_SEC)
         # レーンより手前の板(飛んでいく音符・風船中のどんちゃん)。同じ理由で、
         # 中身がある間と、その次の1回だけ塗り直す。
         try:
@@ -969,12 +906,13 @@ class GameScreenWidget(QWidget):
                 flying = self.chart_preview.balloon_sprite_frame(now) is not None
         except Exception:  # noqa: BLE001
             flying = False
-        if flying or self._flight_was_active:
-            # どんちゃん/風船 と 飛んでいく音符 は別の板に分かれているので、
-            # 塗り直しも両方に投げる(片方だけだと風船やどんちゃんが固まる)。
-            self._flight_overlay.update()
-            self._chara_overlay.update()
-        self._flight_was_active = flying
+        # 「良」も飛んでいく音符もどんちゃんも同じ板なので、どれかに中身が
+        # あれば塗り直す。消え際を残さないよう、前のコマで中身があった場合も
+        # もう1回だけ塗って消し込む。
+        live = flying or judge_active
+        if live or self._flight_was_active:
+            self._overlay.update()
+        self._flight_was_active = live
 
     # ------------------------------------------------------------------
     def _ensure_skin(self):
@@ -1092,6 +1030,40 @@ class GameScreenWidget(QWidget):
         x = CHARA_POS[0] + bx - ox + (1.0 - k) * mx + dx
         y = CHARA_POS[1] + by - oy + (1.0 - k) * my + dy
         p.drawPixmap(QRectF(x, y, w, h), pm, QRectF(0, 0, pm.width(), pm.height()))
+
+    def draw_judge_pop(self, p, ox=0, oy=0):
+        """判定文字「良」。叩いた直後に判定円の上へ出て、昇りながら消える。
+
+        レーンに少しかぶる位置なので、レーンより手前の板(_LaneOverlay)から
+        呼ぶ。ox/oy はその板の左上。"""
+        recent = self.judge_pop()
+        if recent is None:
+            return
+        elapsed = recent[0]
+        if not (0.0 <= elapsed < JUDGE_POP_SEC):
+            return
+        spr = self.chart_preview.judge_sprite()
+        jp = elapsed / JUDGE_POP_SEC
+        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
+        if jp <= JUDGE_POP_FADE_FROM:
+            p.setOpacity(1.0)
+        else:
+            p.setOpacity(max(0.0, 1.0 - (jp - JUDGE_POP_FADE_FROM)
+                             / (1.0 - JUDGE_POP_FADE_FROM)))
+        cx = LANE_X + JUDGE_X_IN_LANE - ox
+        bottom = JUDGE_BOTTOM - oy - rise
+        if spr is not None:
+            w = int(spr.width() * JUDGE_SCALE)
+            h = int(spr.height() * JUDGE_SCALE)
+            p.drawPixmap(QRect(int(cx - w / 2), int(bottom - h), w, h), spr)
+        else:
+            p.setPen(QColor("#f5c518"))
+            f = p.font()
+            f.setPointSize(int(20 * JUDGE_SCALE))
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(int(cx - 40), int(bottom - 26), 80, 26, Qt.AlignCenter, "良")
+        p.setOpacity(1.0)
 
     def draw_balloon_front(self, p, ox=0, oy=0):
         """判定枠の風船を、どんちゃんより手前に描く。
@@ -1900,7 +1872,7 @@ class GameScreenWidget(QWidget):
 
     def _draw_lane_readouts(self, p, now, recent):
         """連打・風船の打数を、本家と同じ金の扇で出す。
-        (「良」はレーンにかぶるので _JudgeOverlay が手前に描く)"""
+        (「良」はレーンにかぶるので _LaneOverlay が手前に描く)"""
         try:
             count, kind, alpha = self.chart_preview.live_tap_state(now)
         except Exception:  # noqa: BLE001
@@ -2034,7 +2006,7 @@ class GameScreenWidget(QWidget):
         レーン(ChartPreviewWidget)側には何も伝えない。軽量で止めるのは
         「画面側が描いている背景と装飾」だけで、レーンの中(音符・ゴーゴー・
         判定の火花・打音表記の帯)は通常再生と同じものをそのまま描くため。
-        「良」と風船を描く板(_JudgeOverlay / _FlightOverlay)も出したままに
+        「良」と風船を描く板(_LaneOverlay)も出したままに
         して、その中で軽量に要らないもの(どんちゃん・魂の飛翔)だけを
         描き手側で落とす(draw_chara_front / draw_soul_flights)。"""
         lite = bool(lite)
