@@ -549,7 +549,7 @@ ROLL_FAN_SCALE = 1.021           # 0.928 の 1.1 倍
 ROLL_FAN_CENTER_X = 413          # 扇の中心 x
 ROLL_FAN_BOTTOM = 202            # 扇の下端 y
 ROLL_NUM_CELL = (63, 75)
-ROLL_NUM_SCALE = 0.851           # 1.5倍(0.90)からさらに 90%、扇に合わせて 5% 大きく
+ROLL_NUM_SCALE = 0.936           # 0.851 の 1.1 倍(扇と同じだけ大きくする)
 ROLL_NUM_ADVANCE = 0.86          # 字送り(セル幅に対する割合)
 # 数字は扇のセル(334x204)の中に位置を持つ。こうしておくと扇を拡大・移動
 # しても数字が置いていかれない。微調整は ROLL_NUM_OFF で。
