@@ -16,6 +16,8 @@ Editor の録画ダイアログは「いま開いている譜面を1本」しか
 """
 
 import os
+import subprocess
+import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -573,7 +575,10 @@ class BatchPage(QWidget):
             return
         t0 = time.perf_counter()
         try:
-            done = self._rec.step(self._batch)
+            # step() は「**まだ続きがあれば True**」。終わったかどうかでは
+            # ない。ここを取り違えていて、最初の数コマで finish() を呼んで
+            # しまい、書き出した動画が1秒しか無かった。
+            more = self._rec.step(self._batch)
         except Exception as exc:  # noqa: BLE001
             self._timer.stop()
             job = self.jobs[self._index]
@@ -589,7 +594,7 @@ class BatchPage(QWidget):
         elif dt > 0.05:
             self._batch = max(1, self._batch - 1)
         self._update_progress()
-        if done:
+        if not more:
             self._timer.stop()
             job = self.jobs[self._index]
             try:
@@ -651,6 +656,11 @@ class BatchPage(QWidget):
             "%s　完了 %d 件 / 失敗 %d 件　（%s）"
             % ("中止しました。" if self._cancel else "終わりました。",
                ok, ng, _fmt_duration(took)))
+        # 終わったら保存先を開く。書き出した動画をすぐ確認したいはずで、
+        # 開くまでにフォルダを辿らせる理由が無い。中止したときと、1本も
+        # 出来ていないときは開かない(見るものが無い)。
+        if ok and not self._cancel:
+            self._open_out_dir()
         if ng and not self._cancel:
             # 理由は行の吹き出しにも出るが、それだけだと気づけないので
             # ここでまとめて見せる。
@@ -660,6 +670,24 @@ class BatchPage(QWidget):
                 self, "まとめて録画",
                 "%d 件が失敗しました。\n\n%s" % (ng, "\n".join(lines[:12])))
         self.finished.emit()
+
+
+    def _open_out_dir(self):
+        """保存先をエクスプローラーで開く。開けなくても録画は成功なので、
+        ここで転んでも黙って流す(「開けませんでした」とだけ言われても
+        利用者にできることが無い)。"""
+        d = self._out_dir()
+        if not os.path.isdir(d):
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(d)          # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", d])
+            else:
+                subprocess.Popen(["xdg-open", d])
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _fmt_duration(seconds):
