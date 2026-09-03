@@ -156,6 +156,7 @@ class PlayerCore:
         path = settings_mod.skin_dir() / "SelectBgm.ogg"
         if not path.exists():
             return
+        self.dock.set_audition(True)
         self._start_audio(str(path), 0.0, loop=True)
 
     def play_demo(self, path, demo_start):
@@ -165,6 +166,7 @@ class PlayerCore:
         """
         wave = _find_wave(path)
         if wave:
+            self.dock.set_audition(True)
             self._start_audio(wave, max(0.0, float(demo_start or 0.0)),
                               loop=True)
 
@@ -175,6 +177,8 @@ class PlayerCore:
         無い。読み込みは裏で進むので、押せるようになるのを待つのではなく
         「読めたら鳴らす」と予約しておく。
         """
+        # ここから先は本編。試聴モードを解く(譜面も一緒に走らせる)。
+        self.dock.set_audition(False)
         wave = self.dock._current_wave_path
         if not wave:
             return

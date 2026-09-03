@@ -264,8 +264,8 @@ RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
 # 大きさと位置は本家に寄せたもの。素材の 130px そのままだと顔が大きすぎて、
 # 虹の先端よりだいぶ手前(左下)に居るように見えた。少し小さくして、先端の
 # 右上へずらす。
-RAINBOW_HEAD_SCALE = 0.80
-RAINBOW_HEAD_OFF = (14, -14)     # 虹の先端からのずれ (右, 上が負)
+RAINBOW_HEAD_SCALE = 0.60
+RAINBOW_HEAD_OFF = (10, -10)     # 虹の先端からのずれ (右, 上が負)
 # レーンより手前に描くものを載せる板。ここに入るのは
 #   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
 #   * 風船中のどんちゃん(画布 648x345 を CHARA_BALLOON_CANVAS_OFF に置く)
@@ -498,7 +498,10 @@ GOGO_SPLASH_CELL = (230, 460)
 GOGO_SPLASH_FRAMES = 30
 GOGO_SPLASH_FRAME_SEC = 1.0 / 30.0
 GOGO_SPLASH_SCALE = 0.825        # 0.55 の 1.5 倍
-GOGO_SPLASH_BOTTOM = LANE_Y + LANE_H   # 火花の足元をレーン下端に置く
+# 本家は判定枠の1本ではなく、画面の下端から横に並んで吹き上がる。
+# 幅を GOGO_SPLASH_COUNT 等分して、その真ん中それぞれに立てる。
+GOGO_SPLASH_COUNT = 6
+GOGO_SPLASH_BOTTOM = SCREEN_H_FULL     # 火花の足元は画面の下端
 
 # 魂ゲージが満タン(入魂)のあいだ、ゲージが虹色に変わる。
 # Rainbow/<コース>/0..11.png 696x44。マスクがゲージ本体と dx=0,dy=0 で一致
@@ -588,8 +591,7 @@ SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
 # 「良」を描くオーバーレイの大きさ(判定円の中心を基準にした矩形)。
 # レーンより手前に重ねる必要があるので、レーンの兄弟ウィジェットにする。
-OVERLAY_RECT = ((-130, 0, 260, 338) if SHOW_GOGO_SPLASH
-                else (-130, 88, 260, 250))   # (dx, y, w, h) dx は判定円中心からの左端
+OVERLAY_RECT = (-130, 88, 260, 250)   # (dx, y, w, h) dx は判定円中心からの左端
 
 
 class _FlightOverlay(QWidget):
@@ -644,7 +646,6 @@ class _JudgeOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        self._screen.draw_gogo_splash(p, self.x(), self.y())
         recent = self._screen.judge_pop()
         if recent is None:
             p.end()
@@ -871,9 +872,9 @@ class GameScreenWidget(QWidget):
     def end_offline_render(self):
         self.chart_preview.end_offline_render()
 
-    def draw_gogo_splash(self, p, ox, oy):
-        """ゴーゴーが始まった瞬間の金色の火花。オーバーレイ(レーンより手前)
-        から呼ぶ。ox/oy はそのオーバーレイの左上。"""
+    def draw_gogo_splash(self, p):
+        """ゴーゴーが始まった瞬間の金色の火花。画面の下端から横並びで
+        吹き上がる(本家と同じで、判定枠の1本ではない)。"""
         sheet = self._skin.get("gogo_splash") if SHOW_GOGO_SPLASH else None
         if sheet is None:
             return
@@ -894,10 +895,12 @@ class GameScreenWidget(QWidget):
         cw, ch = GOGO_SPLASH_CELL
         k = GOGO_SPLASH_SCALE
         dw, dh = cw * k, ch * k
-        cx = LANE_X + JUDGE_X_IN_LANE
-        p.drawPixmap(QRect(int(cx - dw / 2 - ox), int(GOGO_SPLASH_BOTTOM - dh - oy),
-                           int(dw), int(dh)),
-                     sheet, QRect(min(f, GOGO_SPLASH_FRAMES - 1) * cw, 0, cw, ch))
+        src = QRect(min(f, GOGO_SPLASH_FRAMES - 1) * cw, 0, cw, ch)
+        y = int(GOGO_SPLASH_BOTTOM - dh)
+        n = GOGO_SPLASH_COUNT
+        for i in range(n):
+            cx = SCREEN_W * (i + 0.5) / n
+            p.drawPixmap(QRect(int(cx - dw / 2), y, int(dw), int(dh)), sheet, src)
 
     def judge_pop(self):
         """直近ヒット (経過秒, 音符の文字, コンボ番号)。オーバーレイ用。"""
@@ -2530,6 +2533,9 @@ class GameScreenWidget(QWidget):
             # 踊る(実機のキャプチャでもそう見える)。
             self._draw_dancers(p, now, ratio)
             self._draw_chara(p, now)
+        # ゴーゴー突入の火花は画面の下端から。踊り子より手前、左パネルより奥。
+        if not self._compact:
+            self.draw_gogo_splash(p)
         self._draw_left_panel(p, combo, score, recent, now)
         # 軽量では魂ゲージ(+「クリア」+ 虹)を出さない。ゲージは 400px 超の
         # 帯とブロックを毎フレーム重ね描きするうえ、このプレビューは全ノーツ

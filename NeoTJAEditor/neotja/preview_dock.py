@@ -1903,8 +1903,38 @@ class PreviewDock(QDockWidget):
         動画書き出しが同じ音源を自前でデコードするのに使う。"""
         return self._current_wave_path
 
+    def set_audition(self, on: bool):
+        """試聴モード。**譜面は動かさず、音だけ鳴らす。**
+
+        Player の選曲画面は、選曲BGM や DEMOSTART を「譜面の音源とまったく
+        同じ経路」(ミキサーに PCM を渡す)で鳴らしている。ところが再生が
+        始まると playingChanged が飛び、譜面プレビューまで一緒に走り出す。
+        再生窓を閉じたあとで別の曲を読み込むと、鳴っているのは新しい曲の
+        音源なのに、譜面と打音は**前の譜面のまま**進む — 「音源と打音が
+        同時に鳴っている」の正体がこれ。
+
+        試聴のあいだは譜面を止めたままにし、打音の予定も空にしておく。
+        予定は次に譜面を読んだときに入り直るので、戻す処理は要らない。"""
+        self._audition = bool(on)
+        if not on:
+            return
+        try:
+            self.chart_preview.set_playback(self.audio.position() / 1000.0, False)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # ミキサー経路では打音は予定表から鳴るので、止めるにはこれを空に
+            # する(engine.set_enabled だと選曲画面のクリック音まで消える)。
+            self.hit_sounds.set_schedule([], 0.0)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _on_playing_changed(self, playing):
         self.btn_play.setText("一時停止" if playing else "再生")
+        if getattr(self, "_audition", False):
+            # 試聴中。音は鳴らすが譜面は動かさない(set_audition 参照)。
+            self.chart_preview.set_playback(self.audio.position() / 1000.0, False)
+            return
         self.chart_preview.set_playback(self.audio.position() / 1000.0, playing)
         if not playing and self.refresh_preview_cb:
             # Reload from the current editor content (not whatever was last
