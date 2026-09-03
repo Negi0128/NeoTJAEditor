@@ -1083,6 +1083,15 @@ class PreviewDock(QDockWidget):
         return self.game_preview_window.isVisible()
 
     def _on_game_preview_closed(self):
+        # 窓を閉じたら**必ず止める。** 閉じても曲と打音は鳴り続けていて、
+        # 止める手立てが画面から消えるので、音だけが残って止められなくなる。
+        # 窓が非アクティブになったときの自動停止(pause_cb)はあったが、
+        # 「閉じる」はそれを通らない経路だった。Editor でも同じことが
+        # 起きるので、両方が通るここで止める。
+        try:
+            self.audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
         # The window's own close (X) button hides it via closeEvent; let the
         # status-bar toggle button know so its checked state stays in sync.
         if self.game_preview_changed_cb:
