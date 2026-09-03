@@ -498,18 +498,37 @@ class GamePreviewWindow(QWidget):
         self.layout().setAlignment(self.scaled_host, Qt.AlignCenter)
 
     def set_overlay_visible(self, visible: bool):
-        """レーンの上に浮かせているボタン類(モード/コース/録画/倍率/FPS)の
-        表示。全画面のときに隠すためのもの。
+        """操作するものを隠す/出す。鑑賞会で絵だけ見せるためのもの。
 
-        ScaledHost の直接の子のうち、中身(ゲーム画面)以外がそれにあたる。
-        preview_dock 側がどのボタンを置いたかをここで知らずに済むよう、
-        名指しではなく「中身以外の子」でまとめて扱う。"""
+        隠すのは2つ:
+          * レーンの上に浮かせているボタン類(モード/コース/録画/倍率/FPS)
+          * 下の再生速度スライダー
+
+        ボタン類は ScaledHost の直接の子のうち、中身(ゲーム画面)以外が
+        それにあたる。preview_dock 側がどのボタンを置いたかをここで知らずに
+        済むよう、名指しではなく「中身以外の子」でまとめて扱う。
+
+        速度スライダーだけは別の親(下部パネル)に居るので、置いた側から
+        渡してもらう(set_speed_row)。窓の高さも取り直す — 隠したぶん
+        詰めないと、下に灰色の帯が残る。"""
         for child in self.scaled_host.children():
             if not isinstance(child, QWidget):
                 continue
             if child is self._chart_preview:
                 continue
             child.setVisible(visible)
+        cb = getattr(self, "_overlay_cb", None)
+        if cb is not None:
+            cb(visible)
+        self._refit()
+
+    def set_overlay_cb(self, cb):
+        """ボタンの表示を切り替えたときに呼ぶ先。
+
+        再生速度の行は別の親(下部パネル)に居るうえ、隠したら**そのぶん
+        パネルの高さも詰めないと灰色の帯が残る**。どちらも置いた側
+        (preview_dock)しか知らないので、そちらへ任せる。"""
+        self._overlay_cb = cb
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -869,6 +888,7 @@ class PreviewDock(QDockWidget):
             self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
             lane_widget=self.chart_preview,
         )
+        self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
         # レーン右上に並べる3つのボタン。右から「モード切替」「コース」「録画」。
@@ -1113,6 +1133,23 @@ class PreviewDock(QDockWidget):
 
     def is_game_preview_visible(self) -> bool:
         return self.game_preview_window.isVisible()
+
+    def _on_overlay_visible(self, visible):
+        """再生画面のボタンを隠す/出すのに合わせて、下の速度行も合わせる。
+
+        隠すだけでは、その行の高さぶん灰色の帯が残る。パネルの高さも
+        詰める。"""
+        self._overlay_visible = bool(visible)
+        self._speed_row.setVisible(visible)
+        self._apply_bottom_height()
+
+    def _apply_bottom_height(self):
+        """下部パネルの高さを、いまのモードとボタンの表示から決め直す。"""
+        show_page = self.bottom_stack.isVisible()
+        h = self._bottom_h_full if show_page else self._bottom_h_speed_only
+        if not getattr(self, "_overlay_visible", True):
+            h -= self._bottom_h_speed_only     # 速度行のぶんを詰める
+        self._bottom_panel.setFixedHeight(max(0, h))
 
     def _on_game_preview_closed(self):
         # 窓を閉じたら**必ず止める。** 閉じても曲と打音は鳴り続けていて、
@@ -1499,8 +1536,7 @@ class PreviewDock(QDockWidget):
         # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
         show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)
         self.bottom_stack.setVisible(show_page)
-        self._bottom_panel.setFixedHeight(
-            self._bottom_h_full if show_page else self._bottom_h_speed_only)
+        self._apply_bottom_height()
         self.game_preview_window.refit()
         # 作譜モードのときだけ、キー入力を受けるのは編集ペイン。ほかのモードでは
         # レーンへ返す(Space/小節移動が今までどおり効くように)。
