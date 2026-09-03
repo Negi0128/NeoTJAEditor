@@ -18,7 +18,7 @@
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -66,7 +66,6 @@ class PlayerWindow(QMainWindow):
         self.setAcceptDrops(True)
         # 譜面を開くまでは選曲画面の BGM。窓が出てから鳴らす(組み立ての
         # 途中で音を出すと、まだ何も見えていないのに音だけ始まる)。
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(300, self.core.play_select_bgm)
 
     def _save(self):
@@ -157,8 +156,15 @@ class PlayerWindow(QMainWindow):
                                 "譜面を読めませんでした:\n%s" % path)
             return False
         self.core.show()
-        if at_seconds:
-            self.core.dock.audio.seek(int(at_seconds * 1000))
+        # 窓を前面にしてから予約する。再生ウィンドウは「前面でなくなったら
+        # 止める」作りなので、出した直後のフォーカスの動きで、せっかく始めた
+        # 再生がその場で止められてしまう(実際にそうなった)。
+        w = self.core.window
+        w.raise_()
+        w.activateWindow()
+        # 音源が読めたところで自動的に流す。Player は「見る」道具なので、
+        # 開いてから再生ボタンを押させる理由が無い。
+        QTimer.singleShot(120, lambda: self.core.play_chart(at_seconds))
         return True
 
     @property

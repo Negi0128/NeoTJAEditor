@@ -91,7 +91,10 @@ class PlayerCore:
         self.branch_level = "M"
         # 選曲画面で流している音の折り返し位置。None なら何も流していない。
         self._loop = None
-        self._pending_seek = None
+        # 「この音源が読めたら、この秒から鳴らす」という予約。
+        self._pending = None
+        # 最後に読み終わった音源。
+        self._ready = None
         # 終わりまで来たかを見る番人。音源の読み込みが裏で進むので、
         # 「頭出し」もこのタイマーが引き受ける(長さが分かるまで待つ)。
         from PySide6.QtCore import QTimer
@@ -114,6 +117,8 @@ class PlayerCore:
             se_text_enabled=bool(self.cfg.get("se_text_enabled", True)),
         )
         self.dock.hide()
+        # 「読めたら鳴らす」の予約を回収する口。
+        self.dock.songReady.connect(self._on_song_ready)
         self.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
         self.dock.set_volume(float(self.cfg.get("preview_volume", 0.8)))
         self.dock.set_sfx_volume(float(self.cfg.get("sfx_volume", 0.9)))
@@ -151,51 +156,82 @@ class PlayerCore:
         path = settings_mod.skin_dir() / "SelectBgm.ogg"
         if not path.exists():
             return
-        self._loop = (0.0, None)
-        self._start_audio(str(path), 0.0)
+        self._start_audio(str(path), 0.0, loop=True)
 
     def play_demo(self, path, demo_start):
         """譜面の音源を DEMOSTART から流す。終わったらまた同じ所から。
 
         本家の選曲画面と同じ聞こえ方にするため。DEMOSTART が無ければ頭から。
         """
-        self._loop = (max(0.0, float(demo_start or 0.0)), None)
         wave = _find_wave(path)
         if wave:
-            self._start_audio(wave, self._loop[0])
+            self._start_audio(wave, max(0.0, float(demo_start or 0.0)),
+                              loop=True)
+
+    def play_chart(self, at_seconds=0.0):
+        """本編を、音源が読めたところで自動的に流す。
+
+        Player は「見る」道具なので、開いてから再生ボタンを押させる理由が
+        無い。読み込みは裏で進むので、押せるようになるのを待つのではなく
+        「読めたら鳴らす」と予約しておく。
+        """
+        wave = self.dock._current_wave_path
+        if not wave:
+            return
+        self._pending = (wave, float(at_seconds or 0.0), False)
+        # **読み込みの最中なら待つ。** 同じ音源を試聴で先に読んでいると
+        # 「もう読めている」ように見えるが、本編ぶんの読み込みがそのあと
+        # 音を差し替えるので、先に鳴らしても止まってしまう。
+        if not self.dock.is_decoding() and self._ready == wave:
+            self._fire_pending()
 
     def stop_audio(self):
+        self._pending = None
         self._loop = None
         try:
             self.dock.audio.pause()
         except Exception:  # noqa: BLE001
             pass
 
-    def _start_audio(self, wave_path, at_sec):
-        """音源を読み込んで、指定の秒から流し始める。"""
+    def _start_audio(self, wave_path, at_sec, loop=False):
+        """音源を読み込んで、読めたところで指定の秒から流す。
+
+        **長さを見て判断しない。** 読み込みは裏で進むので、前の曲の長さが
+        残っているあいだに「読めた」と誤判定してしまう(DEMOSTART の頭出しが
+        効かなかった原因)。読み終わりは dock.songReady が知らせてくれる。
+        """
+        self._pending = (wave_path, float(at_sec), bool(loop))
+        self._loop = (float(at_sec), wave_path) if loop else None
+        if not self.dock.load_wave_only(wave_path):
+            self._pending = None
+            return
+        if not self.dock.is_decoding() and self._ready == wave_path:
+            # 既に読み終わっているもの(同じ曲を選び直した等)。
+            self._fire_pending()
+
+    def _on_song_ready(self, path):
+        self._ready = path
+        if self._pending and self._pending[0] == path:
+            self._fire_pending()
+
+    def _fire_pending(self):
+        wave, at, loop = self._pending
+        self._pending = None
         try:
-            if not self.dock.load_wave_only(wave_path):
-                return
+            self.dock.audio.seek(int(at * 1000))
+            self.dock.audio.play()
         except Exception:  # noqa: BLE001
             return
-        self._pending_seek = float(at_sec)
-        self._loop_timer.start(20)
+        if loop:
+            self._loop_timer.start(20)
 
     def _tick_loop(self):
-        """流している音が終わりまで来たら、始めの所へ戻す。
-
-        音源の読み込みは裏で進むので、始めの秒へ飛ぶのも「長さが分かってから」
-        でないと効かない。同じタイマーで両方を見る。"""
+        """流している音が終わりまで来たら、始めの所へ戻す。"""
         if self._loop is None:
             self._loop_timer.stop()
             return
         dur = self.dock.duration_seconds()
         if dur <= 0:
-            return                      # まだ読み込み中
-        if self._pending_seek is not None:
-            self.dock.audio.seek(int(self._pending_seek * 1000))
-            self.dock.audio.play()
-            self._pending_seek = None
             return
         pos = self.dock.audio.position() / 1000.0
         # 終わりきる**手前**で戻す。鳴り終わってから戻すと、そのぶんの無音が

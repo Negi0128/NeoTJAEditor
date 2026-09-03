@@ -397,6 +397,26 @@ class GamePreviewWindow(QWidget):
         変わるので、外(preview_dock)から呼べるようにしてある。"""
         self._refit()
 
+    #: 窓を出してから、この時間は「前面でなくなったら止める」を効かせない(秒)。
+    SHOW_GRACE_SEC = 0.6
+
+    def showEvent(self, event):
+        # 出した瞬間を覚えておく。下の _in_show_grace 参照。
+        import time as _time
+        self._shown_at = _time.monotonic()
+        super().showEvent(event)
+
+    def _in_show_grace(self):
+        """出した直後かどうか。
+
+        窓を出すとフォーカスが何度か行き来し、そのあいだに「前面でなく
+        なった」が1回混ざる。そこで止めてしまうと、**出してすぐ自動で
+        再生する**のができない(実際に、始めた再生がその場で止められていた)。
+        利用者が自分で他の窓へ移ったときは、この時間はとっくに過ぎている。"""
+        import time as _time
+        return (_time.monotonic() - getattr(self, "_shown_at", 0.0)
+                < self.SHOW_GRACE_SEC)
+
     def _refit(self):
         if self._fullscreen:
             # 全画面のあいだは窓の大きさを固定しない(固定すると画面いっぱいの
@@ -514,7 +534,9 @@ class GamePreviewWindow(QWidget):
         if event.type() == QEvent.WindowStateChange and self.isMaximized():
             self.showNormal()
             return
-        if event.type() == QEvent.ActivationChange and not self.isActiveWindow() and self._pause_cb:
+        if (event.type() == QEvent.ActivationChange
+                and not self.isActiveWindow() and self._pause_cb
+                and not self._in_show_grace()):
             self._pause_cb()
 
 
@@ -583,6 +605,14 @@ def _fmt_time(ms: int) -> str:
 
 
 class PreviewDock(QDockWidget):
+    #: 音源のデコードが終わった(引数はそのファイルのパス)。
+    #:
+    #: 「読み込めたら再生する」をやるのに要る。長さ(duration_seconds)を見て
+    #: 判断していたときは、**前の曲の長さがそのまま残っている**ので、新しい
+    #: 曲がまだ読めていないのに「読めた」と誤判定していた。DEMOSTART からの
+    #: 試聴が頭出しに失敗していたのはこれが原因。
+    songReady = Signal(str)
+
     """Dockable panel: play the song referenced by WAVE:, tap-measure BPM, and
     line up OFFSET against a waveform with a beat-grid overlay. Writes the
     OFFSET result back into the editor's OFFSET: header line automatically as
@@ -688,6 +718,8 @@ class PreviewDock(QDockWidget):
         # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
         # _current_wave_path とは別に持つ。
         self._audition_wave_path = None
+        # いま読んでいる音源(is_decoding 参照)。
+        self._decoding_path = None
         self._decode_worker = None
         self._waveform_mips = None
         self._editor_bpm = None
@@ -1699,7 +1731,20 @@ class PreviewDock(QDockWidget):
         self._start_waveform_decode(wave_path)
         return True
 
+    def is_decoding(self, wave_path=None):
+        """いま音源を読んでいる最中か。パスを渡せばそれかどうかも見る。
+
+        「読めたら鳴らす」を予約する側が、**もう読み終わっているのか、
+        これから終わるのか**を区別するのに要る。区別しないと、前の曲の
+        読み終わりで先に鳴らしてしまい、そのあと本編の読み込みが音を
+        差し替えた拍子に止まる(実際にそうなった)。"""
+        cur = getattr(self, "_decoding_path", None)
+        if cur is None:
+            return False
+        return wave_path is None or cur == wave_path
+
     def _start_waveform_decode(self, wave_path):
+        self._decoding_path = wave_path
         # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
         # (波形表示用)を同時に得る。レガシー経路では PCM を無視してピークだけ使う。
         # 直前のデコードがまだ走っている状態で self._decode_worker を上書きすると、
@@ -1722,6 +1767,8 @@ class PreviewDock(QDockWidget):
         # 本編の音源だけでなく、選曲画面の試聴/BGM(load_wave_only)で読んだ
         # ものも受け取る。ここで弾いていたせいで、試聴用に読んだ音の長さが
         # いつまでも 0 のままになり、**BGM が鳴らなくなっていた**。
+        if self._decoding_path == path:
+            self._decoding_path = None
         if path not in (self._current_wave_path, self._audition_wave_path):
             return
         # ミップチェインは1本だけ作って両方の波形で共有する(コピーしない)。
@@ -1736,6 +1783,9 @@ class PreviewDock(QDockWidget):
         if self._mixer_active:
             self.audio.set_song_pcm(pcm, sr)
         self.status_label.setText("")
+        # 知らせるのは**全部済ませてから**。ミキサーへ PCM を渡す前に出すと、
+        # 受け取った側が play() を呼んでも鳴らない(実際にそうなっていた)。
+        self.songReady.emit(path)
 
     def _on_audio_error(self, msg: str):
         """音声コールバックが例外で止まった(=以後ずっと無音)ことの通知。

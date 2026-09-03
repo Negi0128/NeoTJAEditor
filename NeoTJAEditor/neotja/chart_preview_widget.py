@@ -982,6 +982,38 @@ class ChartPreviewWidget(QWidget):
     # そのうち最後の何秒かけて薄くしながら消すか。
     ROLL_FADE_SEC = 0.1
 
+    def _loading_font(self):
+        """読み込み中の幕に使う字。曲名と同じ勘亭流。
+
+        ここだけ素の等幅だと、太鼓の画面の中で1か所だけ浮いて見える。
+        素材(Kanteiryu.otf)が無い環境では、これまでどおりの字に落ちる。"""
+        f = self._font(self.LOADING_FONT_SIZE, True)
+        fam = self._kanteiryu_family()
+        if fam:
+            f.setFamily(fam)
+        return f
+
+    _kanteiryu = None
+
+    def _kanteiryu_family(self):
+        """勘亭流の書体名。1回だけ読んで覚える(無ければ空)。"""
+        if ChartPreviewWidget._kanteiryu is None:
+            ChartPreviewWidget._kanteiryu = ""
+            try:
+                import os
+                from PySide6.QtGui import QFontDatabase
+                path = os.path.join(str(settings_mod.skin_dir()),
+                                    "Kanteiryu.otf")
+                if os.path.exists(path):
+                    fid = QFontDatabase.addApplicationFont(path)
+                    fams = (QFontDatabase.applicationFontFamilies(fid)
+                            if fid != -1 else [])
+                    if fams:
+                        ChartPreviewWidget._kanteiryu = fams[0]
+            except Exception:  # noqa: BLE001
+                pass
+        return ChartPreviewWidget._kanteiryu
+
     def live_tap_state(self, now=None):
         """(打数, 種別) を返す。何も出さないときは (None, None)。
 
@@ -3449,7 +3481,7 @@ class ChartPreviewWidget(QWidget):
             painter.setClipRect(0, band_top, lane_w, band_h)
             painter.fillRect(0, band_top, int(lane_w), band_h, QColor(0, 0, 0, 170))
             painter.setPen(QColor(0, 0, 0, 200))
-            painter.setFont(self._font(self.LOADING_FONT_SIZE, True))
+            painter.setFont(self._loading_font())
             painter.drawText(2, band_top + 2, int(lane_w), band_h,
                              Qt.AlignCenter, self.LOADING_TEXT)
             painter.setPen(QColor(255, 255, 255))
