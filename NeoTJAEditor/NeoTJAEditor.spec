@@ -96,6 +96,9 @@ a = Analysis(
         # 作者の自作物(デモ用の譜面と無音WAV)なので入れる。skin_cache が
         # キャッシュへ展開するときの取り出し元になる。
         ('neotja/assets', 'neotja/assets'),
+        # 窓のアイコン。exe に焼いたものは Windows のシェルが使うだけで、
+        # Qt の setWindowIcon には別途ファイルが要る(settings.icon_path)。
+        ('app_icon.ico', '.'),
     ],
     hiddenimports=[
         'PySide6.QtCore',

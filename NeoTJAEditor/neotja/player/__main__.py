@@ -55,7 +55,7 @@ def main():
     crashlog.install_qt()
     app = QApplication(sys.argv)
     app.setApplicationName("NeoTJAPlayer")
-    icon = settings_mod.icon_path()
+    icon = settings_mod.icon_path(player=True)
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
 

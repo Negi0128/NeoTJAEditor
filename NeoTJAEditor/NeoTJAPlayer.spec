@@ -85,6 +85,9 @@ a = Analysis(
         # (デモ用の譜面と無音WAV)で、skin_cache が内蔵スキンを組み立てる
         # ときの取り出し元になる。
         ('neotja/assets', 'neotja/assets'),
+        # 窓のアイコン。exe に焼いたものは Windows のシェルが使うだけで、
+        # Qt の setWindowIcon には別途ファイルが要る(settings.icon_path)。
+        ('app_icon_player.ico', '.'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
@@ -150,5 +153,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='app_icon.ico',
+    icon='app_icon_player.ico',
 )

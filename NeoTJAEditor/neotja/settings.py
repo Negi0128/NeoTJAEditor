@@ -310,12 +310,21 @@ def notes_png_path() -> Path:
     return base / "notes.png"
 
 
-def icon_path() -> Path:
+def icon_path(player: bool = False) -> Path:
+    """窓に付けるアイコン。Editor は E、Player は P。
+
+    見分けが付かないと、並んで開いているときにどちらの窓か分からない
+    (どちらも同じ青い丸だった)。
+
+    frozen では **exe の隣ではなく _MEIPASS** を見る。datas に入れた
+    ファイルはそこへ展開されるので、exe の隣を見ても見つからず、
+    setWindowIcon が黙って飛ばされていた。"""
+    name = "app_icon_player.ico" if player else "app_icon.ico"
     if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
+        base = Path(getattr(sys, "_MEIPASS", None) or Path(sys.executable).parent)
     else:
         base = Path(__file__).resolve().parent.parent
-    return base / "app_icon.ico"
+    return base / name
 
 
 def skin_dir() -> Path:
