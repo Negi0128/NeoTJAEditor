@@ -261,7 +261,11 @@ RAINBOW_WIPE_DEN = 85
 # 中心に置く。
 RAINBOW_HEAD_CELL = 130
 RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
-RAINBOW_HEAD_SCALE = 1.0
+# 大きさと位置は本家に寄せたもの。素材の 130px そのままだと顔が大きすぎて、
+# 虹の先端よりだいぶ手前(左下)に居るように見えた。少し小さくして、先端の
+# 右上へずらす。
+RAINBOW_HEAD_SCALE = 0.80
+RAINBOW_HEAD_OFF = (14, -14)     # 虹の先端からのずれ (右, 上が負)
 # レーンより手前に描くものを載せる板。ここに入るのは
 #   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
 #   * 風船中のどんちゃん(画布 648x345 を CHARA_BALLOON_CANVAS_OFF に置く)
@@ -2326,8 +2330,9 @@ class GameScreenWidget(QWidget):
                 if head is not None and cy is not None:
                     k = RAINBOW_HEAD_SCALE
                     hw, hh = head.width() * k, head.height() * k
-                    p.drawPixmap(QRectF(x + nx - hw / 2.0,
-                                        y + cy - hh / 2.0, hw, hh),
+                    dx, dy = RAINBOW_HEAD_OFF
+                    p.drawPixmap(QRectF(x + nx - hw / 2.0 + dx,
+                                        y + cy - hh / 2.0 + dy, hw, hh),
                                  head, QRectF(0, 0, head.width(), head.height()))
         else:
             nx = w * (c - RAINBOW_HALF) // RAINBOW_WIPE_DEN
