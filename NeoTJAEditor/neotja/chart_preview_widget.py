@@ -25,6 +25,16 @@ DEFAULT_BPM = 120.0
 #: 設定の読み戻しはすべてこの並び(昇順であることが前提)を単一の出所とする。
 SPEED_STEPS = (0.25, 0.50, 0.75, 1.00)
 
+# --- 連打を叩き込むと赤くなる演出 -------------------------------------------
+# 本家では連打を叩くほど帯が黄色から赤へ変わり、しばらく叩くと赤で落ち着く。
+# ROLL_RED_HITS 打で赤が最大になり、そのあとは赤のまま。
+ROLL_RED_HITS = 10.0
+#: 赤へ寄せるとき、緑をどれだけ残すか(0=真っ赤、1=元の黄色のまま)。
+ROLL_RED_KEEP_G = 0.15
+#: 連打の頭の内側を胴で埋めるときの、円の食い込み量(px)。理由は
+#: _draw_roll_sprite のコメント。
+ROLL_HEAD_CLIP_INSET = 2
+
 
 def snap_speed(rate: float) -> float:
     """任意の倍率を SPEED_STEPS のいずれかへ丸める。
@@ -1344,30 +1354,58 @@ class ChartPreviewWidget(QWidget):
                     return None
                 return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
 
+            def redden(im):
+                """黄色い画素だけを赤へ寄せた複製を返す。
+
+                連打を叩き込むと帯が赤くなる本家の演出用。Notes.png に赤い
+                連打の絵は入っていない(3段は頭の表情違いで、帯はどの段も
+                同じ黄色)ので、こちらで作る。
+
+                色を一律に掛ける(乗算)と顔の白目や黒い輪郭まで赤くなって
+                汚れるので、「緑が青よりはっきり高い画素 = 黄〜橙」だけを
+                対象に緑を青へ寄せる。白(R=G=B)も黒も差が無いので素通りし、
+                黄色だけが赤くなる。"""
+                a = np.asarray(im).astype(np.int16).copy()
+                g, b = a[:, :, 1], a[:, :, 2]
+                m = (g - b) > 40
+                g[m] = b[m] + ((g[m] - b[m]) * ROLL_RED_KEEP_G).astype(np.int16)
+                return Image.fromarray(a.astype(np.uint8), "RGBA")
+
             def pack(head, body, r):
                 if head is None or body is None:
                     return None
                 bw, bh = body.width, body.height
                 cap_w = min(bh, bw)
-                mid = body.crop((0, 0, max(1, bw - cap_w), bh))
-                cap = body.crop((max(0, bw - cap_w), 0, bw, bh))
-                head_pix = _pil_to_qpixmap(head)
-                # Pre-scale the head to the exact on-screen size (a normal note
-                # diameter) so the paint loop just blits it - the per-frame
-                # scaledToHeight it used to do was a frame-drop source whenever
-                # a roll was on screen.
-                head_scaled = head_pix.scaledToHeight(int(r * 2), Qt.SmoothTransformation)
-                return {"head": head_scaled, "mid": _pil_to_qpixmap(mid),
-                        "cap": _pil_to_qpixmap(cap), "body_h": bh}
+
+                def parts(bd, hd):
+                    mid = bd.crop((0, 0, max(1, bw - cap_w), bh))
+                    cap = bd.crop((max(0, bw - cap_w), 0, bw, bh))
+                    # Pre-scale the head to the exact on-screen size (a normal
+                    # note diameter) so the paint loop just blits it - the
+                    # per-frame scaledToHeight it used to do was a frame-drop
+                    # source whenever a roll was on screen.
+                    hs = _pil_to_qpixmap(hd).scaledToHeight(int(r * 2),
+                                                            Qt.SmoothTransformation)
+                    return hs, _pil_to_qpixmap(mid), _pil_to_qpixmap(cap)
+
+                h0, m0, c0 = parts(body, head)
+                h1, m1, c1 = parts(redden(body), redden(head))
+                return {"head": h0, "mid": m0, "cap": c0, "body_h": bh,
+                        "head_red": h1, "mid_red": m1, "cap_red": c1}
 
             return {"small": pack(cell(spans[5]), cell(spans[6]), self.NOTE_R_SMALL),
                     "big": pack(cell(spans[7]), cell(spans[8]), self.NOTE_R_BIG)}
         except Exception:
             return None
 
-    def _draw_roll_sprite(self, painter, x0, x1, cy, r, big) -> bool:
+    def _draw_roll_sprite(self, painter, x0, x1, cy, r, big, heat=0.0) -> bool:
         """本家風の黄色連打を skin 素材で描く: 伸縮する胴 + 丸い尾 + 頭。
-        スキン無し/逆スクロール時は False を返し、呼び出し側が従来のバーへ。"""
+        スキン無し/逆スクロール時は False を返し、呼び出し側が従来のバーへ。
+
+        heat は「どれだけ叩き込んだか」で 0(黄色)〜1(赤)。同じ形の赤い
+        複製を上から heat の濃さで重ねるだけなので、途中の値では黄と赤が
+        混ざり、じわじわ赤くなっていく。0 のときは今までどおり1枚ぶんの
+        描画で済む。"""
         pack = self._skin_roll.get("big" if big else "small") if self._skin_roll else None
         if pack is None or x1 < x0:
             return False
@@ -1392,15 +1430,35 @@ class ChartPreviewWidget(QWidget):
         painter.save()
         region = QRegion(int(x0), int(cy - r) - 1,
                          int(total) + 2, int(d) + 2)
-        region = region.united(QRegion(int(x0 - r), int(cy - r),
-                                       int(d), int(d), QRegion.Ellipse))
+        # 円は頭の外周より ROLL_HEAD_CLIP_INSET px 内側にする。頭の絵は輪郭が
+        # なめらか(半透明)なのに対し QRegion の円は1px単位のギザギザなので、
+        # 外周ぴったりだと所々で円のほうが輪郭より外へ出て、そこだけ胴の黄色が
+        # 輪郭の外に細く見える(「連打の先頭の左下が少しはみ出す」)。内側へ
+        # 寄せても埋めたいのは頭の内側なので、見え方は変わらない。
+        i = ROLL_HEAD_CLIP_INSET
+        region = region.united(QRegion(int(x0 - r) + i, int(cy - r) + i,
+                                       int(d) - 2 * i, int(d) - 2 * i,
+                                       QRegion.Ellipse))
         painter.setClipRegion(region, Qt.IntersectClip)
-        painter.drawPixmap(QRectF(x0 - r, cy - r, mid_dst + r, d), mid,
-                           QRectF(0, 0, mid.width(), mid.height()))
-        painter.drawPixmap(QRectF(x0 + mid_dst, cy - r, cap_dst, d), cap,
-                           QRectF(0, 0, cap.width(), cap.height()))
+        body_rect = QRectF(x0 - r, cy - r, mid_dst + r, d)
+        cap_rect = QRectF(x0 + mid_dst, cy - r, cap_dst, d)
+        painter.drawPixmap(body_rect, mid, QRectF(0, 0, mid.width(), mid.height()))
+        painter.drawPixmap(cap_rect, cap, QRectF(0, 0, cap.width(), cap.height()))
+        if heat > 0.0:
+            rm, rc = pack.get("mid_red"), pack.get("cap_red")
+            if rm is not None and rc is not None:
+                painter.setOpacity(min(1.0, heat))
+                painter.drawPixmap(body_rect, rm, QRectF(0, 0, rm.width(), rm.height()))
+                painter.drawPixmap(cap_rect, rc, QRectF(0, 0, rc.width(), rc.height()))
+                painter.setOpacity(1.0)
         painter.restore()
         painter.drawPixmap(QPointF(x0 - r, cy - r), head)  # pre-scaled, sub-pixel
+        if heat > 0.0:
+            rh = pack.get("head_red")
+            if rh is not None:
+                painter.setOpacity(min(1.0, heat))
+                painter.drawPixmap(QPointF(x0 - r, cy - r), rh)
+                painter.setOpacity(1.0)
         return True
 
     def _load_skin_balloon(self):
@@ -2613,10 +2671,13 @@ class ChartPreviewWidget(QWidget):
         (authoritative for mid-measure cases); only the tail needs a lookup.
         Both are resolved here, outside the paint loop, so the 144 Hz redraw
         just multiplies two precomputed floats."""
+        # 最後に打数も持ち回る: 叩き込むほど帯を赤くする(ROLL_RED_HITS)ため、
+        # 描画側で「今この連打を何打めまで叩いたか」を出すのに要る。
         self._roll_draw = [
             (r[0], r[1],
              self._speed(r[3], r[4]), self._speed_at(r[1]),
-             self.NOTE_R_BIG if r[2] == "6" else self.NOTE_R_SMALL)
+             self.NOTE_R_BIG if r[2] == "6" else self.NOTE_R_SMALL,
+             float(r[-1]))
             for r in self._rolls
         ]
         # 風船/くす玉は打数(最後の要素)も持ち回る: 判定枠に固定されている間、
@@ -3135,12 +3196,21 @@ class ChartPreviewWidget(QWidget):
         hi = bisect.bisect_right(self._note_times, t_future)
         rs = self.NOTE_R_SMALL
         draw_items = []
-        for r_start, r_end, sp0, sp1, r in self._roll_draw:
+        for r_start, r_end, sp0, sp1, r, r_hits in self._roll_draw:
             x0 = judge_x + (r_start - now) * sp0
             x1 = judge_x + (r_end - now) * sp1
             if (x0 < -r and x1 < -r) or (x0 > lane_w + r and x1 > lane_w + r):
                 continue
-            draw_items.append((r_start, "roll", (x0, x1, r, r_start, r_end)))
+            # 叩き込み具合。区間に入る前は 0、入ってからは打数の補間
+            # (上部読み出しの数字と同じ数え方)、抜けたあとは赤のまま。
+            if now <= r_start:
+                heat = 0.0
+            elif now >= r_end or r_end <= r_start:
+                heat = 1.0
+            else:
+                done = r_hits * (now - r_start) / (r_end - r_start)
+                heat = min(1.0, done / ROLL_RED_HITS)
+            draw_items.append((r_start, "roll", (x0, x1, r, r_start, r_end, heat)))
         # 風船・くす玉: 終点バーは出さず、風船ノーツ1個だけを描く。区間に入る
         # 前は右から流れてきて、区間中(now が [start,end])は判定枠に固定する。
         # 固定されている間ずっと表示されるので、いつまで残っているか分かる。
@@ -3186,10 +3256,17 @@ class ChartPreviewWidget(QWidget):
         draw_items.sort(key=lambda d: d[0], reverse=True)
         for t0, kind, payload in draw_items:
             if kind == "roll":
-                x0, x1, r, r_start, r_end = payload
-                if not self._draw_roll_sprite(painter, x0, x1, mid_y, r, r >= self.NOTE_R_BIG):
-                    # Red while being hit (now inside the span), yellow otherwise.
-                    color = self._color("don") if r_start <= now <= r_end else self._color("roll")
+                x0, x1, r, r_start, r_end, heat = payload
+                if not self._draw_roll_sprite(painter, x0, x1, mid_y, r,
+                                              r >= self.NOTE_R_BIG, heat):
+                    # 素材が無いときの帯。こちらも叩き込むほど赤へ寄せる。
+                    color = self._color("roll")
+                    if heat > 0.0:
+                        red = self._color("don")
+                        color = QColor(
+                            int(color.red() + (red.red() - color.red()) * heat),
+                            int(color.green() + (red.green() - color.green()) * heat),
+                            int(color.blue() + (red.blue() - color.blue()) * heat))
                     self._draw_roll_bar(painter, x0, x1, mid_y, r, color)
             elif kind in ("balloon", "kusudama"):
                 # くす玉も風船と同じ見た目。区間に入る前は右から流れてきて、
