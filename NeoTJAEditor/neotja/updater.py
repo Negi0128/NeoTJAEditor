@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -22,6 +23,13 @@ ASSET_NAME = "NeoTJAEditor.exe"
 #: 必ず両方を入れ替える**。
 PLAYER_ASSET_NAME = "NeoTJAPlayer.exe"
 _USER_AGENT = "NeoTJAEditor-Updater"
+#: 1回の読み書きで待つ上限(秒)。**総時間ではなくソケット1操作ぶん。**
+#: 30 秒では 84MB の途中で read が切れる回線があった(実測: 3回中2回失敗)。
+DOWNLOAD_TIMEOUT = 60
+#: 落とし直す回数。回線側の一時的な切断は珍しくないので、1回で諦めない。
+DOWNLOAD_TRIES = 3
+#: 落とし直す前に置く秒数(回を追うごとに伸ばす)。
+RETRY_WAIT = 3.0
 
 
 def _version_tuple(v: str):
@@ -102,6 +110,7 @@ class UpdateDownloadWorker(QThread):
         self.player_url = player_url
         #: Player だけ落とせなかったときの理由。Editor は更新される。
         self.player_error = ""
+        self._what = ""
         self._cancelled = False
 
     def cancel(self):
@@ -113,11 +122,37 @@ class UpdateDownloadWorker(QThread):
         self._cancelled = True
 
     def _fetch(self, url, dest, base, span):
-        """url を dest へ落とす。進捗は全体の base%〜(base+span)% に写す。
+        """url を dest へ落とす。**失敗したら落とし直す。**
 
-        返すのは落としたバイト数。中止されたら None。"""
+        進捗は全体の base%〜(base+span)% に写す。返すのは落としたバイト数。
+        中止されたら None。
+
+        回線側の一時的な切断で丸ごと諦めていたが、実測で 84MB の取得は
+        3回中2回が read タイムアウトで落ちる回線があった。1回勝負にする
+        理由が無いので DOWNLOAD_TRIES 回まで落とし直す。"""
+        last = None
+        for attempt in range(DOWNLOAD_TRIES):
+            if self._cancelled:
+                return None
+            if attempt:
+                # 少し待ってから。詰めて叩き直しても同じ切れ方をする。
+                end = time.monotonic() + RETRY_WAIT * attempt
+                while time.monotonic() < end:
+                    if self._cancelled:
+                        return None
+                    time.sleep(0.1)
+                self.stage.emit("%s (%d 回目)" % (self._what, attempt + 1))
+            try:
+                return self._fetch_once(url, dest, base, span)
+            except Exception as e:  # noqa: BLE001
+                if self._cancelled:
+                    return None
+                last = e
+        raise last
+
+    def _fetch_once(self, url, dest, base, span):
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
+        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp, open(dest, "wb") as f:
             # Prefer the Content-Length header (resp.length decreases as we
             # read, so capture the expected total up front for validation).
             try:
@@ -170,7 +205,8 @@ class UpdateDownloadWorker(QThread):
         # 戻したときなど)では Editor だけで 100%。
         span = 50 if self.player_url else 100
         try:
-            self.stage.emit("NeoTJAEditor をダウンロード中...")
+            self._what = "NeoTJAEditor をダウンロード中..."
+            self.stage.emit(self._what)
             if self._fetch(self.asset_url, dest, 0, span) is None:
                 # The with-block closed both handles; now the partial file can
                 # be removed so the fixed path isn't left half-written/locked.
@@ -189,7 +225,8 @@ class UpdateDownloadWorker(QThread):
 
         player_path = ""
         if self.player_url:
-            self.stage.emit("NeoTJAPlayer をダウンロード中...")
+            self._what = "NeoTJAPlayer をダウンロード中..."
+            self.stage.emit(self._what)
             try:
                 if self._fetch(self.player_url, pdest, 50, 50) is None:
                     self._discard(dest)
@@ -262,41 +299,62 @@ class PlayerFetchWorker(QThread):
         # 名前を変える。ここで書けなければ置き場所そのものが駄目なので、その
         # 時点で失敗と分かる(%TEMP% へ落としてから気づくより早い)。
         part = final + ".part"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as resp, open(part, "wb") as f:
-                try:
-                    total = int(resp.headers.get("Content-Length") or 0)
-                except (TypeError, ValueError):
-                    total = 0
-                read = 0
-                while True:
-                    if self._cancelled:
-                        break
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    read += len(chunk)
-                    self.progress.emit(int(read * 100 / total) if total else -1)
+        last = None
+        for attempt in range(DOWNLOAD_TRIES):
             if self._cancelled:
                 self._rm(part)
                 self.cancelled.emit()
                 return
-            if total and read != total:
-                raise IOError("ダウンロードが不完全です (%d/%d バイト)。" % (read, total))
-            with open(part, "rb") as f:
-                if f.read(2) != b"MZ":
-                    raise IOError("ダウンロードしたファイルが壊れています。")
-            os.replace(part, final)
-        except Exception as e:  # noqa: BLE001
-            self._rm(part)
-            if self._cancelled:
-                self.cancelled.emit()
-            else:
-                self.failed.emit(str(e))
-            return
-        self.finished_ok.emit(final)
+            if attempt:
+                end = time.monotonic() + RETRY_WAIT * attempt
+                while time.monotonic() < end:
+                    if self._cancelled:
+                        self._rm(part)
+                        self.cancelled.emit()
+                        return
+                    time.sleep(0.1)
+            try:
+                if self._fetch_once(url, part) is None:   # 中止
+                    self._rm(part)
+                    self.cancelled.emit()
+                    return
+                os.replace(part, final)
+                self.finished_ok.emit(final)
+                return
+            except Exception as e:  # noqa: BLE001
+                self._rm(part)
+                if self._cancelled:
+                    self.cancelled.emit()
+                    return
+                last = e
+        self.failed.emit(str(last))
+
+    def _fetch_once(self, url, part):
+        """1回ぶんの取得。中止されたら None、済んだらバイト数。"""
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp, open(part, "wb") as f:
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            read = 0
+            while True:
+                if self._cancelled:
+                    break
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                read += len(chunk)
+                self.progress.emit(int(read * 100 / total) if total else -1)
+        if self._cancelled:
+            return None
+        if total and read != total:
+            raise IOError("ダウンロードが不完全です (%d/%d バイト)。" % (read, total))
+        with open(part, "rb") as f:
+            if f.read(2) != b"MZ":
+                raise IOError("ダウンロードしたファイルが壊れています。")
+        return read
 
     @staticmethod
     def _rm(path):

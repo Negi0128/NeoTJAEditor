@@ -15,6 +15,10 @@ _SETTINGS_KEYS = (
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom", "preview_speed", "waveform_window",
     "player_select_bgm",
+    # 更新で NeoTJAPlayer だけ入れ替えられなかったときの印。**次の起動で
+    # 読み戻せないと意味が無い** — Editor 側は最新なので「更新の確認」は
+    # 「最新です」と答えるだけで、Player を取りに行く道が無くなる。
+    "player_update_pending",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
@@ -132,6 +136,7 @@ def default_settings() -> dict:
         "player_select_bgm": True,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
+        "player_update_pending": False,
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
         # base64 文字列(QMainWindow.saveGeometry / QSplitter.saveState)。空文字
         # なら既定サイズで開く。
