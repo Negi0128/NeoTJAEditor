@@ -1837,11 +1837,11 @@ class MainWindow(QMainWindow):
             return
         exe = self._find_player()
         if not exe:
-            QMessageBox.warning(
-                self, "NeoTJAPlayer",
-                "NeoTJAPlayer が見つかりませんでした。\n\n"
-                "NeoTJAEditor.exe と同じ場所に NeoTJAPlayer.exe を置いてください。")
-            return
+            if not self._offer_player_download():
+                return
+            exe = self._find_player()
+            if not exe:
+                return
         args = list(exe) + [self.current_file]
         course = self._preview_course_override
         if course:
@@ -1857,6 +1857,83 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "NeoTJAPlayer",
                                 "起動できませんでした:\n%s" % exc)
+
+    def _offer_player_download(self):
+        """NeoTJAPlayer.exe が無いので、その場で落とすか尋ねる。落とせたら True。
+
+        **なぜここで落とすのか**: 更新で2本まとめて落とす仕組みを入れても、
+        その処理を走らせるのは利用者の環境に既に入っている**古い版**の
+        updater で、そちらは NeoTJAEditor.exe しか見ていない。つまり
+        「Player を配り始める版」への更新そのものでは Player が届かず、
+        届くのはその次の更新から。ここで拾えるようにしておかないと、
+        いま使っている人の手元にはいつまでも Player が来ない。
+
+        押した人だけが払う形なので、Player を使わない人に 84MB を
+        負わせることもない。"""
+        from neotja.updater import PlayerFetchWorker, RELEASES_PAGE_URL
+
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self, "NeoTJAPlayer",
+                "ソースから実行中なので、python -m neotja.player で開けます。")
+            return False
+        dest_dir = os.path.dirname(sys.executable)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("NeoTJAPlayer")
+        box.setText(
+            "NeoTJAPlayer がまだ入っていません。\n\n"
+            "いまダウンロードしますか？(約 84MB)\n\n"
+            "置き場所:\n　%s" % dest_dir)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.Yes)
+        if box.exec() != QMessageBox.Yes:
+            return False
+
+        progress = QProgressDialog("NeoTJAPlayer をダウンロード中...",
+                                   "キャンセル", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        result = {"ok": False}
+        worker = PlayerFetchWorker(dest_dir, self)
+
+        def on_progress(pct):
+            if pct >= 0:
+                progress.setRange(0, 100)
+                progress.setValue(pct)
+            else:
+                progress.setRange(0, 0)
+
+        def on_ok(_path):
+            result["ok"] = True
+            progress.close()
+
+        def on_failed(msg):
+            progress.close()
+            box2 = QMessageBox(self)
+            box2.setIcon(QMessageBox.Warning)
+            box2.setWindowTitle("NeoTJAPlayer")
+            box2.setText(
+                "ダウンロードできませんでした:\n%s\n\n"
+                "リリースページから NeoTJAPlayer.exe を手に入れて、"
+                "NeoTJAEditor.exe と同じ場所へ置くこともできます。" % msg)
+            box2.addButton("リリースページを開く", QMessageBox.ActionRole)
+            box2.addButton(QMessageBox.Close)
+            box2.exec()
+            if box2.clickedButton() and box2.clickedButton().text().startswith("リリース"):
+                import webbrowser
+                webbrowser.open(RELEASES_PAGE_URL)
+
+        worker.progress.connect(on_progress)
+        worker.finished_ok.connect(on_ok)
+        worker.failed.connect(on_failed)
+        worker.cancelled.connect(progress.close)
+        progress.canceled.connect(worker.cancel)
+        self._player_fetch_worker = worker
+        worker.start()
+        progress.exec()
+        worker.wait(5000)
+        return result["ok"]
 
     @staticmethod
     def _find_player():
@@ -2140,8 +2217,32 @@ class MainWindow(QMainWindow):
             return
         update_exe = ""
         for line in info.splitlines():
-            if line.startswith("update_exe="):
+            if line.startswith("update_exe=") or line.startswith("update_player="):
                 update_exe = line.split("=", 1)[1].strip()
+
+        # Player だけ置けなかった場合。Editor は入れ替わっているので、
+        # 「更新に失敗しました」と言ってしまうと嘘になる。
+        if info.startswith("player_copy_failed"):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("NeoTJAPlayer を置けませんでした")
+            box.setText(
+                f"NeoTJAEditor は v{VERSION} に更新できましたが、"
+                "NeoTJAPlayer.exe を置き換えられませんでした。\n\n"
+                "更新のときに NeoTJAPlayer を開いたままにしていると、"
+                "ファイルを掴まれていて上書きできません。\n\n"
+                "ダウンロード済みのファイルは残してあるので、"
+                "NeoTJAPlayer を閉じてから手動で上書きするか、"
+                "「ヘルプ → 更新の確認」からやり直してください。")
+            box.setDetailedText(info)
+            if update_exe and os.path.exists(update_exe):
+                box.addButton("ファイルの場所を開く", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Close)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked and clicked.text().startswith("ファイル"):
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(update_exe)])
+            return
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
@@ -2168,14 +2269,15 @@ class MainWindow(QMainWindow):
         from neotja.updater import UpdateCheckWorker
 
         worker = UpdateCheckWorker(self)
-        worker.update_available.connect(lambda tag, notes, url: self._prompt_update(tag, notes, url))
+        worker.update_available.connect(
+            lambda tag, notes, url, purl: self._prompt_update(tag, notes, url, purl))
         if manual:
             worker.up_to_date.connect(lambda: QMessageBox.information(self, "更新の確認", f"現在のバージョン v{VERSION} は最新です。"))
             worker.failed.connect(lambda msg: QMessageBox.warning(self, "更新エラー", f"更新の確認に失敗しました:\n{msg}"))
         self._update_check_worker = worker
         worker.start()
 
-    def _prompt_update(self, tag, notes, asset_url):
+    def _prompt_update(self, tag, notes, asset_url, player_url=""):
         box = QMessageBox(self)
         box.setWindowTitle("新しいバージョンがあります")
         box.setText(f"新しいバージョン {tag} が利用可能です。(現在: v{VERSION})\n\n更新しますか？")
@@ -2195,16 +2297,16 @@ class MainWindow(QMainWindow):
         if not asset_url:
             QMessageBox.warning(self, "更新エラー", "ダウンロード用のファイルが見つかりませんでした。")
             return
-        self._run_update_download(asset_url)
+        self._run_update_download(asset_url, player_url)
 
-    def _run_update_download(self, asset_url):
+    def _run_update_download(self, asset_url, player_url=""):
         from neotja.updater import UpdateDownloadWorker, apply_update
 
         progress = QProgressDialog("更新をダウンロード中...", "キャンセル", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
 
-        worker = UpdateDownloadWorker(asset_url, self)
+        worker = UpdateDownloadWorker(asset_url, player_url, self)
 
         def on_progress(pct):
             if pct >= 0:
@@ -2213,8 +2315,22 @@ class MainWindow(QMainWindow):
             else:
                 progress.setRange(0, 0)
 
-        def on_ok(path):
+        def on_ok(path, player_path):
             progress.close()
+            # Player だけ落とせなかった場合。Editor の更新はこのまま進める
+            # (落とせている以上、そちらを止める理由が無い)。片方だけ新しく
+            # なることになるので、そうなったことは必ず伝える。
+            if worker.player_error:
+                QMessageBox.warning(
+                    self, "更新",
+                    "NeoTJAPlayer をダウンロードできませんでした。\n"
+                    "NeoTJAEditor だけを更新します。\n\n"
+                    "%s\n\n"
+                    "NeoTJAPlayer は前のままになるので、"
+                    "「実行 → NeoTJAPlayer を別ウィンドウで開く」の動きが"
+                    "エディタ側とずれることがあります。"
+                    "あとで「ヘルプ → 更新の確認」からやり直せます。"
+                    % worker.player_error)
             # Settle the unsaved-changes question BEFORE arming the batch:
             # apply_update() starts a script that busy-waits for this PID to
             # exit. If closeEvent then vetoed the exit (Cancel is the default
@@ -2228,7 +2344,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             self._updating = True
-            apply_update(path)
+            apply_update(path, player_path)
             self.close()
 
         def on_failed(msg):
@@ -2236,6 +2352,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "更新エラー", f"ダウンロードに失敗しました:\n{msg}")
 
         worker.progress.connect(on_progress)
+        worker.stage.connect(progress.setLabelText)
         worker.finished_ok.connect(on_ok)
         worker.failed.connect(on_failed)
         worker.cancelled.connect(progress.close)
