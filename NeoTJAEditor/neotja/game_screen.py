@@ -95,6 +95,10 @@ CHARA_BEATS_PER_LOOP = 4.0
 # やめて画布(648x345)の左上をふだんの絵と同じ位置に置き、そこからずらす。
 # 中身で合わせると立ち姿(高さ195)の頭が画面の上へ出るため。
 CHARA_BALLOON_CANVAS_OFF = (41, 10)
+# 風船の絵だけは本家より大きく、位置も左下寄りに見えるので、足元を据えたまま
+# 縮めてから右上へずらす。ふだん/ゴーゴーの絵は素材どおりなので触らない。
+CHARA_BALLOON_SCALE = 0.80
+CHARA_BALLOON_OFF = (16, -16)    # 縮めたあとのずれ (右, 上が負)
 
 # --- 左パネルの中身(本家スクショから採った位置) ----------------------
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
@@ -261,11 +265,8 @@ RAINBOW_WIPE_DEN = 85
 # 中心に置く。
 RAINBOW_HEAD_CELL = 130
 RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
-# 大きさと位置は本家に寄せたもの。素材の 130px そのままだと顔が大きすぎて、
-# 虹の先端よりだいぶ手前(左下)に居るように見えた。少し小さくして、先端の
-# 右上へずらす。
-RAINBOW_HEAD_SCALE = 0.60
-RAINBOW_HEAD_OFF = (10, -10)     # 虹の先端からのずれ (右, 上が負)
+RAINBOW_HEAD_SCALE = 1.0
+RAINBOW_HEAD_OFF = (0, 0)        # 虹の先端からのずれ (右, 上が負)
 # レーンより手前に描くものを載せる板。ここに入るのは
 #   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
 #   * 風船中のどんちゃん(画布 648x345 を CHARA_BALLOON_CANVAS_OFF に置く)
@@ -1068,7 +1069,14 @@ class GameScreenWidget(QWidget):
         if pm is None:
             return
         bx, by = CHARA_BALLOON_CANVAS_OFF
-        p.drawPixmap(CHARA_POS[0] + bx - ox, CHARA_POS[1] + by - oy, pm)
+        k = CHARA_BALLOON_SCALE
+        dx, dy = CHARA_BALLOON_OFF
+        w, h = pm.width() * k, pm.height() * k
+        # 足元を据えたまま縮める(下端を合わせる)。上端基準で縮めると、
+        # 立ち姿のどんちゃんが宙に浮いて見える。
+        x = CHARA_POS[0] + bx - ox + dx
+        y = CHARA_POS[1] + by - oy + (pm.height() - h) + dy
+        p.drawPixmap(QRectF(x, y, w, h), pm, QRectF(0, 0, pm.width(), pm.height()))
 
     def draw_balloon_front(self, p, ox=0, oy=0):
         """判定枠の風船を、どんちゃんより手前に描く。
