@@ -635,10 +635,22 @@ class RecordingPlan:
             self.tmp_dir = None
 
 
+#: 頭から録るときに、曲の前へ足す助走の秒数。
+#:
+#: いきなり曲が始まると音符が流れ込む様子が入らず、動画として頭が詰まって
+#: 見える。ここぶんだけ前から絵を回して、その間は無音にする。
+#:
+#: 音源より前に音符がある譜面(OFFSET が負)では、その音符も入るように
+#: 「いちばん早い音符の3秒前」まで下げる。逆に音符を基準に一律で決めると、
+#: イントロの長い曲で頭が切れてしまうので、既定はあくまで音源の3秒前。
+RECORD_LEAD_SEC = 3.0
+
+
 def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
                       end_sec=None, fps=60, don_path="", ka_path="",
                       song_volume=0.8, sfx_volume=0.9, hit_sounds=True,
-                      cancel=None, want_mips=False):
+                      cancel=None, want_mips=False,
+                      lead_sec=RECORD_LEAD_SEC):
     """曲を読み、音声を作り、RecordingPlan を返す。**Qt には触らない**ので
     ワーカースレッドから呼んでよい(GUI スレッドから呼んでも同じ結果)。
 
@@ -650,14 +662,37 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
     song_sec = song.shape[0] / float(SAMPLE_RATE) if song.shape[0] else 0.0
     if end_sec is None:
         end_sec = song_sec
-    start_sec = max(0.0, float(start_sec))
+    hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
+
+    # 助走は「頭から録るとき」だけ。範囲を指定して途中だけ録るときに勝手に
+    # 前へ伸ばすと、指定した範囲と食い違う。
+    lead = max(0.0, float(lead_sec))
+    start_sec = float(start_sec)
+    if lead > 0.0 and start_sec <= 0.0:
+        first = min(hit_times) if hit_times else 0.0
+        start_sec = min(0.0, float(first)) - lead
+    else:
+        start_sec = max(0.0, start_sec)
     end_sec = max(start_sec, float(end_sec))
     if end_sec - start_sec < 1.0 / fps:
         raise RecordingError("録画する範囲が短すぎます。")
 
-    hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
-    audio = render_audio(song, hit_times, hit_kinds, start_sec=start_sec,
-                         end_sec=end_sec, don_path=don_path, ka_path=ka_path,
+    # 0 より前から録るぶんは、音源の頭へ無音を継ぎ足して打音の予定も同じだけ
+    # 後ろへずらす。ミキサーは負の位置へ seek できないので、「曲そのものを
+    # 遅らせて 0 から回す」という形にして辻褄を合わせる。こうすると音源より
+    # 前にある音符の打音もそのまま鳴る。
+    pad_sec = max(0.0, -start_sec)
+    song_for_audio, at_times = song, hit_times
+    if pad_sec > 0.0:
+        pad_n = int(round(pad_sec * SAMPLE_RATE))
+        ch = song.shape[1] if song.ndim > 1 else 1
+        song_for_audio = np.vstack(
+            [np.zeros((pad_n, ch), dtype=np.float32), song]) if song.size             else np.zeros((pad_n, 2), dtype=np.float32)
+        at_times = [t + pad_sec for t in hit_times]
+    audio = render_audio(song_for_audio, at_times, hit_kinds,
+                         start_sec=start_sec + pad_sec,
+                         end_sec=end_sec + pad_sec,
+                         don_path=don_path, ka_path=ka_path,
                          song_volume=song_volume, sfx_volume=sfx_volume,
                          hit_sounds=hit_sounds, cancel=cancel)
     tmp_dir = tempfile.mkdtemp(prefix="neotja_rec_")
@@ -673,7 +708,7 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
         except Exception:  # noqa: BLE001
             # 波形が出ないだけで録画そのものは成立する。ここで諦めない。
             mips = None
-    del audio, song
+    del audio, song, song_for_audio
     plan = RecordingPlan(tmp_dir, audio_path, start_sec, end_sec, int(fps),
                          int(round((end_sec - start_sec) * fps)), mips=mips)
     if cancel is not None and cancel.cancelled:
