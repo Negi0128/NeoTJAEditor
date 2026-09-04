@@ -244,6 +244,8 @@ class ScaledHost(QWidget):
         content.move(0, 0)
         self._scale = 1.0
         self._buf = None
+        # 転送の最中か。Qt の親送りで戻ってきたぶんを弾く(_forward 参照)。
+        self._forwarding = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         self.refit()
@@ -299,15 +301,39 @@ class ScaledHost(QWidget):
 
     # --- マウスの転送(縮小中だけ) ---------------------------------------
     def _forward(self, event, kind) -> bool:
-        if self._passthrough():
+        """クリックを、倍率で割った座標にして中身へ渡す。渡したら True。
+
+        **転送中はもう一度転送しない(_forwarding)。** Qt は受け取られなかった
+        マウスイベントを親へ回す決まりで、中身(ゲーム画面)はマウスを扱わない
+        から必ず受け取らない。すると親であるこの入れ物へ戻ってきて、ここが
+        また中身へ渡す — 転送と親送りの無限ループになる。スタックを使い切って
+        **プロセスごと落ちる**(0xc0000005 / shiboken)。
+
+        これが「たまに落ちる」の正体だった。通るのは縮小表示のときだけ
+        (等倍は素通しでこの経路に入らない)なので、100% で使っている限り
+        起きず、原因が分からないままになっていた。実測: 表示 75% で
+        レーンの上を1回クリックすれば必ず落ちる。
+
+        受け取ったことにする(accept)のも要る。そうしないと、この入れ物が
+        受け取らなかったものとして更に上(再生ウィンドウ)へ回っていく。"""
+        if self._passthrough() or self._forwarding:
             return False
         pos = event.position() / self._scale
         pt = pos.toPoint()
-        target = self._content.childAt(pt) or self._content
+        target = self._content.childAt(pt)
+        if target is None:
+            # 中身そのものに渡しても扱う相手が居ない。渡すと上の輪に入るだけ。
+            event.accept()
+            return True
         local = target.mapFrom(self._content, pt)
-        QApplication.sendEvent(target, QMouseEvent(
-            kind, QPointF(local), event.globalPosition(),
-            event.button(), event.buttons(), event.modifiers()))
+        self._forwarding = True
+        try:
+            QApplication.sendEvent(target, QMouseEvent(
+                kind, QPointF(local), event.globalPosition(),
+                event.button(), event.buttons(), event.modifiers()))
+        finally:
+            self._forwarding = False
+        event.accept()
         return True
 
     def mousePressEvent(self, event):
