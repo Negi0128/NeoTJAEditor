@@ -226,7 +226,7 @@ NAMEPLATE_LAYOUTS = {
         # 字と字のあいだを広げる量(px)。段位は2文字しかなく詰まって見える。
         "title_space": 0,
         "name_space": 0,
-        "dan_space": 4,
+        "dan_space": 3,
         # 縁取りの太さ(px)。0 なら縁取りしない。
         "title_line": 0.0,
         "name_line": 4.5,
@@ -247,8 +247,8 @@ NAMEPLATE_TITLE_COLOR = "#000000"       # 称号は黒文字。縁取りなし
 NAMEPLATE_TITLE_OUTLINE = "#ffffff"
 #: 段位の文字の色。色名ひとつなら単色、((位置, 色), ...) なら上から下への
 #: グラデーション。位置は 0.0(上端)〜1.0(下端)。
-NAMEPLATE_DAN_COLOR = ((0.00, "#fff8d6"), (0.42, "#f6cf5a"),
-                       (0.56, "#c8901c"), (1.00, "#ffe98a"))
+NAMEPLATE_DAN_COLOR = ((0.00, "#fffce0"), (0.42, "#ffe95c"),
+                       (0.56, "#e6b800"), (1.00, "#fff27a"))
 NAMEPLATE_DAN_OUTLINE = "#000000"
 #: 段位の裏に敷く色。素材の下地の欠けを隠す。
 NAMEPLATE_DAN_BACK = "#000000"
