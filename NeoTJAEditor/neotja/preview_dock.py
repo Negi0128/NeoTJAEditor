@@ -415,6 +415,61 @@ class GamePreviewWindow(QWidget):
             sc = QShortcut(seq, self)
             sc.setContext(Qt.WindowShortcut)
             sc.activated.connect(fn)
+        self._build_tuner()
+
+    # --- 虹の先端の顔の位置合わせ (Ctrl+Shift+矢印) -------------------
+    #
+    # 目で見て決めたいものなので、画面を見ながら 1px ずつ動かせるようにして
+    # ある。Shift を足さない矢印は小節移動と再生速度に使われているので、
+    # Ctrl+Shift の組み合わせにした。決めた値は画面に出るので、それを
+    # game_screen.RAINBOW_HEAD_OFF の初期値に書き写せば固定できる。
+    #: 1回押したときに動く量(px)。Alt を足すと 5px。
+    TUNE_STEP = 1
+    TUNE_STEP_BIG = 5
+    #: 数値を出しておく時間(ms)。
+    TUNE_SHOW_MS = 4000
+
+    def _build_tuner(self):
+        self._tune_label = QLabel("", self.scaled_host)
+        self._tune_label.setStyleSheet(
+            "color: #ffe9a8; background: rgba(0,0,0,180);"
+            " border: 1px solid rgba(255,255,255,60); border-radius: 3px;"
+            " padding: 4px 8px;")
+        _f = self._tune_label.font()
+        _f.setPixelSize(14)
+        self._tune_label.setFont(_f)
+        self._tune_label.hide()
+        self._tune_timer = QTimer(self)
+        self._tune_timer.setSingleShot(True)
+        self._tune_timer.timeout.connect(self._tune_label.hide)
+        moves = ((Qt.Key_Left, -1, 0), (Qt.Key_Right, 1, 0),
+                 (Qt.Key_Up, 0, -1), (Qt.Key_Down, 0, 1))
+        for key, sx, sy in moves:
+            for mod, step in ((Qt.ControlModifier | Qt.ShiftModifier,
+                               self.TUNE_STEP),
+                              (Qt.ControlModifier | Qt.ShiftModifier
+                               | Qt.AltModifier, self.TUNE_STEP_BIG)):
+                sc = QShortcut(QKeySequence(mod | key), self)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(
+                    lambda dx=sx * step, dy=sy * step: self._tune_head(dx, dy))
+        sc = QShortcut(QKeySequence(Qt.ControlModifier | Qt.ShiftModifier
+                                    | Qt.Key_0), self)
+        sc.setContext(Qt.WindowShortcut)
+        sc.activated.connect(lambda: self._tune_head(0, 0, reset=True))
+
+    def _tune_head(self, dx, dy, reset=False):
+        from . import game_screen as _gs
+        off = _gs.reset_rainbow_head() if reset else _gs.nudge_rainbow_head(dx, dy)
+        self._tune_label.setText(
+            "虹の先端の顔  RAINBOW_HEAD_OFF = (%d, %d)   "
+            "Ctrl+Shift+矢印 / +Alt で5px / Ctrl+Shift+0 で戻す"
+            % (off[0], off[1]))
+        self._tune_label.adjustSize()
+        self._tune_label.move(8, 8)
+        self._tune_label.show()
+        self._tune_label.raise_()
+        self._tune_timer.start(self.TUNE_SHOW_MS)
 
     def refit(self):
         """中身の高さが変わったときに窓の固定サイズを取り直す。

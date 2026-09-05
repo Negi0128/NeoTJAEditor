@@ -327,7 +327,7 @@ RAINBOW_LAND_MOVE_SEC = 0.10
 #: そこで消してしまうと「どこかへ行った」ように見える。音符が魂へ着弾する
 #: ときと同じ長さ・同じ消え方(白へ寄せながら薄く)にそろえてある。
 RAINBOW_LAND_SEC = 0.22
-RAINBOW_HEAD_OFF = (0, 0)        # 虹の先端からのずれ (右, 上が負)
+RAINBOW_HEAD_OFF = (0, 0)        # 虹の先端からのずれ (右, 下が正)
 # 本家は先端に顔が無く、代わりに白〜水色の光と 4本角の星が散っている
 # (実機映像 f18〜f29 で確認)。こちらは顔を残したまま、その星だけを足す。
 # 星は「そのコマの先端の位置」に生まれて、あとは動かずに縮みながら消える。
@@ -745,6 +745,24 @@ class _LaneOverlay(QWidget):
         self._screen.draw_chara_front(p, ox, oy)
         self._screen.draw_balloon_front(p, ox, oy)
         p.end()
+
+
+def nudge_rainbow_head(dx, dy):
+    """虹の先端の顔を動かして、動かしたあとの値を返す。
+
+    Player で Ctrl+Shift+矢印 から呼ぶ**調整用**。ここで決めた値を
+    RAINBOW_HEAD_OFF の初期値に書き写せば、次からその位置で出る。
+    アプリを閉じると 0 に戻る(設定には保存しない)。"""
+    global RAINBOW_HEAD_OFF
+    RAINBOW_HEAD_OFF = (RAINBOW_HEAD_OFF[0] + dx, RAINBOW_HEAD_OFF[1] + dy)
+    return RAINBOW_HEAD_OFF
+
+
+def reset_rainbow_head():
+    """虹の先端の顔のずれを 0 に戻す。"""
+    global RAINBOW_HEAD_OFF
+    RAINBOW_HEAD_OFF = (0, 0)
+    return RAINBOW_HEAD_OFF
 
 
 #: 中心線をならす幅(列)。素材の都合でできる小さな段差を消すため。
