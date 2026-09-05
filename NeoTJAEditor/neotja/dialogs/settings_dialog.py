@@ -45,6 +45,7 @@ class SettingsDialog(QDialog):
         "record_output_dir",
         "hit_sound_don_path", "hit_sound_ka_path",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
+        "player_select_bgm", "player_select_bgm_volume",
         "peepo_chart_edit",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
         "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
@@ -508,6 +509,22 @@ class SettingsDialog(QDialog):
             "正の値 = 音がそのミリ秒だけ遅れて耳に届くとみなす、という意味です。譜面が"
             "見た目より遅れて聞こえるなら値を増やしてください。"))
 
+        form = self._group(outer, "選曲画面のBGM")
+        self.select_bgm_check = QCheckBox("譜面を開いていないあいだ BGM を流す")
+        self.select_bgm_check.setChecked(bool(cfg.get("player_select_bgm", True)))
+        form.addRow(self.select_bgm_check)
+        self.select_bgm_vol = QSpinBox()
+        self.select_bgm_vol.setRange(0, 100)
+        self.select_bgm_vol.setSuffix(" %")
+        self.select_bgm_vol.setValue(
+            int(round(float(cfg.get("player_select_bgm_volume", 0.6) or 0.0) * 100)))
+        vol_label = QLabel("音量")
+        form.addRow(vol_label, self.select_bgm_vol)
+        self._bind_enabled(self.select_bgm_check, vol_label, self.select_bgm_vol)
+        form.addRow(self._hint(
+            "NeoTJAPlayer で譜面を開く前の画面に流れる曲の音量です。"
+            "曲の音量に対する比率で、100% なら譜面と同じ音量になります。"))
+
         outer.addStretch()
         return w
 
@@ -886,6 +903,8 @@ class SettingsDialog(QDialog):
         cfg["audio_output_device"] = self.audio_device_combo.currentData() or ""
         cfg["wireless_offset_enabled"] = self.wireless_check.isChecked()
         cfg["wireless_offset_ms"] = float(self.wireless_spin.value())
+        cfg["player_select_bgm"] = self.select_bgm_check.isChecked()
+        cfg["player_select_bgm_volume"] = self.select_bgm_vol.value() / 100.0
 
         # 見本を描くのに使っている辞書をそのまま入れる。二か所で並べると
         # 片方に足し忘れて「見本では変わるのに保存されない」ことになる。
@@ -905,7 +924,7 @@ class SettingsDialog(QDialog):
             "・カスタムショートカット (Alt+0〜9 の10個)\n"
             "・フォント / リサイズ / 編集 / 譜面プレビュー / 連打の計算\n"
             "・動画の保存先\n"
-            "・音声 (出力デバイス、打音のWAVパス、ワイヤレス調整)\n"
+            "・音声 (出力デバイス、打音のWAVパス、ワイヤレス調整、選曲画面のBGM)\n"
             "・ネームプレート (名前・称号・段位)\n"
             "・実験的機能\n\n"
             "最近使ったファイルやウィンドウの位置など、この画面に無い項目は"

@@ -26,6 +26,7 @@ PLAYER_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "record_output_dir", "record_last_dir",
     "player_folders", "player_last_file", "player_select_bgm",
+    "player_select_bgm_volume",
     # ネームプレート。ここに書き忘れると、Player の環境設定で変えても
     # ファイルへ落ちず、次に描くときに古い値へ戻る(実際にそうなっていた)。
     "nameplate_name", "nameplate_title", "nameplate_title_type",
@@ -167,7 +168,22 @@ class PlayerCore:
         if not path.exists():
             return
         self.dock.set_audition(True)
+        self._apply_volume(select_bgm=True)
         self._start_audio(str(path), 0.0, loop=True)
+
+    def _apply_volume(self, select_bgm=False):
+        """曲の音量を掛け直す。
+
+        選曲画面の BGM だけ、設定の比率を掛けて控えめに鳴らす。待っている
+        あいだ流すものなので、譜面と同じ音量だとうるさい。譜面の試聴や本編に
+        移るときは掛けるのをやめて、元の音量へ戻す。"""
+        vol = float(self.cfg.get("preview_volume", 0.8) or 0.0)
+        if select_bgm:
+            vol *= float(self.cfg.get("player_select_bgm_volume", 0.6) or 0.0)
+        try:
+            self.dock.set_volume(max(0.0, min(1.0, vol)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def play_demo(self, path, demo_start):
         """譜面の音源を DEMOSTART から流す。終わったらまた同じ所から。
@@ -177,6 +193,7 @@ class PlayerCore:
         wave = _find_wave(path)
         if wave:
             self.dock.set_audition(True)
+            self._apply_volume()
             self._start_audio(wave, max(0.0, float(demo_start or 0.0)),
                               loop=True)
 
@@ -189,6 +206,7 @@ class PlayerCore:
         """
         # ここから先は本編。試聴モードを解く(譜面も一緒に走らせる)。
         self.dock.set_audition(False)
+        self._apply_volume()
         wave = self.dock._current_wave_path
         if not wave:
             return

@@ -14,7 +14,7 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom", "preview_speed", "waveform_window",
-    "player_select_bgm",
+    "player_select_bgm", "player_select_bgm_volume",
     # 更新で NeoTJAPlayer だけ入れ替えられなかったときの印。**次の起動で
     # 読み戻せないと意味が無い** — Editor 側は最新なので「更新の確認」は
     # 「最新です」と答えるだけで、Player を取りに行く道が無くなる。
@@ -180,6 +180,9 @@ def default_settings() -> dict:
         # NeoTJAPlayer の選曲画面で、譜面を開いていないあいだ BGM を流すか。
         # 音源は System の TNDE-R/Sounds/BGM/SongSelect.ogg。
         "player_select_bgm": True,
+        # 選曲画面の BGM の音量比率(0.0〜1.0)。曲の音量(preview_volume)に
+        # 掛けて使う。待っているあいだ流すものなので、曲より控えめが既定。
+        "player_select_bgm_volume": 0.6,
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         "player_update_pending": False,
