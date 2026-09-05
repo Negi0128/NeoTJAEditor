@@ -164,7 +164,7 @@ NAMEPLATE_PART_BADGE_1P_BLUE = (4, 57, 50, 50)
 NAMEPLATE_PART_BADGE_2P = (4, 111, 50, 50)
 NAMEPLATE_PART_PLATE = (2, 164, 219, 52)      # 名前の白い板
 NAMEPLATE_PART_DAN_BASE = (4, 944, 89, 25)    # 段位の黒い下地
-NAMEPLATE_PART_DAN_GOLD = (49, 1164, 39, 17)  # danGold の金線
+# 素材には danGold 用の金線(49, 1164, 39, 17)もあるが、使わない。
 #: 称号バー。titleType の 0..12 がこの順に並ぶ。
 #: 0 木目 / 1 金 / 2 紫 / 3..8 虹の各種 / 9..11 水色の各種 / 12 赤。
 NAMEPLATE_PART_TITLES = [
@@ -188,41 +188,47 @@ NAMEPLATE_LAYOUT = "tnde"
 #:   段位 x52..100、名前の白枠 x99..203、1P の丸 x8..53。
 #: tnde は素材そのままの大きさ(白い板が 217px 幅)で、今までの銘板の位置を
 #: 保ったまま上へ称号バーを足したもの。本家より横にかなり広い。
+#: *_text は、その枠の中心から見た文字のずれ (右, 下)。枠と字を別々に
+#: 動かせるようにしてある。
 NAMEPLATE_LAYOUTS = {
     "honke": {
         "title": (47, 305, 156, 23),
         "plate": (99, 327, 104, 26),
         "badge": (8, 308, 46, 46),
         "dan": (52, 327, 48, 26),
-        "dan_gold": (58, 346, 36, 6),
         "title_size": 13,
         "name_size": 17,
         "dan_size": 14,
+        "title_text": (0, 0),
+        "name_text": (0, 0),
+        "dan_text": (0, 0),
     },
     "tnde": {
-        "title": (22, 278, 213, 24),
+        "title": (3, 306, 213, 24),
         "plate": (-1, 304, 219, 52),
-        "badge": (0, 303, 50, 50),
-        "dan": (33, 317, 89, 25),
-        "dan_gold": (48, 337, 39, 8),
-        "title_size": 14,
-        "name_size": 24,
-        "dan_size": 15,
+        "badge": (1, 305, 50, 50),
+        "dan": (47, 328, 42, 25),
+        "title_size": 10,
+        "name_size": 15,
+        "dan_size": 16,
+        "title_text": (0, 0),
+        "name_text": (0, 0),
+        "dan_text": (0, 0),
     },
 }
 #: 段位と名前のあいだの空き(px)。
 NAMEPLATE_DAN_GAP = 3
 #: 名前を板の右端から離す量(px)。
 NAMEPLATE_NAME_PAD = 6
-NAMEPLATE_NAME_COLOR = "#111111"        # 本家は白地に黒文字
-NAMEPLATE_NAME_OUTLINE = "#ffffff"
-NAMEPLATE_NAME_OUTLINE_W = 0.0          # 0 なら縁取りしない
-NAMEPLATE_TITLE_COLOR = "#ffffff"
-NAMEPLATE_TITLE_OUTLINE = "#000000"
-NAMEPLATE_TITLE_OUTLINE_W = 3.0
-NAMEPLATE_DAN_COLOR = "#1a1a1a"
-NAMEPLATE_DAN_OUTLINE = "#ffffff"
-NAMEPLATE_DAN_OUTLINE_W = 2.5
+NAMEPLATE_NAME_COLOR = "#ffffff"        # 白文字に黒縁
+NAMEPLATE_NAME_OUTLINE = "#000000"
+NAMEPLATE_NAME_OUTLINE_W = 3.0          # 0 なら縁取りしない
+NAMEPLATE_TITLE_COLOR = "#000000"       # 称号は黒文字。縁取りなし
+NAMEPLATE_TITLE_OUTLINE = "#ffffff"
+NAMEPLATE_TITLE_OUTLINE_W = 0.0
+NAMEPLATE_DAN_COLOR = "#ffffff"         # 白文字に黒縁
+NAMEPLATE_DAN_OUTLINE = "#000000"
+NAMEPLATE_DAN_OUTLINE_W = 3.0
 #: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
 #: NamePlate_Title.png があればそれを称号バーとして貼る(帯も文字も焼き込ま
 #: れた1枚として扱うので、文字は書かない)。特別な称号用。
@@ -824,10 +830,12 @@ _TUNE_ITEMS = [
     ("plate", "銘板/名前の板", "rect"),
     ("badge", "銘板/1P の丸", "rect"),
     ("dan", "銘板/段位", "rect"),
-    ("dan_gold", "銘板/段位の金線", "rect"),
-    ("title_size", "銘板/称号の字", "size"),
-    ("name_size", "銘板/名前の字", "size"),
-    ("dan_size", "銘板/段位の字", "size"),
+    ("title_text", "銘板/称号の字の位置", "off"),
+    ("name_text", "銘板/名前の字の位置", "off"),
+    ("dan_text", "銘板/段位の字の位置", "off"),
+    ("title_size", "銘板/称号の字の大きさ", "size"),
+    ("name_size", "銘板/名前の字の大きさ", "size"),
+    ("dan_size", "銘板/段位の字の大きさ", "size"),
 ]
 #: 起動時の値。Ctrl+Shift+0 でここへ戻す。
 _TUNE_BASE = None
@@ -884,6 +892,8 @@ def tune_apply(tid, dx=0, dy=0, dw=0, dh=0, dsize=0):
         # 幅と高さは 1 未満にしない。0 にすると絵が消えて、戻す手が無くなる。
         lay[tid] = (v[0] + dx, v[1] + dy,
                     max(1, v[2] + dw), max(1, v[3] + dh))
+    elif isinstance(v, tuple):
+        lay[tid] = (v[0] + dx, v[1] + dy)
     else:
         lay[tid] = max(1, int(v) + dsize)
     return lay[tid]
@@ -904,8 +914,8 @@ def tune_dump():
              'NAMEPLATE_LAYOUTS["%s"] = {' % NAMEPLATE_LAYOUT]
     for key, val in _tune_layout().items():
         if isinstance(val, tuple):
-            lines.append('    "%s": (%d, %d, %d, %d),'
-                         % ((key,) + tuple(int(x) for x in val)))
+            lines.append('    "%s": (%s),'
+                         % (key, ", ".join(str(int(x)) for x in val)))
         else:
             lines.append('    "%s": %d,' % (key, val))
     lines.append("}")
@@ -1577,7 +1587,7 @@ class GameScreenWidget(QWidget):
         p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
 
     def _draw_plate_text(self, p, key, text, box, size, fill, outline,
-                         outline_w):
+                         outline_w, off=(0, 0)):
         """枠 box の中心に text を書く。字形は曲名と同じ勘亭流。
 
         枠より横に長くなる名前・称号は、はみ出さないよう横だけ詰める
@@ -1604,7 +1614,8 @@ class GameScreenWidget(QWidget):
         squeeze = 1.0 if r.width() <= avail or r.width() <= 0 else avail / r.width()
         p.save()
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.translate(box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+        p.translate(box[0] + box[2] / 2.0 + off[0],
+                    box[1] + box[3] / 2.0 + off[1])
         if squeeze != 1.0:
             p.scale(squeeze, 1.0)
         if outline_w > 0:
@@ -1644,7 +1655,36 @@ class GameScreenWidget(QWidget):
         name = data["name"][0]
         dan = data["dan"][0]
 
-        # --- 称号バー ---
+        # 重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。称号バーを
+        # 名前の板より手前に出す指定なので、板と段位を先に置く。
+
+        # --- 名前の板と名前 ---
+        # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
+        # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
+        self._draw_part(p, sheet, NAMEPLATE_PART_PLATE, lay["plate"])
+        box = lay["plate"]
+        if dan:
+            left = max(box[0], lay["dan"][0] + lay["dan"][2]
+                       + NAMEPLATE_DAN_GAP)
+            box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
+                   box[3])
+        self._draw_plate_text(p, "np_name", name, box,
+                              lay["name_size"], NAMEPLATE_NAME_COLOR,
+                              NAMEPLATE_NAME_OUTLINE, NAMEPLATE_NAME_OUTLINE_W,
+                              lay["name_text"])
+
+        # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
+        if dan:
+            box = lay["dan"]
+            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
+            d = data["danType"][0]
+            if 0 <= d < len(NAMEPLATE_PART_DANS):
+                self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
+            self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
+                                  NAMEPLATE_DAN_COLOR, NAMEPLATE_DAN_OUTLINE,
+                                  NAMEPLATE_DAN_OUTLINE_W, lay["dan_text"])
+
+        # --- 称号バー。板と段位より手前 ---
         if title or self._nameplate_title_image() is not None:
             img = self._nameplate_title_image()
             if img is not None:
@@ -1659,37 +1699,9 @@ class GameScreenWidget(QWidget):
                 self._draw_plate_text(
                     p, "np_title", title, lay["title"], lay["title_size"],
                     NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
-                    NAMEPLATE_TITLE_OUTLINE_W)
+                    NAMEPLATE_TITLE_OUTLINE_W, lay["title_text"])
 
-        # --- 名前の板と名前 ---
-        # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
-        # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
-        self._draw_part(p, sheet, NAMEPLATE_PART_PLATE, lay["plate"])
-        box = lay["plate"]
-        if dan:
-            left = max(box[0], lay["dan"][0] + lay["dan"][2]
-                       + NAMEPLATE_DAN_GAP)
-            box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
-                   box[3])
-        self._draw_plate_text(p, "np_name", name, box,
-                              lay["name_size"], NAMEPLATE_NAME_COLOR,
-                              NAMEPLATE_NAME_OUTLINE, NAMEPLATE_NAME_OUTLINE_W)
-
-        # --- 段位。黒い下地・飾り・金線を重ねてから字を乗せる ---
-        if dan:
-            box = lay["dan"]
-            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
-            d = data["danType"][0]
-            if 0 <= d < len(NAMEPLATE_PART_DANS):
-                self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
-            if data["danGold"][0]:
-                self._draw_part(p, sheet, NAMEPLATE_PART_DAN_GOLD,
-                                lay["dan_gold"])
-            self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
-                                  NAMEPLATE_DAN_COLOR, NAMEPLATE_DAN_OUTLINE,
-                                  NAMEPLATE_DAN_OUTLINE_W)
-
-        # --- 1P の丸。名前の板に重なるので最後 ---
+        # --- 1P の丸。いちばん手前 ---
         self._draw_part(p, sheet, NAMEPLATE_PART_BADGE_1P, lay["badge"])
 
     def _load_gauge_rainbow(self):
