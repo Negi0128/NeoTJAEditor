@@ -118,12 +118,15 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 #   加算文字    右端 176.7(合計と**同じ**)  字の上端 160.0
 # 右端は両方とも同じなので、加算も SCORE_RIGHT を使う。
 SCORE_RIGHT, SCORE_Y = 174, 198      # スコアは右詰め
+# ふだんの大きさ。点が入った瞬間だけ SCORE_POP_PEAK まで上へ伸びて戻る。
 SCORE_SCALE = 0.98
-#: 点が入った瞬間、合計スコアが上へ跳ねる高さ(px)。伸縮ではなく**移動**なので
-#: 数字の絵は変わらない(倍率ごとのキャッシュも1つで済む)。
-SCORE_HOP_UP = 4.0
-#: 跳ねて戻るまで。
-SCORE_HOP_SEC = 0.14
+#: 伸びきったところの倍率(= 以前のふだんの大きさ)。
+SCORE_POP_PEAK = 1.02
+#: 伸びて戻るまで。**点が入ったその瞬間から**始まる。
+SCORE_POP_SEC = 0.14
+#: 伸縮の刻み。数字の絵は倍率ごとに切り出してキャッシュしているので、連続値
+#: のままだとキャッシュが際限なく増える。0.01 刻みなら多くても数個で収まる。
+SCORE_POP_STEP = 0.01
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
 SCORE_ADVANCE = 0.73
@@ -1661,23 +1664,28 @@ class GameScreenWidget(QWidget):
         self._digit_cache[key] = out
         return out
 
-    def _score_hop(self, now):
-        """合計スコアが上へ跳ねている量(px)。跳ねていなければ 0。
+    def _score_pop(self, now):
+        """合計スコアの伸び具合(1.0 = ふだん)。
 
-        点が入った**その瞬間**から SCORE_HOP_SEC かけて、SCORE_HOP_UP まで
-        上がって戻る。伸縮ではなく移動なので、数字の絵はそのまま使える。"""
+        点が入った**その瞬間**から SCORE_POP_SEC かけて、SCORE_POP_PEAK まで
+        上へ伸びて戻る。
+
+        **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
+        ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
         if self._score_timeline is None or self._lite:
-            return 0.0
+            return 1.0
         try:
             ev = self._score_timeline.last_event(now)
         except Exception:  # noqa: BLE001
-            return 0.0
+            return 1.0
         if ev is None:
-            return 0.0
+            return 1.0
         el = now - ev[0]
-        if not (0.0 <= el < SCORE_HOP_SEC):
-            return 0.0
-        return SCORE_HOP_UP * math.sin(math.pi * el / SCORE_HOP_SEC)
+        if not (0.0 <= el < SCORE_POP_SEC):
+            return 1.0
+        peak = SCORE_POP_PEAK / SCORE_SCALE
+        k = 1.0 + (peak - 1.0) * math.sin(math.pi * el / SCORE_POP_SEC)
+        return round(k / SCORE_POP_STEP) * SCORE_POP_STEP
 
     def _score_total_advance(self):
         """合計スコアの字送り(1枠の幅に対する割合)。
@@ -1695,13 +1703,18 @@ class GameScreenWidget(QWidget):
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
-        # 点が入った瞬間、上へ跳ねて戻る。
-        self._draw_digits(p, self._skin.get("score_digits"), score,
+        # 点が入った瞬間、上へ伸びて戻る。下端をそろえたまま倍率を上げるので、
+        # 伸びるのは上だけ。字送りは倍率の逆数を掛けて横幅を変えない。
+        sc = SCORE_SCALE * self._score_pop(now)
+        sheet = self._skin.get("score_digits")
+        dy = 0.0
+        if sheet is not None and sc != SCORE_SCALE:
+            dy = (sheet.height() / 3.0) * (SCORE_SCALE - sc)
+        self._draw_digits(p, sheet, score,
                           cols=10, rows=3, row=0,
-                          advance=self._score_total_advance(),
-                          right=SCORE_RIGHT,
-                          y=int(SCORE_Y - self._score_hop(now)),
-                          scale=SCORE_SCALE, y_offsets=SCORE_DIGIT_Y_OFF)
+                          advance=self._score_total_advance() * SCORE_SCALE / sc,
+                          right=SCORE_RIGHT, y=int(SCORE_Y + dy), scale=sc,
+                          y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
         # 軽量では出さない。要るのは「いま何点か」であって、加算の演出は
