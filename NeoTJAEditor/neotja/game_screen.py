@@ -1390,20 +1390,31 @@ class NameplateRenderer:
         # --- 称号バー。板と段位より手前 ---
         img = self._title_image()
         if title or img is not None:
+            # 帯は「絵の差し替え」か「素材の色帯」のどちらか。
             if img is not None:
-                p.drawPixmap(QRectF(*lay["title"]), img,
+                # 絵は枠いっぱいに引き伸ばす。縦横比が枠と違う絵のために、
+                # 置き場と大きさを設定からずらせるようにしてある。
+                b = lay["title"]
+                off = data.get("titleImageOff") or (0, 0)
+                grow = data.get("titleImageGrow") or (0, 0)
+                p.drawPixmap(QRectF(b[0] + off[0], b[1] + off[1],
+                                    max(1, b[2] + grow[0]),
+                                    max(1, b[3] + grow[1])), img,
                              QRectF(0, 0, img.width(), img.height()))
             else:
                 t = int(data.get("titleType", 0))
                 if not 0 <= t < len(parts["titles"]):
                     t = 0
                 self._part(p, parts["titles"][t], lay["title"])
-                off, size = self._adjust(lay["title_text"], data,
-                                         "titleOff", "titleSize",
-                                         lay["title_size"])
-                self._text(p, "np_title", title, lay["title"], size,
-                           NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
-                           lay["title_line"], off, lay["title_space"])
+            # 文字は帯の上に書く。絵は「背景」の扱いなので、1枚の帯を
+            # いろいろな称号に使い回せる。文字まで描き込んだ絵を使うときは、
+            # 称号を空欄にすれば何も書かれない。
+            off, size = self._adjust(lay["title_text"], data,
+                                     "titleOff", "titleSize",
+                                     lay["title_size"])
+            self._text(p, "np_title", title, lay["title"], size,
+                       NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
+                       lay["title_line"], off, lay["title_space"])
 
         # --- 1P の丸。いちばん手前 ---
         self._part(p, parts["badge"], lay["badge"])
@@ -1455,6 +1466,10 @@ def nameplate_data_from(cfg):
         "title": str(get("nameplate_title")),
         "titleType": int(get("nameplate_title_type") or 0),
         "titleImage": str(get("nameplate_title_image")),
+        "titleImageOff": (int(get("nameplate_title_image_dx")),
+                          int(get("nameplate_title_image_dy"))),
+        "titleImageGrow": (int(get("nameplate_title_image_dw")),
+                           int(get("nameplate_title_image_dh"))),
         "dan": str(get("nameplate_dan")),
         "danType": int(get("nameplate_dan_type") or 0),
         "danTextColor": str(get("nameplate_dan_text_color")),

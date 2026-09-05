@@ -34,6 +34,8 @@ PLAYER_KEYS = (
     "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
     "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
+    "nameplate_title_image_dx", "nameplate_title_image_dy",
+    "nameplate_title_image_dw", "nameplate_title_image_dh",
 )
 
 

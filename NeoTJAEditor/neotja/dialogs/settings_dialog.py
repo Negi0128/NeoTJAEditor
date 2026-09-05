@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
@@ -11,6 +11,21 @@ from neotja import theme as theme_mod
 
 #: メッセージ内の改行。
 LF = chr(10)
+
+
+class _NoWheel(QObject):
+    """ホイールで値が変わるのを止める見張り。
+
+    数値入力や選択肢の上でホイールを回すと、この画面ではスクロールのつもりが
+    値のほうが変わってしまう。画面が縦に長くスクロールしながら見るので、
+    通りすがりに設定を書き換えてしまう事故が起きやすい。ホイールは常に
+    スクロールへ回し、値は矢印キーか直接入力で変える。"""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel:
+            event.ignore()
+            return True
+        return False
 
 
 class SettingsDialog(QDialog):
@@ -37,6 +52,8 @@ class SettingsDialog(QDialog):
         "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
         "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
         "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
+        "nameplate_title_image_dx", "nameplate_title_image_dy",
+        "nameplate_title_image_dw", "nameplate_title_image_dh",
         # 起動時の案内。これは初期化で戻してよい(戻ると「知らせる」= 既定)。
         "warn_missing_system",
     )
@@ -64,6 +81,14 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_nameplate_tab()), "ネームプレート")
         tabs.addTab(self._scrollable(self._build_developer_tab()), "開発者用")
         tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
+
+        # 数値入力と選択肢は、ホイールで値が変わらないようにする。
+        # 全タブを作り終えてからまとめて掛ける(作る順に依存しない)。
+        self._no_wheel = _NoWheel(self)
+        for kind in (QSpinBox, QDoubleSpinBox, QComboBox):
+            for w in self.findChildren(kind):
+                w.installEventFilter(self._no_wheel)
+                w.setFocusPolicy(Qt.StrongFocus)
 
         btn_row = QHBoxLayout()
         btn_reset = QPushButton("初期化")
@@ -486,6 +511,27 @@ class SettingsDialog(QDialog):
         outer.addStretch()
         return w
 
+    def _rect_rows(self, form, prefix, val, pos_label, size_label):
+        """絵の「置き場のずらし」と「大きさに足す量」の行を足す。
+
+        絵の縦横比が帯の枠と違うときに、手で詰められるようにするもの。
+        4つとも 0 なら帯の枠にぴったり合わせる(これまでどおり)。"""
+        spins = []
+        for label, keys, names in ((pos_label, ("_dx", "_dy"), ("右", "下")),
+                                   (size_label, ("_dw", "_dh"), ("幅", "高さ"))):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            for key, name in zip(keys, names):
+                sp = QSpinBox()
+                sp.setRange(-400, 400)
+                sp.setValue(int(val(prefix + key)))
+                row_layout.addWidget(QLabel(name))
+                row_layout.addWidget(sp, 1)
+                spins.append(sp)
+            form.addRow(label, row)
+        return tuple(spins)
+
     def _text_rows(self, form, prefix, val):
         """文字の「位置」と「大きさ」の行を足す。戻り値は作った入力欄3つ。
 
@@ -575,10 +621,14 @@ class SettingsDialog(QDialog):
 
         form.addRow("画像で置き換え",
                     self._path_row(self.np_title_image_edit, browse_title_image))
+        (self.np_title_img_dx, self.np_title_img_dy,
+         self.np_title_img_dw, self.np_title_img_dh) = self._rect_rows(
+            form, "nameplate_title_image", val, "画像の位置", "画像の大きさ")
         form.addRow(self._hint(
-            "画像を指定すると、帯の色と称号の文字は出さず、その画像を帯として"
-            "そのまま貼ります。帯も文字も焼き込んだ1枚を用意してください。"
-            "特別な称号向けです。空にすると上の色と文字に戻ります。"))
+            "画像を指定すると、帯の色の代わりにその画像を帯として貼ります。"
+            "画像は背景の扱いで、称号の文字は上の入力どおりに書かれるので、"
+            "帯1枚をいろいろな称号に使い回せます。文字まで描き込んだ画像を"
+            "使うときは、称号を空欄にしてください。"))
 
         form = self._group(outer, "名前")
         self.np_name_edit = QLineEdit(str(val("nameplate_name")))
@@ -616,7 +666,9 @@ class SettingsDialog(QDialog):
         for combo in (self.np_title_type_combo, self.np_dan_combo,
                       self.np_dan_type_combo, self.np_dan_text_combo):
             combo.currentIndexChanged.connect(self._update_nameplate_preview)
-        for spin in (self.np_title_dx, self.np_title_dy, self.np_title_size,
+        for spin in (self.np_title_img_dx, self.np_title_img_dy,
+                     self.np_title_img_dw, self.np_title_img_dh,
+                     self.np_title_dx, self.np_title_dy, self.np_title_size,
                      self.np_name_dx, self.np_name_dy, self.np_name_size,
                      self.np_dan_dx, self.np_dan_dy, self.np_dan_size):
             spin.valueChanged.connect(self._update_nameplate_preview)
@@ -639,6 +691,10 @@ class SettingsDialog(QDialog):
             "nameplate_title": self.np_title_edit.text(),
             "nameplate_title_type": int(self.np_title_type_combo.currentData()),
             "nameplate_title_image": self.np_title_image_edit.text(),
+            "nameplate_title_image_dx": self.np_title_img_dx.value(),
+            "nameplate_title_image_dy": self.np_title_img_dy.value(),
+            "nameplate_title_image_dw": self.np_title_img_dw.value(),
+            "nameplate_title_image_dh": self.np_title_img_dh.value(),
             "nameplate_dan": str(self.np_dan_combo.currentData() or ""),
             "nameplate_dan_type": int(self.np_dan_type_combo.currentData()),
             "nameplate_dan_text_color": str(self.np_dan_text_combo.currentData()),
@@ -687,6 +743,8 @@ class SettingsDialog(QDialog):
         """部品シートが無いときに灰色にする入力欄。"""
         return (self.np_title_edit, self.np_title_type_combo,
                 self.np_title_image_edit, self.np_name_edit,
+                self.np_title_img_dx, self.np_title_img_dy,
+                self.np_title_img_dw, self.np_title_img_dh,
                 self.np_dan_combo, self.np_dan_type_combo,
                 self.np_dan_text_combo,
                 self.np_title_dx, self.np_title_dy, self.np_title_size,

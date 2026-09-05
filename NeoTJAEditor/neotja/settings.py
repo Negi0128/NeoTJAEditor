@@ -38,6 +38,8 @@ _SETTINGS_KEYS = (
     "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
     "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
+    "nameplate_title_image_dx", "nameplate_title_image_dy",
+    "nameplate_title_image_dw", "nameplate_title_image_dh",
 )
 
 
@@ -78,6 +80,12 @@ def default_settings() -> dict:
         # 称号バーを丸ごと差し替える絵。空 = 使わない。帯も文字も焼き込んだ
         # 1枚として貼るので、指定すると上の色と文字は出ない。
         "nameplate_title_image": "",
+        # 称号の背景画像の置き方。帯の枠からのずらし(右, 下)と、
+        # 幅・高さに足す量。絵の縦横比が枠と違うときに詰めるためのもの。
+        "nameplate_title_image_dx": 0,
+        "nameplate_title_image_dy": 0,
+        "nameplate_title_image_dw": 0,
+        "nameplate_title_image_dh": 0,
         # 段位。空 = 段位を出さない。NAMEPLATE_DAN_NAMES から選ぶ。
         "nameplate_dan": "",
         # 段位の背景。NAMEPLATE_DAN_TYPES の値。
