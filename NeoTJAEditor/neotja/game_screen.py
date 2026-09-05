@@ -1618,8 +1618,8 @@ class GameScreenWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
-                     right=None, left=None, y=0, scale=1.0, advance=1.0,
-                     y_offsets=None):
+                     right=None, left=None, y=0, scale=1.0, scale_y=None,
+                     advance=1.0, y_offsets=None):
         """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。
 
         advance は「次の字までどれだけ送るか」を1文字枠に対する割合で指定する。
@@ -1634,15 +1634,18 @@ class GameScreenWidget(QWidget):
         # 0-9 を「切り出し済み・指定倍率へ縮小済み」でキャッシュしておく。倍率は
         # どの呼び出しでも定数なので毎フレーム変倍する必要がない(スコア+コンボ+
         # 連打数で1フレーム十数回の変倍 blit になっていた)。
-        glyphs = self._digit_glyphs(sheet, cols, rows, row, scale)
+        glyphs = self._digit_glyphs(sheet, cols, rows, row, scale, scale_y)
         for c in s:
             i = int(c)
             dy = (y_offsets or {}).get(i, 0)
             p.drawPixmap(int(x), int(y) + dy, glyphs[i])
             x += step
 
-    def _digit_glyphs(self, sheet, cols, rows, row, scale):
+    def _digit_glyphs(self, sheet, cols, rows, row, scale, scale_y=None):
         """数字シートの1行を、指定倍率で縮小済みの 0-9 のリストにして返す。
+
+        scale_y を渡すと縦だけ別倍率にできる(合計スコアが上へ伸びるとき、
+        横幅は変えたくないため。実機も幅は変わらない)。
 
         描画サイズは従来の QRect(int(w)+1, int(h)+1) と同一にしてあるので
         見た目は変わらない。素材もレイアウトも実行中に変わらないため使い回せる。"""
@@ -1654,14 +1657,15 @@ class GameScreenWidget(QWidget):
         # (スコア+コンボ+連打数で1コマ十数回)。実寸を dpr 倍で作って
         # setDevicePixelRatio を立てれば、論理サイズは同じまま等倍で貼れる。
         dpr = max(1.0, float(getattr(self, "_dpr", 1.0)))
+        sy = float(scale if scale_y is None else scale_y)
         key = (sheet.cacheKey(), cols, rows, row, round(float(scale), 4),
-               round(dpr, 4))
+               round(sy, 4), round(dpr, 4))
         got = self._digit_cache.get(key)
         if got is not None:
             return got
         cw, ch = sheet.width() / cols, sheet.height() / rows
         # 論理サイズは従来どおり int(cw*scale)+1。実寸だけ dpr 倍にする。
-        dw, dh = int(cw * scale) + 1, int(ch * scale) + 1
+        dw, dh = int(cw * scale) + 1, int(ch * sy) + 1
         out = []
         for i in range(10):
             cell = sheet.copy(QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
@@ -1716,17 +1720,19 @@ class GameScreenWidget(QWidget):
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
-        # 点が入った瞬間、上へ伸びて戻る。下端をそろえたまま倍率を上げるので、
-        # 伸びるのは上だけ。字送りは倍率の逆数を掛けて横幅を変えない。
-        sc = SCORE_SCALE * self._score_pop(now)
+        # 点が入った瞬間、上へ伸びて戻る。**伸ばすのは縦だけ。** 実機も幅は
+        # 変わらない(実測: 高さ 34->40 のあいだ、幅は 110 のまま)。下端を
+        # そろえたまま縦の倍率を上げるので、伸びるのは上だけになる。
+        sy = SCORE_SCALE * self._score_pop(now)
         sheet = self._skin.get("score_digits")
         dy = 0.0
-        if sheet is not None and sc != SCORE_SCALE:
-            dy = (sheet.height() / 3.0) * (SCORE_SCALE - sc)
+        if sheet is not None and sy != SCORE_SCALE:
+            dy = (sheet.height() / 3.0) * (SCORE_SCALE - sy)
         self._draw_digits(p, sheet, score,
                           cols=10, rows=3, row=0,
-                          advance=self._score_total_advance() * SCORE_SCALE / sc,
-                          right=SCORE_RIGHT, y=int(SCORE_Y + dy), scale=sc,
+                          advance=self._score_total_advance(),
+                          right=SCORE_RIGHT, y=int(SCORE_Y + dy),
+                          scale=SCORE_SCALE, scale_y=sy,
                           y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
