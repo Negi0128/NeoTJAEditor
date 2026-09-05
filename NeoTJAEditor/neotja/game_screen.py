@@ -412,6 +412,10 @@ GAUGE_PULSE_HALF_SEC = 6.0 / 60.0
 # ハイライト(白っぽい 4px)を通常圏の上端ハイライトへ重ねるため。
 GAUGE_GOLD_SRC = (546, 0, 140, 22)
 # 叩いた音符が判定円から魂ゲージへ飛ぶ演出。レーンの外まで出るので画面側で描く。
+#: 軽量(音声波形・情報も同じ)のとき、飛んだ音符が消えきるまでの割合。
+#: 0.65 なら飛行時間の 65% で消える。魂ゲージを描いていないので、着く前に
+#: 消しておかないと「画面の右上へ吸い込まれる」だけの絵になる。
+SOUL_FLY_LITE_FADE = 0.65
 SOUL_FLY_SEC = 0.42
 # 弧のてっぺん(道のりの半分の地点)が通る点。y=0 なら音符の中心が画面の
 # 上端に来る = 半分だけ画面の外へ出る。x は左右の膨らみの偏り — 判定円
@@ -2411,8 +2415,6 @@ class GameScreenWidget(QWidget):
 
         **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
         ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
-        if self._lite:
-            return 1.0
         try:
             hits = self.chart_preview.recent_hits(now, COMBO_POP_SEC)
         except Exception:  # noqa: BLE001
@@ -2497,7 +2499,7 @@ class GameScreenWidget(QWidget):
 
         **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
         ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
-        if self._score_timeline is None or self._lite:
+        if self._score_timeline is None:
             return 1.0
         try:
             ev = self._score_timeline.last_event(now)
@@ -2559,9 +2561,10 @@ class GameScreenWidget(QWidget):
                           y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
-        # 軽量では出さない。要るのは「いま何点か」であって、加算の演出は
-        # スコアそのものを見れば分かる情報の重ね描きでしかない。
-        if SHOW_SCORE_GAIN and self._score_timeline is not None and not self._lite:
+        # 軽量でも出す。スコアの見え方はモードで変わらないほうがよい、という
+        # 要望。左パネルの中だけで完結する演出なので、下の背景や魂ゲージを
+        # 落とすのとは事情が違う。
+        if SHOW_SCORE_GAIN and self._score_timeline is not None:
             # **重なるぶんは重ねる。** 古い順に描くので、新しいものほど手前。
             # ふつうの密度の譜面は音符が 0.1 秒おきに来るし、連打を叩いて
             # いる間はもっと詰まるので、1枚しか出さないと点滅して見える。
@@ -2750,6 +2753,10 @@ class GameScreenWidget(QWidget):
 
         並びは元のまま「弾け → 魂の文字」。弾けのほうが後ろになる。
         ox/oy は板の左上。"""
+        # 軽量(音声波形・情報も同じ)では魂ゲージそのものを描いていない。
+        # 弾けと「魂」だけが宙に浮くので、こちらも出さない。
+        if self._lite:
+            return
         try:
             now = self.chart_preview.game_state()[0]
         except Exception:  # noqa: BLE001
@@ -2818,10 +2825,9 @@ class GameScreenWidget(QWidget):
         描く。ox/oy は描き先の板の左上。持ち回る状態は無く、その時刻に
         飛んでいる音符を毎回引き直すだけなので、シークしても止めても
         矛盾しない。"""
-        # 軽量では出さない。行き先の魂ゲージごと描いていないので、飛んだ先に
-        # 何も無い(音符が画面の右上へ吸い込まれて消えるだけの絵になる)。
-        if self._lite:
-            return
+        # 軽量(音声波形・情報も同じ)では魂ゲージを描いていないので、飛んだ先に
+        # 何も無い。飛ばすのはやめず、**着く前に薄れて消える**ようにする。
+        lite = self._lite
         cp = self.chart_preview
         try:
             now = cp.game_state()[0]
@@ -2854,10 +2860,20 @@ class GameScreenWidget(QWidget):
                 u = 1.0 - q
                 x = u * u * sx + 2 * u * q * cx + q * q * ex
                 y = u * u * sy + 2 * u * q * cy + q * q * ey
-                p.setOpacity(1.0)
+                if lite:
+                    # 行き先が無いので、途中で薄れて消える。飛びきってから
+                    # 唐突に消えると「吸い込まれた」ように見えるため。
+                    a = 1.0 - q / SOUL_FLY_LITE_FADE
+                    if a <= 0.0:
+                        continue
+                    p.setOpacity(min(1.0, a))
+                else:
+                    p.setOpacity(1.0)
                 blit_fitted(p, x - w / 2.0 - ox, y - h / 2.0 - oy, w, h,
                             sprite, dpr, dev_off)
                 continue
+            if lite:
+                continue        # 着弾は無い(魂が無いので)
             # --- 着弾後。魂の上に残しつつ、白へ寄せながら消す ---
             t = (elapsed - SOUL_FLY_SEC) / SOUL_LAND_SEC
             if t >= 1.0:
