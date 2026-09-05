@@ -200,6 +200,9 @@ NAMEPLATE_LAYOUTS = {
         "dan_size": 14,
         "title_text": (0, 0),
         "name_text": (0, 0),
+        # 段位を出さないときの名前の位置。段位があるときは名前の枠が段位の
+        # 右へ寄るので、同じずらし量では真ん中に来ない。
+        "name_text_nodan": (0, 0),
         "dan_text": (0, 0),
         "title_space": 0,
         "name_space": 0,
@@ -220,6 +223,7 @@ NAMEPLATE_LAYOUTS = {
         # 称号バーが名前の板の上半分に重なる置き方なので、名前は下へ逃がす。
         "title_text": (14, 0),
         "name_text": (-8, 11),
+        "name_text_nodan": (9, 11),
         "dan_text": (-1, 0),
         # 字と字のあいだを広げる量(px)。段位は2文字しかなく詰まって見える。
         "title_space": 0,
@@ -877,6 +881,7 @@ _TUNE_ITEMS = [
     ("dan_back", "ネームプレート/段位の裏の黒", "rect"),
     ("title_text", "ネームプレート/称号の字の位置", "off"),
     ("name_text", "ネームプレート/名前の字の位置", "off"),
+    ("name_text_nodan", "ネームプレート/名前の字の位置(段位なし)", "off"),
     ("dan_text", "ネームプレート/段位の字の位置", "off"),
     ("title_size", "ネームプレート/称号の字の大きさ", "size"),
     ("name_size", "ネームプレート/名前の字の大きさ", "size"),
@@ -1075,6 +1080,286 @@ def _column_centers(img, smooth=_BAND_SMOOTH):
     return out
 
 
+def bake_text(p, cache, key, path, outline_color, outline_w, fill_color):
+    """縁取りした文字を1枚の絵に焼いて、次からはそれを貼るだけにする。
+
+    **毎コマ縁取りしていたのを見直した。** 文字の輪郭を線でなぞる
+    strokePath は 1回 0.9ms かかり、曲名とネームプレートで毎フレーム2回呼んで
+    いた(実測: 1491コマで strokePath だけ 1.33 秒)。中身は変わらない
+    のだから、1回焼いて貼れば済む。
+
+    焼く倍率は painter の現在の倍率に合わせる。表示倍率を下げたときや
+    録画(1.5倍)でも輪郭が甘くならないようにするため。倍率ごとに別の
+    1枚を持つ(静的レイヤーと同じ考え方)。
+
+    戻り値は (絵, 貼る位置)。焼けなければ None。
+    """
+    try:
+        scale = float(p.transform().m11()) or 1.0
+    except Exception:  # noqa: BLE001
+        scale = 1.0
+    scale = max(0.25, min(4.0, scale))
+    ck = (key, round(scale, 3))
+    hit = cache.get(ck)
+    if hit is not None:
+        return hit
+    r = path.boundingRect().adjusted(-outline_w, -outline_w,
+                                     outline_w, outline_w)
+    w = max(1, int(math.ceil(r.width() * scale)))
+    h = max(1, int(math.ceil(r.height() * scale)))
+    if w > 4096 or h > 4096:
+        return None
+    img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    q = QPainter(img)
+    q.setRenderHint(QPainter.Antialiasing, True)
+    q.scale(scale, scale)
+    q.translate(-r.x(), -r.y())
+    q.strokePath(path, QPen(QColor(outline_color), outline_w,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    q.fillPath(path, _text_brush(fill_color, path.boundingRect()))
+    q.end()
+    pm = QPixmap.fromImage(img)
+    pm.setDevicePixelRatio(scale)
+    hit = (pm, QPointF(r.x(), r.y()))
+    cache[ck] = hit
+    return hit
+
+
+class NameplateRenderer:
+    """ネームプレートを描く。ゲーム画面と、環境設定の見本の両方で使う。
+
+    ウィジェットから切り離してあるのは、環境設定に「こう出ます」の見本を
+    出すため。見本のためだけにゲーム画面を丸ごと作るのは重すぎる
+    (背景・踊り子・音符…と全部の素材を読むことになる)。
+
+    使う側は sheet(部品シート)・family(字形)・data(中身)を入れてから
+    draw() を呼ぶ。data の形は GameScreenWidget._nameplate_data() と同じ。"""
+
+    def __init__(self):
+        self.sheet = None
+        self.family = None
+        self.data = None
+        self.layout = None      # None なら NAMEPLATE_LAYOUT の配置を使う
+        self._paths = {}
+        self._baked = {}
+        self._title_pm = False
+        self._title_src = None
+
+    def invalidate(self):
+        """覚えている字形と焼いた絵を捨てる。字形を差し替えたときに呼ぶ。"""
+        self._paths.clear()
+        self._baked.clear()
+        self._title_pm = False
+
+    # -- 部品 --------------------------------------------------------
+    def _part(self, p, rect, dest):
+        if self.sheet is None:
+            return
+        p.drawPixmap(QRectF(*dest), self.sheet, QRectF(*rect))
+
+    def _title_image(self):
+        """称号バーを丸ごと差し替える絵。指定が無ければ None。"""
+        src = (self.data or {}).get("titleImage") or ""
+        if self._title_pm is not False and src == self._title_src:
+            return self._title_pm
+        self._title_src = src
+        self._title_pm = None
+        if src and os.path.exists(src):
+            pm = QPixmap(src)
+            if not pm.isNull():
+                self._title_pm = pm
+        return self._title_pm
+
+    def _text(self, p, key, text, box, size, fill, outline, outline_w,
+              off=(0, 0), spacing=0):
+        """枠 box の中心に text を書く。字形は曲名と同じ勘亭流。
+
+        枠より横に長くなる名前・称号は、はみ出さないよう横だけ詰める
+        (縦は詰めない — 高さが揃わないと行が波打って見える)。"""
+        if not text:
+            return
+        # 大きさ・字間・縁の太さ・色を変えたら描き直す。key だけで覚えると
+        # 変えても古い絵が出る。
+        ck = (key, text, int(size), int(spacing), round(float(outline_w), 1),
+              fill if isinstance(fill, str) else id(fill))
+        path = self._paths.get(ck)
+        if path is None:
+            f = QFont(self.family) if self.family else QFont()
+            f.setPixelSize(int(size))
+            if spacing:
+                f.setLetterSpacing(QFont.AbsoluteSpacing, float(spacing))
+            path = QPainterPath()
+            path.addText(QPointF(0.0, 0.0), f, text)
+            # 原点は文字送りの基準(ベースライン左端)なので、そのままでは
+            # 上下も左右もずれる。**実際に描かれる外形**の中心を原点へ寄せて
+            # おき、貼るときに枠の中心へ移す。
+            r = path.boundingRect()
+            path.translate(-r.center().x(), -r.center().y())
+            self._paths[ck] = path
+        r = path.boundingRect()
+        avail = box[2] - outline_w * 2.0
+        squeeze = 1.0 if r.width() <= avail or r.width() <= 0 else avail / r.width()
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.translate(box[0] + box[2] / 2.0 + off[0],
+                    box[1] + box[3] / 2.0 + off[1])
+        if squeeze != 1.0:
+            p.scale(squeeze, 1.0)
+        baked = (bake_text(p, self._baked, ck, path, outline, outline_w, fill)
+                 if outline_w > 0 else None)
+        if baked is None:
+            if outline_w > 0:
+                p.strokePath(path, QPen(QColor(outline), outline_w,
+                                        Qt.SolidLine, Qt.RoundCap,
+                                        Qt.RoundJoin))
+            p.fillPath(path, _text_brush(fill, path.boundingRect()))
+        else:
+            pm, at = baked
+            p.drawPixmap(at, pm)
+        p.restore()
+
+    # -- 本体 --------------------------------------------------------
+    def draw(self, p):
+        """1P ぶんを描く(この画面は1人用)。
+
+        重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。"""
+        lay = self.layout or NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
+        data = self.data
+        if self.sheet is None or lay is None or not data:
+            return
+        title = data.get("title", "")
+        name = data.get("name", "")
+        dan = data.get("dan", "")
+
+        # --- 名前の板と名前 ---
+        # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
+        # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
+        self._part(p, NAMEPLATE_PART_PLATE, lay["plate"])
+        box = lay["plate"]
+        if dan:
+            left = max(box[0], lay["dan"][0] + lay["dan"][2]
+                       + NAMEPLATE_DAN_GAP)
+            box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
+                   box[3])
+        self._text(p, "np_name", name, box, lay["name_size"],
+                   NAMEPLATE_NAME_COLOR, NAMEPLATE_NAME_OUTLINE,
+                   lay["name_line"],
+                   lay["name_text"] if dan else lay["name_text_nodan"],
+                   lay["name_space"])
+
+        # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
+        if dan:
+            box = lay["dan"]
+            # 黒い下地の素材は左下だけが角丸で、そのまま貼ると名前の板の白が
+            # 三角に覗く。先に枠を黒で塗りつぶしてから下地を重ねる。
+            pad = lay["dan_back"]
+            p.fillRect(QRectF(box[0] + pad[0], box[1] + pad[1],
+                              max(1, box[2] + pad[2]),
+                              max(1, box[3] + pad[3])),
+                       QColor(NAMEPLATE_DAN_BACK))
+            self._part(p, NAMEPLATE_PART_DAN_BASE, box)
+            d = int(data.get("danType", 0))
+            if 0 <= d < len(NAMEPLATE_PART_DANS):
+                self._part(p, NAMEPLATE_PART_DANS[d], box)
+            fill = (NAMEPLATE_DAN_COLOR
+                    if data.get("danTextColor") == "gold" else "#ffffff")
+            self._text(p, "np_dan", dan, box, lay["dan_size"], fill,
+                       NAMEPLATE_DAN_OUTLINE, lay["dan_line"],
+                       lay["dan_text"], lay["dan_space"])
+
+        # --- 称号バー。板と段位より手前 ---
+        img = self._title_image()
+        if title or img is not None:
+            if img is not None:
+                p.drawPixmap(QRectF(*lay["title"]), img,
+                             QRectF(0, 0, img.width(), img.height()))
+            else:
+                t = int(data.get("titleType", 0))
+                if not 0 <= t < len(NAMEPLATE_PART_TITLES):
+                    t = 0
+                self._part(p, NAMEPLATE_PART_TITLES[t], lay["title"])
+                self._text(p, "np_title", title, lay["title"],
+                           lay["title_size"], NAMEPLATE_TITLE_COLOR,
+                           NAMEPLATE_TITLE_OUTLINE, lay["title_line"],
+                           lay["title_text"], lay["title_space"])
+
+        # --- 1P の丸。いちばん手前 ---
+        self._part(p, NAMEPLATE_PART_BADGE_1P, lay["badge"])
+
+
+def load_title_font():
+    """曲名・ネームプレート用の勘亭流を読む。skin/ の .otf を優先し、無ければ
+    入っていそうな家族名を当たる。どれも無ければ None(既定の字形で描く)。"""
+    path = os.path.join(str(settings_mod.skin_dir()), TITLE_FONT_FILE)
+    if os.path.exists(path):
+        fid = QFontDatabase.addApplicationFont(path)
+        fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+        if fams:
+            return fams[0]
+    have = set(QFontDatabase.families())
+    for fam in TITLE_FONT_FALLBACKS:
+        if fam in have:
+            return fam
+    return None
+
+
+def nameplate_data_from(cfg):
+    """設定からネームプレートの中身を取り出す。描く側と見本で同じ形を使う。"""
+    d = settings_mod.default_settings()
+
+    def get(k):
+        return cfg.get(k, d[k]) if cfg else d[k]
+
+    return {
+        "name": str(get("nameplate_name")),
+        "title": str(get("nameplate_title")),
+        "titleType": int(get("nameplate_title_type") or 0),
+        "titleImage": str(get("nameplate_title_image")),
+        "dan": str(get("nameplate_dan")),
+        "danType": int(get("nameplate_dan_type") or 0),
+        "danTextColor": str(get("nameplate_dan_text_color")),
+    }
+
+
+def nameplate_preview(cfg, scale=2.0, renderer=None):
+    """環境設定に出す見本。ネームプレートだけを描いた絵を返す。
+
+    素材が用意できていなければ None。renderer を渡すと、字形の読み直しと
+    字形の覚え直しを省ける(入力のたびに作り直すのは重いため)。"""
+    lay = NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
+    if lay is None:
+        return None
+    r = renderer or NameplateRenderer()
+    if r.sheet is None:
+        sheet_path = os.path.join(str(settings_mod.skin_dir()),
+                                  "NamePlate_Parts.png")
+        if not os.path.exists(sheet_path):
+            return None
+        sheet = QPixmap(sheet_path)
+        if sheet.isNull():
+            return None
+        r.sheet = sheet
+        r.family = load_title_font()
+    r.data = nameplate_data_from(cfg)
+    # 使っている枠を全部くくった大きさで切り出す。配置を動かしても見本が
+    # 切れないように、実際の値から測る。
+    boxes = [lay[k] for k in ("title", "plate", "badge", "dan")]
+    x0 = min(b[0] for b in boxes) - 2
+    y0 = min(b[1] for b in boxes) - 2
+    x1 = max(b[0] + b[2] for b in boxes) + 2
+    y1 = max(b[1] + b[3] for b in boxes) + 2
+    out = QPixmap(int((x1 - x0) * scale), int((y1 - y0) * scale))
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    p.scale(scale, scale)
+    p.translate(-x0, -y0)
+    r.draw(p)
+    p.end()
+    return out
+
+
 class GameScreenWidget(QWidget):
     """1280x720(または上半分だけの 1280x360)の画面を組み立てる。
 
@@ -1124,14 +1409,14 @@ class GameScreenWidget(QWidget):
         self._chara = None
         self._title = ""
         self._title_family = None
-        # ネームプレートの字形(勘亭流のパス)。名前・称号・段位ぶんを名前で持つ。
-        self._plate_paths = {}
+        # ネームプレートを描くもの。環境設定の見本と同じ実装を使う。
+        self._np_renderer = NameplateRenderer()
         # ネームプレートの中身。最初に描くときに1回だけ読む。
         self._nameplate_json = None
         self._nameplate_epoch = -1
         # 称号バーの差し替え画像。False は「まだ探していない」、None は「無い」。
         self._nameplate_title_pm = False
-        # 焼いた文字の置き場(_baked_text)。倍率ごとに1枚。
+        # 焼いた文字の置き場(bake_text)。倍率ごとに1枚。
         self._text_cache = {}
 
         chart_preview.setParent(self)
@@ -1406,10 +1691,10 @@ class GameScreenWidget(QWidget):
         # ここで空にしていたせいで、素材の読み込みが set_chart より後になる
         # 経路(NeoTJAPlayer は初回の描画で素材を読む)では曲名が消えていた。
         # Editor は起動時に先読みするので、たまたま表に出ていなかっただけ。
-        self._title_family = self._load_title_font()
-        # ネームプレートの文字は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
-        # フォントが差し替わるここで捨てて、次の描画で組み直させる。
-        self._plate_paths = {}
+        self._title_family = load_title_font()
+        # ネームプレートの文字は毎フレーム描くので、字形(パス)だけは1回
+        # 作って使い回す。字形が差し替わるここで捨てて、次の描画で組み直させる。
+        self._np_renderer.invalidate()
 
     def draw_chara_front(self, p, ox=0, oy=0):
         """風船中のどんちゃんだけを、レーンより手前に描く。
@@ -1526,65 +1811,7 @@ class GameScreenWidget(QWidget):
             return
         p.drawPixmap(CHARA_ANCHOR[0] - box[0], CHARA_ANCHOR[1] - box[3], pm)
 
-    def _load_title_font(self):
-        """曲名用の勘亭流を読む。skin/ の .otf を優先し、無ければ入って
-        いそうな家族名を当たる。どれも無ければ None(既定のフォントで描く)。"""
-        path = os.path.join(str(settings_mod.skin_dir()), TITLE_FONT_FILE)
-        if os.path.exists(path):
-            fid = QFontDatabase.addApplicationFont(path)
-            fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-            if fams:
-                return fams[0]
-        have = set(QFontDatabase.families())
-        for fam in TITLE_FONT_FALLBACKS:
-            if fam in have:
-                return fam
-        return None
 
-    def _baked_text(self, p, key, path, outline_color, outline_w, fill_color):
-        """縁取りした文字を1枚の絵に焼いて、次からはそれを貼るだけにする。
-
-        **毎コマ縁取りしていたのを見直した。** 文字の輪郭を線でなぞる
-        strokePath は 1回 0.9ms かかり、曲名とネームプレートで毎フレーム2回呼んで
-        いた(実測: 1491コマで strokePath だけ 1.33 秒)。中身は変わらない
-        のだから、1回焼いて貼れば済む。
-
-        焼く倍率は painter の現在の倍率に合わせる。表示倍率を下げたときや
-        録画(1.5倍)でも輪郭が甘くならないようにするため。倍率ごとに別の
-        1枚を持つ(静的レイヤーと同じ考え方)。
-
-        戻り値は (絵, 貼る位置)。焼けなければ None。
-        """
-        try:
-            scale = float(p.transform().m11()) or 1.0
-        except Exception:  # noqa: BLE001
-            scale = 1.0
-        scale = max(0.25, min(4.0, scale))
-        ck = (key, round(scale, 3))
-        hit = self._text_cache.get(ck)
-        if hit is not None:
-            return hit
-        r = path.boundingRect().adjusted(-outline_w, -outline_w,
-                                         outline_w, outline_w)
-        w = max(1, int(math.ceil(r.width() * scale)))
-        h = max(1, int(math.ceil(r.height() * scale)))
-        if w > 4096 or h > 4096:
-            return None
-        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
-        img.fill(Qt.transparent)
-        q = QPainter(img)
-        q.setRenderHint(QPainter.Antialiasing, True)
-        q.scale(scale, scale)
-        q.translate(-r.x(), -r.y())
-        q.strokePath(path, QPen(QColor(outline_color), outline_w,
-                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        q.fillPath(path, _text_brush(fill_color, path.boundingRect()))
-        q.end()
-        pm = QPixmap.fromImage(img)
-        pm.setDevicePixelRatio(scale)
-        hit = (pm, QPointF(r.x(), r.y()))
-        self._text_cache[ck] = hit
-        return hit
 
     def _draw_title(self, p):
         """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
@@ -1610,7 +1837,7 @@ class GameScreenWidget(QWidget):
         # 先に黒でなぞってから白で塗る絵を1枚焼いて、次からはそれを貼る
         # (塗りと線を同時に出すと線が内側へも太って、勘亭流の細い所が
         # 黒く埋まってしまうので、なぞってから塗る順は変えない)。
-        baked = self._baked_text(p, ("title", self._title, bx, by),
+        baked = bake_text(p, self._text_cache, ("title", self._title, bx, by),
                                  path, TITLE_OUTLINE, TITLE_OUTLINE_W,
                                  TITLE_COLOR)
         if baked is None:
@@ -1674,144 +1901,21 @@ class GameScreenWidget(QWidget):
             pass
         return self._nameplate_title_pm
 
-    def _draw_part(self, p, sheet, rect, dest):
-        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。"""
+    def _draw_nameplate(self, p):
+        """ネームプレート。中身と部品を渡して NameplateRenderer に描かせる。
+
+        描き方そのものは環境設定の見本と共通(neotja/game_screen.py の
+        NameplateRenderer)。二重に書くと片方だけ直して食い違うため。"""
+        sheet = self._skin.get("nameplate_parts")
         if sheet is None:
             return
-        p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
-
-    def _draw_plate_text(self, p, key, text, box, size, fill, outline,
-                         outline_w, off=(0, 0), spacing=0):
-        """枠 box の中心に text を書く。字形は曲名と同じ勘亭流。
-
-        枠より横に長くなる名前・称号は、はみ出さないよう横だけ詰める
-        (縦は詰めない — 高さが揃わないと行が波打って見える)。"""
-        if not text:
-            return
-        # 文字の大きさは画面を見ながら変えられる(tune_apply)ので、字形も
-        # 焼いた絵も大きさ込みで覚える。key だけだと変えても古い絵が出る。
-        ck = (key, text, int(size), int(spacing), round(float(outline_w), 1),
-              fill if isinstance(fill, str) else id(fill))
-        path = self._plate_paths.get(ck)
-        if path is None:
-            f = QFont(self._title_family) if self._title_family else QFont()
-            f.setPixelSize(int(size))
-            if spacing:
-                # 字と字のあいだを px で広げる。段位のような短い語は詰まって
-                # 見えるので、語ごとに広さを持てるようにしてある。
-                f.setLetterSpacing(QFont.AbsoluteSpacing, float(spacing))
-            path = QPainterPath()
-            path.addText(QPointF(0.0, 0.0), f, text)
-            # 原点は文字送りの基準(ベースライン左端)なので、そのままでは
-            # 上下も左右もずれる。**実際に描かれる外形**の中心を測って原点へ
-            # 寄せておき、貼るときに枠の中心へ移す。
-            r = path.boundingRect()
-            path.translate(-r.center().x(), -r.center().y())
-            self._plate_paths[ck] = path
-        r = path.boundingRect()
-        avail = box[2] - outline_w * 2.0
-        squeeze = 1.0 if r.width() <= avail or r.width() <= 0 else avail / r.width()
-        p.save()
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.translate(box[0] + box[2] / 2.0 + off[0],
-                    box[1] + box[3] / 2.0 + off[1])
-        if squeeze != 1.0:
-            p.scale(squeeze, 1.0)
-        if outline_w > 0:
-            baked = self._baked_text(p, ck, path, outline, outline_w, fill)
-        else:
-            baked = None
-        if baked is None:
-            if outline_w > 0:
-                p.strokePath(path, QPen(QColor(outline), outline_w,
-                                        Qt.SolidLine, Qt.RoundCap,
-                                        Qt.RoundJoin))
-            p.fillPath(path, _text_brush(fill, path.boundingRect()))
-        else:
-            pm, at = baked
-            p.drawPixmap(at, pm)
-        p.restore()
-
-    def _draw_nameplate(self, p):
-        """ネームプレート。1P ぶんだけ描く(この画面は1人用)。
-
-        並びは本家と同じで、上に称号バー、下の段に 1P の丸・段位・名前。
-        部品は NamePlate_Parts.png から、文字は NamePlate.json から。"""
-        sheet = self._skin.get("nameplate_parts")
-        lay = NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
-        if sheet is None or lay is None:
-            # 部品シートが用意できないときは、今までどおり組み上げ済みの
-            # ネームプレートだけ貼る(称号も段位も出ないが、板は出る)。
-            np_ = self._skin.get("nameplate")
-            if np_ is not None:
-                box = lay["plate"] if lay else (0, 304, 219, 52)
-                p.drawPixmap(QRectF(box[0] - 25, box[1] - 13,
-                                    np_.width(), np_.height()), np_,
-                             QRectF(0, 0, np_.width(), np_.height()))
-            return
-        data = self._nameplate_data()
-        title = data["title"]
-        name = data["name"]
-        dan = data["dan"]
-
-        # 重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。称号バーを
-        # 名前の板より手前に出す指定なので、板と段位を先に置く。
-
-        # --- 名前の板と名前 ---
-        # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
-        # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
-        self._draw_part(p, sheet, NAMEPLATE_PART_PLATE, lay["plate"])
-        box = lay["plate"]
-        if dan:
-            left = max(box[0], lay["dan"][0] + lay["dan"][2]
-                       + NAMEPLATE_DAN_GAP)
-            box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
-                   box[3])
-        self._draw_plate_text(p, "np_name", name, box,
-                              lay["name_size"], NAMEPLATE_NAME_COLOR,
-                              NAMEPLATE_NAME_OUTLINE, lay["name_line"],
-                              lay["name_text"], lay["name_space"])
-
-        # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
-        if dan:
-            box = lay["dan"]
-            # 黒い下地の素材は左下だけが角丸で、そのまま貼ると名前の板の白が
-            # 三角に覗く。先に枠を黒で塗りつぶしてから下地を重ねる。
-            pad = lay["dan_back"]
-            p.fillRect(QRectF(box[0] + pad[0], box[1] + pad[1],
-                              max(1, box[2] + pad[2]),
-                              max(1, box[3] + pad[3])),
-                       QColor(NAMEPLATE_DAN_BACK))
-            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
-            d = data["danType"]
-            if 0 <= d < len(NAMEPLATE_PART_DANS):
-                self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
-            fill = (NAMEPLATE_DAN_COLOR
-                    if data["danTextColor"] == "gold" else "#ffffff")
-            self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
-                                  fill, NAMEPLATE_DAN_OUTLINE,
-                                  lay["dan_line"], lay["dan_text"],
-                                  lay["dan_space"])
-
-        # --- 称号バー。板と段位より手前 ---
-        if title or self._nameplate_title_image() is not None:
-            img = self._nameplate_title_image()
-            if img is not None:
-                p.drawPixmap(QRectF(*lay["title"]), img,
-                             QRectF(0, 0, img.width(), img.height()))
-            else:
-                t = data["titleType"]
-                if not 0 <= t < len(NAMEPLATE_PART_TITLES):
-                    t = 0
-                self._draw_part(p, sheet, NAMEPLATE_PART_TITLES[t],
-                                lay["title"])
-                self._draw_plate_text(
-                    p, "np_title", title, lay["title"], lay["title_size"],
-                    NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
-                    lay["title_line"], lay["title_text"], lay["title_space"])
-
-        # --- 1P の丸。いちばん手前 ---
-        self._draw_part(p, sheet, NAMEPLATE_PART_BADGE_1P, lay["badge"])
+        r = self._np_renderer
+        if r.sheet is not sheet or r.family != self._title_family:
+            r.sheet = sheet
+            r.family = self._title_family
+            r.invalidate()
+        r.data = self._nameplate_data()
+        r.draw(p)
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""

@@ -494,6 +494,18 @@ class SettingsDialog(QDialog):
         def val(key):
             return cfg.get(key, d[key])
 
+        # 出来上がりの見本。入力のたびに描き直す。数値をいじって窓を開き直す
+        # までどう出るか分からない、という往復を無くすため。
+        form = self._group(outer, "見本")
+        self.np_preview = QLabel()
+        self.np_preview.setAlignment(Qt.AlignCenter)
+        self.np_preview.setMinimumHeight(120)
+        self.np_preview.setStyleSheet(
+            "background: #3a3a3a; border: 1px solid rgba(255,255,255,30);"
+            " border-radius: 3px;")
+        form.addRow(self.np_preview)
+        self._np_preview_renderer = None
+
         form = self._group(outer, "称号(上の帯)")
         self.np_title_edit = QLineEdit(str(val("nameplate_title")))
         self.np_title_edit.setMaxLength(64)
@@ -546,8 +558,45 @@ class SettingsDialog(QDialog):
         form.addRow("文字の色", self.np_dan_text_combo)
         form.addRow(self._hint("「(出さない)」を選ぶと、段位そのものを描きません。"))
 
+        for widget in (self.np_title_edit, self.np_name_edit,
+                       self.np_title_image_edit):
+            widget.textChanged.connect(self._update_nameplate_preview)
+        for combo in (self.np_title_type_combo, self.np_dan_combo,
+                      self.np_dan_type_combo, self.np_dan_text_combo):
+            combo.currentIndexChanged.connect(self._update_nameplate_preview)
+        self._update_nameplate_preview()
+
         outer.addStretch()
         return w
+
+    def _nameplate_values(self):
+        """この画面の入力欄から、設定と同じ形の辞書を作る。"""
+        return {
+            "nameplate_name": self.np_name_edit.text(),
+            "nameplate_title": self.np_title_edit.text(),
+            "nameplate_title_type": int(self.np_title_type_combo.currentData()),
+            "nameplate_title_image": self.np_title_image_edit.text(),
+            "nameplate_dan": str(self.np_dan_combo.currentData() or ""),
+            "nameplate_dan_type": int(self.np_dan_type_combo.currentData()),
+            "nameplate_dan_text_color": str(self.np_dan_text_combo.currentData()),
+        }
+
+    def _update_nameplate_preview(self):
+        """見本を描き直す。素材が無ければその旨を出す(空欄のままにしない)。"""
+        try:
+            from neotja import game_screen as gs_mod
+            if self._np_preview_renderer is None:
+                self._np_preview_renderer = gs_mod.NameplateRenderer()
+            pm = gs_mod.nameplate_preview(self._nameplate_values(), scale=2.0,
+                                          renderer=self._np_preview_renderer)
+        except Exception:  # noqa: BLE001
+            pm = None
+        if pm is None:
+            self.np_preview.setText(
+                "素材が用意できていないため、見本を出せません。\n"
+                "「エディタ・ツール」タブで System フォルダを指定してください。")
+            return
+        self.np_preview.setPixmap(pm)
 
     def _build_developer_tab(self):
         """作る側だけが使う道具。遊ぶ人には要らないものを分けてある。"""
