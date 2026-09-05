@@ -881,6 +881,54 @@ class ChartPreviewWidget(QWidget):
                     out.append((now - t, "1"))
         return out
 
+    def recent_drum_hits(self, now: float, window: float):
+        """window 秒以内に太鼓を光らせるべき打 [(経過秒, 文字, 番号), ...]。
+
+        音符と、連打・風船・くす玉の打の両方を混ぜて、**新しい順**に返す。
+        番号は左右どちらの面を光らせるかを決めるのに使う(偶数=左 / 奇数=右)
+        もので、_recent_hit / roll_tick が返すものと同じ数え方。
+
+        光が消える前に次を叩いたとき、前の光を消さずに重ねるためのもの。
+        1つだけ返していたころは、叩くたびに前の光が消えて点滅して見えた。
+        二分探索で引き直すだけなので、シークしても矛盾しない。"""
+        out = []
+        if window <= 0.0:
+            return out
+        t0 = now - window
+        if self._note_times:
+            hi = bisect.bisect_right(self._note_times, now)
+            lo = bisect.bisect_left(self._note_times, t0)
+            for i in range(hi - 1, lo - 1, -1):
+                t = self._note_times[i]
+                if self._reveal_time is not None and t < self._reveal_time:
+                    break
+                out.append((now - t, self._note_chars[i], i + 1))
+        # 連打・風船・くす玉。打の時刻は打音・roll_tick と同じ決め方。
+        for spans, starts in zip(
+                (self._rolls, self._balloons, self._kusudamas),
+                self._span_starts):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            # 区間は重ならないので、窓に掛かりうるのは今の1つと1つ前だけ。
+            for k in (j, j - 1):
+                if k < 0 or k >= len(spans):
+                    continue
+                start, end, hits = spans[k][0], spans[k][1], spans[k][-1]
+                if not hits or hits <= 0 or end <= start:
+                    continue
+                interval = (end - start) / float(hits)
+                if interval <= 0.0:
+                    continue
+                i_hi = min(int((min(now, end) - start) / interval), hits - 1)
+                i_lo = max(0, int((max(t0, start) - start) / interval))
+                for i in range(i_hi, i_lo - 1, -1):
+                    t = start + i * interval
+                    if t0 < t <= now:
+                        out.append((now - t, "1", i + 1))
+        out.sort(key=lambda h: h[0])
+        return out
+
     def roll_tick(self, now: float):
         """連打・風船・くす玉を叩いている最中なら (直前の打からの経過秒, 打数)。
 

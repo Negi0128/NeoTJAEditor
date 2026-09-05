@@ -335,12 +335,13 @@ COMBO_TEXT_BAND_FALLBACK = ((26, 23), (76, 23))   # ((y, 高さ), ...)
 # コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
 COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 # 太鼓が光る時間(叩いた瞬間からの秒数)。明るさそのままで保つぶん。
-DRUM_GLOW_SEC = 0.12
+DRUM_GLOW_SEC = 0.09
 # 光が消えるときの余韻。上のあいだは明るさそのまま、そこから
 # DRUM_GLOW_FADE_SEC かけて消える。以前は最初の瞬間から線形に暗くしていたので、
 # 光った瞬間からもう暗く、消え際も「ぷつっ」と切れて見えた。
-# 合わせて 0.21 秒。0.07 + 0.05 = 0.12 秒では色が残る時間が短すぎた。
-DRUM_GLOW_FADE_SEC = 0.09
+# 合わせて 0.15 秒。元は 0.07 + 0.05 = 0.12 秒で、色が残る時間が短すぎた。
+# 一度 1.75 倍(0.21秒)にしてみたが長かったので 1.25 倍に落としてある。
+DRUM_GLOW_FADE_SEC = 0.06
 
 # --- 魂ゲージ ------------------------------------------------------------
 # Gauge.png / Gauge_Base.png は 700x68 だが、ゲージ本体は上の 44px だけ。
@@ -2626,36 +2627,36 @@ class GameScreenWidget(QWidget):
         dx, dy = DRUM_POS
         if drum is not None:
             blit_sprite(p, dx, dy, drum, self._dpr)
-            # 連打・風船を叩いている間は、そちらの打に合わせて光らせる。
-            # 打の時刻は打音と同じ決め方なので、音と手が合う。連打は面だけ
-            # (打音も面だけにしてある)。
-            hit = None
+            # 叩いた音符の色で光らせる(面=赤 / 縁=水色)。連打・風船の打も
+            # 同じように光る(打の時刻は打音と同じ決め方なので、音と手が合う。
+            # 連打は面だけ — 打音も面だけにしてある)。
+            #
+            # **消える前に次を叩いたら重ねる。** 1つだけ描いていたころは、
+            # 叩くたびに前の光が消えて点滅して見えた。古い順に描くので、
+            # 新しい打ほど手前に重なる。
+            span = DRUM_GLOW_SEC + DRUM_GLOW_FADE_SEC
             try:
-                tick = self.chart_preview.roll_tick(now)
+                hits = self.chart_preview.recent_drum_hits(now, span)
             except Exception:  # noqa: BLE001
-                tick = None
-            if tick is not None:
-                hit = (tick[0], "1", tick[1])
-            elif recent is not None:
-                hit = recent
-            # 叩いた瞬間だけ、その音符の色で光らせる(面=赤 / 縁=水色)。
-            if hit is not None:
-                elapsed, char, n = hit
-                if 0.0 <= elapsed < DRUM_GLOW_SEC + DRUM_GLOW_FADE_SEC:
-                    glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
-                    if glow is not None:
-                        # 本家は両面同時ではなく片面ずつ。音符ごとに
-                        # 左→右→左…と交互に光らせる。
-                        gw, gh = glow.width(), glow.height()
-                        half = gw // 2
-                        sx = 0 if (n % 2 == 0) else half
-                        # 光っているあいだは明るさそのまま。消えるときだけ
-                        # 短くフェードさせる。
-                        over = elapsed - DRUM_GLOW_SEC
-                        a = 1.0 if over <= 0.0 else 1.0 - over / DRUM_GLOW_FADE_SEC
-                        p.setOpacity(max(0.0, min(1.0, a)))
-                        p.drawPixmap(dx + sx, dy, glow, sx, 0, gw - half, gh)
-                        p.setOpacity(1.0)
+                hits = []
+            for elapsed, char, n in reversed(hits):
+                if not (0.0 <= elapsed < span):
+                    continue
+                glow = self._skin.get("drum_don" if char in "13" else "drum_ka")
+                if glow is None:
+                    continue
+                # 本家は両面同時ではなく片面ずつ。音符ごとに
+                # 左→右→左…と交互に光らせる。
+                gw, gh = glow.width(), glow.height()
+                half = gw // 2
+                sx = 0 if (n % 2 == 0) else half
+                # 光っているあいだは明るさそのまま。消えるときだけ
+                # 短くフェードさせる。
+                over = elapsed - DRUM_GLOW_SEC
+                a = 1.0 if over <= 0.0 else 1.0 - over / DRUM_GLOW_FADE_SEC
+                p.setOpacity(max(0.0, min(1.0, a)))
+                p.drawPixmap(dx + sx, dy, glow, sx, 0, gw - half, gh)
+            p.setOpacity(1.0)
 
         # --- コンボ(太鼓の上に重ねる) ---
         # 位置の基準は太鼓ではなく COMBO_ANCHOR。太鼓だけを動かしても
