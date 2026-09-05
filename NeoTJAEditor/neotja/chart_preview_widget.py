@@ -874,7 +874,7 @@ class ChartPreviewWidget(QWidget):
             return (now - (start + i * interval), i + 1)
         return None
 
-    BALLOON_BROKE_SEC = 0.25     # 割れたあと、その絵を出しておく時間(半分にした)
+    BALLOON_BROKE_SEC = 0.30     # 割れたあと、その絵を出しておく時間
 
     def balloon_pop_elapsed(self, now: float, window: float):
         """直近に風船が割れてからの経過秒。window 秒より前なら None。
