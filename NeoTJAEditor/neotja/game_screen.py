@@ -572,11 +572,21 @@ BALLOON_NUM_OFF = (-5, 5)        # そこからの微調整 (右, 下)
 TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
 JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
 JUDGE_SCALE = 1.05               # 「良」の拡大率
-JUDGE_POP_RISE = 13.0            # 「良」が昇る高さ
-JUDGE_POP_SEC = 0.34             # ポップの持続
-# 出た瞬間から薄くしていくと、ずっと半透明の文字が漂って見える。本家は
-# しばらくはっきり出てから消えるので、ここまでは不透明のままにする。
-JUDGE_POP_FADE_FROM = 0.55       # 0..1 のうちどこからフェードを始めるか
+# 「良」の動き。**本家の実機映像(1920x1080 / 60fps)を1コマずつ測って合わせた。**
+#
+#   出た瞬間は落ち着く場所より上に居て、そこへ**落ちてくる**。
+#   コマ  0   16  33  50  66ms
+#   ずれ  19  15  10   5   0 px (1080p) -> 720p では 12.7 0 まで
+#   落ちきったあとは動かない。0.233 秒まで不透明のまま、そこから
+#   0.05 秒で消える(全体 0.283 秒)。
+#
+# 以前は逆に「下から昇る」うえに、昇りきるのに 0.34 秒かけ、0.187 秒から
+# 薄くしていた。つまり**ずっと半透明の文字が上へ漂う**見え方で、本家の
+# 「ぱっと出て静止し、最後に消える」とは別物になっていた。
+JUDGE_POP_DROP = 13.0            # 出た瞬間、静止位置より上にいる量
+JUDGE_POP_DROP_SEC = 0.066       # 落ちきるまで(実測 4コマ)。等速。
+JUDGE_POP_SEC = 0.283            # 出てから消えるまで
+JUDGE_POP_FADE_FROM = 0.82       # 0..1 のうちどこからフェードを始めるか
 
 # --- 曲名(録画のときだけ、画面の右上) ------------------------------------
 # 勘亭流。DFP勘亭流(DynaFont)はこの環境に無かったので、TNDE が同梱している
@@ -597,8 +607,14 @@ TITLE_OUTLINE = "#000000"
 TITLE_OUTLINE_W = 10.0
 
 # --- スコアの加算表示 ----------------------------------------------------
-# 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。数字は Score_Plate の
-# 2段目(橙)を使う — 本家も加算分だけ色が違う。
+# 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。
+#
+# **本家には無い。** 実機映像を1コマずつ確かめたが、音符を叩いてもスコアが
+# 0 -> 1660 と1コマで変わるだけで、加算分を浮かべる表示はどこにも出ない。
+# しかもこの表示は 0.5 秒かけてスコアの真上を昇っていくので、**合計スコアが
+# 落ち着いて見えない**原因にもなっていた(スコアの帯が毎コマ変わる)。
+# 出さないことにする。戻したくなったらここを True にすれば元どおり。
+SHOW_SCORE_GAIN = False
 SCORE_GAIN_SEC = 0.5             # 出てから消えるまで
 SCORE_GAIN_RISE = 16.0           # 昇る高さ
 SCORE_GAIN_SCALE = 0.902
@@ -1044,7 +1060,8 @@ class GameScreenWidget(QWidget):
             return
         spr = self.chart_preview.judge_sprite()
         jp = elapsed / JUDGE_POP_SEC
-        rise = JUDGE_POP_RISE * (1.0 - (1.0 - jp) ** 2)
+        # 上から落ちてくる。落ちきったら 0 で、あとは動かない。
+        rise = JUDGE_POP_DROP * max(0.0, 1.0 - elapsed / JUDGE_POP_DROP_SEC)
         if jp <= JUDGE_POP_FADE_FROM:
             p.setOpacity(1.0)
         else:
@@ -1620,7 +1637,7 @@ class GameScreenWidget(QWidget):
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
         # 軽量では出さない。要るのは「いま何点か」であって、加算の演出は
         # スコアそのものを見れば分かる情報の重ね描きでしかない。
-        if self._score_timeline is not None and not self._lite:
+        if SHOW_SCORE_GAIN and self._score_timeline is not None and not self._lite:
             ev = self._score_timeline.last_event(now)
             if ev is not None:
                 et, gain = ev
