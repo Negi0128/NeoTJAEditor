@@ -2035,24 +2035,17 @@ class GameScreenWidget(QWidget):
 
         設定が変わったら nameplate_changed() を呼ぶと読み直す。"""
         if self._nameplate_json is None or self._nameplate_epoch != _NP_EPOCH:
-            from . import settings as _settings
             cfg = _NP_CONFIG
             if cfg is None:
                 try:
+                    from . import settings as _settings
                     cfg = _settings.load_settings()
                 except Exception:  # noqa: BLE001
                     cfg = {}
-            d = _settings.default_settings()
-            get = lambda k: cfg.get(k, d[k])  # noqa: E731
-            self._nameplate_json = {
-                "name": str(get("nameplate_name")),
-                "title": str(get("nameplate_title")),
-                "titleType": int(get("nameplate_title_type") or 0),
-                "titleImage": str(get("nameplate_title_image")),
-                "dan": str(get("nameplate_dan")),
-                "danType": int(get("nameplate_dan_type") or 0),
-                "danTextColor": str(get("nameplate_dan_text_color")),
-            }
+            # **組み立ては1か所** (nameplate_data_from)。ここに同じものを
+            # 書いていたころ、あとから足した項目(文字の位置・大きさ、絵の
+            # ずらし)が見本にだけ入って、ゲーム画面では効かなかった。
+            self._nameplate_json = nameplate_data_from(cfg)
             self._nameplate_epoch = _NP_EPOCH
             self._nameplate_title_pm = False   # 絵も読み直す
         return self._nameplate_json
