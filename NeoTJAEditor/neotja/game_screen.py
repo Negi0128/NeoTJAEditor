@@ -304,7 +304,10 @@ RAINBOW_HEAD_SCALE = 1.0
 #: 引き終わりから、顔が帯の先端から魂の中心まで**滑らかに移る**のにかける
 #: 時間。ここを 0 にすると 1コマで 65px 飛んで、目に見えてブレる(実測: 帯の
 #: 先端 (1258,104) から魂の中心 (1238,166) へ一気に動いていた)。
-RAINBOW_LAND_MOVE_SEC = 0.066
+#: 加減速は smoothstep。引き終わりの帯は縦にほとんど動いていない(実測 +0.0
+#: px/コマ)ので、出だしが速いカーブ(1-(1-u)^2)だと「1コマ止まって次に 14px
+#: 落ちる」段差になる。出だしを 0 から立ち上げて、その段差を無くしてある。
+RAINBOW_LAND_MOVE_SEC = 0.10
 #: 虹を引き終わったあと、先端の顔が魂の上に残って消えるまでの時間。
 #: 引き終わり(RAINBOW_HALF コマ = 0.656 秒)にちょうど魂へ着く動きなので、
 #: そこで消してしまうと「どこかへ行った」ように見える。音符が魂へ着弾する
@@ -2590,8 +2593,12 @@ class GameScreenWidget(QWidget):
                 if last_cy is not None:
                     fx = x + last_nx + dx - ox
                     fy = y + last_cy + dy - oy
-                    u = el_land / RAINBOW_LAND_MOVE_SEC
-                    u = 1.0 - (1.0 - u) ** 2          # 寄りながら減速する
+                    # 引き終わりのコマと着地 0 コマ目は帯の先端で同じ位置に
+                    # なる。そのまま lerp すると 1コマ分その場で止まるので、
+                    # 1コマ進めたところから始める。
+                    u = (el_land + RAINBOW_TICK_SEC) / RAINBOW_LAND_MOVE_SEC
+                    u = min(1.0, u)
+                    u = u * u * (3.0 - 2.0 * u)       # 加速してから減速する
                     cx = fx + (cx - fx) * u
                     cy2 = fy + (cy2 - fy) * u
             r = QRectF(cx - hw / 2.0, cy2 - hh / 2.0, hw, hh)
