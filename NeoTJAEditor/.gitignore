@@ -7,6 +7,11 @@ skin/
 # 個人の絶対パス(音源・シミュレータの場所など)が入るのでコミットしない。
 settings.json
 
+# 銘板の中身(名前・称号・段位)と、称号バーの差し替え画像。利用者ごとの
+# 持ち物なので入れない。書式は settings.load_nameplate() を参照。
+NamePlate.json
+NamePlate_Title.png
+
 # 起動確認で吐かせている一時ログ。
 app_std*.log
 

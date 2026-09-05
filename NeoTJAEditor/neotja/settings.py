@@ -207,6 +207,68 @@ def settings_path() -> Path:
     return _primary_settings_path()
 
 
+def nameplate_path() -> Path:
+    """銘板の内容を書いた NamePlate.json の在りか。settings.json と同じ場所。
+
+    形式は TJAPlayer3-Develop-ReWrite と同じで、TNDE に付いてくる
+    「NamePlate to JSON」で作ったものをそのまま置ける:
+
+        {"name": ["1Pの名前", "2Pの名前"], "title": [...], "dan": [...],
+         "danGold": [true, false], "danType": [2, 0], "titleType": [2, 0]}
+
+    設定と同じ場所にしてあるのは、退避先(%LOCALAPPDATA%)へ逃げたときに
+    片方だけ取り残されないようにするため。"""
+    return settings_path().parent / "NamePlate.json"
+
+
+#: NamePlate.json が無い / 読めないときの中身。
+NAMEPLATE_DEFAULT = {
+    "name": ["どんちゃん", "かつくん"],
+    "title": ["", ""],
+    "dan": ["", ""],
+    "danGold": [False, False],
+    "danType": [0, 0],
+    "titleType": [0, 0],
+}
+
+
+def load_nameplate(path=None) -> dict:
+    """NamePlate.json を読む。無ければ・壊れていれば既定値を返す。
+
+    **例外は投げない。** 銘板が出ないだけで演奏はできるので、手で書き換えた
+    JSON が壊れていても起動は妨げない。項目ごとに型を見て、駄目なものだけ
+    既定値に戻す(全部捨てると、1文字の書き間違いで名前まで消える)。"""
+    out = {k: list(v) if isinstance(v, list) else v
+           for k, v in NAMEPLATE_DEFAULT.items()}
+    p = Path(path) if path is not None else nameplate_path()
+    try:
+        with open(p, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return out
+    if not isinstance(data, dict):
+        return out
+    for key, default in NAMEPLATE_DEFAULT.items():
+        got = data.get(key)
+        if not isinstance(got, list):
+            continue
+        want_bool = isinstance(default[0], bool)
+        want_int = isinstance(default[0], int) and not want_bool
+        for i in range(len(out[key])):
+            if i >= len(got):
+                break
+            v = got[i]
+            if want_bool:
+                if isinstance(v, bool):
+                    out[key][i] = v
+            elif want_int:
+                if isinstance(v, int) and not isinstance(v, bool):
+                    out[key][i] = v
+            elif isinstance(v, str):
+                out[key][i] = v
+    return out
+
+
 def _coerce(default, loaded):
     """設定値を default の型に合わせて安全に取り込む。JSON は正しくパースでき
     ても型がずれている(手編集で font_size が "12"、run_config の F2 が文字列

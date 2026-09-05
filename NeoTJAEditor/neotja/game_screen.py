@@ -150,23 +150,83 @@ DRUM_POS = (208, 209)                # 太鼓 120x133
 # していたが、太鼓だけずらしたときに数字が置いていかれた)。
 COMBO_OFFSET = (-3, -3)              # 太鼓の左上から見たコンボの基準
 COMBO_ANCHOR = (DRUM_POS[0] + COMBO_OFFSET[0], DRUM_POS[1] + COMBO_OFFSET[1])
-NAMEPLATE_POS = (-25, 291)           # 1P 銘板(素材の左余白ぶん外へ出す)
-# 銘板に書き込むプレイヤー名。TNDE の銘板素材は「空の白い板」で、名前は
-# ゲーム側がフォントで書く作りなので、こちらでも板の上に書く(旧 skin の
-# NamePlate.png は「どんちゃん」が絵として焼き込まれていた)。将来ここを
-# 差し替えられるよう定数にしてあるが、設定項目にはしていない。
-NAMEPLATE_NAME = "どんちゃん"
-# 以下は旧素材 skin/NamePlate.png(280x79)の「どんちゃん」を実測した値。
-# 縁取りまで含めた文字の外形が x=95..194 / y=27..49(100x23)だったので、
-# その中心と大きさに合わせる。座標は **銘板素材の左上から見た相対** に
-# しておくと、NAMEPLATE_POS を動かしても文字が置いていかれない。
-NAMEPLATE_NAME_CENTER = (144.5, 38.0)
-# 勘亭流で「どんちゃん」を組むと、字の外形は だいたい 4.86*px × 0.945*px。
-# 縁取りの太さ(4)を足して 100x23 になるのが px=20。
-NAMEPLATE_NAME_SIZE = 20
-NAMEPLATE_NAME_COLOR = "#ffffff"
-NAMEPLATE_NAME_OUTLINE = "#000000"
-NAMEPLATE_NAME_OUTLINE_W = 4.0
+# --- 銘板 (NamePlate) -------------------------------------------------
+#
+# 中身は settings.load_nameplate() が読む NamePlate.json。TJAPlayer3-
+# Develop-ReWrite と同じ形式で、TNDE 付属の「NamePlate to JSON」で作った
+# ものをそのまま置ける(name / title / dan / danGold / danType / titleType)。
+#
+# 部品は NamePlate_Parts.png から切り出す。これは System の
+# TNDE-R/Graphics/NamePlate.png (220x1189 の縦長シート)をそのまま持って
+# きたもので、各帯の位置はアルファを数えた実測値。
+NAMEPLATE_PART_BADGE_1P = (4, 3, 50, 50)      # 1P 赤丸
+NAMEPLATE_PART_BADGE_1P_BLUE = (4, 57, 50, 50)
+NAMEPLATE_PART_BADGE_2P = (4, 111, 50, 50)
+NAMEPLATE_PART_PLATE = (2, 164, 219, 52)      # 名前の白い板
+NAMEPLATE_PART_DAN_BASE = (4, 944, 89, 25)    # 段位の黒い下地
+NAMEPLATE_PART_DAN_GOLD = (49, 1164, 39, 17)  # danGold の金線
+#: 称号バー。titleType の 0..12 がこの順に並ぶ。
+#: 0 木目 / 1 金 / 2 紫 / 3..8 虹の各種 / 9..11 水色の各種 / 12 赤。
+NAMEPLATE_PART_TITLES = [
+    (4, 222, 213, 24), (4, 276, 213, 24), (4, 330, 213, 24),
+    (4, 384, 213, 24), (4, 437, 213, 25), (4, 489, 213, 28),
+    (4, 545, 213, 25), (4, 599, 213, 25), (4, 653, 213, 25),
+    (4, 707, 213, 25), (4, 761, 213, 25), (4, 815, 213, 25),
+    (4, 869, 213, 24),
+]
+#: 段位の飾り。danType の 0=銀 / 1=金 / 2=虹。
+NAMEPLATE_PART_DANS = [
+    (47, 999, 44, 24), (47, 1053, 44, 24), (47, 1107, 44, 24),
+]
+
+#: 使う配置。"honke" は本家の実測寸法、"tnde" は素材を等倍で使う。
+NAMEPLATE_LAYOUT = "honke"
+#: 配置。値は画面座標の (x, y, 幅, 高さ)。文字は枠の中心にそろえる。
+#:
+#: honke の数値は本家の映像(1920)を実測して 1.5 で割ったもの:
+#:   全体 x8..205 / y305..355、称号バー x47..203 の高さ23、
+#:   段位 x52..100、名前の白枠 x99..203、1P の丸 x8..53。
+#: tnde は素材そのままの大きさ(白い板が 217px 幅)で、今までの銘板の位置を
+#: 保ったまま上へ称号バーを足したもの。本家より横にかなり広い。
+NAMEPLATE_LAYOUTS = {
+    "honke": {
+        "title": (47, 305, 156, 23),
+        "plate": (99, 327, 104, 26),
+        "badge": (8, 308, 46, 46),
+        "dan": (52, 327, 48, 26),
+        "dan_gold": (58, 346, 36, 6),
+        "title_size": 13,
+        "name_size": 17,
+        "dan_size": 14,
+    },
+    "tnde": {
+        "title": (22, 278, 213, 24),
+        "plate": (-1, 304, 219, 52),
+        "badge": (0, 303, 50, 50),
+        "dan": (33, 317, 89, 25),
+        "dan_gold": (48, 337, 39, 8),
+        "title_size": 14,
+        "name_size": 24,
+        "dan_size": 15,
+    },
+}
+#: 段位と名前のあいだの空き(px)。
+NAMEPLATE_DAN_GAP = 3
+#: 名前を板の右端から離す量(px)。
+NAMEPLATE_NAME_PAD = 6
+NAMEPLATE_NAME_COLOR = "#111111"        # 本家は白地に黒文字
+NAMEPLATE_NAME_OUTLINE = "#ffffff"
+NAMEPLATE_NAME_OUTLINE_W = 0.0          # 0 なら縁取りしない
+NAMEPLATE_TITLE_COLOR = "#ffffff"
+NAMEPLATE_TITLE_OUTLINE = "#000000"
+NAMEPLATE_TITLE_OUTLINE_W = 3.0
+NAMEPLATE_DAN_COLOR = "#1a1a1a"
+NAMEPLATE_DAN_OUTLINE = "#ffffff"
+NAMEPLATE_DAN_OUTLINE_W = 2.5
+#: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
+#: NamePlate_Title.png があればそれを称号バーとして貼る(帯も文字も焼き込ま
+#: れた1枚として扱うので、文字は書かない)。特別な称号用。
+NAMEPLATE_TITLE_IMAGE = "NamePlate_Title.png"
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
 COMBO_X_OFF = 0
@@ -878,7 +938,12 @@ class GameScreenWidget(QWidget):
         self._chara = None
         self._title = ""
         self._title_family = None
-        self._nameplate_path = None
+        # 銘板の字形(勘亭流のパス)。名前・称号・段位ぶんを名前で持つ。
+        self._plate_paths = {}
+        # NamePlate.json の中身。最初に描くときに1回だけ読む。
+        self._nameplate_json = None
+        # 称号バーの差し替え画像。False は「まだ探していない」、None は「無い」。
+        self._nameplate_title_pm = False
         # 焼いた文字の置き場(_baked_text)。倍率ごとに1枚。
         self._text_cache = {}
 
@@ -1118,6 +1183,7 @@ class GameScreenWidget(QWidget):
             ("combo_text", os.path.join("Combo", "Text.png")),
             ("score_digits", "Score_Plate.png"),
             ("nameplate", "NamePlate.png"),
+            ("nameplate_parts", "NamePlate_Parts.png"),
             ("gauge", "Gauge.png"),
             ("gauge_base", "Gauge_Base.png"),
             ("soul", "Soul.png"),
@@ -1154,9 +1220,9 @@ class GameScreenWidget(QWidget):
         # 経路(NeoTJAPlayer は初回の描画で素材を読む)では曲名が消えていた。
         # Editor は起動時に先読みするので、たまたま表に出ていなかっただけ。
         self._title_family = self._load_title_font()
-        # 銘板の名前は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
+        # 銘板の文字は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
         # フォントが差し替わるここで捨てて、次の描画で組み直させる。
-        self._nameplate_path = None
+        self._plate_paths = {}
 
     def draw_chara_front(self, p, ox=0, oy=0):
         """風船中のどんちゃんだけを、レーンより手前に描く。
@@ -1371,46 +1437,154 @@ class GameScreenWidget(QWidget):
         pm, at = baked
         p.drawPixmap(at, pm)
 
-    def _draw_nameplate_name(self, p):
-        """銘板の白い板に NAMEPLATE_NAME を書く。
+    def _nameplate_data(self):
+        """NamePlate.json の中身。読むのは1回だけ。"""
+        if self._nameplate_json is None:
+            from . import settings as _settings
+            try:
+                self._nameplate_json = _settings.load_nameplate()
+            except Exception:  # noqa: BLE001
+                self._nameplate_json = dict(_settings.NAMEPLATE_DEFAULT)
+        return self._nameplate_json
 
-        字形は曲名と同じ勘亭流。旧素材に焼かれていた「どんちゃん」も同じ
-        書体だったので、板だけ差し替わっても見た目が揃う。"""
-        if not NAMEPLATE_NAME:
+    def _nameplate_title_image(self):
+        """称号バーを丸ごと差し替える絵。無ければ None。
+
+        settings.json と同じ場所の NamePlate_Title.png。特別な称号は帯も
+        文字も1枚に焼いた絵で用意したい、という運用のため。"""
+        if self._nameplate_title_pm is not False:
+            return self._nameplate_title_pm
+        self._nameplate_title_pm = None
+        try:
+            from . import settings as _settings
+            path = _settings.settings_path().parent / NAMEPLATE_TITLE_IMAGE
+            if path.exists():
+                pm = QPixmap(str(path))
+                if not pm.isNull():
+                    self._nameplate_title_pm = pm
+        except Exception:  # noqa: BLE001
+            pass
+        return self._nameplate_title_pm
+
+    def _draw_part(self, p, sheet, rect, dest):
+        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。"""
+        if sheet is None:
             return
-        path = self._nameplate_path
+        p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
+
+    def _draw_plate_text(self, p, key, text, box, size, fill, outline,
+                         outline_w):
+        """枠 box の中心に text を書く。字形は曲名と同じ勘亭流。
+
+        枠より横に長くなる名前・称号は、はみ出さないよう横だけ詰める
+        (縦は詰めない — 高さが揃わないと行が波打って見える)。"""
+        if not text:
+            return
+        path = self._plate_paths.get(key)
         if path is None:
             f = QFont(self._title_family) if self._title_family else QFont()
-            f.setPixelSize(NAMEPLATE_NAME_SIZE)
+            f.setPixelSize(size)
             path = QPainterPath()
-            path.addText(QPointF(0.0, 0.0), f, NAMEPLATE_NAME)
-            # 原点は文字送りの基準(ベースライン左端)なので、そのままだと
-            # 上下も左右もずれる。**実際に描かれる外形**の中心を測って、
-            # それが NAMEPLATE_NAME_CENTER に来るよう平行移動しておく。
-            # 縁取りは外形の周りに均等に付くので、中心はこれで合う。
+            path.addText(QPointF(0.0, 0.0), f, text)
+            # 原点は文字送りの基準(ベースライン左端)なので、そのままでは
+            # 上下も左右もずれる。**実際に描かれる外形**の中心を測って原点へ
+            # 寄せておき、貼るときに枠の中心へ移す。
             r = path.boundingRect()
-            path.translate(NAMEPLATE_NAME_CENTER[0] - r.center().x(),
-                           NAMEPLATE_NAME_CENTER[1] - r.center().y())
-            self._nameplate_path = path
+            path.translate(-r.center().x(), -r.center().y())
+            self._plate_paths[key] = path
+        r = path.boundingRect()
+        avail = box[2] - outline_w * 2.0
+        squeeze = 1.0 if r.width() <= avail or r.width() <= 0 else avail / r.width()
         p.save()
         p.setRenderHint(QPainter.Antialiasing, True)
-        # 座標は銘板素材の左上を原点にしてある。板の位置を動かせば文字も
-        # 一緒に動く。
-        p.translate(NAMEPLATE_POS[0], NAMEPLATE_POS[1])
-        # 曲名と同じく、黒でなぞってから白で塗った絵を1枚焼いて貼る。
-        baked = self._baked_text(p, ("nameplate", NAMEPLATE_NAME), path,
-                                 NAMEPLATE_NAME_OUTLINE,
-                                 NAMEPLATE_NAME_OUTLINE_W,
-                                 NAMEPLATE_NAME_COLOR)
+        p.translate(box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+        if squeeze != 1.0:
+            p.scale(squeeze, 1.0)
+        if outline_w > 0:
+            baked = self._baked_text(p, (key, text), path, outline,
+                                     outline_w, fill)
+        else:
+            baked = None
         if baked is None:
-            p.strokePath(path, QPen(QColor(NAMEPLATE_NAME_OUTLINE),
-                                    NAMEPLATE_NAME_OUTLINE_W,
-                                    Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.fillPath(path, QColor(NAMEPLATE_NAME_COLOR))
+            if outline_w > 0:
+                p.strokePath(path, QPen(QColor(outline), outline_w,
+                                        Qt.SolidLine, Qt.RoundCap,
+                                        Qt.RoundJoin))
+            p.fillPath(path, QColor(fill))
         else:
             pm, at = baked
             p.drawPixmap(at, pm)
         p.restore()
+
+    def _draw_nameplate(self, p):
+        """銘板。1P ぶんだけ描く(この画面は1人用)。
+
+        並びは本家と同じで、上に称号バー、下の段に 1P の丸・段位・名前。
+        部品は NamePlate_Parts.png から、文字は NamePlate.json から。"""
+        sheet = self._skin.get("nameplate_parts")
+        lay = NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
+        if sheet is None or lay is None:
+            # 部品シートが用意できないときは、今までどおり組み上げ済みの
+            # 銘板だけ貼る(称号も段位も出ないが、板は出る)。
+            np_ = self._skin.get("nameplate")
+            if np_ is not None:
+                box = lay["plate"] if lay else (0, 304, 219, 52)
+                p.drawPixmap(QRectF(box[0] - 25, box[1] - 13,
+                                    np_.width(), np_.height()), np_,
+                             QRectF(0, 0, np_.width(), np_.height()))
+            return
+        data = self._nameplate_data()
+        title = data["title"][0]
+        name = data["name"][0]
+        dan = data["dan"][0]
+
+        # --- 称号バー ---
+        if title or self._nameplate_title_image() is not None:
+            img = self._nameplate_title_image()
+            if img is not None:
+                p.drawPixmap(QRectF(*lay["title"]), img,
+                             QRectF(0, 0, img.width(), img.height()))
+            else:
+                t = data["titleType"][0]
+                if not 0 <= t < len(NAMEPLATE_PART_TITLES):
+                    t = 0
+                self._draw_part(p, sheet, NAMEPLATE_PART_TITLES[t],
+                                lay["title"])
+                self._draw_plate_text(
+                    p, "np_title", title, lay["title"], lay["title_size"],
+                    NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
+                    NAMEPLATE_TITLE_OUTLINE_W)
+
+        # --- 名前の板と名前 ---
+        # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
+        # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
+        self._draw_part(p, sheet, NAMEPLATE_PART_PLATE, lay["plate"])
+        box = lay["plate"]
+        if dan:
+            left = max(box[0], lay["dan"][0] + lay["dan"][2]
+                       + NAMEPLATE_DAN_GAP)
+            box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
+                   box[3])
+        self._draw_plate_text(p, "np_name", name, box,
+                              lay["name_size"], NAMEPLATE_NAME_COLOR,
+                              NAMEPLATE_NAME_OUTLINE, NAMEPLATE_NAME_OUTLINE_W)
+
+        # --- 段位。黒い下地・飾り・金線を重ねてから字を乗せる ---
+        if dan:
+            box = lay["dan"]
+            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
+            d = data["danType"][0]
+            if 0 <= d < len(NAMEPLATE_PART_DANS):
+                self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
+            if data["danGold"][0]:
+                self._draw_part(p, sheet, NAMEPLATE_PART_DAN_GOLD,
+                                lay["dan_gold"])
+            self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
+                                  NAMEPLATE_DAN_COLOR, NAMEPLATE_DAN_OUTLINE,
+                                  NAMEPLATE_DAN_OUTLINE_W)
+
+        # --- 1P の丸。名前の板に重なるので最後 ---
+        self._draw_part(p, sheet, NAMEPLATE_PART_BADGE_1P, lay["badge"])
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
@@ -1952,13 +2126,10 @@ class GameScreenWidget(QWidget):
                              ct, QRect(0, src_y, ct.width(), band))
 
         # --- 銘板 ---
-        np_ = self._skin.get("nameplate")
-        if np_ is not None:
-            blit_sprite(p, NAMEPLATE_POS[0], NAMEPLATE_POS[1], np_, self._dpr)
-            # 板は空なので、名前はここで書く。板と同じ「毎フレーム描く側」に
-            # 置くのがみそで、静的キャッシュ(_static_layer)へ描くと板だけが
-            # 焼き直されて文字が取り残される事故が起きる(曲名で一度やった)。
-            self._draw_nameplate_name(p)
+        # 板も文字も「毎フレーム描く側」に置くのがみそで、静的キャッシュ
+        # (_static_layer)へ描くと板だけが焼き直されて文字が取り残される
+        # 事故が起きる(曲名で一度やった)。
+        self._draw_nameplate(p)
 
     def _draw_gauge(self, p, ratio, now):
         """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
