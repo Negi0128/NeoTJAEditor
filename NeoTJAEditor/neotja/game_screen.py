@@ -210,16 +210,17 @@ NAMEPLATE_LAYOUTS = {
         "dan_line": 4.5,
     },
     "tnde": {
-        "title": (3, 306, 213, 24),
+        "title": (2, 307, 213, 24),
         "plate": (-1, 304, 219, 52),
         "badge": (1, 305, 50, 50),
-        "dan": (47, 328, 42, 25),
+        "dan": (46, 328, 42, 25),
         "title_size": 10,
         "name_size": 15,
-        "dan_size": 16,
-        "title_text": (0, 0),
-        "name_text": (0, 0),
-        "dan_text": (0, 0),
+        "dan_size": 15,
+        # 称号バーが名前の板の上半分に重なる置き方なので、名前は下へ逃がす。
+        "title_text": (14, 0),
+        "name_text": (-7, 10),
+        "dan_text": (0, -1),
         # 字と字のあいだを広げる量(px)。段位は2文字しかなく詰まって見える。
         "title_space": 0,
         "name_space": 0,
