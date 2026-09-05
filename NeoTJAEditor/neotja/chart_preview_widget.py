@@ -974,6 +974,9 @@ class ChartPreviewWidget(QWidget):
     #   区間の終わりから 4コマ(67ms)で しぼむ。コマ4 → コマ0 へ逆再生。
     #   そのあと小さいまま右下へ飛んでいく。速さは 1コマ +9,+5px(1920)で、
     #   1280 に直すと毎秒 (368, 216)px。0.5 秒後もまだ画面に残っていた。
+    #: 割れなかったときに、しぼんで飛ぶ絵を出すか。今は出さない —
+    #: 区間の終わりで風船もどんちゃんも消える。挙動を詰めてから戻す。
+    BALLOON_FAIL_MOTION = False
     BALLOON_DEFLATE_SEC = 0.067      # しぼむのにかける時間
     BALLOON_ESCAPE_SEC = 0.80        # 飛んでいって消えるまで
     BALLOON_ESCAPE_VX = 368.0        # 右へ(px/秒)
@@ -1058,7 +1061,9 @@ class ChartPreviewWidget(QWidget):
                 if el < self.BALLOON_BURST_SEC:
                     return (5, 0.0, 0.0, 1.0)
                 continue
-            # 叩ききれなかった。しぼんで、そのまま右下へ。
+            # 叩ききれなかった。今は区間の終わりでそのまま消す。
+            if not self.BALLOON_FAIL_MOTION:
+                continue
             if el < self.BALLOON_DEFLATE_SEC:
                 t = el / self.BALLOON_DEFLATE_SEC
                 return (max(0, 4 - int(t * 5)), 0.0, 0.0, 1.0)

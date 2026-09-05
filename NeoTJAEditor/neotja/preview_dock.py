@@ -731,7 +731,7 @@ class GamePreviewWindow(QWidget):
             self._pause_cb()
 
 
-def _roll_tick_notes(spans, bpm_index):
+def _roll_tick_notes(spans, bpm_index, speed=None):
     """Expands roll/balloon/kusudama spans - (start, end, ..., hits) tuples,
     as returned in build_preview_timeline()'s "rolls"/"balloons"/"kusudamas"
     - into evenly spaced virtual note events across the span, so
@@ -745,15 +745,25 @@ def _roll_tick_notes(spans, bpm_index):
     HitSoundEngine (16ms-tick polling) - both accept the identical tuple
     shape, so this expansion doesn't need to know which backend is active.
     `bpm_index` differs between span shapes (rolls carry char before bpm,
-    balloons/kusudamas don't), so the caller passes which column holds it."""
+    balloons/kusudamas don't), so the caller passes which column holds it.
+
+    `speed` を渡すと、打の間隔を 1/speed に固定して、区間に入るぶんだけ
+    鳴らす。風船・くす玉のためのもの — 叩ききれない区間で
+    (end-start)/打数 にすると、短い区間に必要打数を詰め込むことになり、
+    連打よりずっと速い異様な音になっていた(実際にそうなっていた)。"""
     ticks = []
     for span in spans:
         start, end, hits = span[0], span[1], span[-1]
         bpm = span[bpm_index]
         if hits <= 0:
             continue
-        interval = (end - start) / hits
-        for i in range(hits):
+        if speed:
+            interval = 1.0 / float(speed)
+            n = min(int(hits), int(max(0.0, end - start) * float(speed) + 1e-6))
+        else:
+            interval = (end - start) / hits
+            n = int(hits)
+        for i in range(n):
             ticks.append((start + i * interval, "1", bpm))
     return ticks
 
@@ -1843,9 +1853,11 @@ class PreviewDock(QDockWidget):
             # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
             _spd = preview_data.get("roll_hit_speed", 45)
             self._editor_notes += _roll_tick_notes(
-                balloon_pop_spans(preview_data.get("balloons", []), _spd), bpm_index=2)
+                balloon_pop_spans(preview_data.get("balloons", []), _spd),
+                bpm_index=2, speed=_spd)
             self._editor_notes += _roll_tick_notes(
-                balloon_pop_spans(preview_data.get("kusudamas", []), _spd), bpm_index=2)
+                balloon_pop_spans(preview_data.get("kusudamas", []), _spd),
+                bpm_index=2, speed=_spd)
             self._preview_notes = list(preview_data.get("notes", []))
             self._preview_spans = (list(preview_data.get("rolls", [])),
                                    list(preview_data.get("balloons", [])),
