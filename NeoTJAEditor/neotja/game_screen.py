@@ -708,8 +708,16 @@ class _LaneOverlay(QWidget):
         p.end()
 
 
-def _column_centers(img):
-    """画像の列ごとに「不透明な画素の上端と下端の中点」を返す。無い列は None。
+#: 虹の帯として認めるいちばん細い厚み(px)。端は1画素まで細くなって消えるので、
+#: そこの「中心」は当てにならない(実測: 虹の右端の列は不透明な画素が1個しか
+#: 無く、そこへ先端の顔を置くと帯から外れた場所に飛んでいた)。
+_BAND_MIN_THICK = 12
+
+
+def _column_centers(img, min_thick=_BAND_MIN_THICK):
+    """画像の列ごとに「不透明な画素の上端と下端の中点」を返す。
+
+    厚みが min_thick に満たない列と、そもそも不透明な画素が無い列は None。
 
     アルファだけ見れば済むので numpy で一度に処理する。pixelColor の
     二重ループで書くと、虹(1160x325)で 377,200 回の呼び出しになり、
@@ -732,7 +740,9 @@ def _column_centers(img):
         top = np.where(mask, ys, h).min(axis=0)
         bottom = np.where(mask, ys, -1).max(axis=0)
         mid = (top + bottom) / 2.0
-        return [float(mid[x]) if any_col[x] else None for x in range(w)]
+        thick = bottom - top + 1
+        return [float(mid[x]) if (any_col[x] and thick[x] >= min_thick) else None
+                for x in range(w)]
     except Exception:  # noqa: BLE001
         pass
     out = []
@@ -2478,8 +2488,14 @@ class GameScreenWidget(QWidget):
             if pm is None:
                 return None
             self._rainbow_centers = _column_centers(pm.toImage())
-        if 0 <= col < len(self._rainbow_centers):
-            return self._rainbow_centers[col]
+        centers = self._rainbow_centers
+        if not centers:
+            return None
+        col = max(0, min(int(col), len(centers) - 1))
+        # 端は帯が細って中心が当てにならないので、使える列まで左へ戻る。
+        for x in range(col, max(-1, col - 120), -1):
+            if centers[x] is not None:
+                return centers[x]
         return None
 
     def _draw_rainbow(self, p, now):
