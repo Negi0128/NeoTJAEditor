@@ -58,7 +58,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
         tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
         tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
-        tabs.addTab(self._scrollable(self._build_nameplate_tab()), "銘板")
+        tabs.addTab(self._scrollable(self._build_nameplate_tab()), "ネームプレート")
+        tabs.addTab(self._scrollable(self._build_developer_tab()), "開発者用")
         tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
 
         btn_row = QHBoxLayout()
@@ -545,56 +546,34 @@ class SettingsDialog(QDialog):
         form.addRow("文字の色", self.np_dan_text_combo)
         form.addRow(self._hint("「(出さない)」を選ぶと、段位そのものを描きません。"))
 
-        form = self._group(outer, "その他")
-        btn_import = QPushButton("NamePlate.json から読み込む")
-        btn_import.clicked.connect(self._import_nameplate_json)
-        form.addRow(btn_import)
-        form.addRow(self._hint(
-            "TNDE 付属の「NamePlate to JSON」で作った NamePlate.json を、"
-            "settings.json と同じ場所に置いてから押すと、1P の内容をここへ"
-            "取り込みます。帯の色と段位の背景は 木/金/紫・白/金/虹 の3つに"
-            "丸めます。"))
-        self.np_tuner_check = QCheckBox("位置合わせのキーを有効にする（開発用）")
-        self.np_tuner_check.setChecked(bool(val("show_tuner")))
+        outer.addStretch()
+        return w
+
+    def _build_developer_tab(self):
+        """作る側だけが使う道具。遊ぶ人には要らないものを分けてある。"""
+        w, outer = self._tab_body()
+        cfg = self.main_window.config_data
+        d = settings_mod.default_settings()
+
+        form = self._group(outer, "位置合わせ")
+        self.np_tuner_check = QCheckBox("位置合わせのキーを有効にする")
+        self.np_tuner_check.setChecked(
+            bool(cfg.get("show_tuner", d["show_tuner"])))
         form.addRow(self.np_tuner_check)
         form.addRow(self._hint(
-            "再生ウィンドウで Ctrl+Shift+矢印 などを使い、銘板や虹の部品を"
-            "1px ずつ動かせるようになります。動かした値は保存されず、"
-            "Ctrl+Shift+S で tune.txt に書き出す作りです。"
+            "再生ウィンドウで Ctrl+Shift+矢印 などを使い、ネームプレートや"
+            "虹の部品を 1px ずつ動かせるようになります。"))
+        form.addRow(self._hint(
+            "Ctrl+Shift+N / B で対象を選ぶ、Ctrl+Shift+M で「位置 ↔ 大きさ」を"
+            "切り替える、Alt を足すと 5px、Ctrl+Shift+0 で全部を起動時の値へ"
+            "戻す、Ctrl+Shift+S で今の値を tune.txt へ書き出す。"))
+        form.addRow(self._hint(
+            "動かした値は設定には保存されません。書き出した tune.txt の中身を"
+            "ソースの定数へ書き写して固定する使い方です。"
             "※反映にはアプリの再起動が必要です。"))
 
         outer.addStretch()
         return w
-
-    def _import_nameplate_json(self):
-        """NamePlate.json の 1P ぶんを、この画面の入力欄へ流し込む。"""
-        path = settings_mod.nameplate_path()
-        if not path.exists():
-            QMessageBox.information(
-                self, "NamePlate.json",
-                "%s が見つかりませんでした。" % path + LF + LF +
-                "TNDE 付属の「NamePlate to JSON」で作ったファイルを、"
-                "この場所へ置いてからもう一度押してください。")
-            return
-        data = settings_mod.load_nameplate(path)
-        self.np_name_edit.setText(data["name"][0])
-        self.np_title_edit.setText(data["title"][0])
-        # 帯は13種あるが、この画面で選べるのは 木/金/紫 の3つ。それより
-        # 大きい番号はいちばん近い 紫 に寄せる(絵が出ないより良い)。
-        t = max(0, min(2, int(data["titleType"][0])))
-        self.np_title_type_combo.setCurrentIndex(
-            max(0, self.np_title_type_combo.findData(t)))
-        dan = data["dan"][0]
-        i = self.np_dan_combo.findData(dan)
-        if i < 0 and dan:
-            QMessageBox.information(
-                self, "NamePlate.json",
-                "段位「%s」は選べる一覧に無いので、そのままにしました。" % dan)
-        else:
-            self.np_dan_combo.setCurrentIndex(max(0, i))
-        d = max(0, min(2, int(data["danType"][0])))
-        self.np_dan_type_combo.setCurrentIndex(
-            max(0, self.np_dan_type_combo.findData(d)))
 
     def _build_experimental_tab(self):
         """まだ様子見の機能をまとめて置くタブ。既定は全部オフ、有効化しても
@@ -714,13 +693,7 @@ class SettingsDialog(QDialog):
         cfg["nameplate_dan_type"] = int(self.np_dan_type_combo.currentData())
         cfg["nameplate_dan_text_color"] = str(self.np_dan_text_combo.currentData())
         cfg["show_tuner"] = self.np_tuner_check.isChecked()
-        # 描く側が持っている銘板の内容を捨てさせる。これが無いと、保存しても
-        # 次にアプリを開き直すまで古い名前のままになる。
-        try:
-            from neotja import game_screen as _gs
-            _gs.nameplate_changed()
-        except Exception:  # noqa: BLE001
-            pass
+        # 画面へ映すのは呼び出し元(PreviewDock.refresh_nameplate)がやる。
         self.accept()
 
     def _reset(self):
@@ -735,7 +708,7 @@ class SettingsDialog(QDialog):
             "・フォント / リサイズ / 編集 / 譜面プレビュー / 連打の計算\n"
             "・動画の保存先\n"
             "・音声 (出力デバイス、打音のWAVパス、ワイヤレス調整)\n"
-            "・銘板 (名前・称号・段位)\n"
+            "・ネームプレート (名前・称号・段位)\n"
             "・実験的機能\n\n"
             "最近使ったファイルやウィンドウの位置など、この画面に無い項目は"
             "そのまま残ります。\n\n"

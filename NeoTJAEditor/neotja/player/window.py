@@ -276,6 +276,12 @@ class PlayerWindow(QMainWindow):
         dlg = SettingsDialog(self, self)
         if dlg.exec():
             self._save()
+            # ネームプレートは描く側が一度読んだら覚えているので、
+            # 変えたことを伝えて描き直させる(再起動を待たせない)。
+            try:
+                self.core.dock.refresh_nameplate()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- ドラッグ&ドロップ ----
     def dragEnterEvent(self, event):

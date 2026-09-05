@@ -444,8 +444,8 @@ class GamePreviewWindow(QWidget):
 
     def _build_tuner(self):
         # ふだんは切っておく。作る側が絵の位置を詰めるための道具で、遊ぶ人が
-        # 誤って押すと銘板がずれたまま戻し方が分からなくなるため。環境設定の
-        # 「銘板」タブから入れる。ここで読むのはディスクの設定で、入れた直後は
+        # 誤って押すとネームプレートがずれたまま戻し方が分からなくなるため。環境設定の
+        # 「ネームプレート」タブから入れる。ここで読むのはディスクの設定で、入れた直後は
         # まだ効かない(この窓は起動時に作られるため)。
         try:
             from . import settings as _settings
@@ -952,6 +952,12 @@ class PreviewDock(QDockWidget):
         # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ
         # ならなくなり事故りやすいので、ページに載せないだけに留める方が安全。
         self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
+        # ネームプレートの中身は、ファイルではなくこの設定から読ませる。
+        try:
+            from . import game_screen as _gs
+            _gs.set_config(self.config_data)
+        except Exception:  # noqa: BLE001
+            pass
         # 起動時のモード復元中は settings.json へ書き戻さない(_save_bottom_mode)。
         self._restoring_mode = False
         # 同じく、再生速度の復元中も書き戻さない(_save_speed)。
@@ -2431,6 +2437,19 @@ class PreviewDock(QDockWidget):
         self.waveform.set_stereo_view(stereo)
         if self.waveform_stereo_cb:
             self.waveform_stereo_cb(self._waveform_stereo)
+
+    def refresh_nameplate(self):
+        """環境設定でネームプレートを変えたあとに呼ぶ。すぐ描き直す。
+
+        止めているときは次のコマが来ないので、ここで描き直させないと
+        「保存したのに変わらない」ように見える。"""
+        try:
+            from . import game_screen as _gs
+            _gs.set_config(self.config_data)
+            _gs.nameplate_changed()
+            self.game_screen.update()
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_se_text_enabled(self, enabled: bool):
         """settings.json / 環境設定ダイアログの se_text_enabled を反映する入口。

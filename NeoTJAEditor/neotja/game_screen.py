@@ -58,7 +58,7 @@ SCREEN_H_LITE = SCREEN_H_FULL
 
 # --- 実測した配置 --------------------------------------------------------
 BG_TOP_H = 188            # 上部背景の高さ
-PANEL_X, PANEL_Y = 0, 188      # 左パネル(スコア/コンボ/太鼓/銘板)
+PANEL_X, PANEL_Y = 0, 188      # 左パネル(スコア/コンボ/太鼓/ネームプレート)
 PANEL_W, PANEL_H = 333, 176
 # レーン本体の左上。Y は本家に合わせて 192 から 2px 下げた(要望)。判定枠・
 # 火花・判定文字「良」・打音表記・連打数・レーン枠・譜面ウィジェット本体は
@@ -67,7 +67,7 @@ LANE_X, LANE_Y = 333, 196
 LANE_W, LANE_H = 947, 130
 # 打音表記帯(レーン本体の直下)。枠素材(Taiko_Frame.png)では
 #   上辺 48..55 (8px) / 窓 56..185 (130px) / 帯 186..214 (29px) / 下辺 215..223 (9px)
-# = 合計 176px で、これは左パネル(銘板ブロック 333x176)の高さと一致する。
+# = 合計 176px で、これは左パネル(ネームプレートブロック 333x176)の高さと一致する。
 # 帯を 26px にしていたせいでレーンの箱だけ 3px 低く、パネルと下端が揃って
 # いなかった。素材どおりの 29px にすると 188..363 でぴったり重なる。
 SE_STRIP_H = 29
@@ -151,11 +151,9 @@ DRUM_POS = (208, 209)                # 太鼓 120x133
 # していたが、太鼓だけずらしたときに数字が置いていかれた)。
 COMBO_OFFSET = (-3, -3)              # 太鼓の左上から見たコンボの基準
 COMBO_ANCHOR = (DRUM_POS[0] + COMBO_OFFSET[0], DRUM_POS[1] + COMBO_OFFSET[1])
-# --- 銘板 (NamePlate) -------------------------------------------------
+# --- ネームプレート (NamePlate) -------------------------------------------------
 #
-# 中身は settings.load_nameplate() が読む NamePlate.json。TJAPlayer3-
-# Develop-ReWrite と同じ形式で、TNDE 付属の「NamePlate to JSON」で作った
-# ものをそのまま置ける(name / title / dan / danGold / danType / titleType)。
+# 中身は環境設定(settings.json の nameplate_*)。
 #
 # 部品は NamePlate_Parts.png から切り出す。これは System の
 # TNDE-R/Graphics/NamePlate.png (220x1189 の縦長シート)をそのまま持って
@@ -187,7 +185,7 @@ NAMEPLATE_LAYOUT = "tnde"
 #: honke の数値は本家の映像(1920)を実測して 1.5 で割ったもの:
 #:   全体 x8..205 / y305..355、称号バー x47..203 の高さ23、
 #:   段位 x52..100、名前の白枠 x99..203、1P の丸 x8..53。
-#: tnde は素材そのままの大きさ(白い板が 217px 幅)で、今までの銘板の位置を
+#: tnde は素材そのままの大きさ(白い板が 217px 幅)で、今までのネームプレートの位置を
 #: 保ったまま上へ称号バーを足したもの。本家より横にかなり広い。
 #: *_text は、その枠の中心から見た文字のずれ (右, 下)。枠と字を別々に
 #: 動かせるようにしてある。
@@ -837,12 +835,23 @@ class _LaneOverlay(QWidget):
         p.end()
 
 
-#: 銘板の設定が変わるたびに増える。描く側はこれを見て読み直す。
+#: ネームプレートの設定が変わるたびに増える。描く側はこれを見て読み直す。
 _NP_EPOCH = 0
+#: いま動いている設定。preview_dock が起動時に渡す。**ファイルではなく
+#: これを見る** — 環境設定で変えた直後はまだファイルに落ちていないことが
+#: あり(Player は自分が触るキーしか書き戻さない)、そのままだと画面が
+#: 変わらないため。
+_NP_CONFIG = None
+
+
+def set_config(cfg):
+    """いま動いている設定を教える。ネームプレートの中身をここから読む。"""
+    global _NP_CONFIG
+    _NP_CONFIG = cfg
 
 
 def nameplate_changed():
-    """環境設定で銘板を変えたときに呼ぶ。次の描画で読み直される。"""
+    """環境設定でネームプレートを変えたときに呼ぶ。次の描画で読み直す。"""
     global _NP_EPOCH
     _NP_EPOCH += 1
 
@@ -861,23 +870,23 @@ def nameplate_changed():
 #   "line"  … 縁取りの太さ(px)。0.5 刻み。0 で縁取りなし。
 _TUNE_ITEMS = [
     ("rainbow_head", "虹の先端の顔", "off"),
-    ("title", "銘板/称号バー", "rect"),
-    ("plate", "銘板/名前の板", "rect"),
-    ("badge", "銘板/1P の丸", "rect"),
-    ("dan", "銘板/段位", "rect"),
-    ("dan_back", "銘板/段位の裏の黒", "rect"),
-    ("title_text", "銘板/称号の字の位置", "off"),
-    ("name_text", "銘板/名前の字の位置", "off"),
-    ("dan_text", "銘板/段位の字の位置", "off"),
-    ("title_size", "銘板/称号の字の大きさ", "size"),
-    ("name_size", "銘板/名前の字の大きさ", "size"),
-    ("dan_size", "銘板/段位の字の大きさ", "size"),
-    ("title_space", "銘板/称号の字の間隔", "space"),
-    ("name_space", "銘板/名前の字の間隔", "space"),
-    ("dan_space", "銘板/段位の字の間隔", "space"),
-    ("title_line", "銘板/称号の縁の太さ", "line"),
-    ("name_line", "銘板/名前の縁の太さ", "line"),
-    ("dan_line", "銘板/段位の縁の太さ", "line"),
+    ("title", "ネームプレート/称号バー", "rect"),
+    ("plate", "ネームプレート/名前の板", "rect"),
+    ("badge", "ネームプレート/1P の丸", "rect"),
+    ("dan", "ネームプレート/段位", "rect"),
+    ("dan_back", "ネームプレート/段位の裏の黒", "rect"),
+    ("title_text", "ネームプレート/称号の字の位置", "off"),
+    ("name_text", "ネームプレート/名前の字の位置", "off"),
+    ("dan_text", "ネームプレート/段位の字の位置", "off"),
+    ("title_size", "ネームプレート/称号の字の大きさ", "size"),
+    ("name_size", "ネームプレート/名前の字の大きさ", "size"),
+    ("dan_size", "ネームプレート/段位の字の大きさ", "size"),
+    ("title_space", "ネームプレート/称号の字の間隔", "space"),
+    ("name_space", "ネームプレート/名前の字の間隔", "space"),
+    ("dan_space", "ネームプレート/段位の字の間隔", "space"),
+    ("title_line", "ネームプレート/称号の縁の太さ", "line"),
+    ("name_line", "ネームプレート/名前の縁の太さ", "line"),
+    ("dan_line", "ネームプレート/段位の縁の太さ", "line"),
 ]
 #: 起動時の値。Ctrl+Shift+0 でここへ戻す。
 _TUNE_BASE = None
@@ -1115,9 +1124,9 @@ class GameScreenWidget(QWidget):
         self._chara = None
         self._title = ""
         self._title_family = None
-        # 銘板の字形(勘亭流のパス)。名前・称号・段位ぶんを名前で持つ。
+        # ネームプレートの字形(勘亭流のパス)。名前・称号・段位ぶんを名前で持つ。
         self._plate_paths = {}
-        # 銘板の中身。最初に描くときに1回だけ読む。
+        # ネームプレートの中身。最初に描くときに1回だけ読む。
         self._nameplate_json = None
         self._nameplate_epoch = -1
         # 称号バーの差し替え画像。False は「まだ探していない」、None は「無い」。
@@ -1259,7 +1268,7 @@ class GameScreenWidget(QWidget):
             return
         # 上の帯: 魂ゲージ・魂・黒枠・連打数
         self.update(0, 0, SCREEN_W, LANE_Y)
-        # 左パネル: スコア・コース記号・太鼓・コンボ・銘板
+        # 左パネル: スコア・コース記号・太鼓・コンボ・ネームプレート
         self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
         # 下背景の帯: クリア後の金色へのクロスフェード・左流れ・提灯の光の
         # ゆらぎ・(出すなら)踊り子。ここは今まで塗り直していなかったので、
@@ -1398,7 +1407,7 @@ class GameScreenWidget(QWidget):
         # 経路(NeoTJAPlayer は初回の描画で素材を読む)では曲名が消えていた。
         # Editor は起動時に先読みするので、たまたま表に出ていなかっただけ。
         self._title_family = self._load_title_font()
-        # 銘板の文字は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
+        # ネームプレートの文字は毎フレーム描くので、字形(パス)だけは1回作って使い回す。
         # フォントが差し替わるここで捨てて、次の描画で組み直させる。
         self._plate_paths = {}
 
@@ -1536,7 +1545,7 @@ class GameScreenWidget(QWidget):
         """縁取りした文字を1枚の絵に焼いて、次からはそれを貼るだけにする。
 
         **毎コマ縁取りしていたのを見直した。** 文字の輪郭を線でなぞる
-        strokePath は 1回 0.9ms かかり、曲名と銘板で毎フレーム2回呼んで
+        strokePath は 1回 0.9ms かかり、曲名とネームプレートで毎フレーム2回呼んで
         いた(実測: 1491コマで strokePath だけ 1.33 秒)。中身は変わらない
         のだから、1回焼いて貼れば済む。
 
@@ -1616,15 +1625,17 @@ class GameScreenWidget(QWidget):
         p.drawPixmap(at, pm)
 
     def _nameplate_data(self):
-        """銘板の中身。環境設定(settings.json)から読む。読むのは1回だけ。
+        """ネームプレートの中身。環境設定(settings.json)から読む。読むのは1回だけ。
 
         設定が変わったら nameplate_changed() を呼ぶと読み直す。"""
         if self._nameplate_json is None or self._nameplate_epoch != _NP_EPOCH:
             from . import settings as _settings
-            try:
-                cfg = _settings.load_settings()
-            except Exception:  # noqa: BLE001
-                cfg = {}
+            cfg = _NP_CONFIG
+            if cfg is None:
+                try:
+                    cfg = _settings.load_settings()
+                except Exception:  # noqa: BLE001
+                    cfg = {}
             d = _settings.default_settings()
             get = lambda k: cfg.get(k, d[k])  # noqa: E731
             self._nameplate_json = {
@@ -1722,7 +1733,7 @@ class GameScreenWidget(QWidget):
         p.restore()
 
     def _draw_nameplate(self, p):
-        """銘板。1P ぶんだけ描く(この画面は1人用)。
+        """ネームプレート。1P ぶんだけ描く(この画面は1人用)。
 
         並びは本家と同じで、上に称号バー、下の段に 1P の丸・段位・名前。
         部品は NamePlate_Parts.png から、文字は NamePlate.json から。"""
@@ -1730,7 +1741,7 @@ class GameScreenWidget(QWidget):
         lay = NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
         if sheet is None or lay is None:
             # 部品シートが用意できないときは、今までどおり組み上げ済みの
-            # 銘板だけ貼る(称号も段位も出ないが、板は出る)。
+            # ネームプレートだけ貼る(称号も段位も出ないが、板は出る)。
             np_ = self._skin.get("nameplate")
             if np_ is not None:
                 box = lay["plate"] if lay else (0, 304, 219, 52)
@@ -2203,7 +2214,7 @@ class GameScreenWidget(QWidget):
         return base + SCORE_TOTAL_ADVANCE_PX / (cw * SCORE_SCALE)
 
     def _draw_left_panel(self, p, combo, score, recent, now):
-        """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
+        """左パネル: スコア / コース記号 / 太鼓 + コンボ / ネームプレート。"""
         # --- スコア(右詰め) ---
         # 点が入った瞬間、上へ伸びて戻る。**伸ばすのは縦だけ。** 実機も幅は
         # 変わらない(実測: 高さ 34->40 のあいだ、幅は 110 のまま)。下端を
@@ -2341,7 +2352,7 @@ class GameScreenWidget(QWidget):
                                    cy0 + COMBO_TEXT_Y_OFF, ct.width(), band),
                              ct, QRect(0, src_y, ct.width(), band))
 
-        # --- 銘板 ---
+        # --- ネームプレート ---
         # 板も文字も「毎フレーム描く側」に置くのがみそで、静的キャッシュ
         # (_static_layer)へ描くと板だけが焼き直されて文字が取り残される
         # 事故が起きる(曲名で一度やった)。

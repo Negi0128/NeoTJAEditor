@@ -2602,6 +2602,7 @@ class MainWindow(QMainWindow):
                 self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
             )
             self.preview_dock.refresh_theme()
+            self.preview_dock.refresh_nameplate()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))
             self._apply_wireless_offset()
             # 出力デバイスを変えたときだけ開き直す(結果はプレビュー側が表示する)。
