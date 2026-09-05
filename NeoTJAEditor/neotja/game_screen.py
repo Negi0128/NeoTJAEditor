@@ -180,7 +180,7 @@ NAMEPLATE_PART_DANS = [
 ]
 
 #: 使う配置。"honke" は本家の実測寸法、"tnde" は素材を等倍で使う。
-NAMEPLATE_LAYOUT = "honke"
+NAMEPLATE_LAYOUT = "tnde"
 #: 配置。値は画面座標の (x, y, 幅, 高さ)。文字は枠の中心にそろえる。
 #:
 #: honke の数値は本家の映像(1920)を実測して 1.5 で割ったもの:
@@ -806,6 +806,110 @@ class _LaneOverlay(QWidget):
         self._screen.draw_chara_front(p, ox, oy)
         self._screen.draw_balloon_front(p, ox, oy)
         p.end()
+
+
+# --- 画面を見ながらの位置合わせ ---------------------------------------
+#
+# Player から Ctrl+Shift+矢印 で呼ぶ**調整用**。ここで決めた値を、上の定数の
+# 初期値に書き写せば固定できる。アプリを閉じると元に戻る(設定には保存
+# しない — 調整は作る側の作業で、利用者が触るものではないため)。
+#
+# 種類は3つ。
+#   "off"  … 位置だけ。値は (右, 下)。
+#   "rect" … 位置と大きさ。値は (x, y, 幅, 高さ)。
+#   "size" … 文字の大きさ(px)。
+_TUNE_ITEMS = [
+    ("rainbow_head", "虹の先端の顔", "off"),
+    ("title", "銘板/称号バー", "rect"),
+    ("plate", "銘板/名前の板", "rect"),
+    ("badge", "銘板/1P の丸", "rect"),
+    ("dan", "銘板/段位", "rect"),
+    ("dan_gold", "銘板/段位の金線", "rect"),
+    ("title_size", "銘板/称号の字", "size"),
+    ("name_size", "銘板/名前の字", "size"),
+    ("dan_size", "銘板/段位の字", "size"),
+]
+#: 起動時の値。Ctrl+Shift+0 でここへ戻す。
+_TUNE_BASE = None
+
+
+def tune_list():
+    """調整できるものの一覧 [(id, 表示名, 種類), ...]。"""
+    return list(_TUNE_ITEMS)
+
+
+def _tune_layout():
+    return NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT) or {}
+
+
+def _tune_snapshot():
+    global _TUNE_BASE
+    if _TUNE_BASE is None:
+        _TUNE_BASE = {"rainbow_head": RAINBOW_HEAD_OFF,
+                      "layout": {k: dict(v)
+                                 for k, v in NAMEPLATE_LAYOUTS.items()}}
+
+
+def tune_get(tid):
+    """今の値。無い項目は None。"""
+    if tid == "rainbow_head":
+        return RAINBOW_HEAD_OFF
+    return _tune_layout().get(tid)
+
+
+def tune_text(tid):
+    """画面に出す文字。"""
+    v = tune_get(tid)
+    if v is None:
+        return "%s  (この配置には無い)" % tid
+    if isinstance(v, tuple) and len(v) == 4:
+        return "%s = (%d, %d, %d, %d)" % ((tid,) + tuple(int(x) for x in v))
+    if isinstance(v, tuple):
+        return "%s = (%d, %d)" % (tid, v[0], v[1])
+    return "%s = %d" % (tid, v)
+
+
+def tune_apply(tid, dx=0, dy=0, dw=0, dh=0, dsize=0):
+    """調整する。動かしたあとの値を返す。"""
+    global RAINBOW_HEAD_OFF
+    _tune_snapshot()
+    if tid == "rainbow_head":
+        RAINBOW_HEAD_OFF = (RAINBOW_HEAD_OFF[0] + dx, RAINBOW_HEAD_OFF[1] + dy)
+        return RAINBOW_HEAD_OFF
+    lay = _tune_layout()
+    v = lay.get(tid)
+    if v is None:
+        return None
+    if isinstance(v, tuple) and len(v) == 4:
+        # 幅と高さは 1 未満にしない。0 にすると絵が消えて、戻す手が無くなる。
+        lay[tid] = (v[0] + dx, v[1] + dy,
+                    max(1, v[2] + dw), max(1, v[3] + dh))
+    else:
+        lay[tid] = max(1, int(v) + dsize)
+    return lay[tid]
+
+
+def tune_reset():
+    """起動時の値へ戻す。"""
+    global RAINBOW_HEAD_OFF
+    _tune_snapshot()
+    RAINBOW_HEAD_OFF = _TUNE_BASE["rainbow_head"]
+    for k, v in _TUNE_BASE["layout"].items():
+        NAMEPLATE_LAYOUTS[k] = dict(v)
+
+
+def tune_dump():
+    """今の値を、そのまま貼れる形で書き出す。"""
+    lines = ["RAINBOW_HEAD_OFF = (%d, %d)" % RAINBOW_HEAD_OFF,
+             'NAMEPLATE_LAYOUTS["%s"] = {' % NAMEPLATE_LAYOUT]
+    for key, val in _tune_layout().items():
+        if isinstance(val, tuple):
+            lines.append('    "%s": (%d, %d, %d, %d),'
+                         % ((key,) + tuple(int(x) for x in val)))
+        else:
+            lines.append('    "%s": %d,' % (key, val))
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def nudge_rainbow_head(dx, dy):
@@ -1480,10 +1584,13 @@ class GameScreenWidget(QWidget):
         (縦は詰めない — 高さが揃わないと行が波打って見える)。"""
         if not text:
             return
-        path = self._plate_paths.get(key)
+        # 文字の大きさは画面を見ながら変えられる(tune_apply)ので、字形も
+        # 焼いた絵も大きさ込みで覚える。key だけだと変えても古い絵が出る。
+        ck = (key, text, int(size))
+        path = self._plate_paths.get(ck)
         if path is None:
             f = QFont(self._title_family) if self._title_family else QFont()
-            f.setPixelSize(size)
+            f.setPixelSize(int(size))
             path = QPainterPath()
             path.addText(QPointF(0.0, 0.0), f, text)
             # 原点は文字送りの基準(ベースライン左端)なので、そのままでは
@@ -1491,7 +1598,7 @@ class GameScreenWidget(QWidget):
             # 寄せておき、貼るときに枠の中心へ移す。
             r = path.boundingRect()
             path.translate(-r.center().x(), -r.center().y())
-            self._plate_paths[key] = path
+            self._plate_paths[ck] = path
         r = path.boundingRect()
         avail = box[2] - outline_w * 2.0
         squeeze = 1.0 if r.width() <= avail or r.width() <= 0 else avail / r.width()
@@ -1501,8 +1608,7 @@ class GameScreenWidget(QWidget):
         if squeeze != 1.0:
             p.scale(squeeze, 1.0)
         if outline_w > 0:
-            baked = self._baked_text(p, (key, text), path, outline,
-                                     outline_w, fill)
+            baked = self._baked_text(p, ck, path, outline, outline_w, fill)
         else:
             baked = None
         if baked is None:

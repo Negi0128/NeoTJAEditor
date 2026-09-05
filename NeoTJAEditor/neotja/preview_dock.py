@@ -417,19 +417,31 @@ class GamePreviewWindow(QWidget):
             sc.activated.connect(fn)
         self._build_tuner()
 
-    # --- 虹の先端の顔の位置合わせ (Ctrl+Shift+矢印) -------------------
+    # --- 画面を見ながらの位置合わせ (Ctrl+Shift+…) ---------------------
     #
     # 目で見て決めたいものなので、画面を見ながら 1px ずつ動かせるようにして
     # ある。Shift を足さない矢印は小節移動と再生速度に使われているので、
-    # Ctrl+Shift の組み合わせにした。決めた値は画面に出るので、それを
-    # game_screen.RAINBOW_HEAD_OFF の初期値に書き写せば固定できる。
+    # Ctrl+Shift の組み合わせにした。
+    #
+    #   Ctrl+Shift+N / B    調整するものを次へ / 前へ
+    #   Ctrl+Shift+M        矢印の効き方を「位置 → 大きさ」で切り替え
+    #   Ctrl+Shift+矢印     1px 動かす(Alt を足すと 5px)
+    #   Ctrl+Shift+0        全部を起動時の値へ戻す
+    #   Ctrl+Shift+S        今の値をファイルに書き出す
+    #
+    # 決めた値は game_screen の定数の初期値に書き写せば固定できる。設定には
+    # 保存しない — 調整は作る側の作業で、利用者が触るものではないため。
     #: 1回押したときに動く量(px)。Alt を足すと 5px。
     TUNE_STEP = 1
     TUNE_STEP_BIG = 5
     #: 数値を出しておく時間(ms)。
-    TUNE_SHOW_MS = 4000
+    TUNE_SHOW_MS = 6000
+    #: 矢印の効き方。
+    TUNE_MODES = (("move", "位置"), ("size", "大きさ"))
 
     def _build_tuner(self):
+        self._tune_index = 0
+        self._tune_mode = 0
         self._tune_label = QLabel("", self.scaled_host)
         self._tune_label.setStyleSheet(
             "color: #ffe9a8; background: rgba(0,0,0,180);"
@@ -442,34 +454,98 @@ class GamePreviewWindow(QWidget):
         self._tune_timer = QTimer(self)
         self._tune_timer.setSingleShot(True)
         self._tune_timer.timeout.connect(self._tune_label.hide)
+        base = Qt.ControlModifier | Qt.ShiftModifier
         moves = ((Qt.Key_Left, -1, 0), (Qt.Key_Right, 1, 0),
                  (Qt.Key_Up, 0, -1), (Qt.Key_Down, 0, 1))
         for key, sx, sy in moves:
-            for mod, step in ((Qt.ControlModifier | Qt.ShiftModifier,
-                               self.TUNE_STEP),
-                              (Qt.ControlModifier | Qt.ShiftModifier
-                               | Qt.AltModifier, self.TUNE_STEP_BIG)):
-                sc = QShortcut(QKeySequence(mod | key), self)
-                sc.setContext(Qt.WindowShortcut)
-                sc.activated.connect(
-                    lambda dx=sx * step, dy=sy * step: self._tune_head(dx, dy))
-        sc = QShortcut(QKeySequence(Qt.ControlModifier | Qt.ShiftModifier
-                                    | Qt.Key_0), self)
-        sc.setContext(Qt.WindowShortcut)
-        sc.activated.connect(lambda: self._tune_head(0, 0, reset=True))
+            for mod, step in ((base, self.TUNE_STEP),
+                              (base | Qt.AltModifier, self.TUNE_STEP_BIG)):
+                self._tune_key(mod | key,
+                               lambda x=sx, y=sy, s=step: self._tune_move(x * s,
+                                                                          y * s))
+        self._tune_key(base | Qt.Key_N, lambda: self._tune_pick(1))
+        self._tune_key(base | Qt.Key_B, lambda: self._tune_pick(-1))
+        self._tune_key(base | Qt.Key_M, self._tune_switch_mode)
+        self._tune_key(base | Qt.Key_0, self._tune_reset)
+        self._tune_key(base | Qt.Key_S, self._tune_save)
 
-    def _tune_head(self, dx, dy, reset=False):
+    def _tune_key(self, seq, fn):
+        sc = QShortcut(QKeySequence(seq), self)
+        sc.setContext(Qt.WindowShortcut)
+        sc.activated.connect(fn)
+
+    def _tune_item(self):
         from . import game_screen as _gs
-        off = _gs.reset_rainbow_head() if reset else _gs.nudge_rainbow_head(dx, dy)
-        self._tune_label.setText(
-            "虹の先端の顔  RAINBOW_HEAD_OFF = (%d, %d)   "
-            "Ctrl+Shift+矢印 / +Alt で5px / Ctrl+Shift+0 で戻す"
-            % (off[0], off[1]))
+        items = _gs.tune_list()
+        if not items:
+            return None, None
+        self._tune_index %= len(items)
+        return _gs, items[self._tune_index]
+
+    def _tune_move(self, dx, dy):
+        gs, item = self._tune_item()
+        if item is None:
+            return
+        tid, _label, kind = item
+        if kind == "size":
+            # 文字は「上で大きく・下で小さく」。左右は使わない。
+            gs.tune_apply(tid, dsize=-dy)
+        elif kind == "off" or self.TUNE_MODES[self._tune_mode][0] == "move":
+            gs.tune_apply(tid, dx=dx, dy=dy)
+        else:
+            gs.tune_apply(tid, dw=dx, dh=dy)
+        self._tune_show()
+
+    def _tune_pick(self, step):
+        gs, _ = self._tune_item()
+        self._tune_index += step
+        self._tune_show()
+
+    def _tune_switch_mode(self):
+        self._tune_mode = (self._tune_mode + 1) % len(self.TUNE_MODES)
+        self._tune_show()
+
+    def _tune_reset(self):
+        from . import game_screen as _gs
+        _gs.tune_reset()
+        self._tune_show("起動時の値へ戻した")
+
+    def _tune_save(self):
+        from . import game_screen as _gs, settings as _settings
+        try:
+            path = _settings.settings_path().parent / "tune.txt"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(_gs.tune_dump() + "\n")
+            self._tune_show("書き出した: %s" % path)
+        except Exception as exc:  # noqa: BLE001
+            self._tune_show("書き出せなかった: %s" % exc)
+
+    def _tune_show(self, note=""):
+        gs, item = self._tune_item()
+        if item is None:
+            return
+        tid, label, kind = item
+        mode = "文字の大きさ" if kind == "size" else (
+            "位置だけ" if kind == "off"
+            else self.TUNE_MODES[self._tune_mode][1])
+        text = ("[%d/%d] %s   %s   矢印=%s\n"
+                "N/B 選ぶ  M 位置↔大きさ  Alt で5px  0 戻す  S 書き出し"
+                % (self._tune_index + 1, len(gs.tune_list()), label,
+                   gs.tune_text(tid), mode))
+        if note:
+            text += "\n" + note
+        self._tune_label.setText(text)
         self._tune_label.adjustSize()
         self._tune_label.move(8, 8)
         self._tune_label.show()
         self._tune_label.raise_()
         self._tune_timer.start(self.TUNE_SHOW_MS)
+        # 止めているときは次のコマが来ないので、ここで描き直させる。
+        # これが無いと、押しても数字だけ動いて絵が変わらない。
+        try:
+            self._chart_preview.update()
+        except Exception:  # noqa: BLE001
+            pass
 
     def refit(self):
         """中身の高さが変わったときに窓の固定サイズを取り直す。
