@@ -158,25 +158,55 @@ COMBO_ANCHOR = (DRUM_POS[0] + COMBO_OFFSET[0], DRUM_POS[1] + COMBO_OFFSET[1])
 # 部品は NamePlate_Parts.png から切り出す。これは System の
 # TNDE-R/Graphics/NamePlate.png (220x1189 の縦長シート)をそのまま持って
 # きたもので、各帯の位置はアルファを数えた実測値。
-NAMEPLATE_PART_BADGE_1P = (4, 3, 50, 50)      # 1P 赤丸
-NAMEPLATE_PART_BADGE_1P_BLUE = (4, 57, 50, 50)
-NAMEPLATE_PART_BADGE_2P = (4, 111, 50, 50)
-NAMEPLATE_PART_PLATE = (2, 164, 219, 52)      # 名前の白い板
-NAMEPLATE_PART_DAN_BASE = (4, 944, 89, 25)    # 段位の黒い下地
-# 素材には danGold 用の金線(49, 1164, 39, 17)もあるが、使わない。
-#: 称号バー。titleType の 0..12 がこの順に並ぶ。
-#: 0 木目 / 1 金 / 2 紫 / 3..8 虹の各種 / 9..11 水色の各種 / 12 赤。
-NAMEPLATE_PART_TITLES = [
-    (4, 222, 213, 24), (4, 276, 213, 24), (4, 330, 213, 24),
-    (4, 384, 213, 24), (4, 437, 213, 25), (4, 489, 213, 28),
-    (4, 545, 213, 25), (4, 599, 213, 25), (4, 653, 213, 25),
-    (4, 707, 213, 25), (4, 761, 213, 25), (4, 815, 213, 25),
-    (4, 869, 213, 24),
-]
-#: 段位の飾り。danType の 0=銀 / 1=金 / 2=虹。
-NAMEPLATE_PART_DANS = [
-    (47, 999, 44, 24), (47, 1053, 44, 24), (47, 1107, 44, 24),
-]
+# NamePlate.png には**2種類の並び**が出回っている。縦の長さで見分ける。
+#   220x1189 … 太鼓さん次郎のスキン(System/<スキン名>/Graphics/NamePlate.png)。
+#               称号バーが13種、下のほうに段位が並ぶ。
+#   220x648  … 「NamePlate to JSON」に付いてくるほう。称号バーは3種だけで、
+#               段位の位置も違う。
+# 1189 の座標だけを持っていたころ、648 のシートを置かれると段位の切り出しが
+# 画像の外(y=945〜)を指して**段位が何も出なかった**。
+NAMEPLATE_SHEETS = {
+    1189: {
+        "badge": (4, 3, 50, 50),          # 1P 赤丸
+        "plate": (2, 164, 219, 52),       # 名前の白い板
+        "dan_base": (4, 944, 89, 25),     # 段位の黒い下地
+        # 称号バー。titleType の 0..12 がこの順。
+        # 0 木目 / 1 金 / 2 紫 / 3..8 虹の各種 / 9..11 水色の各種 / 12 赤。
+        "titles": [
+            (4, 222, 213, 24), (4, 276, 213, 24), (4, 330, 213, 24),
+            (4, 384, 213, 24), (4, 437, 213, 25), (4, 489, 213, 28),
+            (4, 545, 213, 25), (4, 599, 213, 25), (4, 653, 213, 25),
+            (4, 707, 213, 25), (4, 761, 213, 25), (4, 815, 213, 25),
+            (4, 869, 213, 24),
+        ],
+        # 段位の飾り。danType の 0=銀 / 1=金 / 2=虹。
+        "dans": [(47, 999, 44, 24), (47, 1053, 44, 24), (47, 1107, 44, 24)],
+    },
+    648: {
+        "badge": (4, 2, 50, 50),
+        "plate": (2, 163, 219, 54),
+        "dan_base": (4, 403, 89, 25),
+        "titles": [
+            (4, 221, 213, 24), (4, 275, 213, 24), (4, 329, 213, 24),
+        ],
+        "dans": [(47, 458, 44, 24), (47, 512, 44, 24), (47, 566, 44, 24)],
+    },
+}
+
+
+def nameplate_parts(sheet):
+    """その部品シートの切り出し位置。見分けが付かなければ None。
+
+    高さがぴったり合わなくても、近いほうへ寄せる。作り直したシートで
+    数px違うだけのときに何も出ないより良い。"""
+    if sheet is None:
+        return None
+    h = sheet.height()
+    got = NAMEPLATE_SHEETS.get(h)
+    if got is not None:
+        return got
+    near = min(NAMEPLATE_SHEETS, key=lambda k: abs(k - h))
+    return NAMEPLATE_SHEETS[near] if abs(near - h) <= 40 else None
 
 #: 使う配置。"honke" は本家の実測寸法、"tnde" は素材を等倍で使う。
 NAMEPLATE_LAYOUT = "tnde"
@@ -1308,8 +1338,10 @@ class NameplateRenderer:
         data = self.data or {}
         if lay is None:
             return
-        if self.sheet is None:
-            # 部品シートが無い。環境設定は使わず、既定の姿だけを出す。
+        parts = nameplate_parts(self.sheet)
+        if parts is None:
+            # 部品シートが無い(または並びが分からない)。環境設定は使わず、
+            # 既定の姿だけを出す。
             self._draw_simple(p, lay)
             return
         title = data.get("title", "")
@@ -1319,7 +1351,7 @@ class NameplateRenderer:
         # --- 名前の板と名前 ---
         # 段位は板の左端に重なるので、名前はその右の空きに寄せる。板の
         # 真ん中に置くと、段位の下に名前が潜って読めなくなる。
-        self._part(p, NAMEPLATE_PART_PLATE, lay["plate"])
+        self._part(p, parts["plate"], lay["plate"])
         box = lay["plate"]
         if dan:
             left = max(box[0], lay["dan"][0] + lay["dan"][2]
@@ -1343,10 +1375,10 @@ class NameplateRenderer:
                               max(1, box[2] + pad[2]),
                               max(1, box[3] + pad[3])),
                        QColor(NAMEPLATE_DAN_BACK))
-            self._part(p, NAMEPLATE_PART_DAN_BASE, box)
+            self._part(p, parts["dan_base"], box)
             d = int(data.get("danType", 0))
-            if 0 <= d < len(NAMEPLATE_PART_DANS):
-                self._part(p, NAMEPLATE_PART_DANS[d], box)
+            if 0 <= d < len(parts["dans"]):
+                self._part(p, parts["dans"][d], box)
             fill = (NAMEPLATE_DAN_COLOR
                     if data.get("danTextColor") == "gold" else "#ffffff")
             off, size = self._adjust(lay["dan_text"], data, "danOff",
@@ -1363,9 +1395,9 @@ class NameplateRenderer:
                              QRectF(0, 0, img.width(), img.height()))
             else:
                 t = int(data.get("titleType", 0))
-                if not 0 <= t < len(NAMEPLATE_PART_TITLES):
+                if not 0 <= t < len(parts["titles"]):
                     t = 0
-                self._part(p, NAMEPLATE_PART_TITLES[t], lay["title"])
+                self._part(p, parts["titles"][t], lay["title"])
                 off, size = self._adjust(lay["title_text"], data,
                                          "titleOff", "titleSize",
                                          lay["title_size"])
@@ -1374,7 +1406,7 @@ class NameplateRenderer:
                            lay["title_line"], off, lay["title_space"])
 
         # --- 1P の丸。いちばん手前 ---
-        self._part(p, NAMEPLATE_PART_BADGE_1P, lay["badge"])
+        self._part(p, parts["badge"], lay["badge"])
 
 
 def load_title_font():
