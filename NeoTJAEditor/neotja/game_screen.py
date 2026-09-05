@@ -3706,7 +3706,9 @@ class GameScreenWidget(QWidget):
             self._draw_dancers(p, now, ratio)
             self._draw_chara(p, now)
         # ゴーゴー突入の火花は画面の下端から。踊り子より手前、左パネルより奥。
-        if not self._compact:
+        # 軽量(音声波形・情報も同じ)では出さない。下の背景も踊り子も描いて
+        # いないところへ火花だけ吹き上がるのは浮くため。
+        if not self._compact and not self._lite:
             self.draw_gogo_splash(p)
         self._draw_left_panel(p, combo, score, recent, now)
         # 軽量では魂ゲージ(+「クリア」+ 虹)を出さない。ゲージは 400px 超の
