@@ -700,6 +700,7 @@ class _LaneOverlay(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         ox, oy = self.x(), self.y()
         # 後のものほど手前。
+        self._screen.draw_soul_front(p, ox, oy)
         self._screen.draw_soul_flights(p, ox, oy)
         self._screen.draw_judge_pop(p, ox, oy)
         self._screen.draw_chara_front(p, ox, oy)
@@ -774,6 +775,7 @@ class GameScreenWidget(QWidget):
         self._lite = False
         self._skin = {}
         self._score_timeline = None
+        self._last_gauge_ratio = 0.0
         self._gauge = None
         self._gauge_pulse = None
         self._clear_time = None
@@ -955,8 +957,13 @@ class GameScreenWidget(QWidget):
         # 中身がある間と、その次の1回だけ塗り直す。
         try:
             now = self.chart_preview.game_state()[0]
+            # 魂の弾けは飛行より長く続く(飛行 0.42 + 弾け 0.53 = 0.95 秒 に
+            # 対して、飛んでいる音符は 0.42 + 0.22 = 0.64 秒)。長いほうで
+            # 見ないと、弾けの途中で板の塗り直しが止まる。
             flying = bool(self.chart_preview.recent_hits(
-                now, SOUL_FLY_SEC + SOUL_LAND_SEC))
+                now, max(SOUL_FLY_SEC + SOUL_LAND_SEC,
+                         SOUL_FLY_SEC + (SOUL_BURST_FRAMES - SOUL_BURST_FIRST)
+                         * SOUL_BURST_FRAME_SEC)))
             if not flying and self._chara is not None:
                 flying = self._chara.state() in chara_mod.TIME_BASED_STATES
             if not flying:
@@ -1913,6 +1920,21 @@ class GameScreenWidget(QWidget):
             p.drawPixmap(gx + GAUGE_CLEAR_STEP_X + GAUGE_CLEAR_TEXT_OFF[0],
                          gy + GAUGE_CLEAR_TEXT_OFF[1], src, sx, sy, gw, gh)
 
+
+    def draw_soul_front(self, p, ox=0, oy=0):
+        """魂の弾けと「魂」の文字を、**レーンより手前**に描く。
+
+        どちらも魂ゲージのそばにあり、レーンの上端(y=196)に少しかぶる。
+        画面(親)はレーン(子)より先に描かれるので、_draw_gauge の中で描くと
+        かぶったぶんがレーンの下に潜っていた。_LaneOverlay から呼ぶ。
+
+        並びは元のまま「弾け → 魂の文字」。弾けのほうが後ろになる。
+        ox/oy は板の左上。"""
+        try:
+            now = self.chart_preview.game_state()[0]
+        except Exception:  # noqa: BLE001
+            return
+        ratio = self._last_gauge_ratio
         # 飛んできた音符が魂に当たった瞬間の弾け。以前は「クリアに届いた
         # 瞬間の演出」だと思って1回だけ出していたが、実機のキャプチャを見ると
         # 音符が着弾するたびに出ている(叩き続けているあいだ出っぱなしになる)。
@@ -1937,14 +1959,14 @@ class GameScreenWidget(QWidget):
                 d = c * SOUL_BURST_SCALE
                 cx = SOUL_POS[0] + SOUL_CELL / 2.0
                 cy = SOUL_POS[1] + SOUL_CELL / 2.0
-                blit_fitted(p, int(cx - d / 2), int(cy - d / 2), int(d), int(d),
+                blit_fitted(p, int(cx - d / 2 - ox), int(cy - d / 2 - oy), int(d), int(d),
                             burst, self._dpr, src=QRect(f * c, 0, c, c))
 
         # 魂の文字。ゲージの右端に置き、クリア圏まで溜まったら光る段に変える。
         soul = self._skin.get("soul")
         if soul is not None:
             row = 1 if ratio >= GAUGE_CLEAR_RATIO else 0
-            blit_fitted(p, SOUL_POS[0], SOUL_POS[1], SOUL_CELL, SOUL_CELL,
+            blit_fitted(p, SOUL_POS[0] - ox, SOUL_POS[1] - oy, SOUL_CELL, SOUL_CELL,
                         soul, self._dpr,
                         src=QRect(0, row * SOUL_CELL, SOUL_CELL, SOUL_CELL))
 
@@ -2691,6 +2713,9 @@ class GameScreenWidget(QWidget):
         # 要らない。連打・風船の金の扇(_draw_lane_readouts)は残す — あれは
         # 「今この連打を何回叩いたか」という譜面そのものの情報。
         if not self._lite:
+            # 魂の弾けと「魂」の文字は _LaneOverlay が手前に描くので、
+            # そちらが使う割合をここで渡しておく。
+            self._last_gauge_ratio = ratio
             self._draw_gauge(p, ratio, now)
         self._draw_lane_readouts(p, now, recent)
 
