@@ -114,7 +114,7 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 # 数字シートの1文字は 29.3x31.3。本家のスコアは高さ25px前後だったので
 # 0.8 倍で置く(1.6 倍にしたら6桁がパネルからはみ出した)。
 SCORE_RIGHT, SCORE_Y = 178, 198      # スコアは右詰め
-SCORE_SCALE = 1.02
+SCORE_SCALE = 0.902              # 加算文字(SCORE_GAIN_SCALE)と同じ大きさ
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
 SCORE_ADVANCE = 0.73
@@ -635,7 +635,7 @@ SCORE_GAIN_HOP_UP = 8.0          # 跳ねる高さ
 SCORE_GAIN_FADE_FROM = 0.875     # ここから消えはじめる(0..1)
 SCORE_GAIN_SCALE = 0.902
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
-SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
+SCORE_GAIN_Y_OFF = -1            # スコアの上端からさらに上へ(正=下)
 
 
 class _LaneOverlay(QWidget):
