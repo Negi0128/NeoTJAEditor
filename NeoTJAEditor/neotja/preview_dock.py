@@ -383,6 +383,9 @@ class GamePreviewWindow(QWidget):
         # テーマに切り替えても速度スライダー・ラベル・ボタン等はダークのまま。
         self.setStyleSheet(theme.build_qss(theme.THEMES["dark"]))
         self._pause_cb = pause_cb
+        # 位置合わせの道具。環境設定で入れていなければ作らない(下の
+        # _build_tuner がすぐ戻り、キーも割り当てられない)。
+        self._tune_label = None
         self._chart_preview = chart_preview
         self._lane = lane_widget if lane_widget is not None else chart_preview
         self._bottom_widget = bottom_widget
@@ -440,6 +443,16 @@ class GamePreviewWindow(QWidget):
     TUNE_MODES = (("move", "位置"), ("size", "大きさ"))
 
     def _build_tuner(self):
+        # ふだんは切っておく。作る側が絵の位置を詰めるための道具で、遊ぶ人が
+        # 誤って押すと銘板がずれたまま戻し方が分からなくなるため。環境設定の
+        # 「銘板」タブから入れる。ここで読むのはディスクの設定で、入れた直後は
+        # まだ効かない(この窓は起動時に作られるため)。
+        try:
+            from . import settings as _settings
+            if not _settings.load_settings().get("show_tuner", False):
+                return
+        except Exception:  # noqa: BLE001
+            return
         self._tune_index = 0
         self._tune_mode = 0
         self._tune_label = QLabel("", self.scaled_host)
@@ -521,6 +534,8 @@ class GamePreviewWindow(QWidget):
             self._tune_show("書き出せなかった: %s" % exc)
 
     def _tune_show(self, note=""):
+        if getattr(self, "_tune_label", None) is None:
+            return
         gs, item = self._tune_item()
         if item is None:
             return

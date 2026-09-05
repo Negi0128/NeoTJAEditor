@@ -21,3 +21,6 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+
+# 位置合わせの書き出し。作業中の値なので入れない。
+tune.txt
