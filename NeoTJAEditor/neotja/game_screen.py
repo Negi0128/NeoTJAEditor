@@ -301,6 +301,10 @@ RAINBOW_WIPE_DEN = 85
 RAINBOW_HEAD_CELL = 130
 RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
 RAINBOW_HEAD_SCALE = 1.0
+#: 引き終わりから、顔が帯の先端から魂の中心まで**滑らかに移る**のにかける
+#: 時間。ここを 0 にすると 1コマで 65px 飛んで、目に見えてブレる(実測: 帯の
+#: 先端 (1258,104) から魂の中心 (1238,166) へ一気に動いていた)。
+RAINBOW_LAND_MOVE_SEC = 0.066
 #: 虹を引き終わったあと、先端の顔が魂の上に残って消えるまでの時間。
 #: 引き終わり(RAINBOW_HALF コマ = 0.656 秒)にちょうど魂へ着く動きなので、
 #: そこで消してしまうと「どこかへ行った」ように見える。音符が魂へ着弾する
@@ -2578,6 +2582,18 @@ class GameScreenWidget(QWidget):
             t = el_land / RAINBOW_LAND_SEC
             cx = SOUL_POS[0] + SOUL_CELL / 2.0 - ox
             cy2 = SOUL_POS[1] + SOUL_CELL / 2.0 - oy
+            # 引き終わりの瞬間は、まだ帯の先端に居る。そこから魂の中心へ
+            # 短い時間で寄せる(1コマで飛ばすとブレて見える)。
+            if el_land < RAINBOW_LAND_MOVE_SEC:
+                last_nx = w * (RAINBOW_HALF - 1) // RAINBOW_WIPE_DEN
+                last_cy = self._rainbow_band_center(min(last_nx, w - 1))
+                if last_cy is not None:
+                    fx = x + last_nx + dx - ox
+                    fy = y + last_cy + dy - oy
+                    u = el_land / RAINBOW_LAND_MOVE_SEC
+                    u = 1.0 - (1.0 - u) ** 2          # 寄りながら減速する
+                    cx = fx + (cx - fx) * u
+                    cy2 = fy + (cy2 - fy) * u
             r = QRectF(cx - hw / 2.0, cy2 - hh / 2.0, hw, hh)
             src = QRectF(0, 0, head.width(), head.height())
             # 音符の着弾と同じ消し方: 素の絵を薄くしながら、白へ寄せる。
