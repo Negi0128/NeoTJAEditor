@@ -3396,6 +3396,9 @@ class GameScreenWidget(QWidget):
 
         コマ c の先端に RAINBOW_SPARK_PER_TICK 個生まれて、その場で縮みながら
         消える。先端が右へ進むぶん、後ろへ尾を引いたように見える。"""
+        # 顔と同じ理由で、軽量では出さない(帯が無いのに星だけ散る)。
+        if self._lite:
+            return
         try:
             now = self.chart_preview.game_state()[0]
         except Exception:  # noqa: BLE001
@@ -3445,6 +3448,12 @@ class GameScreenWidget(QWidget):
 
         帯そのものは背景の一部として奥に描いてある(_draw_rainbow)。顔だけを
         手前へ出すと、虹が魂ゲージまで届いたときに顔が魂の後ろへ隠れない。"""
+        # 軽量(音声波形・情報も同じ)では虹の帯そのものを描いていない
+        # (_layered_top が False になり _draw_rainbow を通らない)。この顔は
+        # レーンより手前の板から描くので軽量でも出てしまい、**帯の無いところに
+        # 顔だけが浮いて**いた。帯が無いなら顔も出さない。
+        if self._lite:
+            return
         try:
             now = self.chart_preview.game_state()[0]
         except Exception:  # noqa: BLE001
