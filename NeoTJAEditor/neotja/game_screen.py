@@ -246,7 +246,7 @@ NAMEPLATE_LAYOUTS = {
         "title": (2, 307, 213, 24),
         "plate": (-1, 304, 219, 52),
         "badge": (1, 305, 50, 50),
-        "dan": (46, 328, 42, 25),
+        "dan": (46, 328, 42, 24),
         "title_size": 10,
         "name_size": 15,
         "dan_size": 15,
