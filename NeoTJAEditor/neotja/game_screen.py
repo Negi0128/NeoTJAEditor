@@ -837,6 +837,16 @@ class _LaneOverlay(QWidget):
         p.end()
 
 
+#: 銘板の設定が変わるたびに増える。描く側はこれを見て読み直す。
+_NP_EPOCH = 0
+
+
+def nameplate_changed():
+    """環境設定で銘板を変えたときに呼ぶ。次の描画で読み直される。"""
+    global _NP_EPOCH
+    _NP_EPOCH += 1
+
+
 # --- 画面を見ながらの位置合わせ ---------------------------------------
 #
 # Player から Ctrl+Shift+矢印 で呼ぶ**調整用**。ここで決めた値を、上の定数の
@@ -1107,8 +1117,9 @@ class GameScreenWidget(QWidget):
         self._title_family = None
         # 銘板の字形(勘亭流のパス)。名前・称号・段位ぶんを名前で持つ。
         self._plate_paths = {}
-        # NamePlate.json の中身。最初に描くときに1回だけ読む。
+        # 銘板の中身。最初に描くときに1回だけ読む。
         self._nameplate_json = None
+        self._nameplate_epoch = -1
         # 称号バーの差し替え画像。False は「まだ探していない」、None は「無い」。
         self._nameplate_title_pm = False
         # 焼いた文字の置き場(_baked_text)。倍率ごとに1枚。
@@ -1605,28 +1616,47 @@ class GameScreenWidget(QWidget):
         p.drawPixmap(at, pm)
 
     def _nameplate_data(self):
-        """NamePlate.json の中身。読むのは1回だけ。"""
-        if self._nameplate_json is None:
+        """銘板の中身。環境設定(settings.json)から読む。読むのは1回だけ。
+
+        設定が変わったら nameplate_changed() を呼ぶと読み直す。"""
+        if self._nameplate_json is None or self._nameplate_epoch != _NP_EPOCH:
             from . import settings as _settings
             try:
-                self._nameplate_json = _settings.load_nameplate()
+                cfg = _settings.load_settings()
             except Exception:  # noqa: BLE001
-                self._nameplate_json = dict(_settings.NAMEPLATE_DEFAULT)
+                cfg = {}
+            d = _settings.default_settings()
+            get = lambda k: cfg.get(k, d[k])  # noqa: E731
+            self._nameplate_json = {
+                "name": str(get("nameplate_name")),
+                "title": str(get("nameplate_title")),
+                "titleType": int(get("nameplate_title_type") or 0),
+                "titleImage": str(get("nameplate_title_image")),
+                "dan": str(get("nameplate_dan")),
+                "danType": int(get("nameplate_dan_type") or 0),
+                "danTextColor": str(get("nameplate_dan_text_color")),
+            }
+            self._nameplate_epoch = _NP_EPOCH
+            self._nameplate_title_pm = False   # 絵も読み直す
         return self._nameplate_json
 
     def _nameplate_title_image(self):
-        """称号バーを丸ごと差し替える絵。無ければ None。
+        """称号バーを丸ごと差し替える絵。指定が無ければ None。
 
-        settings.json と同じ場所の NamePlate_Title.png。特別な称号は帯も
-        文字も1枚に焼いた絵で用意したい、という運用のため。"""
+        環境設定の「称号の画像」。特別な称号は帯も文字も1枚に焼いた絵で
+        用意したい、という運用のため。指定が無いときは settings.json と
+        同じ場所の NamePlate_Title.png も見る(以前からの置き場)。"""
         if self._nameplate_title_pm is not False:
             return self._nameplate_title_pm
         self._nameplate_title_pm = None
         try:
             from . import settings as _settings
-            path = _settings.settings_path().parent / NAMEPLATE_TITLE_IMAGE
-            if path.exists():
-                pm = QPixmap(str(path))
+            import os as _os
+            named = self._nameplate_data().get("titleImage") or ""
+            path = named or str(_settings.settings_path().parent
+                                / NAMEPLATE_TITLE_IMAGE)
+            if _os.path.exists(path):
+                pm = QPixmap(path)
                 if not pm.isNull():
                     self._nameplate_title_pm = pm
         except Exception:  # noqa: BLE001
@@ -1649,7 +1679,8 @@ class GameScreenWidget(QWidget):
             return
         # 文字の大きさは画面を見ながら変えられる(tune_apply)ので、字形も
         # 焼いた絵も大きさ込みで覚える。key だけだと変えても古い絵が出る。
-        ck = (key, text, int(size), int(spacing), round(float(outline_w), 1))
+        ck = (key, text, int(size), int(spacing), round(float(outline_w), 1),
+              fill if isinstance(fill, str) else id(fill))
         path = self._plate_paths.get(ck)
         if path is None:
             f = QFont(self._title_family) if self._title_family else QFont()
@@ -1708,9 +1739,9 @@ class GameScreenWidget(QWidget):
                              QRectF(0, 0, np_.width(), np_.height()))
             return
         data = self._nameplate_data()
-        title = data["title"][0]
-        name = data["name"][0]
-        dan = data["dan"][0]
+        title = data["title"]
+        name = data["name"]
+        dan = data["dan"]
 
         # 重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。称号バーを
         # 名前の板より手前に出す指定なので、板と段位を先に置く。
@@ -1741,11 +1772,13 @@ class GameScreenWidget(QWidget):
                               max(1, box[3] + pad[3])),
                        QColor(NAMEPLATE_DAN_BACK))
             self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
-            d = data["danType"][0]
+            d = data["danType"]
             if 0 <= d < len(NAMEPLATE_PART_DANS):
                 self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
+            fill = (NAMEPLATE_DAN_COLOR
+                    if data["danTextColor"] == "gold" else "#ffffff")
             self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
-                                  NAMEPLATE_DAN_COLOR, NAMEPLATE_DAN_OUTLINE,
+                                  fill, NAMEPLATE_DAN_OUTLINE,
                                   lay["dan_line"], lay["dan_text"],
                                   lay["dan_space"])
 
@@ -1756,7 +1789,7 @@ class GameScreenWidget(QWidget):
                 p.drawPixmap(QRectF(*lay["title"]), img,
                              QRectF(0, 0, img.width(), img.height()))
             else:
-                t = data["titleType"][0]
+                t = data["titleType"]
                 if not 0 <= t < len(NAMEPLATE_PART_TITLES):
                     t = 0
                 self._draw_part(p, sheet, NAMEPLATE_PART_TITLES[t],

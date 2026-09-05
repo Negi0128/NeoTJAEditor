@@ -31,6 +31,10 @@ _SETTINGS_KEYS = (
     # default_settings() と両方に要る — ここに書き忘れると「次回から
     # 表示しない」を押しても再起動で戻り、案内が永遠に出続ける。
     "warn_missing_system",
+    # 銘板。これも default_settings() と両方に要る。
+    "nameplate_name", "nameplate_title", "nameplate_title_type",
+    "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
+    "nameplate_dan_text_color", "show_tuner",
 )
 
 
@@ -61,6 +65,25 @@ def default_settings() -> dict:
         # 毎回同じダイアログを見せても読まれないだけなので、逃げ道を用意した。
         # 環境設定「エディタ・ツール」タブの素材の枠から戻せる。
         "warn_missing_system": True,
+        # --- 銘板(ゲーム画面の左下の名前板) ---
+        # 中身はここが正。TNDE 形式の NamePlate.json は環境設定の
+        # 「読み込む」から取り込む(load_nameplate)。
+        "nameplate_name": "どんちゃん",
+        "nameplate_title": "NeoTJAPlayer",
+        # 称号バーの色。NAMEPLATE_TITLE_TYPES の値。
+        "nameplate_title_type": 2,
+        # 称号バーを丸ごと差し替える絵。空 = 使わない。帯も文字も焼き込んだ
+        # 1枚として貼るので、指定すると上の色と文字は出ない。
+        "nameplate_title_image": "",
+        # 段位。空 = 段位を出さない。NAMEPLATE_DAN_NAMES から選ぶ。
+        "nameplate_dan": "",
+        # 段位の背景。NAMEPLATE_DAN_TYPES の値。
+        "nameplate_dan_type": 2,
+        # 段位の文字色。NAMEPLATE_DAN_TEXT_COLORS の値。
+        "nameplate_dan_text_color": "gold",
+        # 位置合わせ用のキー(Ctrl+Shift+…)を効かせるか。ふだんは切っておく。
+        # 作る側が絵の位置を詰めるための道具で、遊ぶ人には要らないため。
+        "show_tuner": False,
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,
@@ -205,6 +228,22 @@ def settings_path() -> Path:
     if fallback.exists():
         return fallback
     return _primary_settings_path()
+
+
+#: 称号バーの見た目。値は NamePlate_Parts.png の何番目の帯かで、
+#: game_screen.NAMEPLATE_PART_TITLES の並びと同じ。
+NAMEPLATE_TITLE_TYPES = (("木", 0), ("金", 1), ("紫", 2))
+#: 段位の背景。0 は素材では銀色だが、見た目どおり「白」と呼ぶ。
+NAMEPLATE_DAN_TYPES = (("白", 0), ("金", 1), ("虹", 2))
+#: 段位の選択肢。空 = 段位を出さない。
+NAMEPLATE_DAN_NAMES = (
+    "", "五級", "四級", "三級", "二級", "一級",
+    "初段", "二段", "三段", "四段", "五段",
+    "六段", "七段", "八段", "九段", "十段",
+    "玄人", "名人", "超人", "達人",
+)
+#: 段位の文字色。
+NAMEPLATE_DAN_TEXT_COLORS = (("白", "white"), ("金", "gold"))
 
 
 def nameplate_path() -> Path:

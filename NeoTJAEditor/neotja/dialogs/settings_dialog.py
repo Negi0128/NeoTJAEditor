@@ -9,6 +9,9 @@ from PySide6.QtWidgets import (
 from neotja import settings as settings_mod
 from neotja import theme as theme_mod
 
+#: メッセージ内の改行。
+LF = chr(10)
+
 
 class SettingsDialog(QDialog):
     # 「初期化」で既定へ戻すキー。この画面に入力欄がある項目だけを並べる
@@ -28,6 +31,9 @@ class SettingsDialog(QDialog):
         "hit_sound_don_path", "hit_sound_ka_path",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
         "peepo_chart_edit",
+        "nameplate_name", "nameplate_title", "nameplate_title_type",
+        "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
+        "nameplate_dan_text_color", "show_tuner",
         # 起動時の案内。これは初期化で戻してよい(戻ると「知らせる」= 既定)。
         "warn_missing_system",
     )
@@ -52,6 +58,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
         tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
         tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
+        tabs.addTab(self._scrollable(self._build_nameplate_tab()), "銘板")
         tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
 
         btn_row = QHBoxLayout()
@@ -475,6 +482,120 @@ class SettingsDialog(QDialog):
         outer.addStretch()
         return w
 
+    def _build_nameplate_tab(self):
+        """ゲーム画面の左下に出る名前板の中身。
+
+        並びは実際の絵と同じで、上から 称号 → 名前 → 段位。"""
+        w, outer = self._tab_body()
+        cfg = self.main_window.config_data
+        d = settings_mod.default_settings()
+
+        def val(key):
+            return cfg.get(key, d[key])
+
+        form = self._group(outer, "称号(上の帯)")
+        self.np_title_edit = QLineEdit(str(val("nameplate_title")))
+        self.np_title_edit.setMaxLength(64)
+        form.addRow("称号", self.np_title_edit)
+        self.np_title_type_combo = QComboBox()
+        for label, value in settings_mod.NAMEPLATE_TITLE_TYPES:
+            self.np_title_type_combo.addItem(label, value)
+        i = self.np_title_type_combo.findData(int(val("nameplate_title_type")))
+        self.np_title_type_combo.setCurrentIndex(max(0, i))
+        form.addRow("帯の色", self.np_title_type_combo)
+        self.np_title_image_edit = QLineEdit(str(val("nameplate_title_image")))
+
+        def browse_title_image():
+            path, _ = QFileDialog.getOpenFileName(
+                self, "称号の画像を選ぶ", self.np_title_image_edit.text(),
+                "画像 (*.png *.webp *.jpg *.jpeg);;すべてのファイル (*)")
+            if path:
+                self.np_title_image_edit.setText(path)
+
+        form.addRow("画像で置き換え",
+                    self._path_row(self.np_title_image_edit, browse_title_image))
+        form.addRow(self._hint(
+            "画像を指定すると、帯の色と称号の文字は出さず、その画像を帯として"
+            "そのまま貼ります。帯も文字も焼き込んだ1枚を用意してください。"
+            "特別な称号向けです。空にすると上の色と文字に戻ります。"))
+
+        form = self._group(outer, "名前")
+        self.np_name_edit = QLineEdit(str(val("nameplate_name")))
+        self.np_name_edit.setMaxLength(32)
+        form.addRow("名前", self.np_name_edit)
+
+        form = self._group(outer, "段位")
+        self.np_dan_combo = QComboBox()
+        for name in settings_mod.NAMEPLATE_DAN_NAMES:
+            self.np_dan_combo.addItem(name or "(出さない)", name)
+        i = self.np_dan_combo.findData(str(val("nameplate_dan")))
+        self.np_dan_combo.setCurrentIndex(max(0, i))
+        form.addRow("段位", self.np_dan_combo)
+        self.np_dan_type_combo = QComboBox()
+        for label, value in settings_mod.NAMEPLATE_DAN_TYPES:
+            self.np_dan_type_combo.addItem(label, value)
+        i = self.np_dan_type_combo.findData(int(val("nameplate_dan_type")))
+        self.np_dan_type_combo.setCurrentIndex(max(0, i))
+        form.addRow("背景", self.np_dan_type_combo)
+        self.np_dan_text_combo = QComboBox()
+        for label, value in settings_mod.NAMEPLATE_DAN_TEXT_COLORS:
+            self.np_dan_text_combo.addItem(label, value)
+        i = self.np_dan_text_combo.findData(str(val("nameplate_dan_text_color")))
+        self.np_dan_text_combo.setCurrentIndex(max(0, i))
+        form.addRow("文字の色", self.np_dan_text_combo)
+        form.addRow(self._hint("「(出さない)」を選ぶと、段位そのものを描きません。"))
+
+        form = self._group(outer, "その他")
+        btn_import = QPushButton("NamePlate.json から読み込む")
+        btn_import.clicked.connect(self._import_nameplate_json)
+        form.addRow(btn_import)
+        form.addRow(self._hint(
+            "TNDE 付属の「NamePlate to JSON」で作った NamePlate.json を、"
+            "settings.json と同じ場所に置いてから押すと、1P の内容をここへ"
+            "取り込みます。帯の色と段位の背景は 木/金/紫・白/金/虹 の3つに"
+            "丸めます。"))
+        self.np_tuner_check = QCheckBox("位置合わせのキーを有効にする（開発用）")
+        self.np_tuner_check.setChecked(bool(val("show_tuner")))
+        form.addRow(self.np_tuner_check)
+        form.addRow(self._hint(
+            "再生ウィンドウで Ctrl+Shift+矢印 などを使い、銘板や虹の部品を"
+            "1px ずつ動かせるようになります。動かした値は保存されず、"
+            "Ctrl+Shift+S で tune.txt に書き出す作りです。"
+            "※反映にはアプリの再起動が必要です。"))
+
+        outer.addStretch()
+        return w
+
+    def _import_nameplate_json(self):
+        """NamePlate.json の 1P ぶんを、この画面の入力欄へ流し込む。"""
+        path = settings_mod.nameplate_path()
+        if not path.exists():
+            QMessageBox.information(
+                self, "NamePlate.json",
+                "%s が見つかりませんでした。" % path + LF + LF +
+                "TNDE 付属の「NamePlate to JSON」で作ったファイルを、"
+                "この場所へ置いてからもう一度押してください。")
+            return
+        data = settings_mod.load_nameplate(path)
+        self.np_name_edit.setText(data["name"][0])
+        self.np_title_edit.setText(data["title"][0])
+        # 帯は13種あるが、この画面で選べるのは 木/金/紫 の3つ。それより
+        # 大きい番号はいちばん近い 紫 に寄せる(絵が出ないより良い)。
+        t = max(0, min(2, int(data["titleType"][0])))
+        self.np_title_type_combo.setCurrentIndex(
+            max(0, self.np_title_type_combo.findData(t)))
+        dan = data["dan"][0]
+        i = self.np_dan_combo.findData(dan)
+        if i < 0 and dan:
+            QMessageBox.information(
+                self, "NamePlate.json",
+                "段位「%s」は選べる一覧に無いので、そのままにしました。" % dan)
+        else:
+            self.np_dan_combo.setCurrentIndex(max(0, i))
+        d = max(0, min(2, int(data["danType"][0])))
+        self.np_dan_type_combo.setCurrentIndex(
+            max(0, self.np_dan_type_combo.findData(d)))
+
     def _build_experimental_tab(self):
         """まだ様子見の機能をまとめて置くタブ。既定は全部オフ、有効化しても
         すぐには反映されずアプリの再起動が要るものが多い(この点は各項目の
@@ -584,6 +705,22 @@ class SettingsDialog(QDialog):
         cfg["audio_output_device"] = self.audio_device_combo.currentData() or ""
         cfg["wireless_offset_enabled"] = self.wireless_check.isChecked()
         cfg["wireless_offset_ms"] = float(self.wireless_spin.value())
+
+        cfg["nameplate_name"] = self.np_name_edit.text()
+        cfg["nameplate_title"] = self.np_title_edit.text()
+        cfg["nameplate_title_type"] = int(self.np_title_type_combo.currentData())
+        cfg["nameplate_title_image"] = self.np_title_image_edit.text()
+        cfg["nameplate_dan"] = str(self.np_dan_combo.currentData() or "")
+        cfg["nameplate_dan_type"] = int(self.np_dan_type_combo.currentData())
+        cfg["nameplate_dan_text_color"] = str(self.np_dan_text_combo.currentData())
+        cfg["show_tuner"] = self.np_tuner_check.isChecked()
+        # 描く側が持っている銘板の内容を捨てさせる。これが無いと、保存しても
+        # 次にアプリを開き直すまで古い名前のままになる。
+        try:
+            from neotja import game_screen as _gs
+            _gs.nameplate_changed()
+        except Exception:  # noqa: BLE001
+            pass
         self.accept()
 
     def _reset(self):
@@ -598,6 +735,7 @@ class SettingsDialog(QDialog):
             "・フォント / リサイズ / 編集 / 譜面プレビュー / 連打の計算\n"
             "・動画の保存先\n"
             "・音声 (出力デバイス、打音のWAVパス、ワイヤレス調整)\n"
+            "・銘板 (名前・称号・段位)\n"
             "・実験的機能\n\n"
             "最近使ったファイルやウィンドウの位置など、この画面に無い項目は"
             "そのまま残ります。\n\n"
