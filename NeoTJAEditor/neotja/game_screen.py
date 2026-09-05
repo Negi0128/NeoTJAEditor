@@ -117,7 +117,7 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 #   合計スコア  右端 176.7  字の上端 198.0
 #   加算文字    右端 176.7(合計と**同じ**)  字の上端 160.0
 # 右端は両方とも同じなので、加算も SCORE_RIGHT を使う。
-SCORE_RIGHT, SCORE_Y = 174, 193      # スコアは右詰め
+SCORE_RIGHT, SCORE_Y = 174, 198      # スコアは右詰め
 SCORE_SCALE = 1.02
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
@@ -638,11 +638,14 @@ SCORE_GAIN_HOP_FROM = 0.62       # ここから跳ねはじめる(0..1)
 SCORE_GAIN_HOP_UP = 8.0          # 跳ねる高さ
 SCORE_GAIN_FADE_FROM = 0.875     # ここから消えはじめる(0..1)
 SCORE_GAIN_SCALE = 0.902
-#: 合計スコアの字送り。**加算文字と同じ字間**にするための値。
-#: 実際の送り幅は「1枠の幅 x 倍率 x この割合」なので、合計スコアのほうが
-#: 字が大きい(1.02 対 0.902)ぶん、割合を倍率の比で割ってやると送り幅が
-#: そろう。字の大きさは変えずに、間隔だけを合わせたいときの出し方。
-SCORE_TOTAL_ADVANCE = SCORE_ADVANCE * SCORE_GAIN_SCALE / SCORE_SCALE
+#: 合計スコアの字送りを、**加算文字の字送りから何 px 広げるか。**
+#:
+#: 送り幅は「1枠の幅 x 倍率 x 割合」で決まる。合計と加算は字の大きさが違う
+#: (1.02 対 0.902)ので、割合をそのまま揃えても送り幅は揃わない。1枠の幅は
+#: 素材によって変わるため、割合は素材を読んだあとに出す
+#: (_score_total_advance)。ここは「加算とちょうど同じ」を 0 とした px 単位の
+#: ずらし量。
+SCORE_TOTAL_ADVANCE_PX = 1.0
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 #: スコアの上端からさらに上へ(正=下)。実機の加算文字の上端 160.0 に合う値。
 #: SCORE_Y を動かすと加算も一緒に動くので、ここを変えるときは注意。
@@ -1653,11 +1656,25 @@ class GameScreenWidget(QWidget):
         self._digit_cache[key] = out
         return out
 
+    def _score_total_advance(self):
+        """合計スコアの字送り(1枠の幅に対する割合)。
+
+        加算文字と同じ送り幅に SCORE_TOTAL_ADVANCE_PX を足したものになる
+        よう、素材の1枠の幅から逆算する。素材が読めていなければ、加算と
+        同じ割合を倍率の比で割った値(px の足しぶんは無視)を返す。"""
+        sheet = self._skin.get("score_digits")
+        base = SCORE_ADVANCE * SCORE_GAIN_SCALE / SCORE_SCALE
+        if sheet is None or sheet.width() <= 0:
+            return base
+        cw = sheet.width() / 10.0
+        return base + SCORE_TOTAL_ADVANCE_PX / (cw * SCORE_SCALE)
+
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
         self._draw_digits(p, self._skin.get("score_digits"), score,
-                          cols=10, rows=3, row=0, advance=SCORE_TOTAL_ADVANCE,
+                          cols=10, rows=3, row=0,
+                          advance=self._score_total_advance(),
                           right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE,
                           y_offsets=SCORE_DIGIT_Y_OFF)
 
