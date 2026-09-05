@@ -63,6 +63,13 @@ def main():
     # 素材は Editor と同じキャッシュを使う。見つからなければ内蔵スキンで
     # 動く(案内は出さない — Player は「見る」道具で、素材が無いなら無いなりに
     # 動いてほしい。素材の入れ方の案内は Editor 側が持っている)。
+    # NamePlate.png を置いてもらうフォルダは、起動のたびに用意しておく。
+    # 描くときに作る作りだと、譜面を開くまでフォルダが現れず「どこに置けば
+    # いいのか」が分からない。作れなくても素材が無いだけなので黙って進む。
+    try:
+        settings_mod.nameplate_dir()
+    except Exception:  # noqa: BLE001
+        pass
     system_dir, _searched, _unusable = skin_cache.find_system_dir(cfg)
     if system_dir is not None:
         try:

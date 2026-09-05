@@ -178,6 +178,13 @@ def _prepare_skin(cfg):
 
     # 展開は初回で 2 秒程度、2 回目以降は指紋が一致するので 10ms 弱で終わる。
     # スプラッシュを出すほどではないので、砂時計カーソルだけ見せる。
+    # NamePlate.png を置いてもらうフォルダは、起動のたびに用意しておく。
+    # 描くときに作る作りだと、譜面を開くまでフォルダが現れず「どこに置けば
+    # いいのか」が分からない。作れなくても素材が無いだけなので黙って進む。
+    try:
+        settings_mod.nameplate_dir()
+    except Exception:  # noqa: BLE001
+        pass
     QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
     try:
         res = skin_cache.ensure_cache(system_dir)
