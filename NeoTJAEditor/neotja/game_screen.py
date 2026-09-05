@@ -118,12 +118,20 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 #   加算文字    右端 176.7(合計と**同じ**)  字の上端 160.0
 # 右端は両方とも同じなので、加算も SCORE_RIGHT を使う。
 SCORE_RIGHT, SCORE_Y = 174, 198      # スコアは右詰め
-# ふだんの大きさ。点が入った瞬間だけ SCORE_POP_PEAK まで上へ伸びて戻る。
+# ふだんの大きさ。点が入った瞬間だけ上へ伸びて戻る。
 SCORE_SCALE = 0.98
-#: 伸びきったところの倍率(= 以前のふだんの大きさ)。
-SCORE_POP_PEAK = 1.02
-#: 伸びて戻るまで。**点が入ったその瞬間から**始まる。
-SCORE_POP_SEC = 0.14
+# 伸び方は実機の映像(1920x1080 / 60fps)を1コマずつ測って合わせた。
+# 字の高さ(下端は固定、幅も不変):
+#     0ms 36 / 16ms 40(頂点) / 33ms 39 / 50ms 38 / 66ms 37 / 83ms 36 / 116ms 34
+# 落ち着いた高さ 34 に対して頂点 40 = 1.18 倍。**1コマで伸びきって、そこから
+# 直線的に戻る。** 以前は 1.02/0.98 = 1.04 倍しか伸ばしておらず、しかも
+# 山なりだったので、実機の弾む感じが出ていなかった。
+#: ふだんの何倍まで伸びるか。
+SCORE_POP_RATIO = 1.18
+#: 伸びきるまで(実測 1コマ)。
+SCORE_POP_ATTACK = 0.016
+#: 戻りきるまで(頂点からではなく、点が入った瞬間からの合計)。
+SCORE_POP_SEC = 0.116
 #: 伸縮の刻み。数字の絵は倍率ごとに切り出してキャッシュしているので、連続値
 #: のままだとキャッシュが際限なく増える。0.01 刻みなら多くても数個で収まる。
 SCORE_POP_STEP = 0.01
@@ -1683,8 +1691,13 @@ class GameScreenWidget(QWidget):
         el = now - ev[0]
         if not (0.0 <= el < SCORE_POP_SEC):
             return 1.0
-        peak = SCORE_POP_PEAK / SCORE_SCALE
-        k = 1.0 + (peak - 1.0) * math.sin(math.pi * el / SCORE_POP_SEC)
+        up = SCORE_POP_RATIO - 1.0
+        if el < SCORE_POP_ATTACK:
+            k = 1.0 + up * (el / SCORE_POP_ATTACK)          # 1コマで伸びきる
+        else:
+            # そこから直線的に戻る(実測どおり)。
+            k = 1.0 + up * (1.0 - (el - SCORE_POP_ATTACK)
+                            / (SCORE_POP_SEC - SCORE_POP_ATTACK))
         return round(k / SCORE_POP_STEP) * SCORE_POP_STEP
 
     def _score_total_advance(self):
