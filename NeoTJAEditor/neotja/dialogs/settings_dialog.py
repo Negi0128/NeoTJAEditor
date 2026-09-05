@@ -533,6 +533,10 @@ class SettingsDialog(QDialog):
             "background: #3a3a3a; border: 1px solid rgba(255,255,255,30);"
             " border-radius: 3px;")
         form.addRow(self.np_preview)
+        self.np_nosheet_hint = self._hint("")
+        self.np_nosheet_hint.setStyleSheet("color: #e0a33a; font-size: 11px;")
+        self.np_nosheet_hint.hide()
+        form.addRow(self.np_nosheet_hint)
         self._np_preview_renderer = None
 
         form = self._group(outer, "素材")
@@ -650,21 +654,44 @@ class SettingsDialog(QDialog):
         }
 
     def _update_nameplate_preview(self):
-        """見本を描き直す。素材が無ければその旨を出す(空欄のままにしない)。"""
+        """見本を描き直す。
+
+        部品シート(NamePlate.png)が見つからないときは、下の設定が効かない
+        ことを伝えて入力欄を灰色にする。効かない値をいじれてしまうと
+        「設定が悪いのか、そもそも無効なのか」が分からなくなるため。"""
+        have_sheet = True
         try:
             from neotja import game_screen as gs_mod
             if self._np_preview_renderer is None:
                 self._np_preview_renderer = gs_mod.NameplateRenderer()
+            have_sheet = gs_mod.nameplate_sheet() is not None
             pm = gs_mod.nameplate_preview(self._nameplate_values(), scale=2.0,
                                           renderer=self._np_preview_renderer)
         except Exception:  # noqa: BLE001
             pm = None
         if pm is None:
-            self.np_preview.setText(
-                "素材が用意できていないため、見本を出せません。\n"
+            self.np_preview.setText("見本を出せませんでした。")
+        else:
+            self.np_preview.setPixmap(pm)
+        for widget in self._nameplate_inputs():
+            widget.setEnabled(have_sheet)
+        self.np_nosheet_hint.setVisible(not have_sheet)
+        if not have_sheet:
+            self.np_nosheet_hint.setText(
+                "NamePlate.png が見つからないので、下の設定は効きません。"
+                "上の見本のとおり「1P どんちゃん」の姿で出ます。"
+                "「NamePlate フォルダを開く」から NamePlate.png を置くか、"
                 "「エディタ・ツール」タブで System フォルダを指定してください。")
-            return
-        self.np_preview.setPixmap(pm)
+
+    def _nameplate_inputs(self):
+        """部品シートが無いときに灰色にする入力欄。"""
+        return (self.np_title_edit, self.np_title_type_combo,
+                self.np_title_image_edit, self.np_name_edit,
+                self.np_dan_combo, self.np_dan_type_combo,
+                self.np_dan_text_combo,
+                self.np_title_dx, self.np_title_dy, self.np_title_size,
+                self.np_name_dx, self.np_name_dy, self.np_name_size,
+                self.np_dan_dx, self.np_dan_dy, self.np_dan_size)
 
     def _build_developer_tab(self):
         """作る側だけが使う道具。遊ぶ人には要らないものを分けてある。"""

@@ -252,8 +252,21 @@ NAMEPLATE_TITLE_OUTLINE = "#ffffff"
 NAMEPLATE_DAN_COLOR = ((0.00, "#fffce0"), (0.42, "#ffe95c"),
                        (0.56, "#e6b800"), (1.00, "#fff27a"))
 NAMEPLATE_DAN_OUTLINE = "#000000"
-#: 素材が無いときに自前で描く 1P の丸の色。TNDE の赤丸に寄せてある。
-NAMEPLATE_SIMPLE_BADGE = "#f2603c"
+# 部品シート(NamePlate.png)が見つからないときの板。数値は、ずっと使って
+# きた 280x79 の名前板(1P どんちゃん)を実測して合わせたもの:
+#   板 215x49 / 赤丸 40x40 / 丸の左端は板の左端から 4px / 縁 3px /
+#   名前の外形 100x23、その中心は板の左から 56%・上から 51%
+# **このときは環境設定の中身を使わない。** 称号バーも段位も素材が要るので
+# 出せず、名前だけ設定どおりにしても中途半端になるため、丸ごと既定の姿に
+# する(何が効いていて何が効いていないのか分からなくなるのを避ける)。
+NAMEPLATE_SIMPLE_NAME = "どんちゃん"
+NAMEPLATE_SIMPLE_BADGE = "#f76e4f"      # 赤丸の色(実測 247,110,79)
+NAMEPLATE_SIMPLE_BADGE_RATIO = 0.816    # 丸の直径 / 板の高さ (40/49)
+NAMEPLATE_SIMPLE_BADGE_INSET = 4.0      # 板の左端から丸の左端まで(px)
+NAMEPLATE_SIMPLE_LINE = 3.0             # 縁の太さ(px)
+NAMEPLATE_SIMPLE_NAME_SIZE = 21         # 名前の大きさ(px)
+NAMEPLATE_SIMPLE_NAME_OFF = (13, 0)     # 板の中心からのずれ。丸のぶん右へ
+NAMEPLATE_SIMPLE_NAME_LINE = 4.0        # 名前の縁の太さ(px)
 #: 段位の裏に敷く色。素材の下地の欠けを隠す。
 NAMEPLATE_DAN_BACK = "#000000"
 #: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
@@ -1257,30 +1270,34 @@ class NameplateRenderer:
         size = int(data.get(size_key) or 0) or size_default
         return (base[0] + off[0], base[1] + off[1]), size
 
-    def _draw_simple(self, p, lay, name):
-        """部品シートが無いときの、自前の簡単な板。
+    def _draw_simple(self, p, lay):
+        """部品シートが無いときの板。「1P どんちゃん」の既定の姿。
 
         白い角丸の板に名前、左端に赤い丸で 1P。称号バーと段位は素材が
-        要るので出さない。**何も描かないと名前すら出ない**ので、
-        最低限これだけは自前で描く。"""
+        要るので出さない。環境設定の中身もここでは使わない
+        (NAMEPLATE_SIMPLE_* の説明を参照)。"""
         box = lay["plate"]
+        # 大きさの比は、ずっと使ってきた 280x79 の名前板の実測に合わせる:
+        #   板 215x49 / 赤丸 40x40 / 丸の左端は板の左端から 4px / 縁 3px
+        # 丸は badge の枠ではなく板から出す。badge は素材シート用に詰めた
+        # 値で、丸の絵の余白ぶん大きいため。
+        d = box[3] * NAMEPLATE_SIMPLE_BADGE_RATIO
+        b = (box[0] + NAMEPLATE_SIMPLE_BADGE_INSET,
+             box[1] + (box[3] - d) / 2.0, d, d)
         p.save()
         p.setRenderHint(QPainter.Antialiasing, True)
-        r = QRectF(*box)
-        p.setPen(QPen(QColor("#000000"), 3.0))
+        p.setPen(QPen(QColor("#000000"), NAMEPLATE_SIMPLE_LINE))
         p.setBrush(QColor("#ffffff"))
-        p.drawRoundedRect(r, box[3] / 2.0, box[3] / 2.0)
-        b = lay["badge"]
+        p.drawRoundedRect(QRectF(*box), box[3] / 2.0, box[3] / 2.0)
         p.setBrush(QColor(NAMEPLATE_SIMPLE_BADGE))
         p.drawEllipse(QRectF(*b))
         p.restore()
-        self._text(p, "np_badge", "1P", b, int(b[3] * 0.46),
+        self._text(p, "np_badge", "1P", b, int(d * 0.52),
                    "#ffffff", "#000000", 3.0)
-        off, size = self._adjust(lay["name_text_nodan"], self.data or {},
-                                 "nameOff", "nameSize", lay["name_size"])
-        self._text(p, "np_name", name, box, size, NAMEPLATE_NAME_COLOR,
-                   NAMEPLATE_NAME_OUTLINE, lay["name_line"], off,
-                   lay["name_space"])
+        self._text(p, "np_simple_name", NAMEPLATE_SIMPLE_NAME, box,
+                   NAMEPLATE_SIMPLE_NAME_SIZE, NAMEPLATE_NAME_COLOR,
+                   NAMEPLATE_NAME_OUTLINE, NAMEPLATE_SIMPLE_NAME_LINE,
+                   NAMEPLATE_SIMPLE_NAME_OFF)
 
     # -- 本体 --------------------------------------------------------
     def draw(self, p):
@@ -1288,12 +1305,12 @@ class NameplateRenderer:
 
         重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。"""
         lay = self.layout or NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
-        data = self.data
-        if lay is None or not data:
+        data = self.data or {}
+        if lay is None:
             return
         if self.sheet is None:
-            # 素材が無い。名前だけの簡単な板を自前で描く。
-            self._draw_simple(p, lay, data.get("name", ""))
+            # 部品シートが無い。環境設定は使わず、既定の姿だけを出す。
+            self._draw_simple(p, lay)
             return
         title = data.get("title", "")
         name = data.get("name", "")
