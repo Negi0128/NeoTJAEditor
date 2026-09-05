@@ -24,8 +24,9 @@ import math
 import os
 
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QImage,
-                           QPainter, QPainterPath, QPen, QPixmap, QTransform)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
+                           QImage, QLinearGradient, QPainter, QPainterPath,
+                           QPen, QPixmap, QTransform)
 from PySide6.QtWidgets import QWidget
 
 from neotja import chara as chara_mod
@@ -244,7 +245,10 @@ NAMEPLATE_NAME_COLOR = "#ffffff"        # 白文字に黒縁
 NAMEPLATE_NAME_OUTLINE = "#000000"
 NAMEPLATE_TITLE_COLOR = "#000000"       # 称号は黒文字。縁取りなし
 NAMEPLATE_TITLE_OUTLINE = "#ffffff"
-NAMEPLATE_DAN_COLOR = "#f5c542"         # 金文字に黒縁
+#: 段位の文字の色。色名ひとつなら単色、((位置, 色), ...) なら上から下への
+#: グラデーション。位置は 0.0(上端)〜1.0(下端)。
+NAMEPLATE_DAN_COLOR = ((0.00, "#fff8d6"), (0.42, "#f6cf5a"),
+                       (0.56, "#c8901c"), (1.00, "#ffe98a"))
 NAMEPLATE_DAN_OUTLINE = "#000000"
 #: 段位の裏に敷く色。素材の下地の欠けを隠す。
 NAMEPLATE_DAN_BACK = "#000000"
@@ -983,6 +987,19 @@ def reset_rainbow_head():
 _BAND_SMOOTH = 61
 
 
+def _text_brush(fill, rect):
+    """文字の塗り。色名なら単色、((位置, 色), ...) なら縦のグラデーション。
+
+    グラデーションは文字の外形の上端〜下端に張る。行ごとではなく語全体に
+    かかるので、金文字の光沢が字をまたいでつながって見える。"""
+    if isinstance(fill, str):
+        return QColor(fill)
+    g = QLinearGradient(0.0, rect.top(), 0.0, rect.bottom())
+    for at, col in fill:
+        g.setColorAt(float(at), QColor(col))
+    return QBrush(g)
+
+
 def _column_centers(img, smooth=_BAND_SMOOTH):
     """画像の列ごとに「帯の中心が上から何pxか」を返す。不透明な画素が
     無い列は None。
@@ -1541,7 +1558,7 @@ class GameScreenWidget(QWidget):
         q.translate(-r.x(), -r.y())
         q.strokePath(path, QPen(QColor(outline_color), outline_w,
                                 Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        q.fillPath(path, QColor(fill_color))
+        q.fillPath(path, _text_brush(fill_color, path.boundingRect()))
         q.end()
         pm = QPixmap.fromImage(img)
         pm.setDevicePixelRatio(scale)
@@ -1667,7 +1684,7 @@ class GameScreenWidget(QWidget):
                 p.strokePath(path, QPen(QColor(outline), outline_w,
                                         Qt.SolidLine, Qt.RoundCap,
                                         Qt.RoundJoin))
-            p.fillPath(path, QColor(fill))
+            p.fillPath(path, _text_brush(fill, path.boundingRect()))
         else:
             pm, at = baked
             p.drawPixmap(at, pm)
