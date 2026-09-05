@@ -242,6 +242,8 @@ NAMEPLATE_TITLE_COLOR = "#000000"       # 称号は黒文字。縁取りなし
 NAMEPLATE_TITLE_OUTLINE = "#ffffff"
 NAMEPLATE_DAN_COLOR = "#ffffff"         # 白文字に黒縁
 NAMEPLATE_DAN_OUTLINE = "#000000"
+#: 段位の裏に敷く色。素材の下地の欠けを隠す。
+NAMEPLATE_DAN_BACK = "#000000"
 #: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
 #: NamePlate_Title.png があればそれを称号バーとして貼る(帯も文字も焼き込ま
 #: れた1枚として扱うので、文字は書かない)。特別な称号用。
@@ -1609,23 +1611,11 @@ class GameScreenWidget(QWidget):
             pass
         return self._nameplate_title_pm
 
-    def _draw_part(self, p, sheet, rect, dest, mirror=False):
-        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。
-
-        mirror=True で左右反転して貼る。段位の黒い下地は素材の左下だけが
-        角丸になっていて、そのままだと下地の左下が欠けて見える。反転した
-        もう1枚(角丸が右下に来る)を重ねると、二枚の和で角の無い箱になる。"""
+    def _draw_part(self, p, sheet, rect, dest):
+        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。"""
         if sheet is None:
             return
-        if not mirror:
-            p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
-            return
-        p.save()
-        p.translate(dest[0] + dest[2] / 2.0, dest[1] + dest[3] / 2.0)
-        p.scale(-1.0, 1.0)
-        p.drawPixmap(QRectF(-dest[2] / 2.0, -dest[3] / 2.0, dest[2], dest[3]),
-                     sheet, QRectF(*rect))
-        p.restore()
+        p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
 
     def _draw_plate_text(self, p, key, text, box, size, fill, outline,
                          outline_w, off=(0, 0), spacing=0):
@@ -1721,8 +1711,10 @@ class GameScreenWidget(QWidget):
         # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
         if dan:
             box = lay["dan"]
+            # 黒い下地の素材は左下だけが角丸で、そのまま貼ると名前の板の白が
+            # 三角に覗く。先に枠を黒で塗りつぶしてから下地を重ねる。
+            p.fillRect(QRectF(*box), QColor(NAMEPLATE_DAN_BACK))
             self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
-            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box, mirror=True)
             d = data["danType"][0]
             if 0 <= d < len(NAMEPLATE_PART_DANS):
                 self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
