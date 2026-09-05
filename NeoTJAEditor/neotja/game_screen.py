@@ -316,7 +316,8 @@ COMBO_POP_RATIO = 1.20      # 伸びきったときの縦の倍率
 COMBO_POP_ATTACK = 0.016    # 伸びきるまで(1コマ)
 COMBO_POP_SEC = 0.175       # 元に戻るまで
 COMBO_POP_STEP = 0.01       # 倍率の刻み(絵のキャッシュを増やしすぎない)
-COMBO_X_OFF = 0
+# コンボ数字だけを右へずらす量。「コンボ」の文字は COMBO_TEXT_X_OFF で別に持つ。
+COMBO_X_OFF = 2
 COMBO_Y_OFF = 22                     # 太鼓の上端からコンボ数字までの距離
 COMBO_TEXT_Y_OFF = 68                # 同 「コンボ」文字まで
 COMBO_TEXT_X_OFF = 3                 # 「コンボ」文字の左右微調整
@@ -787,7 +788,7 @@ BALLOON_NUM_ANCHOR = (100, 64)
 BALLOON_NUM_OFF = (-5, 5)        # そこからの微調整 (右, 下)
 
 TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
-JUDGE_BOTTOM = LANE_Y + 18       # 「良」の下端。レーンに 18px かぶる
+JUDGE_BOTTOM = LANE_Y + 15       # 「良」の下端。レーンに 15px かぶる
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 # 「良」の動き。**本家の実機映像(1920x1080 / 60fps)を1コマずつ測って合わせた。**
 #
@@ -802,8 +803,13 @@ JUDGE_SCALE = 1.05               # 「良」の拡大率
 # 「ぱっと出て静止し、最後に消える」とは別物になっていた。
 JUDGE_POP_DROP = 13.0            # 出た瞬間、静止位置より上にいる量
 JUDGE_POP_DROP_SEC = 0.066       # 落ちきるまで(実測 4コマ)。等速。
-JUDGE_POP_SEC = 0.283            # 出てから消えるまで
-JUDGE_POP_FADE_FROM = 0.82       # 0..1 のうちどこからフェードを始めるか
+#: 出てから薄れ始めるまで(不透明のまま保つ時間)。本家の実測どおり。
+JUDGE_POP_HOLD_SEC = 0.233
+#: そこから消えきるまで。本家は 0.05 秒だが、それだと消え際が見えず
+#: 「ぷつっ」と切れて見えるので長くしてある。薄れ始める時刻は動かさず、
+#: 消えるまでを伸ばすので、そのぶん「良」が出ている時間も延びる。
+JUDGE_POP_FADE_SEC = 0.15
+JUDGE_POP_SEC = JUDGE_POP_HOLD_SEC + JUDGE_POP_FADE_SEC
 
 # --- 曲名(録画のときだけ、画面の右上) ------------------------------------
 # 勘亭流。DFP勘亭流(DynaFont)はこの環境に無かったので、TNDE が同梱している
@@ -1935,14 +1941,13 @@ class GameScreenWidget(QWidget):
         if not (0.0 <= elapsed < JUDGE_POP_SEC):
             return
         spr = self.chart_preview.judge_sprite()
-        jp = elapsed / JUDGE_POP_SEC
         # 上から落ちてくる。落ちきったら 0 で、あとは動かない。
         rise = JUDGE_POP_DROP * max(0.0, 1.0 - elapsed / JUDGE_POP_DROP_SEC)
-        if jp <= JUDGE_POP_FADE_FROM:
+        over = elapsed - JUDGE_POP_HOLD_SEC
+        if over <= 0.0:
             p.setOpacity(1.0)
         else:
-            p.setOpacity(max(0.0, 1.0 - (jp - JUDGE_POP_FADE_FROM)
-                             / (1.0 - JUDGE_POP_FADE_FROM)))
+            p.setOpacity(max(0.0, 1.0 - over / JUDGE_POP_FADE_SEC))
         cx = LANE_X + JUDGE_X_IN_LANE - ox
         bottom = JUDGE_BOTTOM - oy - rise
         if spr is not None:

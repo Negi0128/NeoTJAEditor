@@ -854,8 +854,9 @@ class ChartPreviewWidget(QWidget):
         打の時刻は打音・太鼓の光(roll_tick)とまったく同じ決め方 — 区間を
         打数で等分した位置。ずれると「叩いた手」と「飛んだ音符」が合わない。
 
-        文字は常に "1"(ドン)。連打は打音も太鼓の光も面だけで扱っているので、
-        飛ぶ音符もそれに合わせる。風船・くす玉は含めない(あちらは叩いても
+        文字は大連打なら "3"(大ドン)、ふつうの連打なら "1"(ドン)。飛ぶ音符の
+        大きさが連打の大きさと揃う。打音と太鼓の光は面だけで扱っているので
+        面(ドン)なのは変わらない。風船・くす玉は含めない(あちらは叩いても
         音符が飛ばない扱い)。"""
         if window <= 0.0 or not self._rolls:
             return []
@@ -867,9 +868,12 @@ class ChartPreviewWidget(QWidget):
         for k in (j, j - 1):
             if k < 0 or k >= len(self._rolls):
                 continue
-            start, end, hits = self._rolls[k][0], self._rolls[k][1], self._rolls[k][-1]
+            span = self._rolls[k]
+            start, end, hits = span[0], span[1], span[-1]
             if not hits or hits <= 0 or end <= start:
                 continue
+            # 区間の3つ目が音符の文字。'6' が大連打。
+            char = "3" if str(span[2]) == "6" else "1"
             interval = (end - start) / float(hits)
             if interval <= 0.0:
                 continue
@@ -878,7 +882,7 @@ class ChartPreviewWidget(QWidget):
             for i in range(i_hi, i_lo - 1, -1):
                 t = start + i * interval
                 if t0 < t <= now:
-                    out.append((now - t, "1"))
+                    out.append((now - t, char))
         return out
 
     def recent_drum_hits(self, now: float, window: float):
