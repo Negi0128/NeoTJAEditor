@@ -845,6 +845,42 @@ class ChartPreviewWidget(QWidget):
             out.append((now - t, self._note_chars[i]))
         return out
 
+    def recent_roll_hits(self, now: float, window: float):
+        """window 秒以内に叩いた**連打**の打 [(経過秒, 文字), ...]。
+
+        魂ゲージへ飛ばす演出に使う。音符(recent_hits)と同じ形で返すので、
+        呼ぶ側は足し合わせるだけでよい。
+
+        打の時刻は打音・太鼓の光(roll_tick)とまったく同じ決め方 — 区間を
+        打数で等分した位置。ずれると「叩いた手」と「飛んだ音符」が合わない。
+
+        文字は常に "1"(ドン)。連打は打音も太鼓の光も面だけで扱っているので、
+        飛ぶ音符もそれに合わせる。風船・くす玉は含めない(あちらは叩いても
+        音符が飛ばない扱い)。"""
+        if window <= 0.0 or not self._rolls:
+            return []
+        out = []
+        t0 = now - window
+        starts = self._span_starts[0]
+        # 区間は重ならないので、窓に掛かりうるのは今の1つと1つ前くらい。
+        j = bisect.bisect_right(starts, now) - 1
+        for k in (j, j - 1):
+            if k < 0 or k >= len(self._rolls):
+                continue
+            start, end, hits = self._rolls[k][0], self._rolls[k][1], self._rolls[k][-1]
+            if not hits or hits <= 0 or end <= start:
+                continue
+            interval = (end - start) / float(hits)
+            if interval <= 0.0:
+                continue
+            i_hi = min(int((min(now, end) - start) / interval), hits - 1)
+            i_lo = max(0, int((max(t0, start) - start) / interval))
+            for i in range(i_hi, i_lo - 1, -1):
+                t = start + i * interval
+                if t0 < t <= now:
+                    out.append((now - t, "1"))
+        return out
+
     def roll_tick(self, now: float):
         """連打・風船・くす玉を叩いている最中なら (直前の打からの経過秒, 打数)。
 

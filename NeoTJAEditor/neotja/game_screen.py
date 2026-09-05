@@ -960,10 +960,11 @@ class GameScreenWidget(QWidget):
             # 魂の弾けは飛行より長く続く(飛行 0.42 + 弾け 0.53 = 0.95 秒 に
             # 対して、飛んでいる音符は 0.42 + 0.22 = 0.64 秒)。長いほうで
             # 見ないと、弾けの途中で板の塗り直しが止まる。
-            flying = bool(self.chart_preview.recent_hits(
-                now, max(SOUL_FLY_SEC + SOUL_LAND_SEC,
-                         SOUL_FLY_SEC + (SOUL_BURST_FRAMES - SOUL_BURST_FIRST)
-                         * SOUL_BURST_FRAME_SEC)))
+            _win = max(SOUL_FLY_SEC + SOUL_LAND_SEC,
+                       SOUL_FLY_SEC + (SOUL_BURST_FRAMES - SOUL_BURST_FIRST)
+                       * SOUL_BURST_FRAME_SEC)
+            flying = bool(self.chart_preview.recent_hits(now, _win)
+                          or self.chart_preview.recent_roll_hits(now, _win))
             if not flying and self._chara is not None:
                 flying = self._chara.state() in chara_mod.TIME_BASED_STATES
             if not flying:
@@ -1999,7 +2000,11 @@ class GameScreenWidget(QWidget):
         cp = self.chart_preview
         try:
             now = cp.game_state()[0]
-            hits = cp.recent_hits(now, SOUL_FLY_SEC + SOUL_LAND_SEC)
+            span = SOUL_FLY_SEC + SOUL_LAND_SEC
+            hits = cp.recent_hits(now, span)
+            # 連打を叩いている間も、その打に合わせて飛ばす。打の時刻は打音・
+            # 太鼓の光と同じ決め方なので、手と絵が合う。
+            hits = hits + cp.recent_roll_hits(now, span)
         except Exception:  # noqa: BLE001
             return
         if not hits:
