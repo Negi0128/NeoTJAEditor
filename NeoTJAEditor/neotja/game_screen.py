@@ -301,6 +301,11 @@ RAINBOW_WIPE_DEN = 85
 RAINBOW_HEAD_CELL = 130
 RAINBOW_HEAD_INDEX = (3, 0)      # (列, 行)
 RAINBOW_HEAD_SCALE = 1.0
+#: 虹を引き終わったあと、先端の顔が魂の上に残って消えるまでの時間。
+#: 引き終わり(RAINBOW_HALF コマ = 0.656 秒)にちょうど魂へ着く動きなので、
+#: そこで消してしまうと「どこかへ行った」ように見える。音符が魂へ着弾する
+#: ときと同じ長さ・同じ消え方(白へ寄せながら薄く)にそろえてある。
+RAINBOW_LAND_SEC = 0.22
 RAINBOW_HEAD_OFF = (0, 0)        # 虹の先端からのずれ (右, 上が負)
 # レーンより手前に描くものを載せる板。ここに入るのは
 #   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
@@ -1969,6 +1974,12 @@ class GameScreenWidget(QWidget):
                 if e >= 0.0:
                     el = e
                     break
+            # 虹の先端が魂へ着弾したときも、音符と同じ弾けを出す。
+            rb = self._rainbow_phase(now)
+            if rb is not None and rb[0] >= RAINBOW_HALF:
+                e = (rb[0] - RAINBOW_HALF) * RAINBOW_TICK_SEC
+                if 0.0 <= e < span and (el is None or e < el):
+                    el = e
             if el is not None and el < span:
                 f = SOUL_BURST_FIRST + int(el / SOUL_BURST_FRAME_SEC)
                 c = SOUL_BURST_CELL
@@ -2551,19 +2562,38 @@ class GameScreenWidget(QWidget):
         if got is None:
             return
         c, pm, w, h = got
-        if c >= RAINBOW_HALF:      # 消していく段階には先端が無い
+        head = self._rainbow_head()
+        if head is None:
             return
+        k = RAINBOW_HEAD_SCALE
+        hw, hh = head.width() * k, head.height() * k
+        x, y = RAINBOW_POS
+        dx, dy = RAINBOW_HEAD_OFF
+
+        if c >= RAINBOW_HALF:
+            # 引き終わり。顔は魂の上に着弾して、そこで消える。
+            el_land = (c - RAINBOW_HALF) * RAINBOW_TICK_SEC
+            if el_land >= RAINBOW_LAND_SEC:
+                return
+            t = el_land / RAINBOW_LAND_SEC
+            cx = SOUL_POS[0] + SOUL_CELL / 2.0 - ox
+            cy2 = SOUL_POS[1] + SOUL_CELL / 2.0 - oy
+            r = QRectF(cx - hw / 2.0, cy2 - hh / 2.0, hw, hh)
+            src = QRectF(0, 0, head.width(), head.height())
+            # 音符の着弾と同じ消し方: 素の絵を薄くしながら、白へ寄せる。
+            p.setOpacity((1.0 - t) * (1.0 - t))
+            p.drawPixmap(r, head, src)
+            p.setOpacity((1.0 - t) * t)
+            p.drawPixmap(r, self._white_note("R", head), src)
+            p.setOpacity(1.0)
+            return
+
         nx = w * c // RAINBOW_WIPE_DEN
         if nx <= 0:
             return
-        head = self._rainbow_head()
         cy = self._rainbow_band_center(min(nx, w - 1))
-        if head is None or cy is None:
+        if cy is None:
             return
-        x, y = RAINBOW_POS
-        k = RAINBOW_HEAD_SCALE
-        hw, hh = head.width() * k, head.height() * k
-        dx, dy = RAINBOW_HEAD_OFF
         p.drawPixmap(QRectF(x + nx - hw / 2.0 + dx - ox,
                             y + cy - hh / 2.0 + dy - oy, hw, hh),
                      head, QRectF(0, 0, head.width(), head.height()))
