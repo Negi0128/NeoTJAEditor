@@ -1,6 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(SPECPATH))
+from build_version import write_version_file  # noqa: E402
+from neotja.constants import VERSION          # noqa: E402
 
 import imageio_ffmpeg
 from PyInstaller.utils.hooks import collect_submodules
@@ -167,5 +172,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=write_version_file(
+        'NeoTJAEditor', 'NeoTJAEditor - TJA譜面エディタ', VERSION, os.path.join(SPECPATH, 'build')),
     icon='app_icon.ico',
 )

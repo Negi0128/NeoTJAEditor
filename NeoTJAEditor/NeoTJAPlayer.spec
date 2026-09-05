@@ -10,6 +10,11 @@
 # 使うので、これだけは外せない。
 
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(SPECPATH))
+from build_version import write_version_file  # noqa: E402
+from neotja.constants import VERSION          # noqa: E402
 
 import imageio_ffmpeg
 
@@ -157,5 +162,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=write_version_file(
+        'NeoTJAPlayer', 'NeoTJAPlayer - TJA譜面の再生と録画', VERSION, os.path.join(SPECPATH, 'build')),
     icon='app_icon_player.ico',
 )
