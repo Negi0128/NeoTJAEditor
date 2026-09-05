@@ -487,8 +487,8 @@ class GamePreviewWindow(QWidget):
         if item is None:
             return
         tid, _label, kind = item
-        if kind == "size":
-            # 文字は「上で大きく・下で小さく」。左右は使わない。
+        if kind in ("size", "space", "line"):
+            # 数値ひとつのものは「上で増やす・下で減らす」。左右は使わない。
             gs.tune_apply(tid, dsize=-dy)
         elif kind == "off" or self.TUNE_MODES[self._tune_mode][0] == "move":
             gs.tune_apply(tid, dx=dx, dy=dy)
@@ -525,9 +525,9 @@ class GamePreviewWindow(QWidget):
         if item is None:
             return
         tid, label, kind = item
-        mode = "文字の大きさ" if kind == "size" else (
-            "位置だけ" if kind == "off"
-            else self.TUNE_MODES[self._tune_mode][1])
+        mode = {"size": "上下で大小", "space": "上下で間隔",
+                "line": "上下で太さ", "off": "位置だけ"}.get(
+                    kind, self.TUNE_MODES[self._tune_mode][1])
         text = ("[%d/%d] %s   %s   矢印=%s\n"
                 "N/B 選ぶ  M 位置↔大きさ  Alt で5px  0 戻す  S 書き出し"
                 % (self._tune_index + 1, len(gs.tune_list()), label,

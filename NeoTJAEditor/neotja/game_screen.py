@@ -202,6 +202,12 @@ NAMEPLATE_LAYOUTS = {
         "title_text": (0, 0),
         "name_text": (0, 0),
         "dan_text": (0, 0),
+        "title_space": 0,
+        "name_space": 0,
+        "dan_space": 2,
+        "title_line": 0.0,
+        "name_line": 4.5,
+        "dan_line": 4.5,
     },
     "tnde": {
         "title": (3, 306, 213, 24),
@@ -214,21 +220,27 @@ NAMEPLATE_LAYOUTS = {
         "title_text": (0, 0),
         "name_text": (0, 0),
         "dan_text": (0, 0),
+        # 字と字のあいだを広げる量(px)。段位は2文字しかなく詰まって見える。
+        "title_space": 0,
+        "name_space": 0,
+        "dan_space": 2,
+        # 縁取りの太さ(px)。0 なら縁取りしない。
+        "title_line": 0.0,
+        "name_line": 4.5,
+        "dan_line": 4.5,
     },
 }
 #: 段位と名前のあいだの空き(px)。
 NAMEPLATE_DAN_GAP = 3
 #: 名前を板の右端から離す量(px)。
 NAMEPLATE_NAME_PAD = 6
+# 縁取りの太さは配置のほう(*_line)で持つ。画面を見ながら変えたいため。
 NAMEPLATE_NAME_COLOR = "#ffffff"        # 白文字に黒縁
 NAMEPLATE_NAME_OUTLINE = "#000000"
-NAMEPLATE_NAME_OUTLINE_W = 3.0          # 0 なら縁取りしない
 NAMEPLATE_TITLE_COLOR = "#000000"       # 称号は黒文字。縁取りなし
 NAMEPLATE_TITLE_OUTLINE = "#ffffff"
-NAMEPLATE_TITLE_OUTLINE_W = 0.0
 NAMEPLATE_DAN_COLOR = "#ffffff"         # 白文字に黒縁
 NAMEPLATE_DAN_OUTLINE = "#000000"
-NAMEPLATE_DAN_OUTLINE_W = 3.0
 #: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
 #: NamePlate_Title.png があればそれを称号バーとして貼る(帯も文字も焼き込ま
 #: れた1枚として扱うので、文字は書かない)。特別な称号用。
@@ -821,9 +833,11 @@ class _LaneOverlay(QWidget):
 # しない — 調整は作る側の作業で、利用者が触るものではないため)。
 #
 # 種類は3つ。
-#   "off"  … 位置だけ。値は (右, 下)。
-#   "rect" … 位置と大きさ。値は (x, y, 幅, 高さ)。
-#   "size" … 文字の大きさ(px)。
+#   "off"   … 位置だけ。値は (右, 下)。
+#   "rect"  … 位置と大きさ。値は (x, y, 幅, 高さ)。
+#   "size"  … 文字の大きさ(px)。1 未満にはしない。
+#   "space" … 字と字のあいだ(px)。負にもできる(詰める)。
+#   "line"  … 縁取りの太さ(px)。0.5 刻み。0 で縁取りなし。
 _TUNE_ITEMS = [
     ("rainbow_head", "虹の先端の顔", "off"),
     ("title", "銘板/称号バー", "rect"),
@@ -836,6 +850,12 @@ _TUNE_ITEMS = [
     ("title_size", "銘板/称号の字の大きさ", "size"),
     ("name_size", "銘板/名前の字の大きさ", "size"),
     ("dan_size", "銘板/段位の字の大きさ", "size"),
+    ("title_space", "銘板/称号の字の間隔", "space"),
+    ("name_space", "銘板/名前の字の間隔", "space"),
+    ("dan_space", "銘板/段位の字の間隔", "space"),
+    ("title_line", "銘板/称号の縁の太さ", "line"),
+    ("name_line", "銘板/名前の縁の太さ", "line"),
+    ("dan_line", "銘板/段位の縁の太さ", "line"),
 ]
 #: 起動時の値。Ctrl+Shift+0 でここへ戻す。
 _TUNE_BASE = None
@@ -874,6 +894,8 @@ def tune_text(tid):
         return "%s = (%d, %d, %d, %d)" % ((tid,) + tuple(int(x) for x in v))
     if isinstance(v, tuple):
         return "%s = (%d, %d)" % (tid, v[0], v[1])
+    if isinstance(v, float):
+        return "%s = %.1f" % (tid, v)
     return "%s = %d" % (tid, v)
 
 
@@ -894,6 +916,10 @@ def tune_apply(tid, dx=0, dy=0, dw=0, dh=0, dsize=0):
                     max(1, v[2] + dw), max(1, v[3] + dh))
     elif isinstance(v, tuple):
         lay[tid] = (v[0] + dx, v[1] + dy)
+    elif tid.endswith("_line"):
+        lay[tid] = max(0.0, round(float(v) + dsize * 0.5, 1))
+    elif tid.endswith("_space"):
+        lay[tid] = int(v) + dsize
     else:
         lay[tid] = max(1, int(v) + dsize)
     return lay[tid]
@@ -916,6 +942,8 @@ def tune_dump():
         if isinstance(val, tuple):
             lines.append('    "%s": (%s),'
                          % (key, ", ".join(str(int(x)) for x in val)))
+        elif isinstance(val, float):
+            lines.append('    "%s": %.1f,' % (key, val))
         else:
             lines.append('    "%s": %d,' % (key, val))
     lines.append("}")
@@ -1580,14 +1608,26 @@ class GameScreenWidget(QWidget):
             pass
         return self._nameplate_title_pm
 
-    def _draw_part(self, p, sheet, rect, dest):
-        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。"""
+    def _draw_part(self, p, sheet, rect, dest, mirror=False):
+        """部品シートから (x, y, w, h) を切り出して、枠 dest に収める。
+
+        mirror=True で左右反転して貼る。段位の黒い下地は素材の左下だけが
+        角丸になっていて、そのままだと下地の左下が欠けて見える。反転した
+        もう1枚(角丸が右下に来る)を重ねると、二枚の和で角の無い箱になる。"""
         if sheet is None:
             return
-        p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
+        if not mirror:
+            p.drawPixmap(QRectF(*dest), sheet, QRectF(*rect))
+            return
+        p.save()
+        p.translate(dest[0] + dest[2] / 2.0, dest[1] + dest[3] / 2.0)
+        p.scale(-1.0, 1.0)
+        p.drawPixmap(QRectF(-dest[2] / 2.0, -dest[3] / 2.0, dest[2], dest[3]),
+                     sheet, QRectF(*rect))
+        p.restore()
 
     def _draw_plate_text(self, p, key, text, box, size, fill, outline,
-                         outline_w, off=(0, 0)):
+                         outline_w, off=(0, 0), spacing=0):
         """枠 box の中心に text を書く。字形は曲名と同じ勘亭流。
 
         枠より横に長くなる名前・称号は、はみ出さないよう横だけ詰める
@@ -1596,11 +1636,15 @@ class GameScreenWidget(QWidget):
             return
         # 文字の大きさは画面を見ながら変えられる(tune_apply)ので、字形も
         # 焼いた絵も大きさ込みで覚える。key だけだと変えても古い絵が出る。
-        ck = (key, text, int(size))
+        ck = (key, text, int(size), int(spacing), round(float(outline_w), 1))
         path = self._plate_paths.get(ck)
         if path is None:
             f = QFont(self._title_family) if self._title_family else QFont()
             f.setPixelSize(int(size))
+            if spacing:
+                # 字と字のあいだを px で広げる。段位のような短い語は詰まって
+                # 見えるので、語ごとに広さを持てるようにしてある。
+                f.setLetterSpacing(QFont.AbsoluteSpacing, float(spacing))
             path = QPainterPath()
             path.addText(QPointF(0.0, 0.0), f, text)
             # 原点は文字送りの基準(ベースライン左端)なので、そのままでは
@@ -1670,19 +1714,21 @@ class GameScreenWidget(QWidget):
                    box[3])
         self._draw_plate_text(p, "np_name", name, box,
                               lay["name_size"], NAMEPLATE_NAME_COLOR,
-                              NAMEPLATE_NAME_OUTLINE, NAMEPLATE_NAME_OUTLINE_W,
-                              lay["name_text"])
+                              NAMEPLATE_NAME_OUTLINE, lay["name_line"],
+                              lay["name_text"], lay["name_space"])
 
         # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
         if dan:
             box = lay["dan"]
             self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
+            self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box, mirror=True)
             d = data["danType"][0]
             if 0 <= d < len(NAMEPLATE_PART_DANS):
                 self._draw_part(p, sheet, NAMEPLATE_PART_DANS[d], box)
             self._draw_plate_text(p, "np_dan", dan, box, lay["dan_size"],
                                   NAMEPLATE_DAN_COLOR, NAMEPLATE_DAN_OUTLINE,
-                                  NAMEPLATE_DAN_OUTLINE_W, lay["dan_text"])
+                                  lay["dan_line"], lay["dan_text"],
+                                  lay["dan_space"])
 
         # --- 称号バー。板と段位より手前 ---
         if title or self._nameplate_title_image() is not None:
@@ -1699,7 +1745,7 @@ class GameScreenWidget(QWidget):
                 self._draw_plate_text(
                     p, "np_title", title, lay["title"], lay["title_size"],
                     NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
-                    NAMEPLATE_TITLE_OUTLINE_W, lay["title_text"])
+                    lay["title_line"], lay["title_text"], lay["title_space"])
 
         # --- 1P の丸。いちばん手前 ---
         self._draw_part(p, sheet, NAMEPLATE_PART_BADGE_1P, lay["badge"])
