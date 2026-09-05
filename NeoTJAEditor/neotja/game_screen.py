@@ -117,7 +117,7 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 #   合計スコア  右端 176.7  字の上端 198.0
 #   加算文字    右端 176.7(合計と**同じ**)  字の上端 160.0
 # 右端は両方とも同じなので、加算も SCORE_RIGHT を使う。
-SCORE_RIGHT, SCORE_Y = 174, 198      # スコアは右詰め
+SCORE_RIGHT, SCORE_Y = 174, 199      # スコアは右詰め
 # ふだんの大きさ。点が入った瞬間だけ上へ伸びて戻る。
 SCORE_SCALE = 0.98
 # 伸び方は実機の映像(1920x1080 / 60fps)を1コマずつ測って合わせた。
@@ -665,7 +665,7 @@ SCORE_TOTAL_ADVANCE_PX = 1.0
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 #: スコアの上端からさらに上へ(正=下)。実機の加算文字の上端 160.0 に合う値。
 #: SCORE_Y を動かすと加算も一緒に動くので、ここを変えるときは注意。
-SCORE_GAIN_Y_OFF = -10
+SCORE_GAIN_Y_OFF = -11
 
 
 class _LaneOverlay(QWidget):
