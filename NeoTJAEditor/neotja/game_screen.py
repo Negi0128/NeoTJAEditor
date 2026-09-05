@@ -309,12 +309,24 @@ NAMEPLATE_DAN_BACK = "#000000"
 NAMEPLATE_TITLE_IMAGE = "NamePlate_Title.png"
 # コンボ数字は太鼓の中心にそろえると本家よりわずかに右へ寄って見えるので、
 # 少し左へずらす。
+# コンボが増えたときの伸縮。合計スコアと同じ動き(縦だけ伸びて戻る)。
+# 数字が増えたことを目で拾えるようにするためのもので、値は合計スコアに
+# そろえてある(SCORE_POP_* と同じ)。
+COMBO_POP_RATIO = 1.20      # 伸びきったときの縦の倍率
+COMBO_POP_ATTACK = 0.016    # 伸びきるまで(1コマ)
+COMBO_POP_SEC = 0.175       # 元に戻るまで
+COMBO_POP_STEP = 0.01       # 倍率の刻み(絵のキャッシュを増やしすぎない)
 COMBO_X_OFF = 0
-COMBO_Y_OFF = 19                     # 太鼓の上端からコンボ数字までの距離
-COMBO_TEXT_Y_OFF = 65                # 同 「コンボ」文字まで
+COMBO_Y_OFF = 22                     # 太鼓の上端からコンボ数字までの距離
+COMBO_TEXT_Y_OFF = 68                # 同 「コンボ」文字まで
 COMBO_TEXT_X_OFF = 3                 # 「コンボ」文字の左右微調整
 COMBO_SCALE = 0.954                  # 本家に合わせて 1.06 から 0.9 倍
+#: この数から下は、コンボ数も「コンボ」の文字も出さない。本家と同じ。
+COMBO_SHOW_AT = 10
 COMBO_ADVANCE = 0.80
+#: 上の送りに足す量(px)。割合ではなく px で持てるようにしてある — 見た目の
+#: 字間は px で決めたいのに、割合は素材の1枠の幅に左右されるため。
+COMBO_ADVANCE_PX = 3.0
 # Combo/Text.png (100x100) には「コンボ」が縦に2つ入っている(通常色と金色)。
 # 実測では y=26..48 と y=76..98 で、間に空きがある。中身の範囲を単純に
 # 2等分すると金色側だけ十数px下へずれるので、素材から不透明な帯を実際に
@@ -2387,6 +2399,37 @@ class GameScreenWidget(QWidget):
         self.update()
 
     # ------------------------------------------------------------------
+    def _combo_pop(self, now):
+        """コンボの伸び具合(1.0 = ふだん)。
+
+        音符が判定線を通った**その瞬間**から COMBO_POP_SEC かけて、
+        COMBO_POP_RATIO まで上へ伸びて戻る。合計スコアと同じ動き。
+
+        増えた瞬間は「直近に通った音符」で見る。連打は数に入らない
+        (コンボが増えないので、伸びると嘘になる)。二分探索で取るだけなので
+        シークしても矛盾しない。
+
+        **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
+        ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
+        if self._lite:
+            return 1.0
+        try:
+            hits = self.chart_preview.recent_hits(now, COMBO_POP_SEC)
+        except Exception:  # noqa: BLE001
+            return 1.0
+        if not hits:
+            return 1.0
+        el = hits[0][0]                     # 新しい順。先頭がいちばん近い
+        if not (0.0 <= el < COMBO_POP_SEC):
+            return 1.0
+        up = COMBO_POP_RATIO - 1.0
+        if el < COMBO_POP_ATTACK:
+            k = 1.0 + up * (el / COMBO_POP_ATTACK)          # 1コマで伸びきる
+        else:
+            k = 1.0 + up * (1.0 - (el - COMBO_POP_ATTACK)
+                            / (COMBO_POP_SEC - COMBO_POP_ATTACK))
+        return round(k / COMBO_POP_STEP) * COMBO_POP_STEP
+
     def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
                      right=None, left=None, y=0, scale=1.0, scale_y=None,
                      advance=1.0, y_offsets=None):
@@ -2486,6 +2529,16 @@ class GameScreenWidget(QWidget):
             return base
         cw = sheet.width() / 10.0
         return base + SCORE_TOTAL_ADVANCE_PX / (cw * SCORE_SCALE)
+
+    def _combo_advance(self, sheet):
+        """コンボの字送り(1枠の幅に対する割合)。
+
+        COMBO_ADVANCE に COMBO_ADVANCE_PX ぶんを足したものになるよう、
+        素材の1枠の幅から逆算する。合計スコアと同じ考え方。"""
+        if sheet is None or sheet.width() <= 0:
+            return COMBO_ADVANCE
+        cw = sheet.width() / 10.0
+        return COMBO_ADVANCE + COMBO_ADVANCE_PX / (cw * COMBO_SCALE)
 
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / ネームプレート。"""
@@ -2605,16 +2658,24 @@ class GameScreenWidget(QWidget):
         # コンボが一緒に動かないようにするため。
         cx0, cy0 = COMBO_ANCHOR
         dw = drum.width() if drum is not None else 120
-        if combo > 0:
+        if combo >= COMBO_SHOW_AT:
             key = ("combo_gold" if combo >= COMBO_GOLD_AT else
                    "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
             sheet = self._skin.get(key)
             if sheet is not None:
-                step = sheet.width() / 10 * COMBO_SCALE * COMBO_ADVANCE
+                adv = self._combo_advance(sheet)
+                step = sheet.width() / 10 * COMBO_SCALE * adv
                 # 基準の中心に対して左右対称に置く。
                 right = cx0 + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
-                self._draw_digits(p, sheet, combo, right=right, advance=COMBO_ADVANCE,
-                                  y=cy0 + COMBO_Y_OFF, scale=COMBO_SCALE)
+                # 増えた瞬間に縦だけ伸ばす。横幅は変えない(合計スコアと同じ)。
+                # 下端をそろえたまま倍率を上げるので、伸びるのは上だけ。
+                sy = COMBO_SCALE * self._combo_pop(now)
+                dy = 0.0
+                if sy != COMBO_SCALE:
+                    dy = sheet.height() * (COMBO_SCALE - sy)
+                self._draw_digits(p, sheet, combo, right=right, advance=adv,
+                                  y=int(cy0 + COMBO_Y_OFF + dy),
+                                  scale=COMBO_SCALE, scale_y=sy)
             ct = self._skin.get("combo_text")
             if ct is not None:
                 # 素材には「コンボ」が縦に2つ入っている。上段=通常色 /
