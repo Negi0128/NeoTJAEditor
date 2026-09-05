@@ -1219,6 +1219,17 @@ class NameplateRenderer:
             p.drawPixmap(at, pm)
         p.restore()
 
+    @staticmethod
+    def _adjust(base, data, off_key, size_key, size_default):
+        """配置の値に、環境設定のずらしと大きさを重ねる。
+
+        位置は「配置の既定からどれだけ動かすか」で持つ。配置のほうは
+        段位のあるなしで名前の枠が変わるので、絶対値で持たせると片方が
+        必ずずれるため。"""
+        off = data.get(off_key) or (0, 0)
+        size = int(data.get(size_key) or 0) or size_default
+        return (base[0] + off[0], base[1] + off[1]), size
+
     # -- 本体 --------------------------------------------------------
     def draw(self, p):
         """1P ぶんを描く(この画面は1人用)。
@@ -1242,11 +1253,12 @@ class NameplateRenderer:
                        + NAMEPLATE_DAN_GAP)
             box = (left, box[1], box[0] + box[2] - left - NAMEPLATE_NAME_PAD,
                    box[3])
-        self._text(p, "np_name", name, box, lay["name_size"],
+        off, size = self._adjust(
+            lay["name_text"] if dan else lay["name_text_nodan"],
+            data, "nameOff", "nameSize", lay["name_size"])
+        self._text(p, "np_name", name, box, size,
                    NAMEPLATE_NAME_COLOR, NAMEPLATE_NAME_OUTLINE,
-                   lay["name_line"],
-                   lay["name_text"] if dan else lay["name_text_nodan"],
-                   lay["name_space"])
+                   lay["name_line"], off, lay["name_space"])
 
         # --- 段位。黒い下地に飾りを重ねてから字を乗せる ---
         if dan:
@@ -1264,9 +1276,11 @@ class NameplateRenderer:
                 self._part(p, NAMEPLATE_PART_DANS[d], box)
             fill = (NAMEPLATE_DAN_COLOR
                     if data.get("danTextColor") == "gold" else "#ffffff")
-            self._text(p, "np_dan", dan, box, lay["dan_size"], fill,
-                       NAMEPLATE_DAN_OUTLINE, lay["dan_line"],
-                       lay["dan_text"], lay["dan_space"])
+            off, size = self._adjust(lay["dan_text"], data, "danOff",
+                                     "danSize", lay["dan_size"])
+            self._text(p, "np_dan", dan, box, size, fill,
+                       NAMEPLATE_DAN_OUTLINE, lay["dan_line"], off,
+                       lay["dan_space"])
 
         # --- 称号バー。板と段位より手前 ---
         img = self._title_image()
@@ -1279,10 +1293,12 @@ class NameplateRenderer:
                 if not 0 <= t < len(NAMEPLATE_PART_TITLES):
                     t = 0
                 self._part(p, NAMEPLATE_PART_TITLES[t], lay["title"])
-                self._text(p, "np_title", title, lay["title"],
-                           lay["title_size"], NAMEPLATE_TITLE_COLOR,
-                           NAMEPLATE_TITLE_OUTLINE, lay["title_line"],
-                           lay["title_text"], lay["title_space"])
+                off, size = self._adjust(lay["title_text"], data,
+                                         "titleOff", "titleSize",
+                                         lay["title_size"])
+                self._text(p, "np_title", title, lay["title"], size,
+                           NAMEPLATE_TITLE_COLOR, NAMEPLATE_TITLE_OUTLINE,
+                           lay["title_line"], off, lay["title_space"])
 
         # --- 1P の丸。いちばん手前 ---
         self._part(p, NAMEPLATE_PART_BADGE_1P, lay["badge"])
@@ -1319,6 +1335,16 @@ def nameplate_data_from(cfg):
         "dan": str(get("nameplate_dan")),
         "danType": int(get("nameplate_dan_type") or 0),
         "danTextColor": str(get("nameplate_dan_text_color")),
+        # 環境設定で決める文字の位置(配置の既定からのずらし)と大きさ。
+        "titleOff": (int(get("nameplate_title_dx")),
+                     int(get("nameplate_title_dy"))),
+        "titleSize": int(get("nameplate_title_size")),
+        "nameOff": (int(get("nameplate_name_dx")),
+                    int(get("nameplate_name_dy"))),
+        "nameSize": int(get("nameplate_name_size")),
+        "danOff": (int(get("nameplate_dan_dx")),
+                   int(get("nameplate_dan_dy"))),
+        "danSize": int(get("nameplate_dan_size")),
     }
 
 

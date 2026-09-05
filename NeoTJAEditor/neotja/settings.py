@@ -35,6 +35,9 @@ _SETTINGS_KEYS = (
     "nameplate_name", "nameplate_title", "nameplate_title_type",
     "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
     "nameplate_dan_text_color", "show_tuner",
+    "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
+    "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
+    "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
 )
 
 
@@ -81,6 +84,18 @@ def default_settings() -> dict:
         "nameplate_dan_type": 2,
         # 段位の文字色。NAMEPLATE_DAN_TEXT_COLORS の値。
         "nameplate_dan_text_color": "gold",
+        # 文字の位置と大きさ。位置は配置の既定からのずらし量(右, 下)で、
+        # 0 なら既定のまま。大きさは px そのもの。既定値は
+        # game_screen.NAMEPLATE_LAYOUTS["tnde"] の *_size と揃えてある。
+        "nameplate_title_dx": 0,
+        "nameplate_title_dy": 0,
+        "nameplate_title_size": 10,
+        "nameplate_name_dx": 0,
+        "nameplate_name_dy": 0,
+        "nameplate_name_size": 15,
+        "nameplate_dan_dx": 0,
+        "nameplate_dan_dy": 0,
+        "nameplate_dan_size": 15,
         # 位置合わせ用のキー(Ctrl+Shift+…)を効かせるか。ふだんは切っておく。
         # 作る側が絵の位置を詰めるための道具で、遊ぶ人には要らないため。
         "show_tuner": False,

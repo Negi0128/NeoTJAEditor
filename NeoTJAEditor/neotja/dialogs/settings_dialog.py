@@ -34,6 +34,9 @@ class SettingsDialog(QDialog):
         "nameplate_name", "nameplate_title", "nameplate_title_type",
         "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
         "nameplate_dan_text_color", "show_tuner",
+        "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
+        "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
+        "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
         # 起動時の案内。これは初期化で戻してよい(戻ると「知らせる」= 既定)。
         "warn_missing_system",
     )
@@ -483,6 +486,32 @@ class SettingsDialog(QDialog):
         outer.addStretch()
         return w
 
+    def _text_rows(self, form, prefix, val):
+        """文字の「位置」と「大きさ」の行を足す。戻り値は作った入力欄3つ。
+
+        位置は既定からのずらし量。段位のあるなしで名前の枠が変わるので、
+        絶対値ではなくずらしで持つ(絶対値だと片方が必ずずれる)。"""
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        dx = QSpinBox()
+        dx.setRange(-200, 200)
+        dx.setValue(int(val(prefix + "_dx")))
+        dy = QSpinBox()
+        dy.setRange(-200, 200)
+        dy.setValue(int(val(prefix + "_dy")))
+        row_layout.addWidget(QLabel("右"))
+        row_layout.addWidget(dx, 1)
+        row_layout.addWidget(QLabel("下"))
+        row_layout.addWidget(dy, 1)
+        form.addRow("文字の位置", row)
+        size = QSpinBox()
+        size.setRange(6, 60)
+        size.setSuffix(" px")
+        size.setValue(int(val(prefix + "_size")))
+        form.addRow("文字の大きさ", size)
+        return dx, dy, size
+
     def _build_nameplate_tab(self):
         """ゲーム画面の左下に出る名前板の中身。
 
@@ -516,6 +545,8 @@ class SettingsDialog(QDialog):
         i = self.np_title_type_combo.findData(int(val("nameplate_title_type")))
         self.np_title_type_combo.setCurrentIndex(max(0, i))
         form.addRow("帯の色", self.np_title_type_combo)
+        (self.np_title_dx, self.np_title_dy,
+         self.np_title_size) = self._text_rows(form, "nameplate_title", val)
         self.np_title_image_edit = QLineEdit(str(val("nameplate_title_image")))
 
         def browse_title_image():
@@ -536,6 +567,8 @@ class SettingsDialog(QDialog):
         self.np_name_edit = QLineEdit(str(val("nameplate_name")))
         self.np_name_edit.setMaxLength(32)
         form.addRow("名前", self.np_name_edit)
+        (self.np_name_dx, self.np_name_dy,
+         self.np_name_size) = self._text_rows(form, "nameplate_name", val)
 
         form = self._group(outer, "段位")
         self.np_dan_combo = QComboBox()
@@ -556,6 +589,8 @@ class SettingsDialog(QDialog):
         i = self.np_dan_text_combo.findData(str(val("nameplate_dan_text_color")))
         self.np_dan_text_combo.setCurrentIndex(max(0, i))
         form.addRow("文字の色", self.np_dan_text_combo)
+        (self.np_dan_dx, self.np_dan_dy,
+         self.np_dan_size) = self._text_rows(form, "nameplate_dan", val)
         form.addRow(self._hint("「(出さない)」を選ぶと、段位そのものを描きません。"))
 
         for widget in (self.np_title_edit, self.np_name_edit,
@@ -564,6 +599,10 @@ class SettingsDialog(QDialog):
         for combo in (self.np_title_type_combo, self.np_dan_combo,
                       self.np_dan_type_combo, self.np_dan_text_combo):
             combo.currentIndexChanged.connect(self._update_nameplate_preview)
+        for spin in (self.np_title_dx, self.np_title_dy, self.np_title_size,
+                     self.np_name_dx, self.np_name_dy, self.np_name_size,
+                     self.np_dan_dx, self.np_dan_dy, self.np_dan_size):
+            spin.valueChanged.connect(self._update_nameplate_preview)
         self._update_nameplate_preview()
 
         outer.addStretch()
@@ -579,6 +618,15 @@ class SettingsDialog(QDialog):
             "nameplate_dan": str(self.np_dan_combo.currentData() or ""),
             "nameplate_dan_type": int(self.np_dan_type_combo.currentData()),
             "nameplate_dan_text_color": str(self.np_dan_text_combo.currentData()),
+            "nameplate_title_dx": self.np_title_dx.value(),
+            "nameplate_title_dy": self.np_title_dy.value(),
+            "nameplate_title_size": self.np_title_size.value(),
+            "nameplate_name_dx": self.np_name_dx.value(),
+            "nameplate_name_dy": self.np_name_dy.value(),
+            "nameplate_name_size": self.np_name_size.value(),
+            "nameplate_dan_dx": self.np_dan_dx.value(),
+            "nameplate_dan_dy": self.np_dan_dy.value(),
+            "nameplate_dan_size": self.np_dan_size.value(),
         }
 
     def _update_nameplate_preview(self):
@@ -734,13 +782,9 @@ class SettingsDialog(QDialog):
         cfg["wireless_offset_enabled"] = self.wireless_check.isChecked()
         cfg["wireless_offset_ms"] = float(self.wireless_spin.value())
 
-        cfg["nameplate_name"] = self.np_name_edit.text()
-        cfg["nameplate_title"] = self.np_title_edit.text()
-        cfg["nameplate_title_type"] = int(self.np_title_type_combo.currentData())
-        cfg["nameplate_title_image"] = self.np_title_image_edit.text()
-        cfg["nameplate_dan"] = str(self.np_dan_combo.currentData() or "")
-        cfg["nameplate_dan_type"] = int(self.np_dan_type_combo.currentData())
-        cfg["nameplate_dan_text_color"] = str(self.np_dan_text_combo.currentData())
+        # 見本を描くのに使っている辞書をそのまま入れる。二か所で並べると
+        # 片方に足し忘れて「見本では変わるのに保存されない」ことになる。
+        cfg.update(self._nameplate_values())
         cfg["show_tuner"] = self.np_tuner_check.isChecked()
         # 画面へ映すのは呼び出し元(PreviewDock.refresh_nameplate)がやる。
         self.accept()
