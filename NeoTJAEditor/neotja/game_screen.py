@@ -747,19 +747,29 @@ class _LaneOverlay(QWidget):
         p.end()
 
 
-#: 虹の帯として認めるいちばん細い厚み(px)。端は1画素まで細くなって消えるので、
-#: そこの「中心」は当てにならない(実測: 虹の右端の列は不透明な画素が1個しか
-#: 無く、そこへ先端の顔を置くと帯から外れた場所に飛んでいた)。
-_BAND_MIN_THICK = 12
+#: 中心線をならす幅(列)。素材の都合でできる小さな段差を消すため。
+#: 61 列。虹の素材は先端が三日月形で、下の角が切れる列 810〜815 で中心が
+#: 一段とぶ。9列だと先端付近で 9.1px 逆走(顔が一度上へ戻る)が残り、61列で
+#: 0.7px まで落ちる。いずれも実測。
+_BAND_SMOOTH = 61
 
 
-def _column_centers(img, min_thick=_BAND_MIN_THICK):
-    """画像の列ごとに「不透明な画素の上端と下端の中点」を返す。
+def _column_centers(img, smooth=_BAND_SMOOTH):
+    """画像の列ごとに「帯の中心が上から何pxか」を返す。不透明な画素が
+    無い列は None。
 
-    厚みが min_thick に満たない列と、そもそも不透明な画素が無い列は None。
+    中心はアルファの重心。**上端と下端の中点ではない**。虹の素材では
+      * 列 810〜814 に、帯の下へちぎれた小さな塊がある。中点だと、その塊が
+        切れる列 815 で中心が 21px 飛ぶ。
+      * 先端は 1px まで細くなって消える。中点そのものは最後まで滑らかに
+        続くので、細い列を捨てる必要は無い(以前は厚み12px未満を捨てていて、
+        最後の 16列ぶん中心が 204 に貼り付き、顔が 13px 上へ取り残されて
+        いた)。
+    重心にすると段差は 21.5px → 4.7px になり、さらに 9列で移動平均を
+    かけると 2.1px まで落ちる。いずれも実測。
 
     アルファだけ見れば済むので numpy で一度に処理する。pixelColor の
-    二重ループで書くと、虹(1160x325)で 377,200 回の呼び出しになり、
+    二重ループで書くと、虹(943x400)で 377,200 回の呼び出しになり、
     その1コマだけ 500ms 止まる。
 
     numpy が使えない環境でも動くよう、素直な実装も残してある。"""
@@ -772,27 +782,31 @@ def _column_centers(img, min_thick=_BAND_MIN_THICK):
         conv = img.convertToFormat(QImage.Format_RGBA8888)
         stride = conv.bytesPerLine()
         arr = np.frombuffer(conv.constBits(), dtype=np.uint8, count=stride * h)
-        alpha = arr.reshape(h, stride // 4, 4)[:, :w, 3]
-        mask = alpha > 8
-        any_col = mask.any(axis=0)
+        alpha = arr.reshape(h, stride // 4, 4)[:, :w, 3].astype(np.float64)
+        any_col = (alpha > 8).any(axis=0)
         ys = np.arange(h)[:, None]
-        top = np.where(mask, ys, h).min(axis=0)
-        bottom = np.where(mask, ys, -1).max(axis=0)
-        mid = (top + bottom) / 2.0
-        thick = bottom - top + 1
-        return [float(mid[x]) if (any_col[x] and thick[x] >= min_thick) else None
-                for x in range(w)]
+        weight = alpha.sum(axis=0)
+        cent = (alpha * ys).sum(axis=0) / np.where(weight > 0, weight, 1.0)
+        cols = np.nonzero(any_col)[0]
+        if len(cols) >= 2 and smooth > 1:
+            # 帯のある列だけ並べてならす。端は端の値で埋める。
+            pad = np.pad(cent[cols], (smooth // 2, smooth // 2), mode="edge")
+            sm = np.convolve(pad, np.ones(smooth) / smooth, mode="valid")
+            cent = cent.copy()
+            cent[cols] = sm
+        return [float(cent[x]) if any_col[x] else None for x in range(w)]
     except Exception:  # noqa: BLE001
         pass
     out = []
     for x in range(w):
-        top, bottom = -1, -1
+        tot = 0.0
+        acc = 0.0
         for y in range(h):
-            if img.pixelColor(x, y).alpha() > 8:
-                if top < 0:
-                    top = y
-                bottom = y
-        out.append(None if top < 0 else (top + bottom) / 2.0)
+            a = img.pixelColor(x, y).alpha()
+            if a > 8:
+                tot += a
+                acc += a * y
+        out.append(None if tot <= 0 else acc / tot)
     return out
 
 
@@ -2541,7 +2555,8 @@ class GameScreenWidget(QWidget):
         if not centers:
             return None
         col = max(0, min(int(col), len(centers) - 1))
-        # 端は帯が細って中心が当てにならないので、使える列まで左へ戻る。
+        # 素材の左右には帯の無い余白がある(実測: 帯は 11..898 列)。そこを
+        # 指されたら、いちばん近い帯のある列まで左へ戻る。
         for x in range(col, max(-1, col - 120), -1):
             if centers[x] is not None:
                 return centers[x]
