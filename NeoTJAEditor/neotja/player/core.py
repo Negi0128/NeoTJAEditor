@@ -17,7 +17,7 @@ from neotja.tja_analyzer import TJACourseAnalyzer
 #: 設定ファイルは Editor と共有する(利用者の選択)。共有で困るのは上書き事故
 #: だけ — Player を閉じただけで、エディタ側の「開いていた譜面・ウィンドウ位置・
 #: 分割位置」が Player の値で潰れる。そこで保存の直前にファイルを読み直し、
-#: **ここに挙げたキーだけ**を書き換えて戻す。재生に関わるものだけを並べてある。
+#: **ここに挙げたキーだけ**を書き換えて戻す。再生に関わるものだけを並べてある。
 PLAYER_KEYS = (
     "preview_zoom", "preview_speed", "preview_bottom_mode", "waveform_window",
     "preview_volume", "sfx_volume", "master_volume", "audio_output_device",
