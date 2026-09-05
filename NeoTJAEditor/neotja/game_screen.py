@@ -1654,9 +1654,12 @@ class GameScreenWidget(QWidget):
         # 軽量では出さない。要るのは「いま何点か」であって、加算の演出は
         # スコアそのものを見れば分かる情報の重ね描きでしかない。
         if SHOW_SCORE_GAIN and self._score_timeline is not None and not self._lite:
-            ev = self._score_timeline.last_event(now)
-            if ev is not None:
-                et, gain = ev
+            # **重なるぶんは重ねる。** 古い順に描くので、新しいものほど手前。
+            # ふつうの密度の譜面は音符が 0.1 秒おきに来るし、連打を叩いて
+            # いる間はもっと詰まるので、1枚しか出さないと点滅して見える。
+            for et, gain in self._score_timeline.events_in(
+                    now - SCORE_GAIN_DELAY - SCORE_GAIN_SEC,
+                    now - SCORE_GAIN_DELAY):
                 el = now - et - SCORE_GAIN_DELAY
                 if 0.0 <= el < SCORE_GAIN_SEC and gain > 0:
                     q = el / SCORE_GAIN_SEC

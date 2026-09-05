@@ -5,12 +5,13 @@
 
     ノーツ数 × 一ノーツ当たりの配点 + 連打打数 × 100 ≒ 1,000,000
 
-連打・風船・くす玉の打数は **秒速 18 打** で数える(環境設定の roll_speed は
-見た目の推定用なので、ここでは使わない — 人によって値が違うとスコアまで
-変わってしまうため)。風船とくす玉は「18打で叩ける数」と「割るのに必要な
-打数」の小さいほうを採る。
+配点(一ノーツ当たり)を決めるときは、連打・風船・くす玉の打数を **秒速 18 打**
+で数える。ここは「満点がいくつになるか」の見積もりなので、環境設定の
+roll_speed に左右されてはいけない(人によって配点そのものが変わってしまう)。
 
-打数(=合計点)は上のとおり秒速に依存しないが、**いつ入るか**は打音に合わせる。
+**実際に叩いて入る点は別。** 打音も太鼓の光も環境設定の連打秒速で刻んで
+いるので、加算もそれに合わせる — 合わせないと「叩いた回数」と「加算された
+回数」が食い違う。そのぶん、連打で入る合計は設定で上下する。
 風船・くす玉は割れた時点で打音が止まるので、加算もそこまでに収める
 (tja_analyzer.balloon_pop_spans と同じ切り詰め)。
 
@@ -120,24 +121,33 @@ class ScoreTimeline:
         per_note = self.scoring["per_note"]
 
         events = [(float(n[0]), per_note) for n in (data.get("notes") or [])]
+        # **叩いた回数ぶん入れる。** 打音も太鼓の光も環境設定の連打秒速
+        # (roll_speed)で刻んでいるので、加算もそれに合わせる。合わせないと
+        # 「叩いた回数」と「加算された回数」が食い違う(実測で 40打/秒 鳴って
+        # いるのに加算は 18回/秒 だった)。
+        #
+        # 秒速18打(ROLL_HITS_PER_SEC)は**配点を決めるときだけ**の数字。
+        # 一ノーツ当たりの配点を求める compute_scoring では引き続きそちらを
+        # 使う — あれは「満点がいくつになるか」の見積もりで、人の設定で
+        # 配点そのものが変わってはいけないため。そのぶん、実際に叩いて出る
+        # 合計は連打秒速の設定で上下する(利用者の選択)。
+        speed = max(1.0, float(data.get("roll_hit_speed") or 45))
         for span in (data.get("rolls") or []):
-            events += self._tick_events(span[0], span[1], _span_hits(span[0], span[1]))
+            dur = max(0.0, float(span[1]) - float(span[0]))
+            events += self._tick_events(span[0], span[1], int(dur * speed))
         # 風船・くす玉は「叩ききって割れた時点」で打音が止まる(tja_analyzer の
         # balloon_pop_spans と同じ切り詰め)。加算だけを区間の終わりまで薄く
         # 引き伸ばすと、音が止まったあとも点が入り続けて見た目と食い違うので、
         # 加算も割れる時刻までに収める。
-        # ただし **合計点** は連打秒速(環境設定)に左右させたくないので、打数は
-        # 従来どおり秒速18打で数える(上の説明を参照)。ここで変えるのは
-        # 「いつ入るか」だけ。
-        speed = max(1.0, float(data.get("roll_hit_speed") or 45))
         for group in ("balloons", "kusudamas"):
             for span in data.get(group) or []:
                 need = int(span[4]) if len(span) > 4 else 0
-                hits = min(need, _span_hits(span[0], span[1])) if need > 0 else 0
-                end = float(span[1])
+                start, end = float(span[0]), float(span[1])
+                hits = int(max(0.0, end - start) * speed)
                 if need > 0:
-                    end = min(end, float(span[0]) + need / speed)
-                events += self._tick_events(span[0], end, hits)
+                    hits = min(need, hits)
+                    end = min(end, start + hits / speed)
+                events += self._tick_events(start, end, hits)
 
         events.sort(key=lambda e: e[0])
         self._times = [e[0] for e in events]
@@ -156,6 +166,27 @@ class ScoreTimeline:
         start, end = float(start), float(end)
         step = (end - start) / hits
         return [(start + step * i, ROLL_HIT_SCORE) for i in range(hits)]
+
+    def events_in(self, t0: float, t1: float, limit: int = 40):
+        """(t0, t1] に入った加算を、**古い順**に [(時刻, 点), ...] で返す。
+
+        加算表示は同時に何枚も出る。ふつうの密度の譜面なら音符が 0.1 秒
+        おきに来るし、連打を叩いている間はもっと詰まるので、「直近の1件」
+        しか出さないと出た端から消えて点滅して見える。重なるぶんは重ねる。
+
+        limit は保険。極端に詰まった連打で何十枚も描くことになっても、
+        古いほう(=いちばん薄い)から捨てる。"""
+        if not self._times:
+            return []
+        lo = bisect.bisect_right(self._times, t0)
+        hi = bisect.bisect_right(self._times, t1)
+        if hi - lo > limit:
+            lo = hi - limit
+        out = []
+        for i in range(lo, hi):
+            out.append((self._times[i],
+                        self._cum[i] - (self._cum[i - 1] if i else 0)))
+        return out
 
     def last_event(self, seconds: float):
         """その時刻までに入った直近の加算 (加算した時刻, 点)。まだ何も
