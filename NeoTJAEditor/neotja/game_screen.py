@@ -252,6 +252,8 @@ NAMEPLATE_TITLE_OUTLINE = "#ffffff"
 NAMEPLATE_DAN_COLOR = ((0.00, "#fffce0"), (0.42, "#ffe95c"),
                        (0.56, "#e6b800"), (1.00, "#fff27a"))
 NAMEPLATE_DAN_OUTLINE = "#000000"
+#: 素材が無いときに自前で描く 1P の丸の色。TNDE の赤丸に寄せてある。
+NAMEPLATE_SIMPLE_BADGE = "#f2603c"
 #: 段位の裏に敷く色。素材の下地の欠けを隠す。
 NAMEPLATE_DAN_BACK = "#000000"
 #: 称号バーを丸ごと差し替える絵。settings.json と同じ場所に置いた
@@ -1126,6 +1128,31 @@ def bake_text(p, cache, key, path, outline_color, outline_w, fill_color):
     return hit
 
 
+#: 利用者が置いた NamePlate.png。読んだ結果を覚えておく。
+#: (パス, 更新時刻) が変わったら読み直す — 差し替えてすぐ試せるように。
+_USER_SHEET = None
+_USER_SHEET_KEY = None
+
+
+def user_nameplate_sheet():
+    """NamePlate フォルダに置かれた部品シート。無ければ None。"""
+    global _USER_SHEET, _USER_SHEET_KEY
+    try:
+        path = settings_mod.user_nameplate_path()
+        key = (str(path), path.stat().st_mtime) if path.exists() else None
+    except Exception:  # noqa: BLE001
+        key = None
+    if key == _USER_SHEET_KEY:
+        return _USER_SHEET
+    _USER_SHEET_KEY = key
+    _USER_SHEET = None
+    if key is not None:
+        pm = QPixmap(key[0])
+        if not pm.isNull():
+            _USER_SHEET = pm
+    return _USER_SHEET
+
+
 class NameplateRenderer:
     """ネームプレートを描く。ゲーム画面と、環境設定の見本の両方で使う。
 
@@ -1230,6 +1257,31 @@ class NameplateRenderer:
         size = int(data.get(size_key) or 0) or size_default
         return (base[0] + off[0], base[1] + off[1]), size
 
+    def _draw_simple(self, p, lay, name):
+        """部品シートが無いときの、自前の簡単な板。
+
+        白い角丸の板に名前、左端に赤い丸で 1P。称号バーと段位は素材が
+        要るので出さない。**何も描かないと名前すら出ない**ので、
+        最低限これだけは自前で描く。"""
+        box = lay["plate"]
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(*box)
+        p.setPen(QPen(QColor("#000000"), 3.0))
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(r, box[3] / 2.0, box[3] / 2.0)
+        b = lay["badge"]
+        p.setBrush(QColor(NAMEPLATE_SIMPLE_BADGE))
+        p.drawEllipse(QRectF(*b))
+        p.restore()
+        self._text(p, "np_badge", "1P", b, int(b[3] * 0.46),
+                   "#ffffff", "#000000", 3.0)
+        off, size = self._adjust(lay["name_text_nodan"], self.data or {},
+                                 "nameOff", "nameSize", lay["name_size"])
+        self._text(p, "np_name", name, box, size, NAMEPLATE_NAME_COLOR,
+                   NAMEPLATE_NAME_OUTLINE, lay["name_line"], off,
+                   lay["name_space"])
+
     # -- 本体 --------------------------------------------------------
     def draw(self, p):
         """1P ぶんを描く(この画面は1人用)。
@@ -1237,7 +1289,11 @@ class NameplateRenderer:
         重なりは奥から 名前の板 → 段位 → 称号バー → 1P の丸。"""
         lay = self.layout or NAMEPLATE_LAYOUTS.get(NAMEPLATE_LAYOUT)
         data = self.data
-        if self.sheet is None or lay is None or not data:
+        if lay is None or not data:
+            return
+        if self.sheet is None:
+            # 素材が無い。名前だけの簡単な板を自前で描く。
+            self._draw_simple(p, lay, data.get("name", ""))
             return
         title = data.get("title", "")
         name = data.get("name", "")
@@ -1320,6 +1376,24 @@ def load_title_font():
     return None
 
 
+def nameplate_sheet(skin_sheet=None):
+    """使う部品シート。利用者が置いたものを優先する。
+
+    順に NamePlate/NamePlate.png → 素材キャッシュ(System から展開したもの)。
+    どちらも無ければ None で、そのときは自前の簡単な板になる。"""
+    pm = user_nameplate_sheet()
+    if pm is not None:
+        return pm
+    if skin_sheet is not None:
+        return skin_sheet
+    path = os.path.join(str(settings_mod.skin_dir()), "NamePlate_Parts.png")
+    if os.path.exists(path):
+        pm = QPixmap(path)
+        if not pm.isNull():
+            return pm
+    return None
+
+
 def nameplate_data_from(cfg):
     """設定からネームプレートの中身を取り出す。描く側と見本で同じ形を使う。"""
     d = settings_mod.default_settings()
@@ -1357,16 +1431,11 @@ def nameplate_preview(cfg, scale=2.0, renderer=None):
     if lay is None:
         return None
     r = renderer or NameplateRenderer()
-    if r.sheet is None:
-        sheet_path = os.path.join(str(settings_mod.skin_dir()),
-                                  "NamePlate_Parts.png")
-        if not os.path.exists(sheet_path):
-            return None
-        sheet = QPixmap(sheet_path)
-        if sheet.isNull():
-            return None
+    sheet = nameplate_sheet()
+    if r.sheet is not sheet or r.family is None:
         r.sheet = sheet
         r.family = load_title_font()
+        r.invalidate()
     r.data = nameplate_data_from(cfg)
     # 使っている枠を全部くくった大きさで切り出す。配置を動かしても見本が
     # 切れないように、実際の値から測る。
@@ -1932,9 +2001,7 @@ class GameScreenWidget(QWidget):
 
         描き方そのものは環境設定の見本と共通(neotja/game_screen.py の
         NameplateRenderer)。二重に書くと片方だけ直して食い違うため。"""
-        sheet = self._skin.get("nameplate_parts")
-        if sheet is None:
-            return
+        sheet = nameplate_sheet(self._skin.get("nameplate_parts"))
         r = self._np_renderer
         if r.sheet is not sheet or r.family != self._title_family:
             r.sheet = sheet

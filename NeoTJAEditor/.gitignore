@@ -20,3 +20,6 @@ __pycache__/
 
 # 位置合わせの書き出し。作業中の値なので入れない。
 tune.txt
+
+# 利用者が用意する NamePlate.png の置き場。中身は利用者ごとの持ち物。
+NamePlate/

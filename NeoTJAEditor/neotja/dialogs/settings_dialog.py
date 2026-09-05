@@ -535,6 +535,19 @@ class SettingsDialog(QDialog):
         form.addRow(self.np_preview)
         self._np_preview_renderer = None
 
+        form = self._group(outer, "素材")
+        btn_dir = QPushButton("NamePlate フォルダを開く")
+        btn_dir.clicked.connect(self._open_nameplate_dir)
+        form.addRow(btn_dir)
+        form.addRow(self._hint(
+            "名前板・称号バー・段位バッジの絵は NamePlate.png から切り出して"
+            "います。太鼓さん次郎のスキンによっては入っていないので、"
+            "このフォルダに自分で置くこともできます"
+            "(形式は 220x1189 の縦長の部品シート)。"))
+        form.addRow(self._hint(
+            "フォルダにも System にも無いときは、名前だけの簡単な板を"
+            "自前で描きます。"))
+
         form = self._group(outer, "称号(上の帯)")
         self.np_title_edit = QLineEdit(str(val("nameplate_title")))
         self.np_title_edit.setMaxLength(64)
@@ -607,6 +620,13 @@ class SettingsDialog(QDialog):
 
         outer.addStretch()
         return w
+
+    def _open_nameplate_dir(self):
+        """NamePlate フォルダをエクスプローラで開く(無ければ作ってから)。"""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        path = settings_mod.nameplate_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _nameplate_values(self):
         """この画面の入力欄から、設定と同じ形の辞書を作る。"""
