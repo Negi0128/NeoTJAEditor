@@ -250,22 +250,6 @@ def settings_path() -> Path:
 #: 利用者が自分で用意できる道を用意しておく。ここにあるものを優先し、
 #: 無ければ素材キャッシュ(System から展開したもの)を見る。
 NAMEPLATE_DIR_NAME = "NamePlate"
-#: フォルダに置く説明。何を入れる場所なのか分からないと使われないため。
-NAMEPLATE_README = """このフォルダに NamePlate.png を置くと、
-NeoTJAPlayer のネームプレート(名前板・称号バー・段位バッジ)に使われます。
-
-* 形式は TJAPlayer3-Develop-ReWrite と同じ 220x1189 の縦長の部品シートです。
-  太鼓さん次郎のスキンの System/<スキン名>/Graphics/NamePlate.png が
-  そのまま使えます。
-* このフォルダに無いときは、環境設定で指定した System フォルダから
-  取り出したものを使います。
-* どちらも無いときは、名前だけの簡単な板を自前で描きます。
-
-称号バーを1枚の絵で差し替えたいときは、環境設定の
-「ネームプレート」タブ →「画像で置き換え」から選んでください。
-"""
-
-
 def nameplate_dir() -> Path:
     """NamePlate.png を置いてもらうフォルダ。無ければ作る。
 
@@ -274,10 +258,6 @@ def nameplate_dir() -> Path:
     d = settings_path().parent / NAMEPLATE_DIR_NAME
     try:
         d.mkdir(parents=True, exist_ok=True)
-        readme = d / "ここに NamePlate.png を置いてください.txt"
-        if not readme.exists():
-            with open(readme, "w", encoding="utf-8") as f:
-                f.write(NAMEPLATE_README)
     except Exception:  # noqa: BLE001
         pass
     return d
