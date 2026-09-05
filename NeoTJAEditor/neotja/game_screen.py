@@ -570,7 +570,7 @@ BALLOON_NUM_ANCHOR = (100, 64)
 BALLOON_NUM_OFF = (-5, 5)        # そこからの微調整 (右, 下)
 
 TAP_COUNT_BOTTOM = LANE_Y - 4    # (素材が無いときの文字表示)連打数の下端
-JUDGE_BOTTOM = LANE_Y + 21       # 「良」の下端。レーンに 21px かぶる
+JUDGE_BOTTOM = LANE_Y + 18       # 「良」の下端。レーンに 18px かぶる
 JUDGE_SCALE = 1.05               # 「良」の拡大率
 # 「良」の動き。**本家の実機映像(1920x1080 / 60fps)を1コマずつ測って合わせた。**
 #
@@ -609,14 +609,30 @@ TITLE_OUTLINE_W = 10.0
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。
 #
-# **本家には無い。** 実機映像を1コマずつ確かめたが、音符を叩いてもスコアが
-# 0 -> 1660 と1コマで変わるだけで、加算分を浮かべる表示はどこにも出ない。
-# しかもこの表示は 0.5 秒かけてスコアの真上を昇っていくので、**合計スコアが
-# 落ち着いて見えない**原因にもなっていた(スコアの帯が毎コマ変わる)。
-# 出さないことにする。戻したくなったらここを True にすれば元どおり。
-SHOW_SCORE_GAIN = False
-SCORE_GAIN_SEC = 0.5             # 出てから消えるまで
-SCORE_GAIN_RISE = 16.0           # 昇る高さ
+# 動きは実機のキャプチャ(1920x1080 / 60fps)を、背景を引いてから字の形で
+# 1コマずつ追って測った。以下は 720p 換算(実測値の 1.5 分の1)。
+#
+#   +16ms  薄く、定位置より 39px 右に出る
+#   +33ms  +24px   濃くなりながら左へ
+#   +50ms  +10px
+#   +66ms   -4px   行き過ぎる。ここでほぼ濃い
+#   +116ms   0px   定位置に落ち着く
+#   〜250ms        静止・不透明
+#   +266〜350ms    8px 上へ("落ちる"前の溜め)
+#   +366ms〜       下がりながら消える(実測でも -12 -> -10 -> -9 と戻っている)
+#
+# 以前は叩いた瞬間から 16px 昇りながら、出た瞬間から薄くしていた。つまり
+# **半透明の数字がスコアの上を昇り続ける**見え方で、実機とは別物だった。
+SHOW_SCORE_GAIN = True
+SCORE_GAIN_DELAY = 0.016         # 叩いてから出るまで
+SCORE_GAIN_SEC = 0.40            # 出てから消えるまで
+SCORE_GAIN_IN_SEC = 0.10         # 右から滑り込むのにかける時間
+SCORE_GAIN_IN_X = 39.0           # 出はじめの右へのずれ
+SCORE_GAIN_IN_OVERSHOOT = 4.0    # 定位置を通り過ぎる量
+SCORE_GAIN_FADEIN_SEC = 0.05     # 濃くなりきるまで
+SCORE_GAIN_HOP_FROM = 0.62       # ここから跳ねはじめる(0..1)
+SCORE_GAIN_HOP_UP = 8.0          # 跳ねる高さ
+SCORE_GAIN_FADE_FROM = 0.875     # ここから消えはじめる(0..1)
 SCORE_GAIN_SCALE = 0.902
 SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = 4             # スコアの上端からさらに上へ(正=下)
@@ -1641,17 +1657,45 @@ class GameScreenWidget(QWidget):
             ev = self._score_timeline.last_event(now)
             if ev is not None:
                 et, gain = ev
-                el = now - et
+                el = now - et - SCORE_GAIN_DELAY
                 if 0.0 <= el < SCORE_GAIN_SEC and gain > 0:
                     q = el / SCORE_GAIN_SEC
-                    rise = SCORE_GAIN_RISE * (1.0 - (1.0 - q) ** 2)
+                    # 横: 右から滑り込んで、少し行き過ぎてから戻る。実測は
+                    # 前半も後半も**直線**だったので、そのまま2本の直線で書く
+                    # (39 -> -4 が 0.05秒、-4 -> 0 がもう 0.05秒)。
+                    half = SCORE_GAIN_IN_SEC / 2.0
+                    if el < half:
+                        t = el / half
+                        dx = SCORE_GAIN_IN_X + (-SCORE_GAIN_IN_OVERSHOOT
+                                                - SCORE_GAIN_IN_X) * t
+                    elif el < SCORE_GAIN_IN_SEC:
+                        t = (el - half) / half
+                        dx = -SCORE_GAIN_IN_OVERSHOOT * (1.0 - t)
+                    else:
+                        dx = 0.0
+                    # 縦: 定位置に着いてしばらく動かず、最後に少し上がってから
+                    # 落ちながら消える。上がって落ちるのは投げ上げと同じ形。
+                    if q <= SCORE_GAIN_HOP_FROM:
+                        rise = 0.0
+                    else:
+                        u = (q - SCORE_GAIN_HOP_FROM) / (1.0 - SCORE_GAIN_HOP_FROM)
+                        # u=0.45 で SCORE_GAIN_HOP_UP、u=0.9 で 0 に戻り、
+                        # そのあとは定位置より下へ落ちていく。
+                        g = SCORE_GAIN_HOP_UP / 0.2025
+                        rise = g * (0.9 * u - u * u)
                     sheet = self._skin.get("score_digits")
                     if sheet is not None:
                         gh = sheet.height() / 3 * SCORE_GAIN_SCALE
-                        p.setOpacity(max(0.0, 1.0 - q))
+                        # 出はじめに濃くなり、消え際に薄くなる。あいだは不透明。
+                        a = 1.0
+                        if el < SCORE_GAIN_FADEIN_SEC:
+                            a = el / SCORE_GAIN_FADEIN_SEC
+                        elif q > SCORE_GAIN_FADE_FROM:
+                            a = 1.0 - (q - SCORE_GAIN_FADE_FROM) / (1.0 - SCORE_GAIN_FADE_FROM)
+                        p.setOpacity(max(0.0, min(1.0, a)))
                         self._draw_digits(p, sheet, gain, cols=10, rows=3,
                                           row=SCORE_GAIN_ROW, advance=SCORE_ADVANCE,
-                                          right=SCORE_RIGHT,
+                                          right=SCORE_RIGHT + dx,
                                           y=int(SCORE_Y - gh + SCORE_GAIN_Y_OFF - rise),
                                           scale=SCORE_GAIN_SCALE,
                                           y_offsets=SCORE_DIGIT_Y_OFF)
