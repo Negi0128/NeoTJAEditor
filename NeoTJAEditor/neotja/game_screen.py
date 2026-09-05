@@ -284,15 +284,29 @@ SOUL_LAND_SEC = 0.22
 #                   切り出し (0, 0, W*c/85, H) を (X, Y) に置く
 #   後半 (82..164): 左から順に「消していく」
 #                   nx = W*(c-82)/85 として (nx, 0, W-nx, H) を (X+nx, Y) に置く
-# 数値は OpenTaiko の既定値(CSkin.cs):
-#   Game_Effect_Rainbow_X = 360 / _Y = -100 / _Timer = 8ms
-# 全体で 164*8 = 1.31 秒。
+# 位置は OpenTaiko の既定値(CSkin.cs): Game_Effect_Rainbow_X = 360 / _Y = -100。
+#
+# 長さは本家の実測に合わせてある(60fps の実機映像を1コマずつ数えた)。
+#   引く   : f16 に出て f34 で魂まで届く =  18コマ = 0.30 秒
+#   止まる : f34 から f47 まで動かない   =  13コマ = 0.22 秒
+#   消す   : f47 から f58 で消えきる     =  11コマ = 0.18 秒
+# OpenTaiko の既定値は引き 0.656 秒・タメ無しで、本家の倍以上遅かった。
 SHOW_BALLOON_RAINBOW = True
 RAINBOW_POS = (360, -100)
 RAINBOW_TICK_SEC = 0.008
-RAINBOW_TICKS = 164
-RAINBOW_HALF = 82
-RAINBOW_WIPE_DEN = 85
+RAINBOW_DRAW_TICKS = 38          # 0.30 秒
+RAINBOW_HOLD_TICKS = 28          # 0.22 秒
+RAINBOW_ERASE_TICKS = 23         # 0.18 秒
+#: 引き終わりのコマ番号。ここから止まる。
+RAINBOW_HALF = RAINBOW_DRAW_TICKS
+#: 消し始めるコマ番号。
+RAINBOW_ERASE_FROM = RAINBOW_DRAW_TICKS + RAINBOW_HOLD_TICKS
+RAINBOW_TICKS = RAINBOW_ERASE_FROM + RAINBOW_ERASE_TICKS
+#: 帯を W*c/DEN で切り出す。引き終わり(c = 37)で素材の 94.9% = 894px まで出て、
+#: 先端がちょうど魂の手前に来る。OpenTaiko の 82/85 = 898px と同じ位置。
+RAINBOW_WIPE_DEN = 39
+#: 消すほうは最後のコマ(c = 88)でちょうど全部消えるように。
+RAINBOW_ERASE_DEN = 22
 # 描き足していく間、その先端に大ドンの顔を乗せる。素材どおりに切ると
 # 先端が縦にスパッと切れて見えるので、顔で隠して「顔が虹を引いている」
 # 見え方にする。Notes.png は 130px のセルが 13列x3行で、(3, 0) が
@@ -314,6 +328,17 @@ RAINBOW_LAND_MOVE_SEC = 0.10
 #: ときと同じ長さ・同じ消え方(白へ寄せながら薄く)にそろえてある。
 RAINBOW_LAND_SEC = 0.22
 RAINBOW_HEAD_OFF = (0, 0)        # 虹の先端からのずれ (右, 上が負)
+# 本家は先端に顔が無く、代わりに白〜水色の光と 4本角の星が散っている
+# (実機映像 f18〜f29 で確認)。こちらは顔を残したまま、その星だけを足す。
+# 星は「そのコマの先端の位置」に生まれて、あとは動かずに縮みながら消える。
+# 先端が進むので、結果として尾を引いたように残る。
+RAINBOW_SPARK_LIFE = 11          # 1粒が消えるまでのコマ数
+RAINBOW_SPARK_PER_TICK = 3       # 1コマに生まれる数
+RAINBOW_SPARK_SPREAD = 52.0      # 帯を横切る向きのばらつき (px)
+RAINBOW_SPARK_ALONG = 26.0       # 帯に沿う向きのばらつき (px)
+RAINBOW_SPARK_MIN = 5.0          # 星の半径 (px)
+RAINBOW_SPARK_MAX = 15.0
+RAINBOW_SPARK_WAIST = 0.16       # 星のくびれ。小さいほど鋭い
 # レーンより手前に描くものを載せる板。ここに入るのは
 #   * 判定円(y=261)から魂(y=166)へ、画面の上端をかすめる弧を描く音符
 #   * 風船中のどんちゃん(画布 648x345 を CHARA_BALLOON_CANVAS_OFF に置く)
@@ -713,6 +738,7 @@ class _LaneOverlay(QWidget):
         ox, oy = self.x(), self.y()
         # 後のものほど手前。
         self._screen.draw_soul_front(p, ox, oy)
+        self._screen.draw_rainbow_sparks(p, ox, oy)
         self._screen.draw_rainbow_head_front(p, ox, oy)
         self._screen.draw_soul_flights(p, ox, oy)
         self._screen.draw_judge_pop(p, ox, oy)
@@ -2537,6 +2563,11 @@ class GameScreenWidget(QWidget):
             return None
         return int(el / RAINBOW_TICK_SEC), pm, pm.width(), pm.height()
 
+    @staticmethod
+    def _rainbow_max_nx(w):
+        """帯を出す右端。引き終わりのコマと同じ幅。"""
+        return w * (RAINBOW_DRAW_TICKS - 1) // RAINBOW_WIPE_DEN
+
     def _draw_rainbow(self, p, now):
         """風船が割れたあとにかかる虹の**帯**。上背景の上・レーンより奥。
 
@@ -2548,13 +2579,83 @@ class GameScreenWidget(QWidget):
         c, pm, w, h = got
         x, y = RAINBOW_POS
         if c < RAINBOW_HALF:
+            # 左から描き足していく。
             nx = w * c // RAINBOW_WIPE_DEN
             if nx > 0:
                 p.drawPixmap(x, y, pm, 0, 0, nx, h)
+        elif c < RAINBOW_ERASE_FROM:
+            # 引き終わり。本家はここで 0.22 秒そのまま止まる。素材の残り
+            # (魂より右)は出さない。出すと引き終わった瞬間に右端が 894→943 と
+            # 飛んで、帯が一段伸びたように見える。
+            p.drawPixmap(x, y, pm, 0, 0, self._rainbow_max_nx(w), h)
         else:
-            nx = w * (c - RAINBOW_HALF) // RAINBOW_WIPE_DEN
-            if nx < w:
-                p.drawPixmap(x + nx, y, pm, nx, 0, w - nx, h)
+            # 左から順に消していく。
+            mx = self._rainbow_max_nx(w)
+            nx = w * (c - RAINBOW_ERASE_FROM) // RAINBOW_ERASE_DEN
+            if nx < mx:
+                p.drawPixmap(x + nx, y, pm, nx, 0, mx - nx, h)
+
+    @staticmethod
+    def _spark_path(r):
+        """4本角の星。上下左右に尖って、斜めがくびれている。"""
+        path = QPainterPath()
+        s = r * RAINBOW_SPARK_WAIST
+        d = s * 0.7071
+        path.moveTo(0.0, -r)
+        path.quadTo(d, -d, r, 0.0)
+        path.quadTo(d, d, 0.0, r)
+        path.quadTo(-d, d, -r, 0.0)
+        path.quadTo(-d, -d, 0.0, -r)
+        return path
+
+    def draw_rainbow_sparks(self, p, ox=0, oy=0):
+        """虹の先端に散る星。**魂より手前**に出すので板から呼ぶ。
+
+        コマ c の先端に RAINBOW_SPARK_PER_TICK 個生まれて、その場で縮みながら
+        消える。先端が右へ進むぶん、後ろへ尾を引いたように見える。"""
+        try:
+            now = self.chart_preview.game_state()[0]
+        except Exception:  # noqa: BLE001
+            return
+        got = self._rainbow_phase(now)
+        if got is None:
+            return
+        c, _pm, w, _h = got
+        x, y = RAINBOW_POS
+        last = min(c, RAINBOW_DRAW_TICKS - 1)     # 引き終わったら新しく生まれない
+        first = max(1, c - RAINBOW_SPARK_LIFE + 1)
+        if last < first:
+            return
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255))
+        p.setCompositionMode(QPainter.CompositionMode_Plus)
+        for b in range(first, last + 1):
+            nx = w * b // RAINBOW_WIPE_DEN
+            cy = self._rainbow_band_center(min(nx, w - 1))
+            if cy is None:
+                continue
+            bx = x + nx - ox
+            by = y + cy - oy
+            age = (c - b) / float(RAINBOW_SPARK_LIFE)
+            for k in range(RAINBOW_SPARK_PER_TICK):
+                # コマ番号と粒番号から決まる値なので、毎フレーム散らばらない。
+                hsh = (b * 6364136223846793005 + k * 1442695040888963407) & 0xFFFFFFFF
+                u0 = ((hsh >> 4) & 0xFF) / 255.0
+                u1 = ((hsh >> 12) & 0xFF) / 255.0
+                u2 = ((hsh >> 20) & 0xFF) / 255.0
+                r0 = RAINBOW_SPARK_MIN + (RAINBOW_SPARK_MAX - RAINBOW_SPARK_MIN) * u2
+                # 生まれてすぐ一番大きく、そのあと縮んで消える。
+                r = r0 * (1.0 - age) ** 0.7
+                if r < 1.0:
+                    continue
+                p.save()
+                p.translate(bx + (u0 - 0.5) * 2.0 * RAINBOW_SPARK_ALONG,
+                            by + (u1 - 0.5) * 2.0 * RAINBOW_SPARK_SPREAD)
+                p.setOpacity(min(1.0, (1.0 - age) * 1.6))
+                p.drawPath(self._spark_path(r))
+                p.restore()
+        p.restore()
 
     def draw_rainbow_head_front(self, p, ox=0, oy=0):
         """虹の先端に乗る顔。**魂より手前**に出すので板から呼ぶ。
