@@ -282,6 +282,10 @@ NAMEPLATE_TITLE_OUTLINE = "#ffffff"
 NAMEPLATE_DAN_COLOR = ((0.00, "#fffce0"), (0.42, "#ffe95c"),
                        (0.56, "#e6b800"), (1.00, "#fff27a"))
 NAMEPLATE_DAN_OUTLINE = "#000000"
+#: 称号の絵の下端に引く縁。絵の下は白い板に接するので、縁が無いと境が
+#: 溶けて帯が板に沈んで見える。0 にすると引かない。
+NAMEPLATE_TITLE_IMAGE_EDGE = "#000000"
+NAMEPLATE_TITLE_IMAGE_EDGE_W = 2.0
 # 部品シート(NamePlate.png)が見つからないときの板。数値は、ずっと使って
 # きた 280x79 の名前板(1P どんちゃん)を実測して合わせたもの:
 #   板 215x49 / 赤丸 40x40 / 丸の左端は板の左端から 4px / 縁 3px /
@@ -1397,10 +1401,19 @@ class NameplateRenderer:
                 b = lay["title"]
                 off = data.get("titleImageOff") or (0, 0)
                 grow = data.get("titleImageGrow") or (0, 0)
-                p.drawPixmap(QRectF(b[0] + off[0], b[1] + off[1],
-                                    max(1, b[2] + grow[0]),
-                                    max(1, b[3] + grow[1])), img,
-                             QRectF(0, 0, img.width(), img.height()))
+                r = QRectF(b[0] + off[0], b[1] + off[1],
+                           max(1, b[2] + grow[0]), max(1, b[3] + grow[1]))
+                p.drawPixmap(r, img, QRectF(0, 0, img.width(), img.height()))
+                # 下端に黒い縁を引く。絵の下は白い板に接するので、縁が無いと
+                # 帯と板の境が溶けて、帯が板に沈んで見える。
+                if NAMEPLATE_TITLE_IMAGE_EDGE_W > 0:
+                    p.save()
+                    p.setRenderHint(QPainter.Antialiasing, True)
+                    p.setPen(QPen(QColor(NAMEPLATE_TITLE_IMAGE_EDGE),
+                                  NAMEPLATE_TITLE_IMAGE_EDGE_W))
+                    y = r.bottom() - NAMEPLATE_TITLE_IMAGE_EDGE_W / 2.0
+                    p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+                    p.restore()
             else:
                 t = int(data.get("titleType", 0))
                 if not 0 <= t < len(parts["titles"]):
@@ -1502,8 +1515,15 @@ def nameplate_preview(cfg, scale=2.0, renderer=None):
         r.invalidate()
     r.data = nameplate_data_from(cfg)
     # 使っている枠を全部くくった大きさで切り出す。配置を動かしても見本が
-    # 切れないように、実際の値から測る。
+    # 切れないように、実際の値から測る。称号の絵は枠より大きくできるので、
+    # そのはみ出しぶんも入れる(入れないと、幅を広げても見本では右が切れて
+    # 「効いていない」ように見える)。
     boxes = [lay[k] for k in ("title", "plate", "badge", "dan")]
+    b = lay["title"]
+    off = r.data.get("titleImageOff") or (0, 0)
+    grow = r.data.get("titleImageGrow") or (0, 0)
+    boxes.append((b[0] + off[0], b[1] + off[1],
+                  max(1, b[2] + grow[0]), max(1, b[3] + grow[1])))
     x0 = min(b[0] for b in boxes) - 2
     y0 = min(b[1] for b in boxes) - 2
     x1 = max(b[0] + b[2] for b in boxes) + 2
