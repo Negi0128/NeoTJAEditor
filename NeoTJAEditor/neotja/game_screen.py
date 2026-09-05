@@ -701,6 +701,7 @@ class _LaneOverlay(QWidget):
         ox, oy = self.x(), self.y()
         # 後のものほど手前。
         self._screen.draw_soul_front(p, ox, oy)
+        self._screen.draw_rainbow_head_front(p, ox, oy)
         self._screen.draw_soul_flights(p, ox, oy)
         self._screen.draw_judge_pop(p, ox, oy)
         self._screen.draw_chara_front(p, ox, oy)
@@ -975,6 +976,10 @@ class GameScreenWidget(QWidget):
                        * SOUL_BURST_FRAME_SEC)
             flying = bool(self.chart_preview.recent_hits(now, _win)
                           or self.chart_preview.recent_roll_hits(now, _win))
+            if not flying and SHOW_BALLOON_RAINBOW:
+                # 虹の先端の顔も板が描くので、虹が出ている間は塗り直す。
+                flying = self.chart_preview.balloon_pop_elapsed(
+                    now, RAINBOW_TICKS * RAINBOW_TICK_SEC) is not None
             if not flying and self._chara is not None:
                 flying = self._chara.state() in chara_mod.TIME_BASED_STATES
             if not flying:
@@ -2498,40 +2503,70 @@ class GameScreenWidget(QWidget):
                 return centers[x]
         return None
 
-    def _draw_rainbow(self, p, now):
-        """風船が割れたあとにかかる虹。上背景の上・レーンより奥に描く。"""
+    def _rainbow_phase(self, now):
+        """虹の進み具合 (コマ番号, 絵, 幅, 高さ)。出ていなければ None。"""
         if not SHOW_BALLOON_RAINBOW:
-            return
+            return None
         pm = self._skin.get("rainbow")
         if pm is None:
-            return
+            return None
         span = RAINBOW_TICKS * RAINBOW_TICK_SEC
         try:
             el = self.chart_preview.balloon_pop_elapsed(now, span)
         except Exception:  # noqa: BLE001
-            return
+            return None
         if el is None:
+            return None
+        return int(el / RAINBOW_TICK_SEC), pm, pm.width(), pm.height()
+
+    def _draw_rainbow(self, p, now):
+        """風船が割れたあとにかかる虹の**帯**。上背景の上・レーンより奥。
+
+        先端の顔はここでは描かない。魂より手前に出したいので、レーンより
+        手前の板から draw_rainbow_head_front() で描く。"""
+        got = self._rainbow_phase(now)
+        if got is None:
             return
-        c = int(el / RAINBOW_TICK_SEC)
-        w, h = pm.width(), pm.height()
+        c, pm, w, h = got
         x, y = RAINBOW_POS
         if c < RAINBOW_HALF:
             nx = w * c // RAINBOW_WIPE_DEN
             if nx > 0:
                 p.drawPixmap(x, y, pm, 0, 0, nx, h)
-                head = self._rainbow_head()
-                cy = self._rainbow_band_center(min(nx, w - 1))
-                if head is not None and cy is not None:
-                    k = RAINBOW_HEAD_SCALE
-                    hw, hh = head.width() * k, head.height() * k
-                    dx, dy = RAINBOW_HEAD_OFF
-                    p.drawPixmap(QRectF(x + nx - hw / 2.0 + dx,
-                                        y + cy - hh / 2.0 + dy, hw, hh),
-                                 head, QRectF(0, 0, head.width(), head.height()))
         else:
             nx = w * (c - RAINBOW_HALF) // RAINBOW_WIPE_DEN
             if nx < w:
                 p.drawPixmap(x + nx, y, pm, nx, 0, w - nx, h)
+
+    def draw_rainbow_head_front(self, p, ox=0, oy=0):
+        """虹の先端に乗る顔。**魂より手前**に出すので板から呼ぶ。
+
+        帯そのものは背景の一部として奥に描いてある(_draw_rainbow)。顔だけを
+        手前へ出すと、虹が魂ゲージまで届いたときに顔が魂の後ろへ隠れない。"""
+        try:
+            now = self.chart_preview.game_state()[0]
+        except Exception:  # noqa: BLE001
+            return
+        got = self._rainbow_phase(now)
+        if got is None:
+            return
+        c, pm, w, h = got
+        if c >= RAINBOW_HALF:      # 消していく段階には先端が無い
+            return
+        nx = w * c // RAINBOW_WIPE_DEN
+        if nx <= 0:
+            return
+        head = self._rainbow_head()
+        cy = self._rainbow_band_center(min(nx, w - 1))
+        if head is None or cy is None:
+            return
+        x, y = RAINBOW_POS
+        k = RAINBOW_HEAD_SCALE
+        hw, hh = head.width() * k, head.height() * k
+        dx, dy = RAINBOW_HEAD_OFF
+        p.drawPixmap(QRectF(x + nx - hw / 2.0 + dx - ox,
+                            y + cy - hh / 2.0 + dy - oy, hw, hh),
+                     head, QRectF(0, 0, head.width(), head.height()))
 
     def _draw_bg_light(self, p, now):
         """下背景の提灯の光を、加算合成でゆっくり明滅させながら重ねる。"""
