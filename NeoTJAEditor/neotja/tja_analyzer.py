@@ -40,6 +40,21 @@ def balloon_pop_spans(spans, roll_hit_speed):
     return out
 
 
+def balloon_pops(span, roll_hit_speed):
+    """その風船・くす玉を叩ききれるか(= 割れるか)。
+
+    balloon_pop_spans を通したあとの区間を渡す。割れるものは
+    end - start がちょうど 必要打数/秒速 になっているので、その長さで
+    何打入るかを数えれば足りる。区間が短くて叩ききれなかったものは
+    end が TJA の区間終わりのままなので、打数が必要数に届かない。"""
+    need = int(span[-1]) if len(span) > 1 else 0
+    if need <= 0:
+        return False
+    speed = max(1.0, float(roll_hit_speed or 45))
+    # 浮動小数の丸めで 1 打足りなくならないよう、わずかに余裕を持たせる。
+    return int((float(span[1]) - float(span[0])) * speed + 1e-6) >= need
+
+
 class TJACourseAnalyzer:
     DIFF = {"0": "Easy", "Easy": "Easy", "1": "Normal", "Normal": "Normal",
             "2": "Hard", "Hard": "Hard", "3": "Oni", "Oni": "Oni", "4": "Edit", "Edit": "Edit"}

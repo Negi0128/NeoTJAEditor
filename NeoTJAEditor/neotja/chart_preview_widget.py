@@ -917,7 +917,7 @@ class ChartPreviewWidget(QWidget):
                 start, end, hits = spans[k][0], spans[k][1], spans[k][-1]
                 if not hits or hits <= 0 or end <= start:
                     continue
-                interval = (end - start) / float(hits)
+                interval = self._span_interval(spans, start, end, hits)
                 if interval <= 0.0:
                     continue
                 i_hi = min(int((min(now, end) - start) / interval), hits - 1)
@@ -949,7 +949,7 @@ class ChartPreviewWidget(QWidget):
             start, end, hits = span[0], span[1], span[-1]
             if not (start <= now < end) or not hits or hits <= 0:
                 continue
-            interval = (end - start) / float(hits)
+            interval = self._span_interval(spans, start, end, hits)
             if interval <= 0.0:
                 continue
             i = int((now - start) / interval)
@@ -958,25 +958,49 @@ class ChartPreviewWidget(QWidget):
             return (now - (start + i * interval), i + 1)
         return None
 
+    def _span_interval(self, spans, start, end, hits):
+        """その区間の打の間隔(秒)。
+
+        風船・くす玉は**必ず連打と同じ速さ**で叩く。区間が短くて叩ききれない
+        ときに (end-start)/打数 で割ると、間隔が引き伸ばされて連打より遅く
+        叩くことになる。連打(_rolls)は打数が区間の長さから決まっているので
+        どちらの式でも同じだが、そろえておく。"""
+        if spans is self._rolls:
+            return (end - start) / float(hits) if hits else 0.0
+        return 1.0 / self._roll_hit_speed
+
     BALLOON_BROKE_SEC = 0.30     # 割れたあと、その絵を出しておく時間
+    # --- 叩ききれなかったとき(本家の実測。60fps の映像を1コマずつ数えた) ---
+    #   区間の終わりから 4コマ(67ms)で しぼむ。コマ4 → コマ0 へ逆再生。
+    #   そのあと小さいまま右下へ飛んでいく。速さは 1コマ +9,+5px(1920)で、
+    #   1280 に直すと毎秒 (368, 216)px。0.5 秒後もまだ画面に残っていた。
+    BALLOON_DEFLATE_SEC = 0.067      # しぼむのにかける時間
+    BALLOON_ESCAPE_SEC = 0.80        # 飛んでいって消えるまで
+    BALLOON_ESCAPE_VX = 368.0        # 右へ(px/秒)
+    BALLOON_ESCAPE_VY = 216.0        # 下へ(px/秒)
+    BALLOON_ESCAPE_SHRINK = 0.55     # 飛び終わりの大きさ(倍)
 
     def balloon_pop_elapsed(self, now: float, window: float):
         """直近に風船が割れてからの経過秒。window 秒より前なら None。
 
         虹のように「割れた瞬間から流す」演出に使う。区間は割れる時刻まで
-        切り詰めたほうなので、end がそのまま割れた瞬間。"""
+        切り詰めたほうなので、end がそのまま割れた瞬間。
+
+        叩ききれなかった風船は割れないので、数に入れない(虹も出ない)。"""
         best = None
-        for spans, starts in zip((self._balloons, self._kusudamas),
-                                 self._span_starts[1:]):
+        for spans, starts, flags in zip(
+                (self._balloons, self._kusudamas), self._span_starts[1:],
+                (self._balloon_pops, self._kusudama_pops)):
             if not spans:
                 continue
             j = bisect.bisect_right(starts, now) - 1
             while j >= 0:
                 end = spans[j][1]
                 if end <= now:
-                    el = now - end
-                    if el < window and (best is None or el < best):
-                        best = el
+                    if flags[j]:
+                        el = now - end
+                        if el < window and (best is None or el < best):
+                            best = el
                     break
                 j -= 1
         return best
@@ -1005,6 +1029,48 @@ class ChartPreviewWidget(QWidget):
             return 5 if now >= b_end else min(4, int(prog * 5))
         return None
 
+    def balloon_sprite_state(self, now: float):
+        """判定枠に出す風船の (コマ, 右へのずれ, 下へのずれ, 倍率)。
+
+        出さないときは None。叩ききれた風船は今までどおり、割れるまで
+        コマが進んで、そのあと破裂のコマ。叩ききれなかった風船は割れず、
+        しぼんでから右下へ飛んでいく(BALLOON_* の説明を参照)。"""
+        if self._skin_balloon_seq is None:
+            return None
+        for spans, starts, flags in zip(
+                (self._balloons, self._kusudamas), self._span_starts[1:],
+                (self._balloon_pops, self._kusudama_pops)):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            if j < 0:
+                continue
+            b_start, b_end = spans[j][0], spans[j][1]
+            if now < b_start:
+                continue
+            if now < b_end:
+                span = max(1e-6, b_end - b_start)
+                prog = min(1.0, max(0.0, (now - b_start) / span))
+                return (min(4, int(prog * 5)), 0.0, 0.0, 1.0)
+            el = now - b_end
+            if flags[j]:
+                # 叩ききれた。破裂のコマを少しだけ。
+                if el < self.BALLOON_BURST_SEC:
+                    return (5, 0.0, 0.0, 1.0)
+                continue
+            # 叩ききれなかった。しぼんで、そのまま右下へ。
+            if el < self.BALLOON_DEFLATE_SEC:
+                t = el / self.BALLOON_DEFLATE_SEC
+                return (max(0, 4 - int(t * 5)), 0.0, 0.0, 1.0)
+            el -= self.BALLOON_DEFLATE_SEC
+            if el >= self.BALLOON_ESCAPE_SEC:
+                continue
+            t = el / self.BALLOON_ESCAPE_SEC
+            k = 1.0 + (self.BALLOON_ESCAPE_SHRINK - 1.0) * t
+            return (0, self.BALLOON_ESCAPE_VX * el,
+                    self.BALLOON_ESCAPE_VY * el, k)
+        return None
+
     def draw_balloon_sprite_at(self, painter, x, y, frame):
         """風船の絵を任意の位置に1コマ描く(画面側の板から呼ぶ)。"""
         self._draw_balloon_sprite(painter, x, y, frame)
@@ -1015,8 +1081,9 @@ class ChartPreviewWidget(QWidget):
         どんちゃんの絵を切り替えるのに使う。区間は「割れる時刻まで
         切り詰めた」ほう(_balloons/_kusudamas)なので、end がそのまま
         割れた瞬間になる。"""
-        for spans, starts in zip((self._balloons, self._kusudamas),
-                                 self._span_starts[1:]):
+        for spans, starts, flags in zip(
+                (self._balloons, self._kusudamas), self._span_starts[1:],
+                (self._balloon_pops, self._kusudama_pops)):
             if not spans:
                 continue
             j = bisect.bisect_right(starts, now) - 1
@@ -1025,7 +1092,8 @@ class ChartPreviewWidget(QWidget):
             start, end = spans[j][0], spans[j][1]
             if start <= now < end:
                 return "hitting"
-            if end <= now < end + self.BALLOON_BROKE_SEC:
+            # 叩ききれなかった風船は割れない。割った顔も出さない。
+            if flags[j] and end <= now < end + self.BALLOON_BROKE_SEC:
                 return "broke"
         return None
 
@@ -1826,9 +1894,15 @@ class ChartPreviewWidget(QWidget):
         # 風船・くす玉が割れる秒速(環境設定の連打秒速)。区間の終わりまで
         # 引き延ばすのではなく、この速さで叩いて必要打数に達した時点で割れる。
         self._roll_hit_speed = max(1.0, float(data.get("roll_hit_speed", 45) or 45))
-        from neotja.tja_analyzer import balloon_pop_spans
+        from neotja.tja_analyzer import balloon_pop_spans, balloon_pops
         self._balloons = balloon_pop_spans(self._balloons, self._roll_hit_speed)
         self._kusudamas = balloon_pop_spans(self._kusudamas, self._roll_hit_speed)
+        # 叩ききれる(= 割れる)かどうか。区間ごとに1つ。叩ききれないものは
+        # 割れないので、破裂音も虹も割った顔も出さず、しぼんで飛んでいく。
+        self._balloon_pops = [balloon_pops(b, self._roll_hit_speed)
+                              for b in self._balloons]
+        self._kusudama_pops = [balloon_pops(k, self._roll_hit_speed)
+                               for k in self._kusudamas]
         # 区間の開始時刻だけ抜いた並び。roll_tick() が毎フレーム二分探索する
         # のに使う(bisect の key= は Python 3.10 からなので、ここで持つ)。
         self._span_starts = ([r[0] for r in self._rolls],
@@ -2776,8 +2850,10 @@ class ChartPreviewWidget(QWidget):
         ]
         # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
         # ここを跨いだら破裂音を鳴らす。
+        # 叩ききれなかったものは割れないので、鳴らす時刻に入れない。
         self._pop_times = sorted(
-            [b[1] for b in self._balloons] + [k[1] for k in self._kusudamas]
+            [b[1] for b, ok in zip(self._balloons, self._balloon_pops) if ok]
+            + [k[1] for k, ok in zip(self._kusudamas, self._kusudama_pops) if ok]
         )
         self._last_pop_scan_t = None
 
@@ -2852,10 +2928,10 @@ class ChartPreviewWidget(QWidget):
             for s in spans:
                 start, end, hits = s[0], s[1], s[-1]
                 if start <= now < end:
-                    span = end - start
-                    frac = (now - start) / span if span > 0 else 1.0
-                    rem = int(hits * (1.0 - frac)) + (1 if frac < 1.0 else 0)
-                    return max(0, min(int(hits), rem))
+                    # 秒速どおりに叩いた数を引く。叩ききれない区間では
+                    # 0 に届かず、残りを抱えたまま終わる(本家と同じ)。
+                    done = int((now - start) * self._roll_hit_speed)
+                    return max(0, int(hits) - done)
         return None
 
     def _cumulative_hits(self, now):

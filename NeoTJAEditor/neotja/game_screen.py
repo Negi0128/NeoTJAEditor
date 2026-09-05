@@ -1794,7 +1794,7 @@ class GameScreenWidget(QWidget):
                 # スキンでも同じことが起きる。風船が判定枠に居るかを直接
                 # 見ておく。これが無いと風船の絵が最初のコマで固まる
                 # (風船中は判定線を通る音符も無いので、板が塗り直されない)。
-                flying = self.chart_preview.balloon_sprite_frame(now) is not None
+                flying = self.chart_preview.balloon_sprite_state(now) is not None
         except Exception:  # noqa: BLE001
             flying = False
         # 「良」も飛んでいく音符もどんちゃんも同じ板なので、どれかに中身が
@@ -1966,14 +1966,24 @@ class GameScreenWidget(QWidget):
         cp = self.chart_preview
         try:
             now = cp.game_state()[0]
-            f = cp.balloon_sprite_frame(now)
+            got = cp.balloon_sprite_state(now)
         except Exception:  # noqa: BLE001
             return
-        if f is None:
+        if got is None:
             return
+        f, dx, dy, k = got
         cx = LANE_X + JUDGE_X_IN_LANE - ox
         cy = LANE_Y + LANE_H // 2 - oy
-        cp.draw_balloon_sprite_at(p, cx, cy, f)
+        if dx or dy or k != 1.0:
+            # 叩ききれなかった風船が、しぼんで右下へ飛んでいくところ。
+            # 縮めながら動かすので、その場で拡縮してから貼る。
+            p.save()
+            p.translate(cx + dx, cy + dy)
+            p.scale(k, k)
+            cp.draw_balloon_sprite_at(p, 0, 0, f)
+            p.restore()
+        else:
+            cp.draw_balloon_sprite_at(p, cx, cy, f)
 
     def _draw_chara(self, p, now):
         """どんちゃんを1コマ描く。素材が無ければ何もしない。
