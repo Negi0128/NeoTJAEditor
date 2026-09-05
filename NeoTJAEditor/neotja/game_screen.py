@@ -118,7 +118,18 @@ CHARA_BALLOON_OFF = (0, 0)       # そこからの微調整 (右, 上が負)
 #   加算文字    右端 176.7(合計と**同じ**)  字の上端 160.0
 # 右端は両方とも同じなので、加算も SCORE_RIGHT を使う。
 SCORE_RIGHT, SCORE_Y = 174, 198      # スコアは右詰め
-SCORE_SCALE = 1.02
+# ふだんの大きさ。跳ねるときだけ SCORE_POP_PEAK まで伸びる。
+SCORE_SCALE = 0.98
+#: 跳ねたときのいちばん大きい倍率。伸びきったところが以前の大きさ(1.02)。
+SCORE_POP_PEAK = 1.02
+#: 叩いてから跳ねはじめるまで。加算文字が落ちはじめる時刻に合わせてある
+#: (加算文字は 0.016 秒後に出て、その一生の 79% で山の頂点=落ちはじめ)。
+SCORE_POP_DELAY = 0.33
+#: 伸びて戻るまで。
+SCORE_POP_SEC = 0.12
+#: 伸縮の刻み。数字の絵は倍率ごとにキャッシュしているので、連続値のままだと
+#: キャッシュが際限なく増える。0.01 刻みなら多くても数個で収まる。
+SCORE_POP_STEP = 0.01
 # 数字シートは1文字ぶんの枠(29.3px)に余白を含むので、そのまま送ると字間が
 # 空きすぎる。本家は字が詰まっているので送り幅を枠の 76% にする。
 SCORE_ADVANCE = 0.73
@@ -1656,6 +1667,29 @@ class GameScreenWidget(QWidget):
         self._digit_cache[key] = out
         return out
 
+    def _score_pop(self, now):
+        """合計スコアの伸び具合(1.0 = ふだん)。
+
+        点が入ってから SCORE_POP_DELAY 後、SCORE_POP_SEC かけて
+        SCORE_POP_PEAK まで伸びて戻る。頂点は加算文字が落ちはじめる時刻。
+
+        **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
+        ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
+        if self._score_timeline is None or self._lite:
+            return 1.0
+        try:
+            ev = self._score_timeline.last_event(now)
+        except Exception:  # noqa: BLE001
+            return 1.0
+        if ev is None:
+            return 1.0
+        el = now - ev[0] - SCORE_POP_DELAY
+        if not (0.0 <= el < SCORE_POP_SEC):
+            return 1.0
+        peak = SCORE_POP_PEAK / SCORE_SCALE
+        k = 1.0 + (peak - 1.0) * math.sin(math.pi * el / SCORE_POP_SEC)
+        return round(k / SCORE_POP_STEP) * SCORE_POP_STEP
+
     def _score_total_advance(self):
         """合計スコアの字送り(1枠の幅に対する割合)。
 
@@ -1672,10 +1706,18 @@ class GameScreenWidget(QWidget):
     def _draw_left_panel(self, p, combo, score, recent, now):
         """左パネル: スコア / コース記号 / 太鼓 + コンボ / 銘板。"""
         # --- スコア(右詰め) ---
-        self._draw_digits(p, self._skin.get("score_digits"), score,
+        # 点が入った少しあと(加算文字が落ちはじめるところ)で、上へ伸びて戻る。
+        # 下端をそろえたまま倍率を上げるので、伸びるのは上だけ。
+        sc = SCORE_SCALE * self._score_pop(now)
+        sheet = self._skin.get("score_digits")
+        dy = 0.0
+        if sheet is not None and sc != SCORE_SCALE:
+            ch = sheet.height() / 3.0
+            dy = ch * (SCORE_SCALE - sc)      # 伸びたぶんだけ上へ
+        self._draw_digits(p, sheet, score,
                           cols=10, rows=3, row=0,
-                          advance=self._score_total_advance(),
-                          right=SCORE_RIGHT, y=SCORE_Y, scale=SCORE_SCALE,
+                          advance=self._score_total_advance() * SCORE_SCALE / sc,
+                          right=SCORE_RIGHT, y=int(SCORE_Y + dy), scale=sc,
                           y_offsets=SCORE_DIGIT_Y_OFF)
 
         # --- スコアの加算分(スコアの上へ浮かんで消える) ---
