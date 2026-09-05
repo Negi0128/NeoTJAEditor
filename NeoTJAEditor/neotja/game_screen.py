@@ -208,6 +208,7 @@ NAMEPLATE_LAYOUTS = {
         "title_line": 0.0,
         "name_line": 4.5,
         "dan_line": 4.5,
+        "dan_back": (0, 0, 0, 0),
     },
     "tnde": {
         "title": (2, 307, 213, 24),
@@ -219,8 +220,8 @@ NAMEPLATE_LAYOUTS = {
         "dan_size": 15,
         # 称号バーが名前の板の上半分に重なる置き方なので、名前は下へ逃がす。
         "title_text": (14, 0),
-        "name_text": (-7, 10),
-        "dan_text": (0, -1),
+        "name_text": (-8, 11),
+        "dan_text": (-1, 0),
         # 字と字のあいだを広げる量(px)。段位は2文字しかなく詰まって見える。
         "title_space": 0,
         "name_space": 0,
@@ -229,6 +230,9 @@ NAMEPLATE_LAYOUTS = {
         "title_line": 0.0,
         "name_line": 4.5,
         "dan_line": 4.5,
+        # 段位の裏に敷く黒が、段位の枠からどれだけはみ出すか。
+        # (ずらし右, ずらし下, 幅を足す, 高さを足す)。
+        "dan_back": (0, 0, 10, 0),
     },
 }
 #: 段位と名前のあいだの空き(px)。
@@ -847,6 +851,7 @@ _TUNE_ITEMS = [
     ("plate", "銘板/名前の板", "rect"),
     ("badge", "銘板/1P の丸", "rect"),
     ("dan", "銘板/段位", "rect"),
+    ("dan_back", "銘板/段位の裏の黒", "rect"),
     ("title_text", "銘板/称号の字の位置", "off"),
     ("name_text", "銘板/名前の字の位置", "off"),
     ("dan_text", "銘板/段位の字の位置", "off"),
@@ -1713,7 +1718,11 @@ class GameScreenWidget(QWidget):
             box = lay["dan"]
             # 黒い下地の素材は左下だけが角丸で、そのまま貼ると名前の板の白が
             # 三角に覗く。先に枠を黒で塗りつぶしてから下地を重ねる。
-            p.fillRect(QRectF(*box), QColor(NAMEPLATE_DAN_BACK))
+            pad = lay["dan_back"]
+            p.fillRect(QRectF(box[0] + pad[0], box[1] + pad[1],
+                              max(1, box[2] + pad[2]),
+                              max(1, box[3] + pad[3])),
+                       QColor(NAMEPLATE_DAN_BACK))
             self._draw_part(p, sheet, NAMEPLATE_PART_DAN_BASE, box)
             d = data["danType"][0]
             if 0 <= d < len(NAMEPLATE_PART_DANS):
