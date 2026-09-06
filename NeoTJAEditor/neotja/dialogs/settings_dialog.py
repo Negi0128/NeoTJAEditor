@@ -49,7 +49,7 @@ class SettingsDialog(QDialog):
         "peepo_chart_edit",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
         "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
-        "nameplate_dan_text_color", "show_tuner",
+        "nameplate_dan_text_color", "show_tuner", "arrange_ref",
         "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
         "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
         "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
@@ -808,6 +808,16 @@ class SettingsDialog(QDialog):
         form.addRow(self._hint("譜面プレビューの下部パネルに、音符を直接置ける「作譜」モードを"
                                "追加します。※反映にはアプリの再起動が必要です。"))
 
+        form2 = self._group(outer, "NeoTJAPlayer")
+        self.arrange_ref_check = QCheckBox("アレンジ譜面")
+        self.arrange_ref_check.setChecked(cfg.get("arrange_ref", False))
+        form2.addRow(self.arrange_ref_check)
+        form2.addRow(self._hint(
+            "表譜面（おに）を本家、裏譜面（うら）をアレンジとみなして重ねた"
+            "「アレンジ」をコース選択に追加します。裏にだけある音符—"
+            "アレンジで足した音符—が薄く出るので、どこを埋めたのかが"
+            "見えます。おにとうらの両方がある譜面でだけ出ます。"))
+
         outer.addStretch()
         return w
 
@@ -910,6 +920,7 @@ class SettingsDialog(QDialog):
         # 片方に足し忘れて「見本では変わるのに保存されない」ことになる。
         cfg.update(self._nameplate_values())
         cfg["show_tuner"] = self.np_tuner_check.isChecked()
+        cfg["arrange_ref"] = self.arrange_ref_check.isChecked()
         # 画面へ映すのは呼び出し元(PreviewDock.refresh_nameplate)がやる。
         self.accept()
 

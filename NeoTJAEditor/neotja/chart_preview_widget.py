@@ -416,6 +416,9 @@ class ChartPreviewWidget(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._note_times = []
         self._note_chars = []
+        # アレンジ: 裏(アレンジ)にだけある音符の番号。ここに入っている
+        # 音符だけ薄く描く。ふつうのコースでは空。
+        self._added_notes = frozenset()
         self._note_bpms = []
         self._note_scrolls = []
         # 音符/小節線の見かけ速度(px/秒)。_rebuild_min_vis_speed で作り直す。
@@ -1884,6 +1887,7 @@ class ChartPreviewWidget(QWidget):
         notes = sorted(data.get("notes") or [], key=lambda n: n[0])
         self._note_times = [n[0] for n in notes]
         self._note_chars = [n[1] for n in notes]
+        self._added_notes = frozenset(data.get("arrange_added") or ())
         self._note_bpms = [n[2] for n in notes]
         self._note_scrolls = [n[3] for n in notes]
         # 5th element is the precomputed 打音表記 syllable (see se_text.py).
@@ -3014,6 +3018,10 @@ class ChartPreviewWidget(QWidget):
         self._last_info = info
         self._info_update_cb(bpm, scroll, m_num, m_den, cumulative_hits)
 
+    #: アレンジで「足した音符」を描くときの濃さ。1.0 で通常。
+    #: 本家の音符を通常の濃さで残したまま、足したぶんだけ引くのが狙い。
+    ARRANGE_DIM = 0.42
+
     def _draw_note(self, painter: QPainter, x: float, y: float, r: int, c: str, big: bool):
         sprite = sprite_for_dpr(
             (self._sprites_big if big else self._sprites_small).get(c), self._dpr)
@@ -3484,8 +3492,14 @@ class ChartPreviewWidget(QWidget):
                     progress = elapsed / self.HIT_ANIM_DURATION
                     if progress > 1.0:
                         progress = 1.0
-                    painter.setOpacity(max(0.0, 1.0 - progress))
+                    dim = self.ARRANGE_DIM if i in self._added_notes else 1.0
+                    painter.setOpacity(max(0.0, 1.0 - progress) * dim)
                     self._draw_note(painter, x, y, max(1, int(r * (1.0 - 0.25 * progress))), c, big)
+                    painter.setOpacity(1.0)
+                elif i in self._added_notes:
+                    # アレンジで足した音符。薄くして、本家の音符と見分ける。
+                    painter.setOpacity(self.ARRANGE_DIM)
+                    self._draw_note(painter, pre_x, mid_y, r, c, big)
                     painter.setOpacity(1.0)
                 else:
                     self._draw_note(painter, pre_x, mid_y, r, c, big)

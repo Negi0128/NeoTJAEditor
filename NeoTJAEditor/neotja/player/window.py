@@ -146,10 +146,29 @@ class PlayerWindow(QMainWindow):
             pass
         if course_key:
             return self._play(path, course_key, at_seconds)
-        self.select.set_song(title, subtitle, courses)
+        self.select.set_song(title, subtitle,
+                             self._with_arrange_course(courses))
         self.tabs.setCurrentIndex(0)
         self.select.setFocus(Qt.OtherFocusReason)
         return True
+
+    def _with_arrange_course(self, courses):
+        """おに と うら の両方がある譜面に「アレンジ」を足す。
+
+        実験的機能でオンにしたときだけ。レベルはアレンジ側(うら)のものを
+        そのまま出す — 叩く難しさはうらのものだから。"""
+        from neotja import tja_analyzer as _ta
+        out = list(courses or [])
+        if not self.cfg.get("arrange_ref", False):
+            return out
+        have = {c.get("key"): c for c in out if c.get("key")}
+        base = have.get(_ta.ARRANGE_BASE_COURSE)
+        over = have.get(_ta.ARRANGE_OVER_COURSE)
+        if base is None or over is None:
+            return out          # 片方しか無ければ比べようがない
+        out.append({"key": _ta.ARRANGE_COURSE_KEY,
+                    "level": over.get("level")})
+        return out
 
     def _on_course_chosen(self, course_key):
         if self._pending_path:

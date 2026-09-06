@@ -34,7 +34,7 @@ _SETTINGS_KEYS = (
     # ネームプレート。これも default_settings() と両方に要る。
     "nameplate_name", "nameplate_title", "nameplate_title_type",
     "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
-    "nameplate_dan_text_color", "show_tuner",
+    "nameplate_dan_text_color", "show_tuner", "arrange_ref",
     "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
     "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
@@ -107,6 +107,8 @@ def default_settings() -> dict:
         # 位置合わせ用のキー(Ctrl+Shift+…)を効かせるか。ふだんは切っておく。
         # 作る側が絵の位置を詰めるための道具で、遊ぶ人には要らないため。
         "show_tuner": False,
+        # 実験的機能: アレンジ譜面(表=本家 / 裏=アレンジ を重ねて見る)。
+        "arrange_ref": False,
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,

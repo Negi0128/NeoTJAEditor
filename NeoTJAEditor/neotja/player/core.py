@@ -10,6 +10,7 @@ import os
 
 from neotja import settings as settings_mod
 from neotja.preview_dock import PreviewDock
+from neotja import tja_analyzer
 from neotja.tja_analyzer import TJACourseAnalyzer
 
 #: Player が書き換えてよい設定のキー。
@@ -31,7 +32,7 @@ PLAYER_KEYS = (
     # ファイルへ落ちず、次に描くときに古い値へ戻る(実際にそうなっていた)。
     "nameplate_name", "nameplate_title", "nameplate_title_type",
     "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
-    "nameplate_dan_text_color", "show_tuner",
+    "nameplate_dan_text_color", "show_tuner", "arrange_ref",
     "nameplate_title_dx", "nameplate_title_dy", "nameplate_title_size",
     "nameplate_name_dx", "nameplate_name_dy", "nameplate_name_size",
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
@@ -301,8 +302,29 @@ class PlayerCore:
         self.current_file = path
         if course_key:
             self.course_override = course_key
-        preview = self.analyzer.build_preview_timeline(
-            content, None, self.course_override, branch_level=self.branch_level)
+        if self.course_override == tja_analyzer.ARRANGE_COURSE_KEY:
+            # アレンジ: 中身は裏譜面(アレンジ)そのもの。表譜面(本家)を
+            # もう一度組んで突き合わせ、裏にだけある音符の番号を持たせる。
+            # 描く側はそれを見て、足した音符だけ薄くする。
+            preview = self.analyzer.build_preview_timeline(
+                content, None, tja_analyzer.ARRANGE_OVER_COURSE,
+                branch_level=self.branch_level)
+            base = self.analyzer.build_preview_timeline(
+                content, None, tja_analyzer.ARRANGE_BASE_COURSE,
+                branch_level=self.branch_level)
+            preview["arrange_added"] = tja_analyzer.arrange_added_notes(
+                base, preview)
+            # course_key は "Edit" のまま(情報モードの集計がこれで課程を
+            # 引くため)。代わりに印を立てて、画面側はこれを見る。
+            preview["arrange_ref"] = True
+            # コースボタンの表記。中身は裏譜面だが、見ているのは
+            # 「アレンジ」なので、うら ではなくその名前を出す。
+            preview["course_label"] = tja_analyzer.ARRANGE_COURSE_NAME
+            preview["course_color"] = tja_analyzer.ARRANGE_COURSE_COLOR
+        else:
+            preview = self.analyzer.build_preview_timeline(
+                content, None, self.course_override,
+                branch_level=self.branch_level)
         clicks = self.analyzer.build_metronome_clicks(
             content, None, self.dock.duration_seconds())
         self.dock.refresh_from_content(content, path, clicks, preview,

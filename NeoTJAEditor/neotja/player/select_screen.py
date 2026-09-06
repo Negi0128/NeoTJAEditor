@@ -15,12 +15,13 @@ TJA を1つ開いたら、まずここでコースを選ぶ。単発のファイ
 
 import os
 
-from PySide6.QtCore import (QEasingCurve, QRect, Qt, Signal,
+from PySide6.QtCore import (QEasingCurve, QRect, QRectF, Qt, Signal,
                             QVariantAnimation)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
+from neotja.tja_analyzer import ARRANGE_COURSE_KEY
 
 #: 描くときの座標系。ゲーム画面と同じ 1280x720 で、そこへ倍率をかけて出す。
 #: 座標を全部書き換えずに大きくできるので、実測して合わせた位置はそのまま。
@@ -62,7 +63,8 @@ CARD_SLOT_X = tuple(x + ROW_SHIFT for x in (431.25, 574.5, 717.75, 861.0))
 
 #: スロットの並び。おに と うら は**同じ場所**を分け合い、めくって切り替える
 #: (本家と同じ)。5枚並べると横幅が足りず、左のボタンをカードで潰してしまう。
-SLOT_COURSES = (("Easy",), ("Normal",), ("Hard",), ("Oni", "Edit"))
+SLOT_COURSES = (("Easy",), ("Normal",), ("Hard",),
+                ("Oni", "Edit", ARRANGE_COURSE_KEY))
 
 #: Select_Number.png の中の各数字の左右(実測)。18px 等間隔に置かれているが
 #: 字そのものは細いので、そのまま並べると字間が空いて「1 0」に見える。
@@ -112,7 +114,20 @@ PICK_GAP = 40
 PICK_ANIM_MS = 150
 
 #: TJA のコースキー → Difficulty_Bar の何枚目か。
-CARD_INDEX = {"Easy": 0, "Normal": 1, "Hard": 2, "Oni": 3, "Edit": 4}
+CARD_INDEX = {"Easy": 0, "Normal": 1, "Hard": 2, "Oni": 3, "Edit": 4,
+              # アレンジは うら のカードを借りて色だけ変える。
+              # 専用の絵は素材に無く、こちらで同梱もできないため。
+              ARRANGE_COURSE_KEY: 4}
+
+#: アレンジのカードに掛ける色。うら(紫)と並べても取り違えない色として
+#: 青緑を選んだ。乗算で重ねるので、カードの模様や陰影はそのまま残る。
+ARRANGE_TINT = QColor(70, 205, 190)
+
+#: カードに載せる名前の帯。うら のカードを借りている以上、色を変えただけ
+#: では「青いうら」にしか見えないので、名前を書いておく。
+#: (カード左上からの x/y/幅/高さ、カード 131x237 のときの値)
+ARRANGE_LABEL_RECT = (9, 10, 113, 26)
+ARRANGE_LABEL_TEXT = "アレンジ"
 
 #: 表示の並び順(やさしいものから)。
 COURSE_ORDER = ("Easy", "Normal", "Hard", "Oni", "Edit")
@@ -401,12 +416,17 @@ class SelectScreen(QWidget):
         if not self._picking or not self._has_flip(self._cursor):
             return []
         t = max(0.0, min(1.0, self._pick_t))
-        w = int(CARD_W * PICK_SCALE)
-        h = int(CARD_H * PICK_SCALE)
-        total = w * 2 + PICK_GAP
+        # 枚数はスロットの中身しだい(おに/うら の2枚、アレンジを足せば
+        # 3枚)。3枚でも収まるよう、枚数が増えたら少し小さく出す。
+        n = len(self._slots[self._cursor])
+        k = PICK_SCALE if n <= 2 else PICK_SCALE * 0.80
+        gap = PICK_GAP if n <= 2 else int(PICK_GAP * 0.6)
+        w = int(CARD_W * k)
+        h = int(CARD_H * k)
+        total = w * n + gap * (n - 1)
         x0 = (SCREEN_W - total) // 2
         y0 = CARD_Y + (CARD_H - h) // 2
-        finals = [QRect(x0, y0, w, h), QRect(x0 + w + PICK_GAP, y0, w, h)]
+        finals = [QRect(x0 + j * (w + gap), y0, w, h) for j in range(n)]
         srcs = self._card_rects()
         src = srcs[self._cursor] if self._cursor < len(srcs) else finals[0]
         out = []
@@ -547,8 +567,14 @@ class SelectScreen(QWidget):
                     p.drawPixmap(r, dim)
                 self._draw_level(p, r, None)
             elif cards is not None:
-                sx = int(round(CARD_X0 + idx * CARD_PITCH))
-                p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
+                tint = (self._tinted_card(course["key"], idx)
+                        if course.get("key") == ARRANGE_COURSE_KEY else None)
+                if tint is not None:
+                    p.drawPixmap(r, tint)
+                    self._draw_arrange_label(p, r)
+                else:
+                    sx = int(round(CARD_X0 + idx * CARD_PITCH))
+                    p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
                 self._draw_level(p, r, course.get("level"))
             else:
                 p.fillRect(r, QColor("#c86"))
@@ -569,10 +595,65 @@ class SelectScreen(QWidget):
         for j, r in enumerate(rects):
             course = self._slots[self._cursor][j]
             idx = CARD_INDEX.get(course.get("key"), 3)
-            if cards is not None:
+            tint = (self._tinted_card(course["key"], idx)
+                    if course.get("key") == ARRANGE_COURSE_KEY else None)
+            if tint is not None:
+                p.drawPixmap(r, tint)
+                self._draw_arrange_label(p, r)
+            elif cards is not None:
                 sx = int(round(CARD_X0 + idx * CARD_PITCH))
                 p.drawPixmap(r, cards, QRect(sx, 0, CARD_W, CARD_H))
             self._draw_level(p, r, int(course.get("level") or 0))
+
+    def _tinted_card(self, key, idx):
+        """アレンジのカード。うら のカードに色を掛けたもの。
+
+        専用の絵は素材に無いので うら を借りるが、そのままだと うら と
+        見分けが付かない。**乗算**で色を掛けるのは、模様や陰影を残した
+        まま色味だけ変えるため(単色で塗ると絵が潰れる)。カード1枚ぶん
+        なので、種類ごとに1枚だけ作り置く。"""
+        pm = self._dim_cache.get(("tint", key))
+        if pm is not None:
+            return pm
+        cards = self._skin.get("Select_Cards")
+        if cards is None:
+            return None
+        sx = int(round(CARD_X0 + idx * CARD_PITCH))
+        pm = cards.copy(QRect(sx, 0, CARD_W, CARD_H))
+        q = QPainter(pm)
+        q.setCompositionMode(QPainter.CompositionMode_Multiply)
+        q.fillRect(pm.rect(), ARRANGE_TINT)
+        q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        q.drawPixmap(0, 0, cards, sx, 0, CARD_W, CARD_H)
+        q.end()
+        self._dim_cache[("tint", key)] = pm
+        return pm
+
+    def _draw_arrange_label(self, p, rect):
+        """アレンジのカードに名前の帯を載せる。
+
+        カードは うら の絵を借りて色を変えただけなので、これが無いと
+        「青いうら」にしか見えない。カードは選択時に拡大するので、
+        カード 131x237 を基準にした値へ倍率をかけてから置く。"""
+        sx = rect.width() / float(CARD_W)
+        sy = rect.height() / float(CARD_H)
+        x, y, w, h = ARRANGE_LABEL_RECT
+        r = QRectF(rect.x() + x * sx, rect.y() + y * sy, w * sx, h * sy)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(12, 40, 38, 225))
+        p.drawRoundedRect(r, r.height() * 0.35, r.height() * 0.35)
+        p.setPen(QPen(ARRANGE_TINT, max(1.0, 1.6 * sy)))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, r.height() * 0.35, r.height() * 0.35)
+        f = QFont(self._title_font or "Yu Gothic UI")
+        f.setPixelSize(max(8, int(15 * sy)))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(235, 255, 252))
+        p.drawText(r, Qt.AlignCenter, ARRANGE_LABEL_TEXT)
+        p.restore()
 
     def _dim_card(self, idx):
         """薄暗くしたカード(譜面に無いコース用)。種類ごとに1枚だけ作り置く。

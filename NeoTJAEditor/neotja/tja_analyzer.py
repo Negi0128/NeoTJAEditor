@@ -1,3 +1,4 @@
+import bisect
 import re
 from decimal import Decimal
 
@@ -1236,3 +1237,65 @@ class TJACourseAnalyzer:
             "has_branches": has_branches,
             "branch_level": branch_level,
         }
+
+
+# ----------------------------------------------------------------------
+# アレンジ譜面
+# ----------------------------------------------------------------------
+#: コース選択に出す擬似コースのキー。TJA の COURSE: には無い値なので、
+#: 本物のコースと取り違える心配がない。
+ARRANGE_COURSE_KEY = "ArrangeRef"
+#: 画面に出す名前。
+ARRANGE_COURSE_NAME = "アレンジ"
+#: コースボタンに出すときの色。コース選択のカードに掛ける色と同じ。
+ARRANGE_COURSE_COLOR = "#46CDBE"
+#: 本家(おに)側の課程 / アレンジ(うら)側の課程。TJA では裏譜面を
+#: COURSE:Edit で書くのが通例。
+ARRANGE_BASE_COURSE = "Oni"
+ARRANGE_OVER_COURSE = "Edit"
+
+
+def _match_tolerance(bpm):
+    """2つの課程の音符を「同じ位置」とみなす許容差(秒)。
+
+    同じ TJA なら BPM も OFFSET も同じなので、本来は誤差ゼロで一致する。
+    それでも幅を持たせるのは、小節の刻み方が違う(16分と32分で書いた)
+    ときの端数と、#DELAY のような書き方の揺れを吸収するため。拍の
+    1/16 を目安にし、極端な BPM でも 5〜30ms に収める。
+    """
+    try:
+        b = float(bpm)
+    except (TypeError, ValueError):
+        b = 0.0
+    if b <= 0.0:
+        b = 120.0
+    return max(0.005, min(0.030, 60.0 / b / 16.0))
+
+
+def arrange_added_notes(base_preview, over_preview):
+    """アレンジ側にだけある音符の番号(0始まり)を返す。
+
+    base(本家=おに)に同じ位置の音符が無い音符を「アレンジで足した音符」と
+    みなす。**種類の違いは見ない** — 同じ位置の カツ→ドン や 小→大 は
+    「足した」ではなく「変えた」なので、薄くする対象にしない。
+
+    アレンジは音符を足すだけで消すことはない(叩く負荷が上がるため)ので、
+    本家にあってアレンジに無い音符は数えていない。
+    """
+    base = [float(n[0]) for n in (base_preview or {}).get("notes") or []]
+    over = (over_preview or {}).get("notes") or []
+    if not over:
+        return []
+    bpms = (over_preview or {}).get("bpm_changes") or [(0.0, 120.0)]
+    bpm_times = [float(c[0]) for c in bpms]
+    base.sort()
+    added = []
+    for i, n in enumerate(over):
+        t = float(n[0])
+        j = bisect.bisect_right(bpm_times, t) - 1
+        tol = _match_tolerance(bpms[j][1] if j >= 0 else 120.0)
+        k = bisect.bisect_left(base, t - tol)
+        if k < len(base) and base[k] <= t + tol:
+            continue                    # 本家にもある
+        added.append(i)
+    return added

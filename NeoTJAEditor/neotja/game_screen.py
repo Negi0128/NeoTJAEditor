@@ -2450,6 +2450,10 @@ class GameScreenWidget(QWidget):
         self._beat_marks = self._build_beat_marks(preview_data)
         self._course_key = course_key or (preview_data or {}).get("course_key")
         self._course_sym = None
+        # アレンジは中身が裏譜面なので、そのまま出すと うら の印が付く。
+        # 本家でも裏でもない見方なので、コース記号は出さない。
+        if (preview_data or {}).get("arrange_ref"):
+            self._course_key = None
         if self._course_key:
             # コース記号は Easy/Normal/Hard/Oni/Edit の5種。
             name = {"easy": "Easy", "normal": "Normal", "hard": "Hard",
