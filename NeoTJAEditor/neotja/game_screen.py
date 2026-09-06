@@ -902,6 +902,7 @@ class _LaneOverlay(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         ox, oy = self.x(), self.y()
         # 後のものほど手前。
+        self._screen.draw_combo_front(p, ox, oy)
         self._screen.draw_soul_front(p, ox, oy)
         self._screen.draw_rainbow_sparks(p, ox, oy)
         self._screen.draw_rainbow_head_front(p, ox, oy)
@@ -1727,10 +1728,15 @@ class GameScreenWidget(QWidget):
             return
         span = GOGO_SPLASH_FRAMES * GOGO_SPLASH_FRAME_SEC
         f = None
-        for g0, _g1 in regions:
+        # 新しい区間から見る。昇順のまま先頭で打ち切ると、前のゴーゴーから
+        # span(1秒)以内に次が始まったとき古いほうで確定してしまい、新しい
+        # 区間の火花が出なかった(ゴーゴーを細かく刻むと当たる)。
+        for g0, _g1 in reversed(regions):
             el = now - g0
             if 0.0 <= el < span:
                 f = int(el / GOGO_SPLASH_FRAME_SEC)
+                break
+            if el >= span:
                 break
         if f is None:
             return
@@ -1806,7 +1812,12 @@ class GameScreenWidget(QWidget):
         # 「良」も飛んでいく音符もどんちゃんも同じ板なので、どれかに中身が
         # あれば塗り直す。消え際を残さないよう、前のコマで中身があった場合も
         # もう1回だけ塗って消し込む。
-        live = flying or judge_active
+        # コンボの数字もこの板に描くので、出ている間は塗り直しが要る。
+        try:
+            combo_on = self.chart_preview.game_state()[1] >= COMBO_SHOW_AT
+        except Exception:  # noqa: BLE001
+            combo_on = False
+        live = flying or judge_active or combo_on
         if live or self._flight_was_active:
             self._overlay.update()
         self._flight_was_active = live
@@ -1928,6 +1939,41 @@ class GameScreenWidget(QWidget):
         x = CHARA_POS[0] + bx - ox + (1.0 - k) * mx + dx
         y = CHARA_POS[1] + by - oy + (1.0 - k) * my + dy
         p.drawPixmap(QRectF(x, y, w, h), pm, QRectF(0, 0, pm.width(), pm.height()))
+
+    def draw_combo_front(self, p, ox=0, oy=0):
+        """コンボの数字。**レーンより手前の板**に描く。
+
+        数字は太鼓の中心に対して左右対称に置くので、桁が増えるとその半分
+        だけ右へ伸びる。4桁でレーンの左端(x=333)に届き、5桁では17px 入り
+        込む。レーンは左パネルより手前に描かれるので、パネル側に描くと
+        そのぶんが隠れて最後の桁が切れていた。"""
+        try:
+            now, combo, _ = self.chart_preview.game_state()
+        except Exception:  # noqa: BLE001
+            return
+        if combo < COMBO_SHOW_AT:
+            return
+        key = ("combo_gold" if combo >= COMBO_GOLD_AT else
+               "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
+        sheet = self._skin.get(key)
+        if sheet is None:
+            return
+        drum = self._skin.get("drum")
+        dw = drum.width() if drum is not None else 120
+        cx0, cy0 = COMBO_ANCHOR
+        adv = self._combo_advance(sheet)
+        step = sheet.width() / 10 * COMBO_SCALE * adv
+        # 基準の中心に対して左右対称に置く。
+        right = cx0 + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
+        # 増えた瞬間に縦だけ伸ばす。横幅は変えない(合計スコアと同じ)。
+        # 下端をそろえたまま倍率を上げるので、伸びるのは上だけ。
+        sy = COMBO_SCALE * self._combo_pop(now)
+        dy = 0.0
+        if sy != COMBO_SCALE:
+            dy = sheet.height() * (COMBO_SCALE - sy)
+        self._draw_digits(p, sheet, combo, right=right - ox, advance=adv,
+                          y=int(cy0 + COMBO_Y_OFF + dy) - oy,
+                          scale=COMBO_SCALE, scale_y=sy)
 
     def draw_judge_pop(self, p, ox=0, oy=0):
         """判定文字「良」。叩いた直後に判定円の上へ出て、昇りながら消える。
@@ -2679,23 +2725,9 @@ class GameScreenWidget(QWidget):
         cx0, cy0 = COMBO_ANCHOR
         dw = drum.width() if drum is not None else 120
         if combo >= COMBO_SHOW_AT:
-            key = ("combo_gold" if combo >= COMBO_GOLD_AT else
-                   "combo_silver" if combo >= COMBO_SILVER_AT else "combo_white")
-            sheet = self._skin.get(key)
-            if sheet is not None:
-                adv = self._combo_advance(sheet)
-                step = sheet.width() / 10 * COMBO_SCALE * adv
-                # 基準の中心に対して左右対称に置く。
-                right = cx0 + dw // 2 + int(step * len(str(combo))) // 2 + COMBO_X_OFF
-                # 増えた瞬間に縦だけ伸ばす。横幅は変えない(合計スコアと同じ)。
-                # 下端をそろえたまま倍率を上げるので、伸びるのは上だけ。
-                sy = COMBO_SCALE * self._combo_pop(now)
-                dy = 0.0
-                if sy != COMBO_SCALE:
-                    dy = sheet.height() * (COMBO_SCALE - sy)
-                self._draw_digits(p, sheet, combo, right=right, advance=adv,
-                                  y=int(cy0 + COMBO_Y_OFF + dy),
-                                  scale=COMBO_SCALE, scale_y=sy)
+            # 数字は draw_combo_front() がレーンより手前の板へ描く。ここで
+            # 描くと、4桁以上で右へ伸びたぶんがレーン(x=333 から)の下に
+            # 潜って最後の桁が切れていた。
             ct = self._skin.get("combo_text")
             if ct is not None:
                 # 素材には「コンボ」が縦に2つ入っている。上段=通常色 /

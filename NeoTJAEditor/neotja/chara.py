@@ -327,6 +327,12 @@ class CharaAnimator:
     SEEK_JUMP_SEC = 0.4
     #: 風船の状態を1周するのにかける秒数(OpenTaiko の nCharaBeat = 0.2f)。
     BALLOON_LOOP_SEC = 0.2
+    #: ゴーゴーに入る回転(GoGoStart)を流しきるのにかける秒数。
+    #: ここだけ拍ではなく時間で送る。拍で送ると 53枚を 53/29.75 = 1.78拍
+    #: かけることになり、BPM120 では 0.88秒 も回り続けてゴーゴーの絵に
+    #: なるのが遅れていた(BPM が遅いほど遅れる)。本家は BPM に関係なく
+    #: 一定なので、時間で固定する。
+    GOGO_START_SEC = 0.35
 
     def __init__(self, sprites=None):
         self.sprites = sprites if sprites is not None else CharaSprites()
@@ -426,16 +432,19 @@ class CharaAnimator:
             self._frames = 0.0
             self._last_gogo = gogo
 
-        # --- コマを進める(送りの速さは全状態で共通) ---
-        self._frames += beats * self.frames_per_beat()
-
+        # --- コマを進める ---
         if self._state == STATE_GOGO_START:
+            # 回転だけは時間で送る(GOGO_START_SEC で流しきる)。
             n = self.sprites.count(STATE_GOGO_START)
+            self._frames += dt / max(1e-6, self.GOGO_START_SEC) * max(1, n)
             if n and self._frames < n:
                 return (STATE_GOGO_START, int(self._frames))
-            # 流し終わったのでループへ。余ったコマはループ側へ引き継ぐ。
-            self._frames = max(0.0, self._frames - n)
+            # 流し終わったのでループへ。送りの速さが違うので余りは持ち越さず、
+            # ゴーゴーのループは頭から始める。
+            self._frames = 0.0
             self._state = STATE_GOGO
+        else:
+            self._frames += beats * self.frames_per_beat()
 
         state = self._state
         if not self.sprites.has(state):
