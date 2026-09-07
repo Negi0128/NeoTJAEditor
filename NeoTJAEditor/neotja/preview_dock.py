@@ -713,6 +713,29 @@ class GamePreviewWindow(QWidget):
     def _on_preview_height_changed(self, _h):
         self._refit()
 
+    def wheelEvent(self, event):
+        """ホイールで小節移動。**この窓のどこにカーソルがあっても効く。**
+
+        レーン(ChartPreviewWidget)も同じことを自前でやるが、あちらはレーンの
+        矩形の中にカーソルがあるときだけ。ゲーム画面の余白・左のパネル・
+        各モードの下画面ではレーンまでイベントが届かず、同じ「プレビュー
+        画面」なのに場所によって効いたり効かなかったりしていた。
+
+        ここは**拾われなかったホイールだけ**が上がってくる場所なので、
+        速度スライダーのように自分でホイールを使う部品の動きは変わらない
+        (あちらが受け取った時点でここへは来ない)。
+
+        例外を外へ出さないのはレーン側と同じ理由 — ホイールは短時間に
+        何十回も飛んでくるので、1回の失敗でプロセスごと落とさない。"""
+        try:
+            d = event.angleDelta().y()
+            if d:
+                self._lane.seek_relative_measure(1 if d > 0 else -1)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        event.accept()
+
     def closeEvent(self, event):
         self.closed.emit()
         super().closeEvent(event)
@@ -1833,6 +1856,21 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # Sync from editor content
     # ------------------------------------------------------------------
+    def set_play_state(self, state):
+        """演奏モードの記録を差し込む(None で再生モードへ戻す)。
+
+        **譜面の打音を止める。** 演奏中は自分が叩いた音だけが鳴るべきで、
+        譜面の側が勝手に鳴らすと二重になる。戻すときは組み直す。"""
+        self.chart_preview.set_play_state(state)
+        try:
+            if state is not None:
+                self.hit_sounds.set_schedule([], self.spin_offset.value())
+            else:
+                self.hit_sounds.set_schedule(self._editor_notes,
+                                             self.spin_offset.value())
+        except Exception:  # noqa: BLE001
+            pass
+
     def refresh_from_content(self, content: str, current_file, metronome_clicks=None, preview_data=None, course_stats=None):
         headers = parse_preview_headers(content)
         self._editor_bpm = headers["bpm"]

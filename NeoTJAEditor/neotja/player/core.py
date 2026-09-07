@@ -11,6 +11,7 @@ import os
 from neotja import settings as settings_mod
 from neotja.preview_dock import PreviewDock
 from neotja import tja_analyzer
+from neotja.constants import PLAY_MODE_PLAY, PLAY_MODE_WATCH
 from neotja.tja_analyzer import TJACourseAnalyzer
 
 #: Player が書き換えてよい設定のキー。
@@ -100,6 +101,8 @@ class PlayerCore:
         self.analyzer = TJACourseAnalyzer(self.cfg)
         self.current_file = ""
         self.course_override = None
+        #: いまの遊び方。**Editor と録画は常に見るだけ。**
+        self.play_mode = PLAY_MODE_WATCH
         self.branch_level = "M"
         # 選曲画面で流している音の折り返し位置。None なら何も流していない。
         self._loop = None
@@ -288,7 +291,7 @@ class PlayerCore:
         sub = (h.get("subtitle") or "").lstrip("-")
         return h.get("title") or "", sub, read_courses(content, self.analyzer)
 
-    def load(self, path, course_key=None):
+    def load(self, path, course_key=None, play_mode=PLAY_MODE_WATCH):
         """TJA を1つ読み込んで再生ウィンドウへ流す。成功したら True。
 
         エディタの _apply_preview_payload と同じ手順(解析 → メトロノーム →
@@ -300,8 +303,33 @@ class PlayerCore:
         except OSError:
             return False
         self.current_file = path
+        self.play_mode = play_mode
         if course_key:
             self.course_override = course_key
+        preview = self.build_preview(content)
+        clicks = self.analyzer.build_metronome_clicks(
+            content, None, self.dock.duration_seconds())
+        self.dock.refresh_from_content(content, path, clicks, preview,
+                                       self._course_stats(content, preview))
+        # 演奏モードならここで「叩いた記録」を差し込む。**再生モードでは
+        # 必ず None に戻す** — 前の曲の記録が残ると、次の曲が叩いた扱いで
+        # 始まってしまう。
+        if play_mode == PLAY_MODE_PLAY:
+            from neotja.player.play_state import PlayState
+            self.dock.set_play_state(PlayState(preview))
+        else:
+            self.dock.set_play_state(None)
+        self.cfg["player_last_file"] = path
+        return True
+
+    def build_preview(self, content):
+        """いま選ばれているコースの譜面データを組む。
+
+        **録画もここを通す。** 以前は録画側が
+        build_preview_timeline(course_override) を直に呼んでいたので、
+        アレンジのときは TJA に無いコースキーを渡すことになり、別のコース
+        (裏)に落ちて合成されないまま録画されていた。組み立てが2か所に
+        あったのが原因なので、1か所にまとめてある。"""
         if self.course_override == tja_analyzer.ARRANGE_COURSE_KEY:
             # アレンジ: 中身は裏譜面(アレンジ)そのもの。表譜面(本家)を
             # もう一度組んで突き合わせ、裏にだけある音符の番号を持たせる。
@@ -321,16 +349,10 @@ class PlayerCore:
             # 「アレンジ」なので、うら ではなくその名前を出す。
             preview["course_label"] = tja_analyzer.ARRANGE_COURSE_NAME
             preview["course_color"] = tja_analyzer.ARRANGE_COURSE_COLOR
-        else:
-            preview = self.analyzer.build_preview_timeline(
-                content, None, self.course_override,
-                branch_level=self.branch_level)
-        clicks = self.analyzer.build_metronome_clicks(
-            content, None, self.dock.duration_seconds())
-        self.dock.refresh_from_content(content, path, clicks, preview,
-                                       self._course_stats(content, preview))
-        self.cfg["player_last_file"] = path
-        return True
+            return preview
+        return self.analyzer.build_preview_timeline(
+            content, None, self.course_override,
+            branch_level=self.branch_level)
 
     def _course_stats(self, content, preview):
         """情報モードが出すコースごとの集計(ノーツ数・連打数など)。

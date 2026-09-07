@@ -11,6 +11,7 @@ from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
+from neotja.constants import KIND_DON, KIND_KA
 from neotja import theme
 from neotja.theme import COLORS
 
@@ -351,39 +352,76 @@ class ChartPreviewWidget(QWidget):
     JUDGE_POP_DURATION = 0.34   # 「良」の文字が上へ昇りながらフェードする時間
     COMBO_POP_DURATION = 0.16   # コンボ数字がヒットごとに拡大→等倍へ戻る時間
 
-    # --- GOGO judgment-ring pulse (PeepoDrumKit getGogoZoomAmount port) --
-    # chart_editor_widgets_game.cpp:120-134. Only the "fire" envelope is
-    # ported; the lane zoom (tAttLane) is deliberately NOT - this lane's
-    # proportions are fixed by design.
-    GOGO_ATT = 0.05
-    GOGO_DEC = 0.20
-    GOGO_REL = 0.10
+    # --- 判定枠の炎のふくらみ ------------------------------------------
+    # 形(アタック→ディケイ→サステイン→リリース)は PeepoDrumKit の
+    # getGogoZoomAmount(chart_editor_widgets_game.cpp:120-134)から。
+    # **時間と倍率は本家の映像を1コマずつ測って入れ替えた。**
+    #
+    # 測り方: ゴーゴーに入る前のフレームを基準にして「そこでは橙でなかった
+    # のに橙になった画素」だけを炎とみなし(静的な UI の橙が落ちる)、その
+    # 面積から相当半径 √(面積/π) を出した。定常を 1 とすると
+    #
+    #     0ms 0.61(出はじめ) / 17ms 1.58 / **33ms 1.78(山)** /
+    #   100ms 1.63 / 150ms 1.50 / 200ms 1.41 / 250ms 1.28 / **300ms 1.00**
+    #
+    # 面積は 3.15 倍で、これは半径 1.78 倍の2乗にほぼ一致する。つまり
+    # **ふくらみは大きさだけで、濃さは変わっていない**(濃さが動いていれば
+    # 面積は半径の2乗からずれる)。以前は 8% しか大きくせず、代わりに濃さを
+    # 0.63→0.80 と動かしていたので、ほとんどふくらんで見えなかった。
+    GOGO_ATT = 0.033      # 出はじめ→山 (2コマ)
+    GOGO_DEC = 0.267      # 山→定常 (16コマ)
+    GOGO_REL = 0.10       # ゴーゴーが終わってから消えるまで
+    #: 山での大きさの増しぶん。定常の 1.0 に対して 1.0 + これ = 1.78 倍。
+    GOGO_FIRE_BURST = 0.78
+    #: 炎の濃さ。実測どおり**一定**にする(加算合成での見え方は据え置き)。
+    GOGO_FIRE_OPACITY = 0.625
+    #: 小節線。**本家の映像から実測**した色と太さ。
+    #: 1920x1080 のキャプチャで芯の色が RGB(204..224) の中間色の灰、
+    #: 幅は 5px(1280 換算で約3.3px)だった。エディタ単体のレーン表示は
+    #: これまでどおりテーマ色(fg_dim・2px)のままにする — あちらは本家の
+    #: 見た目を狙っていないので、素材が入っているとき(skinned)だけ使う。
+    BAR_LINE_COLOR = "#cccccc"
+    BAR_LINE_WIDTH = 3
+    #: 出はじめの大きさ。実測の1コマ目が定常の 0.61 倍だった。
+    GOGO_FIRE_START = 0.61
+    #: 出はじめ→山 のふくらみ方。 (経過/GOGO_ATT) ** これ。
+    #: 実測の中間コマ(17ms で 1.58)に合わせた値。**アタックは2コマしかなく、
+    #: 途中の点が1つだけ**なので、ここだけは他より確からしさが低い。
+    GOGO_ATT_SHAPE = 0.3
+    #: 山から定常へ減っていく形。 (1 - 経過/GOGO_DEC) ** これ。
+    #: 実測に当てはめて決めた: 0.7 で最大の誤差 0.049、1.0(直線)だと 0.172。
+    #: 元の PeepoDrumKit の形(前半で速く落ちる)は実測より減りが速かった。
+    GOGO_DEC_SHAPE = 0.7
 
     # ゴーゴー区間の地(Lane_GoGo.png / GOGO_TINT)の切り替わり方。
     # 「フェード」ではなく「縦中央から上下へ帯が広がる」動きにする。
-    # OpenTaiko(MIT ライセンス, src/Stages/07.Game/Taiko/CActImplLaneTaiko.cs)
-    # の実装に合わせた5段階のステップ(連続補間ではない - 本家がそうだから):
-    # ゴーゴー開始時に 1目盛り18msのカウンタ(0..17)を回し、その値で縦倍率と
-    # 描画yのずらしを切り替えている(565行目でカウンタ生成、149〜163行目で
-    # 参照)。対応関係(元コードのカウンタ値 -> 経過時間 -> 縦倍率):
-    #   カウンタ 0-4  (elapsed <  90ms) -> 倍率 0.2
-    #   カウンタ 5    (elapsed < 108ms) -> 倍率 0.4
-    #   カウンタ 6    (elapsed < 126ms) -> 倍率 0.6
-    #   カウンタ 7-8  (elapsed < 162ms) -> 倍率 0.8
-    #   カウンタ 9-   (elapsed >=162ms) -> 倍率 1.0
-    # 元コードは描画yを"ずらす"(縦中央固定・高さに倍率をかけるのと同じ意味 -
-    # レーン高さ135pxで検算すると +54/+40/+26/+13/+0 と一致する)。抜けるとき
-    # のアニメーションは無し: OpenTaiko もゴーゴー終了と同時に地を描かなく
-    # なるだけで、閉じるモーションは無い。
-    GOGO_OPEN_T1 = 0.090
-    GOGO_OPEN_T2 = 0.108
-    GOGO_OPEN_T3 = 0.126
-    GOGO_OPEN_T4 = 0.162
-    GOGO_OPEN_SCALE1 = 0.2
-    GOGO_OPEN_SCALE2 = 0.4
-    GOGO_OPEN_SCALE3 = 0.6
-    GOGO_OPEN_SCALE4 = 0.8
-    GOGO_OPEN_SCALE_FULL = 1.0
+    #
+    # **本家の映像(1920x1080 / 60fps)を1コマずつ測って決めた値。**
+    # レーンの右のほうで「その行が横いっぱい赤いか」を数え、帯の高さを
+    # フレームごとに出した(全開 208px)。
+    #
+    #   f32  34px  出はじめ
+    #   f33  33px  動かない
+    #   f34  33px
+    #   f35  67px   f36 103px   f37 138px   f38 174px   f39 208px = 全開
+    #
+    # 後半 f35-f39 に直線を当てると 1フレーム 35.2px の**等速**。その直線を
+    # 前へ伸ばすと f34 で 31.8px となり、実測 33px と 1.2px しか違わない
+    # (f33 では -3.4px となり合わない)。つまり
+    #
+    #   ・帯は 0 からではなく **全開の 0.16** の細い帯として出る
+    #   ・そこで 2フレーム(33ms)止まる
+    #   ・f34 から 5フレーム(83ms)かけて**等速で**全開へ
+    #
+    # 以前は OpenTaiko(CActImplLaneTaiko.cs)の 18ms カウンタを5段階のまま
+    # 移植していた(0.2 のまま 90ms 止まり、162ms で全開)。倍率の下限は
+    # 近かったが、止まる時間が 40ms 長く全開も 45ms 遅かった。
+    #
+    # 抜けるときのアニメーションは無い。映像でも f56 -> f57 で一瞬に戻って
+    # いて、閉じるモーションは無かった。
+    GOGO_OPEN_MIN = 0.16          # 出はじめの縦倍率 (33/208)
+    GOGO_OPEN_HOLD = 2.0 / 60.0   # そのまま止まっている時間 (2コマ = 33ms)
+    GOGO_OPEN_RISE = 5.0 / 60.0   # そこから全開までの時間 (5コマ = 83ms)
 
     PANEL_INSET = 14           # left margin so the combo/course block reads as a floating card, not edge-to-edge
     PANEL_GAP = 24             # gap between the panel's right edge and the judgment ring
@@ -419,6 +457,8 @@ class ChartPreviewWidget(QWidget):
         # アレンジ: 裏(アレンジ)にだけある音符の番号。ここに入っている
         # 音符だけ薄く描く。ふつうのコースでは空。
         self._added_notes = frozenset()
+        # 演奏モードの記録(PlayState)。再生モードでは None のまま。
+        self._play_state = None
         self._note_bpms = []
         self._note_scrolls = []
         # 音符/小節線の見かけ速度(px/秒)。_rebuild_min_vis_speed で作り直す。
@@ -582,6 +622,8 @@ class ChartPreviewWidget(QWidget):
         # 打音表記スプライトを帯の高さへ縮小したもののキャッシュ((label,big,帯高)->QPixmap)。
         # 帯の高さが変わるときに捨てる。
         self._se_scaled_cache = {}
+        # 尾の素材の先頭にある「ー」の幅(素材ごとに1回だけ測る)。
+        self._roll_tail_cut = {}
         # 直近に渡されたプレビューデータ(set_lane_geometry の組み直し用)。
         self._preview_data_cache = None
         # 素材(レーンの地・打音表記・火花・判定円・風船・炎・音符)は
@@ -631,6 +673,7 @@ class ChartPreviewWidget(QWidget):
         # 「素材が無かったとき」と同じ値(音符だけは空の辞書 = 1枚も無い)。
         self._sprites_small, self._sprites_big = {}, {}
         self._skin_judge_good = None
+        self._skin_judge_bands = {}
         self._skin_balloon = None
         self._skin_roll = None
         self._pop_sound = None
@@ -694,7 +737,8 @@ class ChartPreviewWidget(QWidget):
 
         self._sprites_small, self._sprites_big = self._load_sprites()
         # Optional 良 judge sprite (skin/Judge.png). None -> drawn text fallback.
-        self._skin_judge_good = self._load_skin_judge()
+        self._skin_judge_bands = self._load_skin_judge_bands() or {}
+        self._skin_judge_good = self._skin_judge_bands.get("good")
         # Optional balloon sprite (for 風船/くす玉). None -> procedural circle.
         self._skin_balloon = self._load_skin_balloon()
         # Optional 黄色連打 sprite. None -> procedural bar.
@@ -824,8 +868,21 @@ class ChartPreviewWidget(QWidget):
         レーン側が既に持っている情報をそのまま渡すだけなので、HUD 用に
         別途カウントを持たずに済み、シークしてもズレない。"""
         now = self._current_chart_time()
+        st = self._play_state
+        if st is not None:
+            # 演奏モードでは「時刻から数える」をやめ、叩いた記録を見る。
+            st.advance(now)
+            return now, st.combo, self._play_recent_hit(st, now)
         combo = bisect.bisect_right(self._note_times, now)
         return now, combo, self._recent_hit(now)
+
+    @staticmethod
+    def _play_recent_hit(st, now):
+        """演奏モードの直近ヒット (経過秒, 音符の文字, コンボ番号)。"""
+        lj = st.last_judge
+        if lj is None:
+            return None
+        return (now - lj[0], lj[2], lj[3])
 
     def total_notes(self) -> int:
         return len(self._note_times)
@@ -838,6 +895,23 @@ class ChartPreviewWidget(QWidget):
         こちらも状態を持たず、シークしても矛盾しない。"""
         if not self._note_times or window <= 0.0:
             return []
+        st = self._play_state
+        if st is not None:
+            # 演奏モードでは、叩いて入った音符だけ飛ばす。不可と見送りは
+            # 飛ばさない(魂も入らないので、飛ぶ絵だけ出るのはおかしい)。
+            out = []
+            for i in range(len(self._note_times) - 1, -1, -1):
+                ht = st.hit_time(i)
+                if ht is None:
+                    continue
+                el = now - ht
+                if el < 0.0:
+                    continue
+                if el >= window:
+                    break
+                if st.judge_of(i) != "bad":
+                    out.append((el, self._note_chars[i]))
+            return out
         hi = bisect.bisect_right(self._note_times, now)
         lo = bisect.bisect_left(self._note_times, now - window)
         out = []
@@ -900,6 +974,12 @@ class ChartPreviewWidget(QWidget):
         二分探索で引き直すだけなので、シークしても矛盾しない。"""
         out = []
         if window <= 0.0:
+            return out
+        st = self._play_state
+        if st is not None:
+            # 演奏モードは譜面ではなく**押したキー**で光る。空打ちでも光る。
+            for n, (el, kind) in enumerate(st.recent_presses(now, window)):
+                out.append((el, "1" if kind == KIND_DON else "2", n))
             return out
         t0 = now - window
         if self._note_times:
@@ -1119,7 +1199,11 @@ class ChartPreviewWidget(QWidget):
         """連打の数え上げ / 風船・くす玉の残り打数。区間外は None。
         本家レイアウトではレーンの上に余白が無く、この読み出しを画面側
         (game_screen.py)が描くので、そこから呼べるように公開する。"""
-        return self._live_top_count(self._current_chart_time() if now is None else now)
+        t = self._current_chart_time() if now is None else now
+        st = self._play_state
+        if st is not None:
+            return st.live_span_count(t)
+        return self._live_top_count(t)
 
     def gogo_regions(self):
         """ゴーゴー区間 [(start, end), ...]。画面側の演出用。"""
@@ -1244,9 +1328,24 @@ class ChartPreviewWidget(QWidget):
         return int(last[-1]), alpha
 
 
-    def judge_sprite(self):
-        """判定文字「良」の絵 (skin/Judge.png の上段)。無ければ None。"""
+    def judge_sprite(self, kind=None):
+        """判定文字の絵 (skin/Judge.png)。kind は "good"/"ok"/"bad"。
+
+        省略すると「良」。再生モードは全部の音符が自動で良になるので、
+        呼び出し側は省略してよい。"""
+        if kind:
+            spr = self._skin_judge_bands.get(kind)
+            if spr is not None:
+                return spr
         return self._skin_judge_good
+
+    def current_judge(self):
+        """演奏モードの直近の判定 ("good"/"ok"/"bad")。再生モードでは None。
+
+        判定文字の絵を選ぶのに使う。「いつ叩いたか」は既存の game_state()
+        の3つ目から取れるので、ここでは種類だけを返す。"""
+        st = self._play_state
+        return st.last_judge[1] if (st is not None and st.last_judge) else None
 
     def _recent_hit(self, now: float):
         """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
@@ -1295,19 +1394,112 @@ class ChartPreviewWidget(QWidget):
         if ft > peak:
             v = 1.0 - ((ft - peak) / self.GOGO_REL) ** 2
         elif ft >= self.GOGO_ATT:
-            v = 2.0 - (1.0 - (1.0 - (ft - self.GOGO_ATT) / self.GOGO_DEC) ** 2)
+            # 山(2.0)から定常(1.0)へ。形は実測に当てはめた GOGO_DEC_SHAPE。
+            x = (ft - self.GOGO_ATT) / self.GOGO_DEC
+            v = 1.0 + max(0.0, 1.0 - x) ** self.GOGO_DEC_SHAPE
         else:
             v = 2.0 * (ft / self.GOGO_ATT)
         v *= 0.5
         return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
+    def paint_hit_explosion(self, painter, now, cx, cy):
+        """判定枠の火花を (cx, cy) を中心に描く。
+
+        炎(paint_gogo_fire)と同じ理由で、レーンの中と外の両方から呼ばれる。
+        素材は 260x260 でレーン(高さ130)に対して大きく、そのままでは上下
+        65px ずつが切られていた。"""
+        self._draw_hit_explosion(painter, now, cx, cy)
+
+    def judge_center(self):
+        """判定円の中心 (x, y)。**このウィジェットの中の座標**。
+
+        画面側がレーンの外へ炎を描くのに使う。paintEvent の judge_x /
+        mid_y と同じ出し方にしてあるので、定数を変えても食い違わない。"""
+        return (float(int(self.JUDGE_X)),
+                float(int(self.TOP_MARGIN)) + int(self.LANE_HEIGHT) / 2.0)
+
+    def paint_gogo_fire(self, painter, now, cx, cy):
+        """判定枠の炎を (cx, cy) を中心に描く。描いたら True。
+
+        **レーンの中と外の両方から呼ばれる。** レーンの中(このウィジェット)
+        では音符より奥に置きたいが、炎は本家ではレーンの黒枠を越えて背景の
+        上まではみ出す。ウィジェットは自分の矩形の外へ描けないので、画面側
+        (game_screen)が背景の上にもう一度これを呼ぶ。内側はレーンが覆うので
+        二重には見えない(加算合成でも重ならない)。"""
+        st = self.gogo_fire_state(now)
+        if st is None or self._skin_gogo_fire is None:
+            return False
+        fire_k, fire_op = st
+        fr = self._skin_gogo_fire[int(now / self.GOGO_FIRE_FRAME_SEC)
+                                  % len(self._skin_gogo_fire)]
+        # 大音符の判定枠(外輪の直径 = JUDGE_RING_R*2)に横幅を合わせる。
+        k = 2.0 * self.JUDGE_RING_R * self.GOGO_FIRE_FIT / fr.width() * fire_k
+        fw, fh = fr.width() * k, fr.height() * k
+        # 切る前のセル中心(180,185)が判定円に来るように置く。切った矩形の
+        # 中心に合わせると、炎が右上に伸びている絵なので位置がずれる。
+        ox, oy = self._gogo_fire_org
+        ax = (self.GOGO_FIRE_CELL[0] / 2.0 - ox) * k
+        ay = (self.GOGO_FIRE_CELL[1] / 2.0 - oy) * k
+        # 素材は不透明に近いフラットな橙のシルエットなので、そのまま置くと
+        # 判定円を塗りつぶした塊になる。判定円と同じく**加算合成**にすると
+        # 地の上で光って見え、下の判定円も透ける。
+        rect = QRectF(cx - ax + self.GOGO_FIRE_OFF[0],
+                      cy - ay + self.GOGO_FIRE_OFF[1], fw, fh)
+        self.last_fire_rect = rect
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode_Plus)
+        painter.setOpacity(fire_op)
+        painter.drawPixmap(rect, fr, QRectF(fr.rect()))
+        painter.restore()
+        return True
+
+    def gogo_fire_state(self, now: float):
+        """判定枠の炎の (大きさの倍率, 濃さ)。ゴーゴーに関係なければ None。
+
+        大きさは定常を 1.0 とした倍率。**本家の映測そのもの**:
+
+            0ms 0.61 → 33ms 1.78(山) → 300ms 1.00(定常)
+
+        濃さは一定。実測で面積が半径の2乗どおりに動いていた = 濃さは
+        変わっていない、と分かったため。区間が終わったあとだけ薄くして消す。
+
+        gogo_pulse(PeepoDrumKit 由来の 0..1)と分けているのは、あちらが
+        「山 1.0 / 定常 0.5」という別の尺度で、素材が無いときの自前リングも
+        使っているから。炎の見た目はこちらに閉じている。"""
+        starts = self._gogo_starts
+        if not starts:
+            return None
+        i = bisect.bisect_right(starts, now) - 1
+        if i < 0:
+            return None
+        g0, g1 = self._gogo_regions[i]
+        el = now - g0
+        if el < 0.0:
+            return None
+        if now > g1:
+            # 区間の外。大きさは定常のまま、濃さだけ落として消す。
+            over = (now - g1) / self.GOGO_REL
+            if over >= 1.0:
+                return None
+            return (1.0, self.GOGO_FIRE_OPACITY * (1.0 - over))
+        peak = 1.0 + self.GOGO_FIRE_BURST
+        if el < self.GOGO_ATT:
+            u = (el / self.GOGO_ATT) ** self.GOGO_ATT_SHAPE
+            k = self.GOGO_FIRE_START + (peak - self.GOGO_FIRE_START) * u
+        elif el < self.GOGO_ATT + self.GOGO_DEC:
+            x = (el - self.GOGO_ATT) / self.GOGO_DEC
+            k = 1.0 + self.GOGO_FIRE_BURST * (1.0 - x) ** self.GOGO_DEC_SHAPE
+        else:
+            k = 1.0
+        return (k, self.GOGO_FIRE_OPACITY)
+
     def _gogo_open_scale(self, now: float):
         """ゴーゴー区間の地(Lane_GoGo.png / GOGO_TINT)を「縦中央から広がる」
         動きにするための縦倍率を返す。区間外なら None(=描かない)。
 
-        OpenTaiko(MIT, CActImplLaneTaiko.cs)のカウンタ切り替えを、連続補間
-        ではなく段階のまま移植している(クラス定数 GOGO_OPEN_T1-4 / SCALE1-4
-        のコメントに出典と対応表がある)。抜けるとき(区間終了後)は本家と
+        本家の映像を1コマずつ測って決めた動き(クラス定数 GOGO_OPEN_MIN /
+        HOLD / RISE のコメントに実測値と当てはめがある)。出はじめの細い帯で
+        少し止まり、そこからは**等速**で開く。抜けるとき(区間終了後)は本家と
         同じく即座に描かなくなるだけで、閉じるモーションは無い。判定円まわり
         の炎(GoGoFire.png)や判定リングの脈動(gogo_pulse)はここでは触らない。"""
         starts = self._gogo_starts
@@ -1320,15 +1512,12 @@ class ChartPreviewWidget(QWidget):
         if not (g0 <= now <= g1):
             return None
         elapsed = now - g0
-        if elapsed < self.GOGO_OPEN_T1:
-            return self.GOGO_OPEN_SCALE1
-        if elapsed < self.GOGO_OPEN_T2:
-            return self.GOGO_OPEN_SCALE2
-        if elapsed < self.GOGO_OPEN_T3:
-            return self.GOGO_OPEN_SCALE3
-        if elapsed < self.GOGO_OPEN_T4:
-            return self.GOGO_OPEN_SCALE4
-        return self.GOGO_OPEN_SCALE_FULL
+        if elapsed < self.GOGO_OPEN_HOLD:
+            return self.GOGO_OPEN_MIN
+        u = (elapsed - self.GOGO_OPEN_HOLD) / self.GOGO_OPEN_RISE
+        if u >= 1.0:
+            return 1.0
+        return self.GOGO_OPEN_MIN + (1.0 - self.GOGO_OPEN_MIN) * u
 
     SE_MIN_CONTRAST = 3.0  # WCAG 2.1 minimum for large/bold text
 
@@ -1395,7 +1584,14 @@ class ChartPreviewWidget(QWidget):
         head_r = head_l + head.width()
         tail_r = x1 + tail.width() / 2.0
         tail_l = tail_r - tail.width()
-        if tail_l < head_r:
+        # 尾の素材「っ‼」には**先頭に「ー」が付いている**(ラベルは "っ!!" だが
+        # 絵は「ーっ‼」)。そのまま置くと、引き伸ばした線の先にもう一本、
+        # 太さも高さも違う短い「ー」がぶら下がって見える。先頭の「ー」ぶんは
+        # 描かず、代わりに引き伸ばした線をそこまで届かせる。
+        # 「っ‼」の位置は変えない(‼ が連打の終わりの音符に来るのは本家と同じ)。
+        cut = self._roll_tail_dash(tail, mid)
+        draw_l = tail_l + cut
+        if draw_l < head_r:
             # 区間が短くて「ー」を挟む余地が無い。頭だけ出す(尾を重ねると
             # 字が潰れて読めなくなるため)。
             painter.drawPixmap(QPointF(head_l, se_y), head)
@@ -1407,10 +1603,53 @@ class ChartPreviewWidget(QWidget):
         # 上下の縁はそのままに、どれだけ長くても1本に繋がる。
         mid_col = QRectF(max(0.0, mid.width() / 2.0 - 1.0), 0,
                          min(2.0, float(mid.width())), mid.height())
-        painter.drawPixmap(QRectF(head_r, se_y, tail_l - head_r, mid.height()),
+        painter.drawPixmap(QRectF(head_r, se_y, draw_l - head_r, mid.height()),
                            mid, mid_col)
-        painter.drawPixmap(QPointF(tail_l, se_y), tail)
+        painter.drawPixmap(QPointF(draw_l, se_y), tail,
+                           QRectF(cut, 0, tail.width() - cut, tail.height()))
         painter.drawPixmap(QPointF(head_l, se_y), head)
+
+    def _roll_tail_dash(self, tail, mid):
+        """尾の素材「ーっ‼」のうち、先頭の「ー」が何px あるかを返す。
+
+        絵から測る。「ー」は縦に細い棒(この素材では10px)、「っ」はそれより
+        ずっと背が高い(17px〜)ので、**列ごとの縦の太さが棒の1.4倍を超えた
+        ところ**が「っ」の始まりとみなせる。素材の作りに寄せた決め打ちの
+        数値を置かずに済む。
+
+        素材ごとに1回だけ測って覚える(帯の高さが変わると絵も変わるので、
+        大きさもキーに入れる)。「ー」が付いていない素材なら 0 を返し、
+        これまでどおり丸ごと描かれる。"""
+        key = (tail.cacheKey(), mid.cacheKey())
+        got = self._roll_tail_cut.get(key)
+        if got is not None:
+            return got
+        cut = 0
+        try:
+            import numpy as np
+            ti = tail.toImage().convertToFormat(QImage.Format_RGBA8888)
+            mi = mid.toImage().convertToFormat(QImage.Format_RGBA8888)
+
+            def ink_heights(im):
+                w, h = im.width(), im.height()
+                a = np.frombuffer(im.constBits(), dtype=np.uint8,
+                                  count=im.bytesPerLine() * h)
+                a = a.reshape(h, -1, 4)[:, :w, 3]
+                return (a > 16).sum(axis=0)
+
+            bar = int(ink_heights(mi).max())
+            th = ink_heights(ti)
+            if bar > 0:
+                over = np.nonzero(th > bar * 1.4)[0]
+                if len(over):
+                    cut = int(over[0])
+        except Exception:  # noqa: BLE001
+            cut = 0
+        # 全部切ってしまう/切らなさすぎる測り違いへの保険。
+        if not (0 < cut < tail.width() * 0.7):
+            cut = 0
+        self._roll_tail_cut[key] = cut
+        return cut
 
     def _se_static_text(self, label: str, size: int) -> QStaticText:
         family = self.font().family()
@@ -1692,9 +1931,16 @@ class ChartPreviewWidget(QWidget):
             return None
 
     def _load_skin_judge(self):
-        """Top cell (良) of an OpenTaiko-style skin/Judge.png, scaled for the
-        judge pop, or None. This preview auto-hits every note so the judgment
-        is always 良 - only that first row is needed."""
+        """skin/Judge.png の1段目(良)。再生モードはこれしか使わない。"""
+        return (self._load_skin_judge_bands() or {}).get("good")
+
+    def _load_skin_judge_bands(self):
+        """skin/Judge.png の 良 / 可 / 不可 を切り出して返す。
+
+        素材は縦に帯が並んでいる(TNDE-R は 90x240 に4本)。上から
+        良・可・不可 の順とみなす。**再生モードは全部の音符が自動で
+        「良」になるので1段目しか要らない**が、演奏モードでは3段とも要る。
+        帯が1本しか無い素材では、可・不可 もその1本で代用する。"""
         path = os.path.join(str(settings_mod.skin_dir()), "Judge.png")
         if not os.path.exists(path):
             return None
@@ -1704,18 +1950,31 @@ class ChartPreviewWidget(QWidget):
             img = Image.open(path).convert("RGBA")
             a = np.asarray(img)[:, :, 3]
             row_opaque = a.max(axis=1) > 16
-            y0 = y1 = None
-            start = None
+            bands, start = [], None
             for y in range(a.shape[0]):
                 if row_opaque[y] and start is None:
                     start = y
                 elif not row_opaque[y] and start is not None:
-                    y0, y1 = start, y - 1
-                    break
-            if y0 is None:
-                if start is None:
-                    return None
-                y0, y1 = start, a.shape[0] - 1
+                    bands.append((start, y - 1))
+                    start = None
+            if start is not None:
+                bands.append((start, a.shape[0] - 1))
+            if not bands:
+                return None
+            out = {}
+            for key, idx in (("good", 0), ("ok", 1), ("bad", 2)):
+                y0, y1 = bands[idx] if idx < len(bands) else bands[0]
+                pm = self._crop_judge_band(img, y0, y1)
+                if pm is not None:
+                    out[key] = pm
+            return out or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _crop_judge_band(self, img, y0, y1):
+        try:
+            import numpy as np
+            from PIL import Image
             band = img.crop((0, y0, img.width, y1 + 1))
             ba = np.asarray(band)[:, :, 3]
             cols = np.where(ba.max(axis=0) > 16)[0]
@@ -1726,7 +1985,7 @@ class ChartPreviewWidget(QWidget):
             band = band.resize((max(1, round(band.width * scale)), self.JUDGE_SPRITE_H),
                                Image.Resampling.LANCZOS)
             return _pil_to_qpixmap(band)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _load_sprites(self):
@@ -2039,8 +2298,28 @@ class ChartPreviewWidget(QWidget):
     _KEY_PREV = frozenset((Qt.Key_D, Qt.Key_S, Qt.Key_PageDown, Qt.Key_Left))
     _KEY_NEXT = frozenset((Qt.Key_K, Qt.Key_L, Qt.Key_PageUp, Qt.Key_Right))
 
+    #: 演奏モードの打面。慣例どおり 左カツ=D / 左ドン=F / 右ドン=J / 右カツ=K。
+    _KEY_DON = (Qt.Key_F, Qt.Key_J)
+    _KEY_KA = (Qt.Key_D, Qt.Key_K)
+
     def keyPressEvent(self, event):
         key = event.key()
+        # --- 演奏モード ---------------------------------------------
+        # ここを先に見る。**演奏中は打面がすべてを持っていく。** 再生・
+        # シーク・速度変更は通さない(叩いた記録と巻き戻しは両立しない)。
+        if self._play_state is not None:
+            if event.isAutoRepeat():
+                return          # キーを押しっぱなしの連射は打とみなさない
+            if key in self._KEY_DON:
+                self._play_press(KIND_DON)
+                return
+            if key in self._KEY_KA:
+                self._play_press(KIND_KA)
+                return
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self.pause()    # 中断だけは残す
+                return
+            return
         # 再生/一時停止(f/j): 再生中なら一時停止、そうでなければ小節頭の少し前
         # からリード再生(リード中は開始位置より前の譜面/SEを隠す)。ドンの音。
         # フィードバックは動作(シーク)の後に鳴らす: ミキサーはシーク時に再生中の
@@ -2090,6 +2369,33 @@ class ChartPreviewWidget(QWidget):
             self._step_speed(+1)
             return
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # 演奏モード
+    # ------------------------------------------------------------------
+    def set_play_state(self, state):
+        """演奏モードの記録を差し込む。None で再生モードに戻る。
+
+        画面の読み出し(コンボ・スコア・判定・太鼓の光)は、これが入って
+        いるときだけそちらを見る。**入っていなければ今までどおり時刻から
+        導く** ので、Editor の譜面プレビューと録画は何も変わらない。"""
+        self._play_state = state
+        self.update()
+
+    def play_state(self):
+        return self._play_state
+
+    def _play_press(self, kind):
+        """打面が押された。判定して、音を鳴らして、描き直す。"""
+        st = self._play_state
+        if st is None:
+            return
+        now = self._current_chart_time()
+        st.advance(now)
+        st.press(now, kind)
+        # 空打ちでも鳴らす(本家と同じ)。
+        self._feedback("don" if kind == KIND_DON else "ka")
+        self.update()
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_P and not event.isAutoRepeat():
@@ -2520,7 +2826,10 @@ class ChartPreviewWidget(QWidget):
     # 合わせる」と、結び目を判定円に留めたまま右へ膨らむ。
     # ゴーゴー中に判定円で燃える炎 (10_Effects/Fire.png)。7コマのループ。
     # 素材の絵は 234x192 と判定円(108)より大きいので縮めて置く。
-    GOGO_FIRE_FRAME_SEC = 1.0 / 15.0
+    # 本家の実測では、同じコマが 2フレーム(60fps)ずつ続き 12フレーム=200ms
+    # で1周していた = **30fps で 6コマ**。手元の素材は 7コマなので、周期は
+    # 233ms になる(コマ数は素材で決まるので、速さだけを合わせる)。
+    GOGO_FIRE_FRAME_SEC = 1.0 / 30.0
     GOGO_FIRE_FIT = 2.25   # 1.0 = 大音符の判定枠ぴったり
     GOGO_FIRE_CELL = (360, 370)
     GOGO_FIRE_OFF = (0, 0)
@@ -3246,7 +3555,10 @@ class ChartPreviewWidget(QWidget):
         # 突き合わせる。
         cps = self._checkpoints
         snap = self.CHECKPOINT_SNAP
-        pen_bar = QPen(self._color("fg_dim"), 2)
+        if skinned:
+            pen_bar = QPen(QColor(self.BAR_LINE_COLOR), self.BAR_LINE_WIDTH)
+        else:
+            pen_bar = QPen(self._color("fg_dim"), 2)
         pen_cp = QPen(self._color("checkpoint"), 3)
         # レーンの外に出る小節線はここで落とす。可視の時間窓は「譜面でいちばん
         # 遅い見かけ速度」に合わせて広く取ってあるので(_visible_window)、窓に
@@ -3320,31 +3632,8 @@ class ChartPreviewWidget(QWidget):
         # NOTE: the lane-zoom half of getGogoZoomAmount (tAttLane) is
         # deliberately not ported - the lane's proportions are fixed.
         gogo_env = self.gogo_pulse(now)
-        if gogo_env > 0.0 and self._skin_gogo_fire is not None:
-            # 本家の炎(7コマのループ)を判定円に重ねる。素材が無いときだけ
-            # 下の自前リングに落ちる。
-            fr = self._skin_gogo_fire[int(now / self.GOGO_FIRE_FRAME_SEC)
-                                      % len(self._skin_gogo_fire)]
-            # 大音符の判定枠(外輪の直径 = JUDGE_RING_R*2)に横幅を合わせる。
-            k = (2.0 * self.JUDGE_RING_R * self.GOGO_FIRE_FIT / fr.width()
-                 * (0.92 + 0.16 * gogo_env))
-            fw, fh = fr.width() * k, fr.height() * k
-            # 切る前のセル中心(180,185)が判定円に来るように置く。切った矩形の
-            # 中心に合わせると、炎が右上に伸びている絵なので位置がずれる。
-            ox, oy = self._gogo_fire_org
-            ax = (self.GOGO_FIRE_CELL[0] / 2.0 - ox) * k
-            ay = (self.GOGO_FIRE_CELL[1] / 2.0 - oy) * k
-            # 素材は不透明に近いフラットな橙のシルエットなので、そのまま置くと
-            # 判定円を塗りつぶした塊になる。判定円と同じく**加算合成**にすると
-            # 地の上で光って見え、下の判定円も透ける。
-            painter.save()
-            painter.setCompositionMode(QPainter.CompositionMode_Plus)
-            painter.setOpacity(min(1.0, 0.45 + 0.35 * gogo_env))
-            painter.drawPixmap(QRectF(judge_x - ax + self.GOGO_FIRE_OFF[0],
-                                      mid_y - ay + self.GOGO_FIRE_OFF[1],
-                                      fw, fh), fr, QRectF(fr.rect()))
-            painter.restore()
-        elif gogo_env > 0.0:
+        drew_fire = self.paint_gogo_fire(painter, now, judge_x, mid_y)
+        if not drew_fire and gogo_env > 0.0:
             glow_r = int(judge_r + 4 + 11 * gogo_env)
             painter.setOpacity(0.18 + 0.55 * gogo_env)
             painter.setPen(QPen(self._color("don"), 2.0 + 5.0 * gogo_env))
@@ -3680,7 +3969,13 @@ class ChartPreviewWidget(QWidget):
             # 連打・風船・くす玉。音符と同じで、判定枠を通り過ぎたら消す。
             # 数が少ないので音符のような二分探索はせず素直に舐める。
             for t0, t1, label, big, bpm, scroll in self._span_se:
-                if t0 <= now:
+                # 連打は**区間が終わるまで**出す。頭が判定線を通った時点で
+                # 消していたので、叩いている最中に「連打ーーっ‼」が丸ごと
+                # 消えていた。連打の表記は頭から尾まで伸びる帯なので、
+                # 頭が通り過ぎても尾が残っているうちは出しておく。
+                # 風船・くす玉は1語を頭の位置に置くだけなので、通り過ぎたら
+                # 消す(左へ流れていくだけになり、残す意味が無い)。
+                if (t1 if label == "れんだ" else t0) <= now:
                     continue
                 if reveal_t is not None and t0 < reveal_t:
                     continue
@@ -3703,6 +3998,21 @@ class ChartPreviewWidget(QWidget):
                 painter.drawStaticText(int(x0 - sz.width() / 2.0),
                                        int(fy - sz.height() / 2.0), st)
             painter.setClipRect(self.rect())
+
+        # 判定枠の演出(ゴーゴーの炎・叩いた火花)の、**打音表記帯にかかるぶん**。
+        # どちらもレーンより大きい絵で、下へ 20px ほどはみ出す。帯はここまでで
+        # 上塗りされるので、音符帯へ描いた1回目ではその部分が隠れてしまう。
+        #
+        # **順番は変わらない。** 音符は音符帯にクリップされていて帯の範囲には
+        # 来ないので、ここで描き足しても「音符が火花の上」という前後関係は
+        # そのまま。帯の外(レーンウィジェットの外)へ出るぶんは、画面側の
+        # draw_judge_effects_back が背景の上に描く。
+        if footer_h > 0:
+            painter.save()
+            painter.setClipRect(0, band_bottom, lane_w, footer_h)
+            self.paint_gogo_fire(painter, now, judge_x, mid_y)
+            self._draw_hit_explosion(painter, now, judge_x, mid_y)
+            painter.restore()
 
         # Current measure / total measures ("15/90"), below the judgment
         # ring in the bottom margin - same bisect-over-bar_times approach as

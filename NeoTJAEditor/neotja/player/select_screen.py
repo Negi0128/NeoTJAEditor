@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, 
 from PySide6.QtWidgets import QWidget
 
 from neotja import settings as settings_mod
+from neotja.constants import PLAY_MODE_PLAY, PLAY_MODE_WATCH
 from neotja.tja_analyzer import ARRANGE_COURSE_KEY
 
 #: 描くときの座標系。ゲーム画面と同じ 1280x720 で、そこへ倍率をかけて出す。
@@ -137,6 +138,22 @@ COURSE_ORDER = ("Easy", "Normal", "Hard", "Oni", "Edit")
 EMPTY_TITLE = "TJAを選んでください"
 EMPTY_SUBTITLE = "ドラッグ＆ドロップでも読み込めます"
 
+#: 「再生／演奏」を選ばせるか。**演奏モードが仕上がるまで False。**
+#: False のときはコースを選んだ時点で再生モードのまま始まり、これまでと
+#: 同じ1手で通る。演奏の中身(判定・スコア・打面キー)はコードに入っているが、
+#: ここを通らない限り PlayState が作られないので一切動かない。
+SHOW_PLAY_MODE = False
+
+#: 再生／演奏 を選ばせる2枚。素材に絵が無いので自前で描く。
+#: (見出し, 説明, 主な色, モード)
+MODE_CARDS = (
+    ("再生", "見るだけ", QColor(255, 128, 171), PLAY_MODE_WATCH),
+    ("演奏", "自分で叩く", QColor(70, 205, 190), PLAY_MODE_PLAY),
+)
+#: そのカードの大きさ(ふつうのカードの何倍か)と間隔。
+MODE_SCALE = 1.10
+MODE_GAP = 44
+
 #: 譜面に無いコースのカードをどれだけ暗くするか。
 MISSING_DIM = 150
 
@@ -144,7 +161,8 @@ MISSING_DIM = 150
 class SelectScreen(QWidget):
     """コースを選ぶ画面。選ばれたら courseChosen を出す。"""
 
-    courseChosen = Signal(str)      # コースキー
+    #: (コースキー, 遊び方)。遊び方は PLAY_MODE_WATCH / PLAY_MODE_PLAY。
+    courseChosen = Signal(str, str)
     cancelled = Signal()
     #: レンチのボタン。NeoTJAPlayer の設定を開く。
     settingsRequested = Signal()
@@ -170,6 +188,10 @@ class SelectScreen(QWidget):
         self._slot_side = 0         # おに のスロットで今どちらを見せているか
         # おに と うら を選んでいる最中か(押されたら2枚を出して選ばせる)。
         self._picking = False
+        # 再生／演奏 を聞いている最中のコース(dict)。聞いていなければ None。
+        # コースが決まったあとに必ず1回通る。**遊び方をここで分けるので、
+        # 再生中のキーと演奏の打面が衝突しない。**
+        self._mode_for = None
         # いまカーソルが乗っているもの。"card:0".."card:3" / "back" / "conf"、
         # 乗っていなければ None。**大きくするのはこれが乗っているものだけ。**
         # 以前は「選んでいるカード」を常に大きくしていたが、カーソルを外して
@@ -206,6 +228,7 @@ class SelectScreen(QWidget):
         # おに のスロットは、うらがあっても最初は おに を見せる。
         self._slot_side = 0
         self._picking = False
+        self._mode_for = None
         self._pick_t = 0.0
         # いちばん難しい「実際に入っているもの」に合わせる。
         have = [i for i, c in enumerate(self._slots) if c]
@@ -262,11 +285,16 @@ class SelectScreen(QWidget):
         elif k in (Qt.Key_Right, Qt.Key_K, Qt.Key_J):
             self._move(1)
         elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
-            key = self.current_course()
-            if key:
-                self.courseChosen.emit(key)
+            c = self._course_in(self._cursor)
+            if c:
+                self._ask_mode(c)
         elif k == Qt.Key_Escape:
-            self.cancelled.emit()
+            if self._mode_for is not None:
+                self._close_mode()
+            elif self._picking:
+                self._start_pick(False)
+            else:
+                self.cancelled.emit()
         else:
             super().keyPressEvent(event)
 
@@ -292,6 +320,17 @@ class SelectScreen(QWidget):
         if self._clickable_at(pt):
             self._click_sound()
 
+        # 再生／演奏 を聞いている最中は、その2枚と「外側」しか押せない。
+        if self._mode_for is not None:
+            for j, rect in enumerate(self._mode_rects()):
+                if rect.contains(pt):
+                    course = self._mode_for
+                    self._close_mode()
+                    self.courseChosen.emit(course["key"], MODE_CARDS[j][3])
+                    return
+            self._close_mode()          # 外を押したら閉じるだけ
+            return
+
         # おに/うら を選んでいる最中は、その2枚と「外側」しか押せない。
         if self._picking:
             for j, rect in enumerate(self._pick_rects()):
@@ -300,8 +339,7 @@ class SelectScreen(QWidget):
                     self._pick_t = 0.0
                     self._pick_anim.stop()
                     self._slot_side = j
-                    self.update()
-                    self.courseChosen.emit(self._slots[self._cursor][j]["key"])
+                    self._ask_mode(self._slots[self._cursor][j])
                     return
             # 外を押したら閉じるだけ(選ばずに戻れる道を必ず残す)。
             self._start_pick(False)
@@ -329,7 +367,7 @@ class SelectScreen(QWidget):
         self.update()
         c = self._course_in(i)
         if c:
-            self.courseChosen.emit(c["key"])
+            self._ask_mode(c)
 
     def mouseMoveEvent(self, event):
         pt = self._to_screen(event.position())
@@ -384,6 +422,8 @@ class SelectScreen(QWidget):
 
     def _clickable_at(self, pt):
         """そこに押せるものがあるか。"""
+        if self._mode_for is not None:
+            return any(r.contains(pt) for r in self._mode_rects())
         if self._picking:
             return any(r.contains(pt) for r in self._pick_rects())
         if self._back_rect().contains(pt) or self._conf_rect().contains(pt):
@@ -437,6 +477,94 @@ class SelectScreen(QWidget):
                 int(round(src.width() + (f.width() - src.width()) * t)),
                 int(round(src.height() + (f.height() - src.height()) * t))))
         return out
+
+    # ------------------------------------------------------------------
+    # 再生 / 演奏 を選ばせる
+    # ------------------------------------------------------------------
+    def _ask_mode(self, course):
+        """コースが決まったので、遊び方を聞く。
+
+        **必ずここを通してから courseChosen を出す。** 遊び方が決まって
+        いない状態で始めてしまうと、演奏のつもりで再生が始まる。"""
+        if not SHOW_PLAY_MODE:
+            # 演奏モードを出さない間は、これまでどおり押した時点で始まる。
+            self._picking = False
+            self._pick_t = 0.0
+            self._pick_anim.stop()
+            self.update()
+            self.courseChosen.emit(course["key"], PLAY_MODE_WATCH)
+            return
+        self._mode_for = dict(course)
+        self._picking = False
+        self._pick_t = 0.0          # 押したカードの場所から出し直す
+        self._start_pick(True)
+
+    def _close_mode(self):
+        self._mode_for = None
+        self._pick_t = 0.0
+        self._pick_anim.stop()
+        self.update()
+
+    def _mode_rects(self):
+        """再生 / 演奏 の2枚を出す場所。押したカードから中央へ広がる。"""
+        if self._mode_for is None:
+            return []
+        t = max(0.0, min(1.0, self._pick_t))
+        w = int(CARD_W * MODE_SCALE)
+        h = int(CARD_H * MODE_SCALE)
+        total = w * len(MODE_CARDS) + MODE_GAP * (len(MODE_CARDS) - 1)
+        x0 = (SCREEN_W - total) // 2
+        y0 = CARD_Y + (CARD_H - h) // 2
+        srcs = self._card_rects()
+        src = srcs[self._cursor] if self._cursor < len(srcs) else QRect(x0, y0, w, h)
+        out = []
+        for j in range(len(MODE_CARDS)):
+            f = QRect(x0 + j * (w + MODE_GAP), y0, w, h)
+            out.append(QRect(
+                int(round(src.x() + (f.x() - src.x()) * t)),
+                int(round(src.y() + (f.y() - src.y()) * t)),
+                int(round(src.width() + (f.width() - src.width()) * t)),
+                int(round(src.height() + (f.height() - src.height()) * t))))
+        return out
+
+    def _draw_mode(self, p):
+        """再生 / 演奏 の2枚。素材に絵が無いので自前で描く。
+
+        コースのカードと同じ縦長・角丸にしておくと、同じ「選ぶもの」だと
+        すぐ分かる。色はコースの絵と取り違えないよう、単色の面にする。"""
+        rects = self._mode_rects()
+        if not rects:
+            return
+        p.fillRect(PANEL_RECT, QColor(0, 0, 0, int(210 * self._pick_t)))
+        name = self._title_font or "Meiryo"
+        for j, r in enumerate(rects):
+            head, note, col, _mode = MODE_CARDS[j]
+            rf = QRectF(r)
+            rad = r.width() * 0.10
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(18, 20, 26, 245))
+            p.drawRoundedRect(rf, rad, rad)
+            p.setPen(QPen(col, max(2.0, r.width() * 0.022)))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rf, rad, rad)
+            # 見出し(勘亭流があればそれで、無ければ既定の書体)
+            f = QFont(name)
+            f.setPixelSize(max(14, int(r.height() * 0.20)))
+            f.setBold(True)
+            p.setFont(f)
+            p.setPen(col)
+            p.drawText(QRectF(rf.x(), rf.y() + rf.height() * 0.30,
+                              rf.width(), rf.height() * 0.24),
+                       Qt.AlignCenter, head)
+            # 説明はふつうの書体。勘亭流だと小さい字が読めない。
+            f2 = QFont("Yu Gothic UI")
+            f2.setPixelSize(max(9, int(r.height() * 0.058)))
+            p.setFont(f2)
+            p.setPen(QColor(214, 220, 226))
+            p.drawText(QRectF(rf.x() + rf.width() * 0.04,
+                              rf.y() + rf.height() * 0.57,
+                              rf.width() * 0.92, rf.height() * 0.22),
+                       Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, note)
 
     def _swap_rect(self, i):
         """めくるボタンの場所。カードの右上。"""
@@ -492,6 +620,8 @@ class SelectScreen(QWidget):
         self._draw_cards(p)
         if self._picking:
             self._draw_pick(p)
+        if self._mode_for is not None:
+            self._draw_mode(p)
 
     def _draw_title(self, p):
         # 曲名の帯は Difficulty_Back の絵に含まれているので、文字だけ置く。

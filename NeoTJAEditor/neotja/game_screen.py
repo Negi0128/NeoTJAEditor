@@ -727,6 +727,10 @@ BG_CLEAR_LAYERS = (
 # 本家と同じく出す。うるさく感じるかもしれないと一度切っていたが、
 # 「ゴーゴーに入るときに下から火花が欲しい」という要望があったので戻した。
 SHOW_GOGO_SPLASH = True
+#: 判定枠の演出(炎・火花)の、レーンからはみ出すぶんを **魂ゲージより手前**
+#: に出すか。
+#: False なら背景の上・ゲージの下(上へはみ出したぶんはゲージに隠れる)。
+GOGO_FIRE_ABOVE_HUD = True
 GOGO_SPLASH_CELL = (230, 460)
 GOGO_SPLASH_FRAMES = 30
 GOGO_SPLASH_FRAME_SEC = 1.0 / 30.0
@@ -1715,6 +1719,43 @@ class GameScreenWidget(QWidget):
     def end_offline_render(self):
         self.chart_preview.end_offline_render()
 
+    def wheelEvent(self, event):
+        """ホイールで小節移動。**ゲーム画面のどこでも効く。**
+
+        レーン(ChartPreviewWidget)は自分の矩形の中でしか受け取らないので、
+        左のパネル・背景・魂ゲージの上ではホイールが素通りしていた。同じ
+        「プレビュー画面」なのに場所で効いたり効かなかったりするのは
+        分かりにくいので、ここで受けてレーンへ渡す。
+
+        例外を外へ出さないのはレーン側と同じ理由(ホイールは短時間に何十回も
+        飛んでくるので、1回の失敗でプロセスごと落とさない)。"""
+        try:
+            d = event.angleDelta().y()
+            if d:
+                self.chart_preview.seek_relative_measure(1 if d > 0 else -1)
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        event.accept()
+
+    def draw_judge_effects_back(self, p, now):
+        """判定枠の演出(ゴーゴーの炎・叩いた火花)を、レーンの外にも描く。
+
+        どちらもレーンより大きい絵で、本家ではレーンの黒枠を越えて背景の
+        上まではみ出す。レーンは子ウィジェットで自分の矩形の外へ描けない
+        ので、ここで同じ絵・同じ大きさ・同じ位置にもう一度描く。レーンの
+        中はレーンが上から塗り直すため、見えるのははみ出したぶんだけ。
+
+        順番はレーン側と同じ(炎 → 火花)。"""
+        try:
+            cp = self.chart_preview
+            jx, jy = cp.judge_center()
+            cx, cy = cp.x() + jx, cp.y() + jy
+            cp.paint_gogo_fire(p, now, cx, cy)
+            cp.paint_hit_explosion(p, now, cx, cy)
+        except Exception:  # noqa: BLE001
+            pass
+
     def draw_gogo_splash(self, p):
         """ゴーゴーが始まった瞬間の金色の火花。画面の下端から横並びで
         吹き上がる(本家と同じで、判定枠の1本ではない)。"""
@@ -1986,7 +2027,8 @@ class GameScreenWidget(QWidget):
         elapsed = recent[0]
         if not (0.0 <= elapsed < JUDGE_POP_SEC):
             return
-        spr = self.chart_preview.judge_sprite()
+        # 演奏モードでは 良／可／不可 を出し分ける。
+        spr = self.chart_preview.judge_sprite(self.chart_preview.current_judge())
         # 上から落ちてくる。落ちきったら 0 で、あとは動かない。
         rise = JUDGE_POP_DROP * max(0.0, 1.0 - elapsed / JUDGE_POP_DROP_SEC)
         over = elapsed - JUDGE_POP_HOLD_SEC
@@ -3734,10 +3776,21 @@ class GameScreenWidget(QWidget):
             now, combo, recent = self.chart_preview.game_state()
         except Exception:  # noqa: BLE001
             now, combo, recent = 0.0, 0, None
-        score = self._score_timeline.at(now) if self._score_timeline else 0
+        # 演奏モードでは、スコアも魂ゲージも「叩いた記録」から出す。
+        # 再生モードは今までどおり時刻から引く(状態を持たない)。
+        play = self.chart_preview.play_state()
+        if play is not None:
+            score = play.score
+        else:
+            score = self._score_timeline.at(now) if self._score_timeline else 0
         # 魂ゲージの満ち具合。ゲージ本体と踊り子(4体目=33% / 5体目=クリア)が
         # 同じ値を見るよう、ここで1回だけ出して両方へ渡す。
-        ratio = self._gauge.ratio(combo) if self._gauge else 0.0
+        if self._gauge is None:
+            ratio = 0.0
+        elif play is not None:
+            ratio = self._gauge.ratio(play.gauge_hits())
+        else:
+            ratio = self._gauge.ratio(combo)
         # 魂ゲージは「叩いた数 × ランク / 10000」。音符数で決まるランクが
         # 1個あたりの点なので、譜面の7割半ばで入魂して以降は満タンのまま
         # — 最後の音符でちょうど満タンになる線形の伸び方とは違う。
@@ -3763,6 +3816,12 @@ class GameScreenWidget(QWidget):
         # いないところへ火花だけ吹き上がるのは浮くため。
         if not self._compact and not self._lite:
             self.draw_gogo_splash(p)
+        # 判定枠の演出(炎・火花)の、**レーンからはみ出すぶん**。どちらも
+        # レーンより大きい絵で、本家では黒枠を越えて背景の上まで出る。
+        # レーンは子ウィジェットで自分の矩形の外へ描けないので、ここで
+        # 背景の上にもう一度描く。内側はレーンが覆うので二重には見えない。
+        if not GOGO_FIRE_ABOVE_HUD:
+            self.draw_judge_effects_back(p, now)
         self._draw_left_panel(p, combo, score, recent, now)
         # 軽量では魂ゲージ(+「クリア」+ 虹)を出さない。ゲージは 400px 超の
         # 帯とブロックを毎フレーム重ね描きするうえ、このプレビューは全ノーツ
@@ -3775,6 +3834,8 @@ class GameScreenWidget(QWidget):
             self._last_gauge_ratio = ratio
             self._draw_gauge(p, ratio, now)
         self._draw_lane_readouts(p, now, recent)
+        if GOGO_FIRE_ABOVE_HUD:
+            self.draw_judge_effects_back(p, now)
 
         p.end()
         # レーン本体は子ウィジェット(ChartPreviewWidget)が自分で描く。

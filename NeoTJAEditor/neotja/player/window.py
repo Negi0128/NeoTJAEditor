@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from neotja.constants import PLAY_MODE_WATCH
 from neotja.player.batch import BatchPage
 from neotja.player.core import PlayerCore, save_shared_settings
 from neotja.player.select_screen import SelectScreen
@@ -145,7 +146,8 @@ class PlayerWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         if course_key:
-            return self._play(path, course_key, at_seconds)
+            # Editor から渡ってくる道。演奏は選択画面からだけなので見るだけ。
+            return self._play(path, course_key, at_seconds, PLAY_MODE_WATCH)
         self.select.set_song(title, subtitle,
                              self._with_arrange_course(courses))
         self.tabs.setCurrentIndex(0)
@@ -170,15 +172,15 @@ class PlayerWindow(QMainWindow):
                     "level": over.get("level")})
         return out
 
-    def _on_course_chosen(self, course_key):
+    def _on_course_chosen(self, course_key, mode=PLAY_MODE_WATCH):
         if self._pending_path:
-            self._play(self._pending_path, course_key, 0.0)
+            self._play(self._pending_path, course_key, 0.0, mode)
 
-    def _play(self, path, course_key, at_seconds):
+    def _play(self, path, course_key, at_seconds, mode=PLAY_MODE_WATCH):
         # 試聴を止めてから本編へ。止めないと、譜面の頭出しと試聴の折り返しが
         # 取り合って再生位置が飛ぶ。
         self.core.stop_audio()
-        if not self.core.load(path, course_key=course_key):
+        if not self.core.load(path, course_key=course_key, play_mode=mode):
             QMessageBox.warning(self, "NeoTJAPlayer",
                                 "譜面を読めませんでした:\n%s" % path)
             return False
@@ -252,9 +254,10 @@ class PlayerWindow(QMainWindow):
             QMessageBox.warning(self, "動画を書き出す",
                                 "譜面を読めませんでした:" + "\n%s" % exc)
             return
-        preview = self.core.analyzer.build_preview_timeline(
-            content, None, self.core.course_override,
-            branch_level=self.core.branch_level)
+        # 再生画面と同じ組み立てを通す。ここで build_preview_timeline を
+        # 直に呼ぶと、アレンジのときに TJA に無いコースキーを渡すことに
+        # なり、裏譜面が録画されてしまう。
+        preview = self.core.build_preview(content)
         out_dir = os.path.dirname(path)
         if not out_dir or not os.path.isdir(out_dir):
             out_dir = os.path.expanduser("~")
