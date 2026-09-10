@@ -310,6 +310,12 @@ def build_qss(p: dict) -> str:
     QCheckBox:disabled, QLabel:disabled {{
         color: {p['fg_dim']};
     }}
+    /* 入力欄も同じく。ラベルだけ薄くして入力欄の文字が濃いままだと、
+       同じ行の中でちぐはぐに見える。 */
+    QComboBox:disabled, QLineEdit:disabled,
+    QSpinBox:disabled, QDoubleSpinBox:disabled {{
+        color: {p['fg_dim']};
+    }}
     QGroupBox {{
         border: 1px solid {p['border']};
         border-radius: 4px;

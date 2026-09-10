@@ -813,30 +813,39 @@ class SettingsDialog(QDialog):
             "（切っても今までどおり動きます）。"))
 
         self.gpu_vsync_check = QCheckBox("モニタの表示に同期する")
-        self.gpu_vsync_check.setChecked(cfg.get("gpu_vsync", True))
+        self.gpu_vsync_check.setChecked(cfg.get("gpu_vsync", False))
         # GPU で描かないなら同期する面が無いので、触れないようにする。
         self.gpu_vsync_check.setEnabled(self.gpu_render_check.isChecked())
         self.gpu_render_check.toggled.connect(self.gpu_vsync_check.setEnabled)
         form.addRow(self.gpu_vsync_check)
-        form.addRow(self._hint(
+        _vsync_hint = self._hint(
             "モニタの書き換えに合わせて1コマずつ出します。絵が横に裂ける現象"
             "（ティアリング）が出なくなり、fps はモニタの数値ちょうどに揃います。"
             "代わりに、次の書き換えを待つあいだアプリ全体が止まります"
             "（120Hzなら8.3ms刻み）。入力や音のもたつきが気になるときは"
-            "切ってください。「GPUで描画する」が切ってあるときは関係ありません。"))
+            "切ってください。「GPUで描画する」が切ってあるときは関係ありません。")
+        # 説明文はチェックとは別のウィジェットなので、放っておくと
+        # チェックだけ薄くなって説明だけ濃いままになる。道連れにする。
+        _vsync_hint.setEnabled(self.gpu_render_check.isChecked())
+        self.gpu_render_check.toggled.connect(_vsync_hint.setEnabled)
+        form.addRow(_vsync_hint)
 
         form2 = self._group(outer, "最大fps")
         self.max_fps_spin = QSpinBox()
-        self.max_fps_spin.setRange(0, 240)
-        self.max_fps_spin.setSpecialValueText("無制限")
+        self.max_fps_spin.setRange(20, 1000)
+        self.max_fps_spin.setSingleStep(10)
         self.max_fps_spin.setSuffix(" fps")
-        self.max_fps_spin.setValue(int(cfg.get("preview_max_fps", 0) or 0))
+        # 0(=無制限)は 12.1.4 の既定。数値で持たせる形に変えたので、
+        # 古い設定ファイルを開いたときは上限いっぱいとして見せる。
+        _cap = int(cfg.get("preview_max_fps", 1000) or 0)
+        self.max_fps_spin.setValue(1000 if _cap <= 0 else max(20, min(1000, _cap)))
         form2.addRow("譜面プレビューの上限", self.max_fps_spin)
         form2.addRow(self._hint(
-            "譜面プレビューを1秒に何コマまで描き直すか。0で無制限（既定）。"
-            "上のモニタ同期が入っていれば、実際の上限はモニタの数値になります。"
-            "非力な機械で負荷を抑えたいときは 60 などに下げてください。"
-            "※20を下回る値は20として扱います（0＝無制限は別）。"))
+            "譜面プレビューを1秒に何コマまで描き直すか。20〜1000、既定は1000。"
+            "GPU描画で実際に出るのは360前後なので、既定のままなら頭打ちに"
+            "なりません。非力な機械で負荷を抑えたいときは 60 などに下げて"
+            "ください。上のモニタ同期を入れている場合は、この値より先に"
+            "モニタの数値で頭打ちになります。"))
 
         outer.addStretch()
         return w

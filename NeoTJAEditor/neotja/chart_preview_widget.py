@@ -784,7 +784,7 @@ class ChartPreviewWidget(QWidget):
         except Exception:
             pass
         # Cap the redraw rate to keep CPU use down. Tunable via settings
-        # "preview_max_fps" (20-240、**0 は無制限**)。環境設定「表示」タブ。
+        # "preview_max_fps" (20-1000、0 は無制限)。環境設定「表示」タブ。
         cap = DEFAULT_MAX_FPS
         try:
             cap = int(settings_mod.load_settings().get("preview_max_fps",
@@ -797,7 +797,7 @@ class ChartPreviewWidget(QWidget):
             # 1ms より短くはできない(QTimer の刻み)。
             self._timer.setInterval(1)
             return
-        cap = max(20, min(240, cap))
+        cap = max(20, min(1000, cap))
         # This is a plain software-rendered QWidget, so its redraw timer is NOT
         # synchronized to the display's vblank. Rendering at ~62.5 fps (the
         # 16 ms floor) against a 60 Hz panel produces a ~2.5 Hz beat: every
