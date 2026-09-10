@@ -46,7 +46,8 @@ class SettingsDialog(QDialog):
         "hit_sound_don_path", "hit_sound_ka_path",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
         "player_select_bgm", "player_select_bgm_volume",
-        "peepo_chart_edit",
+        "peepo_chart_edit", "gpu_render", "gpu_vsync",
+        "preview_max_fps",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
         "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
         "nameplate_dan_text_color", "show_tuner", "arrange_ref",
@@ -79,6 +80,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
         tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
         tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
+        tabs.addTab(self._scrollable(self._build_display_tab()), "表示")
         tabs.addTab(self._scrollable(self._build_nameplate_tab()), "ネームプレート")
         tabs.addTab(self._scrollable(self._build_developer_tab()), "開発者用")
         tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
@@ -794,6 +796,51 @@ class SettingsDialog(QDialog):
         outer.addStretch()
         return w
 
+    def _build_display_tab(self):
+        """譜面プレビューの描き方。どれも反映にアプリの再起動が要る
+        (描画の面はアプリを作るときに1回だけ決まるため)。"""
+        w, outer = self._tab_body()
+        cfg = self.main_window.config_data
+
+        form = self._group(outer, "描画")
+        self.gpu_render_check = QCheckBox("GPUで描画する")
+        self.gpu_render_check.setChecked(cfg.get("gpu_render", True))
+        form.addRow(self.gpu_render_check)
+        form.addRow(self._hint(
+            "ゲーム画面の描画をグラフィックボードに任せます。実測で1コマ"
+            "3.4ms → 1.4ms。絵は変わりません。※反映にはアプリの再起動が"
+            "必要です。グラフィック周りがおかしいときは切ってください"
+            "（切っても今までどおり動きます）。"))
+
+        self.gpu_vsync_check = QCheckBox("モニタの表示に同期する")
+        self.gpu_vsync_check.setChecked(cfg.get("gpu_vsync", True))
+        # GPU で描かないなら同期する面が無いので、触れないようにする。
+        self.gpu_vsync_check.setEnabled(self.gpu_render_check.isChecked())
+        self.gpu_render_check.toggled.connect(self.gpu_vsync_check.setEnabled)
+        form.addRow(self.gpu_vsync_check)
+        form.addRow(self._hint(
+            "モニタの書き換えに合わせて1コマずつ出します。絵が横に裂ける現象"
+            "（ティアリング）が出なくなり、fps はモニタの数値ちょうどに揃います。"
+            "代わりに、次の書き換えを待つあいだアプリ全体が止まります"
+            "（120Hzなら8.3ms刻み）。入力や音のもたつきが気になるときは"
+            "切ってください。「GPUで描画する」が切ってあるときは関係ありません。"))
+
+        form2 = self._group(outer, "最大fps")
+        self.max_fps_spin = QSpinBox()
+        self.max_fps_spin.setRange(0, 240)
+        self.max_fps_spin.setSpecialValueText("無制限")
+        self.max_fps_spin.setSuffix(" fps")
+        self.max_fps_spin.setValue(int(cfg.get("preview_max_fps", 0) or 0))
+        form2.addRow("譜面プレビューの上限", self.max_fps_spin)
+        form2.addRow(self._hint(
+            "譜面プレビューを1秒に何コマまで描き直すか。0で無制限（既定）。"
+            "上のモニタ同期が入っていれば、実際の上限はモニタの数値になります。"
+            "非力な機械で負荷を抑えたいときは 60 などに下げてください。"
+            "※20を下回る値は20として扱います（0＝無制限は別）。"))
+
+        outer.addStretch()
+        return w
+
     def _build_experimental_tab(self):
         """まだ様子見の機能をまとめて置くタブ。既定は全部オフ、有効化しても
         すぐには反映されずアプリの再起動が要るものが多い(この点は各項目の
@@ -909,6 +956,9 @@ class SettingsDialog(QDialog):
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
+        cfg["gpu_render"] = self.gpu_render_check.isChecked()
+        cfg["gpu_vsync"] = self.gpu_vsync_check.isChecked()
+        cfg["preview_max_fps"] = int(self.max_fps_spin.value())
 
         cfg["audio_output_device"] = self.audio_device_combo.currentData() or ""
         cfg["wireless_offset_enabled"] = self.wireless_check.isChecked()
@@ -936,6 +986,7 @@ class SettingsDialog(QDialog):
             "・フォント / リサイズ / 編集 / 譜面プレビュー / 連打の計算\n"
             "・動画の保存先\n"
             "・音声 (出力デバイス、打音のWAVパス、ワイヤレス調整、選曲画面のBGM)\n"
+            "・表示 (GPU描画・モニタ同期・最大fps)\n"
             "・ネームプレート (名前・称号・段位)\n"
             "・実験的機能\n\n"
             "最近使ったファイルやウィンドウの位置など、この画面に無い項目は"

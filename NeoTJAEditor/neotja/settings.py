@@ -12,6 +12,7 @@ _SETTINGS_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
+    "gpu_render", "gpu_vsync",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom", "preview_speed", "waveform_window",
     "player_select_bgm", "player_select_bgm_volume",
@@ -155,10 +156,33 @@ def default_settings() -> dict:
         # ペースト操作では鳴らない。環境設定ダイアログ「エディタ・ツール」
         # タブのチェックボックスで変更。
         "note_input_sound": True,
-        # 譜面プレビューの最大再描画fps(CPU負荷の上限)。既定120。実際にはパネル
-        # のリフレッシュレートの2倍を狙い、この値で頭打ちにする(ソフト描画の
-        # ちらつき/カクつき対策。60Hzパネルなら120fps)。下げるほど軽い。
-        "preview_max_fps": 120,
+        # 譜面プレビューの最大再描画fps(CPU負荷の上限)。**0 で無制限**。
+        # 既定は 0 — GPU 描画(gpu_render)と垂直同期(gpu_vsync)が既定で
+        # 入っており、実際の頭打ちはモニタの走査になるため、ここで別に
+        # 抑える意味がない。
+        # 0 以外を入れるとその値で頭打ちにする。20〜240。CPU 描画に戻して
+        # いる場合や、非力な機械で負荷を抑えたい場合に下げる。
+        # (0 以外かつ 120 以下のときは、パネルのリフレッシュレートの2倍と
+        #  比べて小さいほうを採る。ソフト描画のちらつき/カクつき対策。)
+        "preview_max_fps": 0,
+        # ゲーム画面を GPU(OpenGL)で塗る。既定 True。
+        # 実測(GTX 970 / 1280x720 / 音符216): 1コマの塗りが 2.77ms -> 1.37ms、
+        # 実 fps 277 -> 427。絵は CPU 版と一致する。
+        # **効くのは等倍(表示 100%)の画面だけ。** 縮小表示と録画は
+        # QWidget.render() で別の描き先へ描く経路で、OpenGL 版はそれが
+        # できない(絵が壊れる)ため、そちらは CPU のまま。
+        # 古い環境や描画がおかしい環境では false にすると元の塗り方に戻る。
+        "gpu_render": True,
+        # GPU 描画のとき、モニタの走査に合わせて待つか。既定 True。
+        # True にするとパネルのリフレッシュレートちょうどに揃い、絵が横に
+        # 裂ける現象(ティアリング)が出ない。代わりに **描き終わってから次の
+        # 走査まで UI が止まる** — 120Hz なら 1コマ 8.3ms 刻みになり、
+        # 実測では無関係なタイマーの間隔まで 5.2ms -> 8.3ms(最大 20ms)へ
+        # 伸びた。入力と音のタイミングが気になるときは切ること。
+        # 譜面プレビューの塗り直しはもともとタイマーで刻んでおり、垂直同期に
+        # 頼っていない(preview_max_fps 参照)。
+        # gpu_render が False のときは関係ない。
+        "gpu_vsync": True,
         # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
         # 確認するための目安)。既定True。気になる場合はfalseで消せる。
         "preview_show_fps": True,

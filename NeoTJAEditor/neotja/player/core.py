@@ -28,7 +28,7 @@ PLAYER_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "record_output_dir", "record_last_dir",
     "player_folders", "player_last_file", "player_select_bgm",
-    "player_select_bgm_volume",
+    "player_select_bgm_volume", "gpu_render", "gpu_vsync",
     # ネームプレート。ここに書き忘れると、Player の環境設定で変えても
     # ファイルへ落ちず、次に描くときに古い値へ戻る(実際にそうなっていた)。
     "nameplate_name", "nameplate_title", "nameplate_title_type",

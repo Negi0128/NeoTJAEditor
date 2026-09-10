@@ -31,6 +31,11 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QPen, QPixmap, QTransform)
 from PySide6.QtWidgets import QWidget
 
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+except ImportError:  # OpenGL の入っていない環境。CPU 版だけで動く。
+    QOpenGLWidget = None
+
 from neotja import chara as chara_mod
 from neotja import gauge as gauge_mod
 from neotja import settings as settings_mod
@@ -1572,8 +1577,16 @@ def nameplate_preview(cfg, scale=2.0, renderer=None):
     return out
 
 
-class GameScreenWidget(QWidget):
+class _GameScreenBase:
     """1280x720(または上半分だけの 1280x360)の画面を組み立てる。
+
+    **これ自体はウィジェットではない。** 実体は下の2つ:
+      GameScreenWidget    … ふつうの QWidget。CPU で塗る。録画と縮小表示用
+      GameScreenGLWidget  … QOpenGLWidget。GPU で塗る。等倍の画面表示用
+    描画は paint_screen(painter) 1本にまとめてあるので、どちらも同じ絵になる。
+    分けているのは QOpenGLWidget の都合で、あちらは render() で他の描き先へ
+    描けない(自分のバッファにしか描けず、渡すと絵が壊れる)。録画と縮小表示は
+    render() を使うため、そこは CPU 版でなければならない。
 
     compact=True は「通常再生モード」用で、下部背景と踊り子を描かないぶん
     軽く、窓も小さい。録画は compact=False で全部描く。
@@ -1694,6 +1707,10 @@ class GameScreenWidget(QWidget):
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
         self._hud_timer = QTimer(self)
+        # レーン側と同じく精密タイマーにする。既定(CoarseTimer)だと Qt は
+        # 20ms 以上の間隔を粗く扱うので、preview_max_fps を 30(=33ms)に
+        # 落としたとき、このタイマーだけ 21回/秒しか発火しない。
+        self._hud_timer.setTimerType(Qt.PreciseTimer)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
         self._hud_timer.timeout.connect(self._tick_hud)
         # 動かすのは表示されているあいだだけ。録画用の画面はずっと非表示の
@@ -1837,14 +1854,37 @@ class GameScreenWidget(QWidget):
             return None
 
     def _tick_hud(self):
+        """レーンのタイマーが止まっているあいだ、画面を塗り直し続ける。
+
+        レーンのタイマーは再生していないと止まる。そのあいだ画面が更新を
+        受け取る口はここだけになる。
+
+        **止めているあいだ絵は実際には変わらない。** 流れる背景も提灯の光も
+        踊り子も、位相を壁時計ではなく譜面時刻(game_state()[0])から取って
+        いて、止めると譜面時刻ごと凍るため。実測でも停止中の2枚に差は
+        出ない。ここを残してあるのは、シークやトーストなど「止まっていても
+        起きること」の受け皿としてで、コマ数を稼ぐためではない。
+        """
         if not self.isVisible():
             return
-        # 以前はレーンを二重に描かせないため、レーンに重ならない矩形だけを
-        # 指定して部分的に塗り直していた。レーンを親へ畳んだ今は、レーンも
-        # この paintEvent が描くので分ける意味がない(分けたままだと、指定した
-        # 矩形の外にあるレーンが止まって見える)。全面を1回で塗り直す。
-        # Qt は同じコマの update() をまとめるので、レーン側の
-        # _request_repaint() と重なっても2度描きにはならない。
+        cp_timer = getattr(self.chart_preview, "_timer", None)
+        if cp_timer is not None:
+            # 上限(preview_max_fps)はレーン側が決める。写しが古くならないよう
+            # 毎回合わせておく — 実行中に設定を変えたとき、こちらだけ前の
+            # 間隔で回り続けるのを防ぐ。
+            iv = cp_timer.interval()
+            if iv > 0 and self._hud_timer.interval() != iv:
+                self._hud_timer.setInterval(iv)
+            # **レーンが回っているあいだは何もしない。** あちらの
+            # _request_repaint() が同じ update() を出すので、ここでも出すと
+            # 1コマに2回頼むことになる。2本のタイマーは位相がずれていて Qt が
+            # まとめきれず、**上限の2倍のコマ数が塗られていた**
+            # (240 指定で実測 497回/秒の update・275コマ/秒の描画)。
+            # レーンを畳む前は、こちらが「レーンに重ならない矩形」だけを
+            # 塗り直していたので二重にならなかった。畳んで全面を塗るように
+            # なった時点で重複している。
+            if cp_timer.isActive():
+                return
         self.update()
 
     # ------------------------------------------------------------------
@@ -3789,11 +3829,16 @@ class GameScreenWidget(QWidget):
         if ft is not None:
             p.drawPixmap(0, FOOTER_Y, ft)
 
-    def paintEvent(self, event):
+    def paint_screen(self, p):
+        """画面一式を p へ描く。
+
+        描き先を選ばない形にしてある — 画面(QPainter(self))・録画の QImage・
+        GPU のバッファ、どれへでも同じ絵を出せる。GPU 描画へ移すときは、
+        ここを呼ぶ入口を差し替えるだけで済む。
+        """
         # 録画は窓を出さずに render() するので、showEvent を通らない経路がある。
         # ここでも揃えておけば、どちらから来ても同じ絵になる。
         self._ensure_skin()
-        p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         # この1コマの実効 devicePixelRatio。画面は 1.0、録画(1080p)は 1.5。
         # ウィジェットの devicePixelRatio() ではなく deviceTransform を見るのは、
@@ -3929,8 +3974,6 @@ class GameScreenWidget(QWidget):
         self._draw_lane_front(p)
         p.restore()
 
-        p.end()
-
     def _draw_lane_front(self, p, ox=0, oy=0):
         """レーンより手前に出すもの。後のものほど手前。
 
@@ -3954,3 +3997,83 @@ class GameScreenWidget(QWidget):
     def judge_center(self):
         """判定円の中心(画面座標)。実測値と突き合わせるのに使う。"""
         return (LANE_X + JUDGE_X_IN_LANE, LANE_Y + LANE_H // 2)
+
+
+class GameScreenWidget(_GameScreenBase, QWidget):
+    """CPU で塗る画面。録画と縮小表示はこちらでなければならない。
+
+    どちらも QWidget.render() で別の描き先へ描く経路で、QOpenGLWidget は
+    それができない(GameScreenGLWidget の説明を参照)。
+    """
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        self.paint_screen(p)
+        p.end()
+
+
+class GameScreenGLWidget(_GameScreenBase, QOpenGLWidget or QWidget):
+    """GPU で塗る画面。等倍で表示するときだけ使う。
+
+    実測(GTX 970 / 1280x720 / 音符216): 1コマの塗りが 3.39ms -> 2.17ms。
+    絵は CPU 版と一致する(加算合成のゴーゴーの炎・火花、SourceIn の
+    魂ゲージ、勘亭流の文字まで確認済み。差はアンチエイリアスの縁と
+    グラデーションのディザだけ)。
+
+    **表示 fps は上がらない — むしろ下がる。** OpenGL の既定は垂直同期
+    ありで、描き終わったあと次の走査まで待たされる。120Hz のパネルでは
+    120fps ちょうどに張り付き、CPU 版の 190fps を下回る。速くなるのは
+    「1コマぶんの仕事」であって「1秒あたりのコマ数」ではない。
+    垂直同期を切れば 427fps 出るが、その判断は QSurfaceFormat で
+    アプリ全体に対して行うもの(ここではなく起動時に決める)。
+
+    **paintEvent を持たせてはいけない。** QOpenGLWidget は基底の
+    paintEvent が自分のバッファを束ねてから paintGL() を呼ぶ仕組みで、
+    paintEvent を上書きするとその段取りが飛ぶ。
+
+    **render() で他の描き先へは描けない。** 呼ぶと絵が壊れる(ノイズの塊に
+    なる)。録画と縮小表示はこの経路を通るので、そこは CPU 版を使うこと。
+    絵を取り出したいときは grabFramebuffer()。
+    """
+
+    def paintGL(self):
+        p = QPainter(self)
+        self.paint_screen(p)
+        p.end()
+
+
+def make_game_screen(chart_preview, compact=False, gpu=False, parent=None):
+    """画面を1つ作る。gpu=True なら OpenGL で塗るほうを返す。
+
+    OpenGL が使えない環境(古い機械・リモートデスクトップ・PySide6 に
+    QtOpenGLWidgets が入っていない)では黙って CPU 版へ落とす。**画面が
+    真っ黒になるより、少し重くても映るほうがよい。**
+
+    録画からは gpu=True で呼ばないこと。録画は QWidget.render() で QImage へ
+    描く経路で、OpenGL 版はそれができない(GameScreenGLWidget の説明を参照)。
+    """
+    if gpu and QOpenGLWidget is not None:
+        return GameScreenGLWidget(chart_preview, compact=compact, parent=parent)
+    return GameScreenWidget(chart_preview, compact=compact, parent=parent)
+
+
+def apply_gl_surface_format(cfg):
+    """GPU 描画の面の作り方を、アプリ全体に対して決める。
+
+    **QApplication を作る前(遅くとも最初の OpenGL の面を作る前)に1回だけ
+    呼ぶこと。** あとから変えても、既にできている面には効かない。
+
+    ここで決めるのは垂直同期だけ。既定は「待たない」(gpu_vsync の説明を
+    参照)。gpu_render が切ってあるなら OpenGL の面自体を作らないので、
+    何もしない。
+    """
+    if not (cfg or {}).get("gpu_render", True):
+        return
+    try:
+        from PySide6.QtGui import QSurfaceFormat
+        fmt = QSurfaceFormat.defaultFormat()
+        fmt.setSwapInterval(1 if (cfg or {}).get("gpu_vsync", False) else 0)
+        QSurfaceFormat.setDefaultFormat(fmt)
+    except Exception:  # noqa: BLE001
+        # 古い PySide6 や OpenGL の無い環境。既定のまま動かす。
+        pass

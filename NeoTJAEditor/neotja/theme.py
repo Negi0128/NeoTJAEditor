@@ -303,6 +303,13 @@ def build_qss(p: dict) -> str:
     QCheckBox, QLabel {{
         color: {p['fg']};
     }}
+    /* 触れない状態は薄く出す。上の色指定は状態を問わず効くので、これが
+       無いと Qt が用意している「無効のときの色」が潰され、押せないのに
+       見た目が変わらない項目になる(環境設定の「モニタの表示に同期する」で
+       実際にそうなっていた)。 */
+    QCheckBox:disabled, QLabel:disabled {{
+        color: {p['fg_dim']};
+    }}
     QGroupBox {{
         border: 1px solid {p['border']};
         border-radius: 4px;

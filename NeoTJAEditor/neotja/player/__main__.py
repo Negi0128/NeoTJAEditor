@@ -53,6 +53,9 @@ def main():
     from PySide6.QtWidgets import QApplication
 
     crashlog.install_qt()
+    # GPU 描画の面の作り方は **QApplication より先**に決める(Editor と同じ)。
+    from neotja import game_screen as _gs_fmt
+    _gs_fmt.apply_gl_surface_format(settings_mod.load_settings())
     app = QApplication(sys.argv)
     app.setApplicationName("NeoTJAPlayer")
     icon = settings_mod.icon_path(player=True)

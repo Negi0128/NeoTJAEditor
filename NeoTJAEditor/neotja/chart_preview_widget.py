@@ -99,7 +99,8 @@ _HIT_PATH_FPS = 60.0
 #     HIT_PATH_SCALE = (LANE_HEIGHT / 2) / 409 ≈ 0.1296
 # これで弧の全体が固定枠の中に収まり、上がって・被さって・落ちてくる動きが
 # そのまま見える。レーンの比率は一切変えていない。
-#: preview_max_fps の既定値。settings.py の既定と同じものを指す
+#: 「頭打ちを外す」判定の境目。settings.py の既定(0=無制限)とは別物で、
+#: preview_max_fps にこれより大きい値を入れたときだけ上限を素通しにする
 # (_apply_timer_interval で「既定のままか、明示的に上げたか」を見分けるのに
 # 使うので、片方だけ動くと判断がずれる)。
 DEFAULT_MAX_FPS = 120
@@ -783,13 +784,19 @@ class ChartPreviewWidget(QWidget):
         except Exception:
             pass
         # Cap the redraw rate to keep CPU use down. Tunable via settings
-        # "preview_max_fps" (20-240; 既定は DEFAULT_MAX_FPS)。
+        # "preview_max_fps" (20-240、**0 は無制限**)。環境設定「表示」タブ。
         cap = DEFAULT_MAX_FPS
         try:
             cap = int(settings_mod.load_settings().get("preview_max_fps",
                                                        DEFAULT_MAX_FPS))
         except Exception:
             cap = DEFAULT_MAX_FPS
+        if cap <= 0:
+            # 無制限。イベントループが回れるだけ塗る。GPU 描画で垂直同期を
+            # 入れているなら、実際の頭打ちは画面の走査(=モニタの Hz)になる。
+            # 1ms より短くはできない(QTimer の刻み)。
+            self._timer.setInterval(1)
+            return
         cap = max(20, min(240, cap))
         # This is a plain software-rendered QWidget, so its redraw timer is NOT
         # synchronized to the display's vblank. Rendering at ~62.5 fps (the

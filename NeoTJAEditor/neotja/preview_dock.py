@@ -232,7 +232,8 @@ class ScaledHost(QWidget):
     オフスクリーンを挟まない)。つまり**等倍の経路は今までと1命令も変わらない**。
 
     縮小中は中身を隠して自前のタイマーで描き直す。隠すと中身の update() が
-    効かなくなるので、代わりにここが 120fps 相当で render() を回す。
+    効かなくなるので、代わりにここが 120fps 相当で中身の paint_screen() を
+    呼ぶ(render() ではない — 中身が GPU 描画のとき render() は絵が壊れる)。
     マウスは座標を倍率で割って中身へ転送する(レーン上のボタンが押せるように)。"""
 
     FRAME_MS = 8          # 120fps 相当。レーン側の目標と揃える。
@@ -296,8 +297,18 @@ class ScaledHost(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.scale(self._scale, self._scale)
-        self._content.render(p, QPoint(0, 0), QRegion(),
-                             QWidget.RenderFlag.DrawChildren)
+        paint = getattr(self._content, "paint_screen", None)
+        if paint is not None:
+            # 中身の描画を直に呼ぶ。render() を使わないのは2つ理由がある:
+            #  ・中身が GPU 描画(GameScreenGLWidget)のとき、render() では
+            #    絵が壊れる(自分のバッファにしか描けない)。ここを通れば
+            #    描き先はこちらの painter なので CPU で正しく縮小できる。
+            #  ・画面は1枚のウィジェットに畳んであり子が居ないので、
+            #    render(DrawChildren) と結果は同じ。
+            paint(p)
+        else:
+            self._content.render(p, QPoint(0, 0), QRegion(),
+                                 QWidget.RenderFlag.DrawChildren)
 
     # --- マウスの転送(縮小中だけ) ---------------------------------------
     def _forward(self, event, kind) -> bool:
@@ -1099,8 +1110,13 @@ class PreviewDock(QDockWidget):
         # 本家レイアウト: レーンを 1280x360 の画面へ組み込む(背景・左パネル・
         # スコア・コンボ・太鼓・魂ゲージはこちらが描く)。レーン自体の描画は
         # ChartPreviewWidget のままで、寸法だけ本家に合わせて差し替わる。
-        from neotja.game_screen import GameScreenWidget
-        self.game_screen = GameScreenWidget(self.chart_preview, compact=True)
+        # GPU(OpenGL)で塗るかどうか。等倍表示のときだけ効く — 縮小表示は
+        # 上の ScaledHost が自分の painter へ CPU で描き直す。録画は画面外に
+        # 別の CPU 版を作るので、こちらの選択に関係なく無傷。
+        from neotja.game_screen import make_game_screen
+        self.game_screen = make_game_screen(
+            self.chart_preview, compact=True,
+            gpu=bool(self.config_data.get("gpu_render", True)))
         self.game_preview_window = GamePreviewWindow(
             self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
             lane_widget=self.chart_preview,
