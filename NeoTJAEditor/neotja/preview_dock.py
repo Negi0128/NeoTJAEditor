@@ -322,10 +322,16 @@ class ScaledHost(QWidget):
         pt = pos.toPoint()
         target = self._content.childAt(pt)
         if target is None:
-            # 中身そのものに渡しても扱う相手が居ない。渡すと上の輪に入るだけ。
-            event.accept()
-            return True
-        local = target.mapFrom(self._content, pt)
+            # 子が居ない場所。以前はここで握り潰していた — 当時は中身
+            # (ゲーム画面)がマウスを一切扱わず、渡しても上の輪に戻るだけ
+            # だったため。いまはレーンを畳んだぶんゲーム画面自身が
+            # mousePressEvent を持ち、必ず accept() するので渡してよい
+            # (握り潰したままだと、縮小表示でレーンを押してもキー操作の
+            # フォーカスが移らない)。無限ループは _forwarding が止める。
+            target = self._content
+            local = pt
+        else:
+            local = target.mapFrom(self._content, pt)
         self._forwarding = True
         try:
             QApplication.sendEvent(target, QMouseEvent(
@@ -1338,7 +1344,8 @@ class PreviewDock(QDockWidget):
             # it doesn't hand keyboard focus to a specific child, so without
             # this, Space/Q/PgUp/PgDn silently do nothing until the user
             # clicks inside the lane once.
-            self.chart_preview.setFocus(Qt.OtherFocusReason)
+            # レーンはゲーム画面へ畳んであり、キーはあちらが受けて渡す。
+            self.game_screen.setFocus(Qt.OtherFocusReason)
         else:
             self.game_preview_window.hide()
 
@@ -1598,7 +1605,7 @@ class PreviewDock(QDockWidget):
         """Called after apply_theme(): repaints the parts that don't restyle
         themselves from the app-level QSS."""
         self.info_bar.refresh_theme()
-        self.chart_preview.update()
+        self.game_screen.update()
         for wf in self._waveforms():
             wf.refresh_theme()
 
@@ -1754,7 +1761,8 @@ class PreviewDock(QDockWidget):
         if idx == self.MODE_EDIT and self.MODE_EDIT is not None:
             self.chart_edit.setFocus(Qt.OtherFocusReason)
         else:
-            self.chart_preview.setFocus(Qt.OtherFocusReason)
+            # レーンはゲーム画面へ畳んであり、キーはあちらが受けて渡す。
+            self.game_screen.setFocus(Qt.OtherFocusReason)
         self._save_bottom_mode(idx)
 
     # ------------------------------------------------------------------

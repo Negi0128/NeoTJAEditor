@@ -443,6 +443,15 @@ class ChartPreviewWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setFocusPolicy(Qt.StrongFocus)
+        # どの画面(モニタ)に出ているかを教えてくれる相手。塗り直しの依頼先と
+        # 同じく、畳まれているときだけ差し込まれる。_apply_timer_interval が
+        # リフレッシュレートを見るのに使う。
+        self._screen_cb = None
+        # 塗り直しの依頼先。既定は自分(単体のウィジェットとして動くとき)。
+        # ゲーム画面に畳まれているときは、あちらが自分の update を渡す
+        # — レーンはもう子ウィジェットではないので、自分を update() しても
+        # 画面には何も起きないため。set_repaint_cb() を参照。
+        self._repaint_cb = None
         # paintEvent fills the ENTIRE widget rect first thing (fillRect(rect,
         # bg)), so tell Qt the widget paints all its own pixels. Without this,
         # Qt erases the background to the window color before every paint, and
@@ -758,7 +767,15 @@ class ChartPreviewWidget(QWidget):
         # scrolling time-accurate regardless of the exact interval.
         hz = 60.0
         try:
-            scr = self.screen()
+            # 畳まれているときは自分がどの画面に居るのか分からない
+            # (親が None なので self.screen() は常にプライマリを返す)。
+            # 畳んだ側が「自分の乗っている画面」を教えてくれるならそれを使う。
+            scr = None
+            cb = self._screen_cb
+            if cb is not None:
+                scr = cb()
+            if scr is None:
+                scr = self.screen()
             if scr is not None:
                 r = scr.refreshRate()
                 if r and r > 0:
@@ -849,7 +866,7 @@ class ChartPreviewWidget(QWidget):
             self.setFixedHeight(h)
         if changed:
             self.heightChanged.emit(h)
-            self.update()
+            self._request_repaint()
 
     # ------------------------------------------------------------------
     # 叩いた音符の飛び方(右上への直線移動)
@@ -1680,7 +1697,7 @@ class ChartPreviewWidget(QWidget):
             self._pos_wall = _time.monotonic()
             if not self._playing:
                 self._timer.stop()
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
         # Hit sounds only while genuinely playing - a stopped/paused scroll
         # tween moves the display but must stay silent.
@@ -2236,7 +2253,7 @@ class ChartPreviewWidget(QWidget):
         # values happen to match the previous chart's - the info bar must
         # refresh after a chart/course/branch change.
         self._last_info = None
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     def mousePressEvent(self, event):
@@ -2270,11 +2287,11 @@ class ChartPreviewWidget(QWidget):
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        self.update()
+        self._request_repaint()
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
-        self.update()
+        self._request_repaint()
 
     def event(self, e):
         # Tab は通常 keyPressEvent に届く前に QWidget::event 内のフォーカス移動
@@ -2383,7 +2400,7 @@ class ChartPreviewWidget(QWidget):
         いるときだけそちらを見る。**入っていなければ今までどおり時刻から
         導く** ので、Editor の譜面プレビューと録画は何も変わらない。"""
         self._play_state = state
-        self.update()
+        self._request_repaint()
 
     def play_state(self):
         return self._play_state
@@ -2398,7 +2415,7 @@ class ChartPreviewWidget(QWidget):
         st.press(now, kind)
         # 空打ちでも鳴らす(本家と同じ)。
         self._feedback("don" if kind == KIND_DON else "ka")
-        self.update()
+        self._request_repaint()
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_P and not event.isAutoRepeat():
@@ -2460,19 +2477,17 @@ class ChartPreviewWidget(QWidget):
         if loading == self._loading:
             return
         self._loading = loading
-        self.update()
-        if self.parent() is not None:
-            self.parent().update()
+        self._request_repaint()
 
     def show_toast(self, text: str, seconds: float = 3.0):
         """レーン左上に text を seconds 秒だけ表示する。"""
         self._toast_text = text
         self._toast_timer.start(int(seconds * 1000))
-        self.update()
+        self._request_repaint()
 
     def _clear_toast(self):
         self._toast_text = ""
-        self.update()
+        self._request_repaint()
 
     def wheelEvent(self, event):
         # Python の例外をここから外へ出さない。イベントハンドラから例外が
@@ -2568,7 +2583,7 @@ class ChartPreviewWidget(QWidget):
             self._pause_cb()
         if self._seek_seconds_cb:
             self._seek_seconds_cb(0.0)
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     def toggle_play(self):
@@ -2655,7 +2670,7 @@ class ChartPreviewWidget(QWidget):
     def _on_checkpoints_changed(self):
         if self._checkpoints_changed_cb:
             self._checkpoints_changed_cb(list(self._checkpoints))
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     def jump_to_checkpoint(self, direction: int):
@@ -2701,7 +2716,7 @@ class ChartPreviewWidget(QWidget):
             self._pause_cb()
         if self._seek_seconds_cb:
             self._seek_seconds_cb(target)
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     def seek_relative_measure(self, direction: int):
@@ -3049,7 +3064,7 @@ class ChartPreviewWidget(QWidget):
         self.WIDGET_HEIGHT_NO_SE = top_margin + self.LANE_HEIGHT + bottom_margin
         self.setFixedSize(int(self.LANE_WIDTH), self.widget_height())
         self._rebuild_draw_cache()
-        self.update()
+        self._request_repaint()
 
     def _rebuild_draw_cache(self):
         """寸法を変えたあとに、寸法依存の下準備をやり直す。"""
@@ -3060,7 +3075,7 @@ class ChartPreviewWidget(QWidget):
     def set_offset(self, offset: float):
         self._offset = offset
         self._rebuild_nav_points()
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     # ------------------------------------------------------------------
@@ -3120,7 +3135,7 @@ class ChartPreviewWidget(QWidget):
                 self._state = "paused"
                 if not self._animating:
                     self._timer.stop()
-        self.update()
+        self._request_repaint()
         self._push_realtime_info()
 
     def _current_audio_time(self) -> float:
@@ -3161,7 +3176,7 @@ class ChartPreviewWidget(QWidget):
         self._rebuild_span_draw_data()
         self._rebuild_min_vis_speed()
         self.show_toast("等速モード: " + ("ON (HS1固定)" if self._constant_speed else "OFF"), 1.5)
-        self.update()
+        self._request_repaint()
 
     def _speed_at(self, t: float) -> float:
         """On-screen speed implied by the BPM/SCROLL in effect at chart time
@@ -3334,7 +3349,7 @@ class ChartPreviewWidget(QWidget):
         """チェックポイント(音源時刻の列)を外部から設定する(将来のエディタ同期
         用の入口)。昇順に正規化して保持する。"""
         self._checkpoints = sorted(float(t) for t in (times or []))
-        self.update()
+        self._request_repaint()
 
     @staticmethod
     def _idx_at(times, now):
@@ -3413,12 +3428,54 @@ class ChartPreviewWidget(QWidget):
             painter.setBrush(QBrush(self._color("balloon")))
             painter.drawEllipse(int(x - r), int(cy - r), r * 2, r * 2)
 
+    def set_repaint_cb(self, cb):
+        """塗り直しの依頼先を差し替える。None で自分の update() に戻す。
+
+        ゲーム画面へ畳むと、レーンは子ウィジェットではなくなる。その状態で
+        self.update() を呼んでも Qt は「見えていないウィジェット」の更新として
+        捨てるので、画面が止まる。畳んだ側が自分の update を渡すこと。
+        """
+        self._repaint_cb = cb
+
+    def set_screen_cb(self, cb):
+        """自分が出ている画面(QScreen)を返す関数。None で自分で調べる。"""
+        self._screen_cb = cb
+        self._apply_timer_interval()
+
+    def _request_repaint(self):
+        cb = self._repaint_cb
+        if cb is None:
+            self.update()
+        else:
+            cb()
+
     def paintEvent(self, event):
+        """単体のウィジェットとして塗るときの入口。
+
+        ゲーム画面(GameScreenWidget)に入っているときはこちらを通らない。
+        あちらは自分の QPainter で paint_lane() を直に呼ぶ — 子ウィジェット
+        にすると半透明の合成が毎コマ乗るため、1枚に畳んである。
+        """
+        painter = QPainter(self)
+        self.paint_lane(painter)
+        painter.end()
+
+    def paint_lane(self, painter):
+        """レーン一式を painter へ描く。
+
+        painter は**レーンの左上が原点**になるよう平行移動され、レーンの
+        矩形でクリップされた状態で渡されること。ウィジェットとして自分で
+        塗るときは QPainter(self) がその条件を満たしている。
+
+        中の座標はすべてレーンローカル(LANE_WIDTH / TOP_MARGIN / JUDGE_X
+        基準)で、ウィジェットの大きさには依存していない。self.rect() や
+        self.width() を見ている数箇所も、setFixedSize() で固定してあるので
+        親へ畳んだあとも同じ値を返す。
+        """
         self.frames_painted += 1
         # 素材は起動時ではなくここで揃える(_ensure_skin の説明を参照)。
         # 2回目以降は真偽値を1つ見るだけなので、コマごとの負担にはならない。
         self._ensure_skin()
-        painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         # Sample note/roll/balloon sprites at sub-pixel offsets so a note gliding
         # across the lane moves smoothly instead of snapping a whole pixel at a
@@ -4096,5 +4153,3 @@ class ChartPreviewWidget(QWidget):
             painter.drawText(0, band_top, int(lane_w), band_h,
                              Qt.AlignCenter, self.LOADING_TEXT)
             painter.setClipRect(self.rect())
-
-        painter.end()

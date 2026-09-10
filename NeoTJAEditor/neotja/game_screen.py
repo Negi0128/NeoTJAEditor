@@ -24,7 +24,8 @@ import math
 import os
 import time as _time
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer
+from PySide6.QtCore import (Qt, QEvent, QPoint, QPointF, QRect, QRectF,
+                            QTimer)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QImage, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap, QTransform)
@@ -45,7 +46,7 @@ SCREEN_H_COMPACT = 360
 # 1280x260 にしていた。だが軽量に残すものが増えて、そこを使う要素が
 # 戻ってきた:
 #   ・連打/風船の打数の読み出し(金の扇は y≒22..202、風船の吹き出しも同じ辺り)
-#   ・レーンより手前の板 _LaneOverlay (良・飛ぶ音符・どんちゃん・風船)
+#   ・レーンより手前に出すもの (良・飛ぶ音符・どんちゃん・風船)
 # どちらも切り取り範囲に丸ごと入るので、切ると上が欠ける。「戻した要素が
 # 全部ちゃんと見えていること」を優先して、切り取りはやめて compact と同じ
 # 高さに戻した。左右は元から一切触っていないので、判定円の x・音符の
@@ -876,48 +877,6 @@ SCORE_GAIN_ROW = 1               # Score_Plate.png の段(0=白 1=橙 2=水)
 SCORE_GAIN_Y_OFF = -11
 
 
-class _LaneOverlay(QWidget):
-    """レーンより手前に出すものを、**1枚の板にまとめて**描く。
-
-    レーンは画面(親)の子ウィジェットで、親は子より先に描かれる。だから
-    「飛んでいく音符」「判定文字 良」「風船中のどんちゃんと風船」のように
-    レーンに重なるものは、親に描くとレーンの下に潜ってしまう。レーンの
-    兄弟として重ねた板に描くことで手前に出している。
-
-    **なぜ1枚なのか(以前は3枚だった)**
-    半透明の子ウィジェットは、塗り直すたびに Qt が下の親ぶんも巻き込んで
-    合成する。実測で、この板だけで **1コマ 1.77ms**(1コマ 6.84ms のうち)を
-    使っていた。画面本体の描画(1.18ms)より重い。3枚のうち2枚は 1280x520 の
-    全幅で、密度の高い譜面ではどれも毎コマ塗り直しになる。
-
-    前後関係は板の重ね順でしか作れないと思って分けていたが、1枚の中でも
-    **描く順番**でそのまま作れる。飛んでいく音符 -> 良 -> どんちゃん -> 風船
-    の順に描けば、以前の3枚と1枚も違わない絵になる。合成は3回から1回へ。
-    """
-
-    def __init__(self, screen):
-        super().__init__(screen)
-        self._screen = screen
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        ox, oy = self.x(), self.y()
-        # 後のものほど手前。
-        self._screen.draw_combo_front(p, ox, oy)
-        self._screen.draw_soul_front(p, ox, oy)
-        self._screen.draw_rainbow_sparks(p, ox, oy)
-        self._screen.draw_rainbow_head_front(p, ox, oy)
-        self._screen.draw_soul_flights(p, ox, oy)
-        self._screen.draw_judge_pop(p, ox, oy)
-        self._screen.draw_chara_front(p, ox, oy)
-        self._screen.draw_balloon_front(p, ox, oy)
-        p.end()
-
-
 #: ネームプレートの設定が変わるたびに増える。描く側はこれを見て読み直す。
 _NP_EPOCH = 0
 #: いま動いている設定。preview_dock が起動時に渡す。**ファイルではなく
@@ -1678,7 +1637,16 @@ class GameScreenWidget(QWidget):
         # 焼いた文字の置き場(bake_text)。倍率ごとに1枚。
         self._text_cache = {}
 
-        chart_preview.setParent(self)
+        # レーンは**子ウィジェットにしない**。子にすると、レーンが塗り直す
+        # たびに Qt が親ぶんを巻き込んで合成する(半透明の子と同じ扱い)。
+        # 代わりに paintEvent の中で自分の QPainter へ直に描く。
+        # 親を外しても setFixedSize() は効いたままなので、レーン側が見ている
+        # self.rect() / width() / height() は今までと同じ値を返す。
+        chart_preview.setParent(None)
+        chart_preview.hide()
+        # レーンが「塗り直したい」と言ってきたら、画面ごと塗り直す。
+        chart_preview.set_repaint_cb(self.update)
+        chart_preview.set_screen_cb(self.screen)
         # レーンの寸法を本家に合わせる。上下の余白は 0 にして、レーン本体と
         # 打音表記帯だけの高さ(130+26)にする — 余白ぶんの情報(連打カウント等)
         # は画面側の余白に描くほうが本家に近い。
@@ -1691,9 +1659,12 @@ class GameScreenWidget(QWidget):
         chart_preview._hide_hit_fly = True
         # 判定枠の風船も、どんちゃんより手前に出すためこちらで描く。
         chart_preview._hide_balloon_sprite = True
-        chart_preview.move(LANE_X, LANE_Y)
 
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
+        # キー操作はレーンが持っている(再生・シーク・速度・演奏モードの打面)。
+        # レーンを子ウィジェットでなくしたので、フォーカスはこちらが受けて
+        # レーンへ渡す。これが無いと F/J/D/K も Space も無言で効かなくなる。
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setAutoFillBackground(False)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         # 静的な下地(背景・左パネル・黒枠 等)を焼いたキャッシュ。None なら
@@ -1705,7 +1676,6 @@ class GameScreenWidget(QWidget):
         # 等倍ブリットにする。
         self._static_layer_dpr = 1.0
         # いま描いている面の devicePixelRatio。paintEvent が毎コマ更新する。
-        # 子の板(_LaneOverlay)は親と同じ面へ描かれるのでこれを見る。
         self._dpr = 1.0
         # 上背景シートから切り出した駒((key,col,row) -> QPixmap)。
         self._bg_up_cache = {}
@@ -1723,22 +1693,6 @@ class GameScreenWidget(QWidget):
         self._rainbow_centers = None
         # 数字シートの縮小済みグリフ((sheet,cols,rows,row,scale) -> [0..9])
         self._digit_cache = {}
-        # 判定ポップが前フレームに出ていたか(消し込みを1回だけ行うため)
-        # 飛んでいる音符が前フレームに居たか(同じく消し込みを1回だけ行う)
-        self._flight_was_active = False
-
-        # レーンが update() しても、Qt が塗り直すのはレーンの矩形だけ。
-        # スコア・コンボ・太鼓・魂ゲージ・「良」はどれもレーンの外にあるので、
-        # 放っておくと一度描かれたきり止まって見える。ここで毎フレーム
-        # 塗り直す。レーンに重ならない2つの矩形だけを指定して、レーンを
-        # 二重に描かせない。
-        # 「良」はレーンにかぶるので、レーンより手前の板に描く。
-        # 飛んでいく音符も、判定円(レーンの中)から出るのでレーンより手前。
-        # 「良」より奥にしたいので先に作って先に raise する。
-        self._overlay = _LaneOverlay(self)
-        self._overlay.setGeometry(*SOUL_FLY_RECT)
-        self._overlay.raise_()
-
         self._hud_timer = QTimer(self)
         self._hud_timer.setInterval(max(1, chart_preview._timer.interval()))
         self._hud_timer.timeout.connect(self._tick_hud)
@@ -1789,19 +1743,52 @@ class GameScreenWidget(QWidget):
             traceback.print_exc()
         event.accept()
 
+    # --- キーとマウス --------------------------------------------------
+    # レーンはもう子ウィジェットではないので、Qt はレーンへイベントを配らない。
+    # 操作の実装はレーン側に置いたまま(単体で動かせる状態を壊さない)、
+    # ここで受けて渡す。
+    def event(self, e):
+        # Tab は keyPressEvent へ届く前にフォーカス移動へ消費されるので、
+        # レーン側と同じく event() で横取りする。
+        if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab:
+            self.chart_preview.toggle_constant_speed()
+            e.accept()
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, event):
+        self.chart_preview.keyPressEvent(event)
+        if not event.isAccepted():
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        self.chart_preview.keyReleaseEvent(event)
+        if not event.isAccepted():
+            super().keyReleaseEvent(event)
+
+    def mousePressEvent(self, event):
+        # 押したらキー操作が効くようにする(レーン側が同じことをしていた)。
+        # accept() を必ず返すこと — ScaledHost が「誰も受け取らなかった」と
+        # 判断すると親へ送り返し、行き場のないイベントが往復して落ちる
+        # (preview_dock.ScaledHost._forward の説明を参照)。
+        self.setFocus(Qt.MouseFocusReason)
+        event.accept()
+
     def draw_judge_effects_back(self, p, now):
         """判定枠の演出(ゴーゴーの炎・叩いた火花)を、レーンの外にも描く。
 
         どちらもレーンより大きい絵で、本家ではレーンの黒枠を越えて背景の
-        上まではみ出す。レーンは子ウィジェットで自分の矩形の外へ描けない
-        ので、ここで同じ絵・同じ大きさ・同じ位置にもう一度描く。レーンの
+        上まではみ出す。レーンはレーンの矩形でクリップして描くので外へ
+        出せない。ここで同じ絵・同じ大きさ・同じ位置にもう一度描く。レーンの
         中はレーンが上から塗り直すため、見えるのははみ出したぶんだけ。
 
         順番はレーン側と同じ(炎 → 火花)。"""
         try:
             cp = self.chart_preview
             jx, jy = cp.judge_center()
-            cx, cy = cp.x() + jx, cp.y() + jy
+            # レーンはもう子ウィジェットではないので cp.x()/cp.y() は 0。
+            # レーンを置いている位置を定数から取る。
+            cx, cy = LANE_X + jx, LANE_Y + jy
             cp.paint_gogo_fire(p, now, cx, cy)
             cp.paint_hit_explosion(p, now, cx, cy)
         except Exception:  # noqa: BLE001
@@ -1852,67 +1839,13 @@ class GameScreenWidget(QWidget):
     def _tick_hud(self):
         if not self.isVisible():
             return
-        # 上の帯: 魂ゲージ・魂・黒枠・連打数
-        self.update(0, 0, SCREEN_W, LANE_Y)
-        # 左パネル: スコア・コース記号・太鼓・コンボ・ネームプレート
-        self.update(PANEL_X, PANEL_Y, PANEL_W, PANEL_H)
-        # 下背景の帯: クリア後の金色へのクロスフェード・左流れ・提灯の光の
-        # ゆらぎ・(出すなら)踊り子。ここは今まで塗り直していなかったので、
-        # 等倍(ScaledHost が素通しになる 100%)では下半分が最初のコマで
-        # 止まっていた。踊り子の有無で条件を付けてはいけない
-        # (SHOW_DANCERS = False の今は _dancer が必ず None なので、
-        # 付けるとこの行が一度も実行されず、クリア演出が画面でだけ動かない
-        # = 録画や 75%/50% と絵が食い違う)。縮小表示のときは ScaledHost が
-        # 画面ごと描き直しているので、これは重ならない(同じ矩形を2度描く
-        # ことにはならない)。
-        if not self._compact and not self._lite:
-            self.update(0, BG_DOWN_Y, SCREEN_W, self.height() - BG_DOWN_Y)
-        # 「良」の板(レーンの手前)。判定ポップが出ていない間は中身が空なので、
-        # 毎フレーム更新する必要がない(半透明の子ウィジェットの再描画は親の
-        # 巻き込み再描画も呼ぶ)。消え際を残さないよう、「前フレームは出ていた」
-        # 場合だけもう1回だけ更新して消し込む。
-        recent = self.judge_pop()
-        judge_active = bool(recent is not None and 0.0 <= recent[0] < JUDGE_POP_SEC)
-        # レーンより手前の板(飛んでいく音符・風船中のどんちゃん)。同じ理由で、
-        # 中身がある間と、その次の1回だけ塗り直す。
-        try:
-            now = self.chart_preview.game_state()[0]
-            # 魂の弾けは飛行より長く続く(飛行 0.42 + 弾け 0.53 = 0.95 秒 に
-            # 対して、飛んでいる音符は 0.42 + 0.22 = 0.64 秒)。長いほうで
-            # 見ないと、弾けの途中で板の塗り直しが止まる。
-            _win = max(SOUL_FLY_SEC + SOUL_LAND_SEC,
-                       SOUL_FLY_SEC + (SOUL_BURST_FRAMES - SOUL_BURST_FIRST)
-                       * SOUL_BURST_FRAME_SEC)
-            flying = bool(self.chart_preview.recent_hits(now, _win)
-                          or self.chart_preview.recent_roll_hits(now, _win))
-            if not flying and SHOW_BALLOON_RAINBOW:
-                # 虹の先端の顔も板が描くので、虹が出ている間は塗り直す。
-                flying = self.chart_preview.balloon_pop_elapsed(
-                    now, RAINBOW_TICKS * RAINBOW_TICK_SEC) is not None
-            if not flying and self._chara is not None:
-                flying = self._chara.state() in chara_mod.TIME_BASED_STATES
-            if not flying:
-                # どんちゃんを描かない = anim.update() を回さない場面では、
-                # 上の「風船中のどんちゃん」判定が効かない(state() が永久に
-                # 通常のまま)。軽量モードだけでなく、1_Chara を持たない
-                # スキンでも同じことが起きる。風船が判定枠に居るかを直接
-                # 見ておく。これが無いと風船の絵が最初のコマで固まる
-                # (風船中は判定線を通る音符も無いので、板が塗り直されない)。
-                flying = self.chart_preview.balloon_sprite_state(now) is not None
-        except Exception:  # noqa: BLE001
-            flying = False
-        # 「良」も飛んでいく音符もどんちゃんも同じ板なので、どれかに中身が
-        # あれば塗り直す。消え際を残さないよう、前のコマで中身があった場合も
-        # もう1回だけ塗って消し込む。
-        # コンボの数字もこの板に描くので、出ている間は塗り直しが要る。
-        try:
-            combo_on = self.chart_preview.game_state()[1] >= COMBO_SHOW_AT
-        except Exception:  # noqa: BLE001
-            combo_on = False
-        live = flying or judge_active or combo_on
-        if live or self._flight_was_active:
-            self._overlay.update()
-        self._flight_was_active = live
+        # 以前はレーンを二重に描かせないため、レーンに重ならない矩形だけを
+        # 指定して部分的に塗り直していた。レーンを親へ畳んだ今は、レーンも
+        # この paintEvent が描くので分ける意味がない(分けたままだと、指定した
+        # 矩形の外にあるレーンが止まって見える)。全面を1回で塗り直す。
+        # Qt は同じコマの update() をまとめるので、レーン側の
+        # _request_repaint() と重なっても2度描きにはならない。
+        self.update()
 
     # ------------------------------------------------------------------
     def _ensure_skin(self):
@@ -2074,8 +2007,8 @@ class GameScreenWidget(QWidget):
     def draw_judge_pop(self, p, ox=0, oy=0):
         """判定文字「良」。叩いた直後に判定円の上へ出て、昇りながら消える。
 
-        レーンに少しかぶる位置なので、レーンより手前の板(_LaneOverlay)から
-        呼ぶ。ox/oy はその板の左上。"""
+        レーンに少しかぶる位置なので、レーンを描いたあとに呼ぶ
+        (_draw_lane_front)。ox/oy はその座標系の左上で、いまは常に 0。"""
         recent = self.judge_pop()
         if recent is None:
             return
@@ -2950,8 +2883,8 @@ class GameScreenWidget(QWidget):
         """魂の弾けと「魂」の文字を、**レーンより手前**に描く。
 
         どちらも魂ゲージのそばにあり、レーンの上端(y=196)に少しかぶる。
-        画面(親)はレーン(子)より先に描かれるので、_draw_gauge の中で描くと
-        かぶったぶんがレーンの下に潜っていた。_LaneOverlay から呼ぶ。
+        _draw_gauge はレーンより先に描くので、その中で描くとかぶったぶんが
+        レーンの下に潜る。レーンのあとに描く(_draw_lane_front)。
 
         並びは元のまま「弾け → 魂の文字」。弾けのほうが後ろになる。
         ox/oy は板の左上。"""
@@ -3092,7 +3025,7 @@ class GameScreenWidget(QWidget):
 
     def _draw_lane_readouts(self, p, now, recent):
         """連打・風船の打数を、本家と同じ金の扇で出す。
-        (「良」はレーンにかぶるので _LaneOverlay が手前に描く)"""
+        (「良」はレーンにかぶるので _draw_lane_front が手前に描く)"""
         try:
             count, kind, alpha = self.chart_preview.live_tap_state(now)
         except Exception:  # noqa: BLE001
@@ -3226,7 +3159,7 @@ class GameScreenWidget(QWidget):
         レーン(ChartPreviewWidget)側には何も伝えない。軽量で止めるのは
         「画面側が描いている背景と装飾」だけで、レーンの中(音符・ゴーゴー・
         判定の火花・打音表記の帯)は通常再生と同じものをそのまま描くため。
-        「良」と風船を描く板(_LaneOverlay)も出したままに
+        「良」と風船(_draw_lane_front)も出したままに
         して、その中で軽量に要らないもの(どんちゃん・魂の飛翔)だけを
         描き手側で落とす(draw_chara_front / draw_soul_flights)。"""
         lite = bool(lite)
@@ -3958,7 +3891,7 @@ class GameScreenWidget(QWidget):
         # 要らない。連打・風船の金の扇(_draw_lane_readouts)は残す — あれは
         # 「今この連打を何回叩いたか」という譜面そのものの情報。
         if not self._lite:
-            # 魂の弾けと「魂」の文字は _LaneOverlay が手前に描くので、
+            # 魂の弾けと「魂」の文字は _draw_lane_front が手前に描くので、
             # そちらが使う割合をここで渡しておく。
             self._last_gauge_ratio = ratio
             self._draw_gauge(p, ratio, now)
@@ -3966,8 +3899,52 @@ class GameScreenWidget(QWidget):
         if GOGO_FIRE_ABOVE_HUD:
             self.draw_judge_effects_back(p, now)
 
+        # --- レーン本体 ---
+        # 以前は子ウィジェットに自分で描かせていた。子にすると塗り直しの
+        # たびに親ぶんを巻き込んだ合成が乗るので、ここへ畳んである。
+        # レーン側の座標はすべてレーンローカルなので、原点を移して
+        # レーンの矩形でクリップすれば中身は1行も変えずに済む
+        # (クリップは必須 — レーン内部には「ウィジェットの矩形で切れる」
+        # 前提で描いているものがある)。
+        p.save()
+        # 幅も高さもレーン自身から取る。中で setClipRect(self.rect()) して
+        # 親のクリップを置き換える箇所があるので、ここの矩形とレーンの矩形が
+        # 食い違うと外へはみ出して描けてしまう。出所を1つに揃える。
+        cp = self.chart_preview
+        p.setClipRect(LANE_X, LANE_Y, cp.width(), cp.height())
+        p.translate(LANE_X, LANE_Y)
+        cp.paint_lane(p)
+        p.restore()
+
+        # --- レーンより手前に出すもの ---
+        # 以前は半透明の子ウィジェット(_LaneOverlay)に描かせていた。
+        # レーンを親へ畳んだので、この位置に描けばそのまま手前になる。
+        # 半透明の子は塗り直すたびに親ぶんを巻き込んだ合成が走るため、
+        # 板1枚ぶんの合成が毎コマ消える。
+        p.save()
+        # 板だった頃はウィジェットの矩形(SOUL_FLY_RECT)で切れていた。実測では
+        # どの場面でも y>=520 へは1画素も描いていないが、切れる前提で書かれた
+        # ものが紛れていても気付けないので、同じ矩形を張っておく。
+        p.setClipRect(*SOUL_FLY_RECT)
+        self._draw_lane_front(p)
+        p.restore()
+
         p.end()
-        # レーン本体は子ウィジェット(ChartPreviewWidget)が自分で描く。
+
+    def _draw_lane_front(self, p, ox=0, oy=0):
+        """レーンより手前に出すもの。後のものほど手前。
+
+        座標系は SOUL_FLY_RECT(0,0,1280,520)。ox/oy は板だった頃の名残で、
+        板は (0,0) に置いてあったので実際には常に 0。
+        """
+        self.draw_combo_front(p, ox, oy)
+        self.draw_soul_front(p, ox, oy)
+        self.draw_rainbow_sparks(p, ox, oy)
+        self.draw_rainbow_head_front(p, ox, oy)
+        self.draw_soul_flights(p, ox, oy)
+        self.draw_judge_pop(p, ox, oy)
+        self.draw_chara_front(p, ox, oy)
+        self.draw_balloon_front(p, ox, oy)
 
     # ------------------------------------------------------------------
     def lane_rect(self) -> QRect:
