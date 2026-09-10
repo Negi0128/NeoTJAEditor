@@ -22,8 +22,9 @@ FULL(録画用)は 1280x720 全部、COMPACT(再生モード)は上部背景と�
 import bisect
 import math
 import os
+import time as _time
 
-from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QTimer
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QImage, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap, QTransform)
@@ -934,8 +935,12 @@ def set_config(cfg):
 
 def nameplate_changed():
     """環境設定でネームプレートを変えたときに呼ぶ。次の描画で読み直す。"""
-    global _NP_EPOCH
+    global _NP_EPOCH, _USER_SHEET_CHECKED
     _NP_EPOCH += 1
+    # 部品シートの見にいきは 0.5 秒に1回へ間引いてあるので、設定を触った
+    # 直後だけはその間隔を待たずに見にいかせる(NamePlate.png を差し替えて
+    # 環境設定を閉じた、という手順ですぐ反映されるように)。
+    _USER_SHEET_CHECKED = 0.0
 
 
 # --- 画面を見ながらの位置合わせ ---------------------------------------
@@ -1158,6 +1163,32 @@ def _column_centers(img, smooth=_BAND_SMOOTH):
     return out
 
 
+def _opaque_bounds(pm, thresh=4):
+    """絵の中で「何か描かれている」矩形 (x, y, 幅, 高さ)。全部透明なら None。
+
+    焼いた絵を切り詰めるのに使う。範囲を決め打ちにすると、称号の画像を
+    環境設定で広げたときに切れてしまうので、**描いた結果から測る**。"""
+    img = pm.toImage().convertToFormat(QImage.Format_RGBA8888)
+    w, h = img.width(), img.height()
+    if w <= 0 or h <= 0:
+        return None
+    try:
+        import numpy as np
+        a = np.frombuffer(img.constBits(), dtype=np.uint8,
+                          count=img.bytesPerLine() * h)
+        a = a.reshape(h, -1, 4)[:, :w, 3]
+        rows = np.nonzero((a > thresh).any(axis=1))[0]
+        cols = np.nonzero((a > thresh).any(axis=0))[0]
+        if not len(rows) or not len(cols):
+            return None
+        return (int(cols.min()), int(rows.min()),
+                int(cols.max() - cols.min() + 1),
+                int(rows.max() - rows.min() + 1))
+    except Exception:  # noqa: BLE001
+        # numpy が無い環境。焼かずに丸ごと返す(遅いが正しい)。
+        return (0, 0, w, h)
+
+
 def bake_text(p, cache, key, path, outline_color, outline_w, fill_color):
     """縁取りした文字を1枚の絵に焼いて、次からはそれを貼るだけにする。
 
@@ -1208,11 +1239,25 @@ def bake_text(p, cache, key, path, outline_color, outline_w, fill_color):
 #: (パス, 更新時刻) が変わったら読み直す — 差し替えてすぐ試せるように。
 _USER_SHEET = None
 _USER_SHEET_KEY = None
+#: 最後にファイルを見にいった時刻(time.monotonic)。
+_USER_SHEET_CHECKED = 0.0
+#: ファイルを見にいく間隔(秒)。**毎コマ見にいってはいけない。**
+#: exists() + stat() の2回で実測 1.37ms/コマ かかっていて、ゲーム画面
+#: 9.3ms のうち 15% が「差し替えられていないか確かめる」だけに消えていた。
+#: 0.5 秒に1回なら、差し替えてすぐ試せる手触りは変わらないまま
+#: 1コマあたりの負担がほぼ消える(120fps なら 60コマに1回)。
+USER_SHEET_CHECK_SEC = 0.5
 
 
-def user_nameplate_sheet():
-    """NamePlate フォルダに置かれた部品シート。無ければ None。"""
-    global _USER_SHEET, _USER_SHEET_KEY
+def user_nameplate_sheet(force=False):
+    """NamePlate フォルダに置かれた部品シート。無ければ None。
+
+    force=True で間隔を無視して見にいく(環境設定で変えた直後など)。"""
+    global _USER_SHEET, _USER_SHEET_KEY, _USER_SHEET_CHECKED
+    now = _time.monotonic()
+    if not force and (now - _USER_SHEET_CHECKED) < USER_SHEET_CHECK_SEC:
+        return _USER_SHEET
+    _USER_SHEET_CHECKED = now
     try:
         path = settings_mod.user_nameplate_path()
         key = (str(path), path.stat().st_mtime) if path.exists() else None
@@ -1619,6 +1664,12 @@ class GameScreenWidget(QWidget):
         self._title_family = None
         # ネームプレートを描くもの。環境設定の見本と同じ実装を使う。
         self._np_renderer = NameplateRenderer()
+        # 焼いたネームプレート (絵, 貼る位置) と、それを焼いたときの中身。
+        # 中身が変わるまで貼るだけで済ませる。
+        self._np_baked = None
+        self._np_baked_key = None
+        # 提灯の光を中身のある行だけに切り詰めたもの (絵, 下げ量)。
+        self._bg_light_cut = None
         # ネームプレートの中身。最初に描くときに1回だけ読む。
         self._nameplate_json = None
         self._nameplate_epoch = -1
@@ -1883,6 +1934,9 @@ class GameScreenWidget(QWidget):
             return
         self._skin_ready = True
         self._load_skin()
+        # 素材が入れ替わったので、素材から作った作り置きを捨てる。
+        self._bg_light_cut = None
+        self._np_baked = None
 
     def _load_skin(self):
         """skin/ から使う絵を読む。無ければ None のままで、描画側が黙って飛ばす
@@ -1950,6 +2004,7 @@ class GameScreenWidget(QWidget):
         # ネームプレートの文字は毎フレーム描くので、字形(パス)だけは1回
         # 作って使い回す。字形が差し替わるここで捨てて、次の描画で組み直させる。
         self._np_renderer.invalidate()
+        self._np_baked = None      # 字形が変わったので焼き直す
 
     def draw_chara_front(self, p, ox=0, oy=0):
         """風船中のどんちゃんだけを、レーンより手前に描く。
@@ -2195,18 +2250,70 @@ class GameScreenWidget(QWidget):
         return self._nameplate_title_pm
 
     def _draw_nameplate(self, p):
-        """ネームプレート。中身と部品を渡して NameplateRenderer に描かせる。
+        """ネームプレート。**焼いた1枚を貼るだけ。**
 
-        描き方そのものは環境設定の見本と共通(neotja/game_screen.py の
-        NameplateRenderer)。二重に書くと片方だけ直して食い違うため。"""
+        描き方そのものは環境設定の見本と共通(NameplateRenderer)。二重に
+        書くと片方だけ直して食い違うため。
+
+        中身(名前・称号・段位とその位置)は環境設定でしか変わらないのに、
+        以前は毎コマ板・段位・称号バー・1Pの丸・文字を組み直していて
+        0.81ms/コマ かかっていた。1枚に焼いて貼るだけなら 0.02ms。
+
+        **焼く範囲は毎回その絵から測る。** 決め打ちにすると、称号の画像を
+        環境設定で広げたときに切れる(以前それで「幅の調整が反映されない」
+        と言われた事故がある)。広い画布へ一度描いてから、中身のある矩形を
+        探して切り出す。"""
+        pm, at = self._nameplate_baked()
+        if pm is None:
+            return
+        p.drawPixmap(at, pm)
+
+    #: ネームプレートを焼くときの画布と、その左上が画面のどこにあたるか。
+    #: 実際の絵はこの中のごく一部だが、称号の画像を広げても収まるよう
+    #: 大きめに取る(焼くのは中身が変わったときだけなので、大きくても
+    #: 毎コマの負担にはならない)。
+    NAMEPLATE_BAKE_ORIGIN = (-160, 180)
+    NAMEPLATE_BAKE_SIZE = (900, 460)
+
+    def _nameplate_baked(self):
+        """焼いたネームプレートと貼る位置 (QPixmap, QPoint)。無ければ (None, None)。
+
+        中身・部品シート・字形のどれかが変わったときだけ焼き直す。"""
         sheet = nameplate_sheet(self._skin.get("nameplate_parts"))
+        data = self._nameplate_data()
         r = self._np_renderer
         if r.sheet is not sheet or r.family != self._title_family:
             r.sheet = sheet
             r.family = self._title_family
             r.invalidate()
-        r.data = self._nameplate_data()
-        r.draw(p)
+            self._np_baked = None
+        key = (_NP_EPOCH, id(sheet), self._title_family,
+               tuple(sorted((k, str(v)) for k, v in (data or {}).items())))
+        if self._np_baked is not None and self._np_baked_key == key:
+            return self._np_baked
+        r.data = data
+        self._np_baked_key = key
+        self._np_baked = self._bake_nameplate(r)
+        return self._np_baked
+
+    def _bake_nameplate(self, r):
+        ox, oy = self.NAMEPLATE_BAKE_ORIGIN
+        w, h = self.NAMEPLATE_BAKE_SIZE
+        canvas = QPixmap(w, h)
+        canvas.fill(Qt.transparent)
+        q = QPainter(canvas)
+        q.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.translate(-ox, -oy)
+        try:
+            r.draw(q)
+        finally:
+            q.end()
+        box = _opaque_bounds(canvas)
+        if box is None:
+            return (None, None)
+        x, y, bw, bh = box
+        return (canvas.copy(x, y, bw, bh), QPoint(ox + x, oy + y))
 
     def _load_gauge_rainbow(self):
         """skin/GaugeRainbow/0..11.png を読む。1枚でも欠けたら None。"""
@@ -3613,7 +3720,7 @@ class GameScreenWidget(QWidget):
         """下背景の提灯の光を、加算合成でゆっくり明滅させながら重ねる。"""
         if not (SHOW_BACKGROUND and SHOW_BACKGROUND_LIGHT):
             return
-        lit = self._skin.get("bg_down_light")
+        lit, lit_dy = self._bg_light_pm()
         if lit is None:
             return
         phase = (now % BG_LIGHT_PERIOD) / BG_LIGHT_PERIOD
@@ -3624,8 +3731,30 @@ class GameScreenWidget(QWidget):
         p.setClipRect(QRect(0, BG_DOWN_Y, SCREEN_W, FOOTER_Y - BG_DOWN_Y))
         p.setCompositionMode(QPainter.CompositionMode_Plus)
         p.setOpacity(BG_LIGHT_MIN + (BG_LIGHT_MAX - BG_LIGHT_MIN) * k)
-        blit_sprite(p, 0, BG_DOWN_Y, lit, self._dpr)
+        blit_sprite(p, 0, BG_DOWN_Y + lit_dy, lit, self._dpr)
         p.restore()
+
+    def _bg_light_pm(self):
+        """提灯の光を、**中身のある行だけ**に切り詰めた絵と、その下げ量。
+
+        素材は 1280x360 だが中身は上 225 行だけで、残りは完全に透明。
+        加算合成では透明な画素は結果に一切効かないので、貼らなくても
+        絵は1画素も変わらない(実測 0.179 → 0.144 ms)。切るのは1回だけ。"""
+        if self._bg_light_cut is None:
+            lit = self._skin.get("bg_down_light")
+            if lit is None:
+                return (None, 0)
+            box = _opaque_bounds(lit)
+            if box is None:
+                self._bg_light_cut = (None, 0)
+            elif box[1] == 0 and box[3] >= lit.height():
+                self._bg_light_cut = (lit, 0)      # 切る余地なし
+            else:
+                # 横は切らない。左右にずらすと BG_DOWN_Y と同じ「画面の
+                # 左端から」という置き方が崩れて、読む側が混乱する。
+                self._bg_light_cut = (lit.copy(0, box[1], lit.width(), box[3]),
+                                      box[1])
+        return self._bg_light_cut
 
     # --- クリア(ノルマ到達)後の背景 -----------------------------------------
     def _clear_elapsed(self, now):
