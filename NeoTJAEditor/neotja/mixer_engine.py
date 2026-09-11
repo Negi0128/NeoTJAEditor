@@ -25,6 +25,7 @@ read_pos・イベントのカーソル・発音中ボイスなどの可変状態
 
 import bisect
 import os
+import time
 import traceback
 import wave
 from collections import deque
@@ -37,6 +38,15 @@ from neotja.audio_engine import ensure_don_wav, ensure_ka_wav, ensure_click_wav
 
 _MAX_VOICES = 32
 _MAX_BLOCK = 4096
+#: 同じ効果音(ドン / カッ / メトロノーム)を同時に鳴らせる数。
+#: 打音の素材は 0.8 秒ほどあり、16分の連打では前の音の尾が残ったまま次が乗る。
+#: 上限が全体の 32 しか無かったので密な譜面では 32 本に張り付き、打音だけで
+#: 峰が 5 倍まで行って音が割れていた。重なった尾は新しい打音にかき消されて
+#: 聞こえないので、数を絞っても聞こえ方はほとんど変わらない。
+_MAX_VOICES_PER_SOUND = 4
+#: 追い出すボイスを消すまでの長さ(秒)。ぶつ切りにすると波形が途中で
+#: 途切れて「プチッ」と鳴るので、ごく短く絞ってから消す。
+_EVICT_FADE_SEC = 0.005
 
 
 def list_output_devices():
@@ -46,8 +56,16 @@ def list_output_devices():
     ホストAPI名を添えたもの。sounddevice が無ければ空リスト。
 
     同じ機器が MME / WASAPI / DirectSound と複数のホストAPIから見えるのは
-    普通なので、名前が重複したものはひとつにまとめる(最初に見つけたものを
-    採用し、実際にどのホストAPIで開くかは _open_stream の試行順に任せる)。"""
+    普通なので、名前が重複したものはひとつにまとめる。
+
+    **WASAPI のものを先に拾う。** 以前は見つけた順(PortAudio は MME ->
+    DirectSound -> WASAPI の順に並べる)で最初のものを採っていたので、
+    必ず MME の名前が残っていた。MME の名前は 31 文字で切り詰められる
+    (「test (4- High Definition Audio」)ため WASAPI 側のフル名と一致せず、
+    _find_output_device の「WASAPI 優先」が一度も効いていなかった。
+    結果として常に MME 経由で開いていて、遅延が 91ms あった(WASAPI なら
+    22ms)。
+    同じ機器の MME 名は WASAPI 名の頭と一致するので、それも重複として落とす。"""
     try:
         import sounddevice as sd
     except Exception:  # noqa: BLE001
@@ -57,8 +75,7 @@ def list_output_devices():
         devices = sd.query_devices()
     except Exception:  # noqa: BLE001
         return []
-    out = []
-    seen = set()
+    cands = []
     for dev in devices:
         try:
             if int(dev.get("max_output_channels", 0)) < 1:
@@ -66,20 +83,46 @@ def list_output_devices():
             name = str(dev.get("name", "")).strip()
         except Exception:  # noqa: BLE001
             continue
-        if not name or name in seen:
+        if not name:
             continue
-        seen.add(name)
         try:
             host = hostapis[int(dev.get("hostapi", 0))]["name"]
         except Exception:  # noqa: BLE001
             host = ""
+        cands.append((0 if "WASAPI" in host else 1, name, host))
+    cands.sort(key=lambda c: c[0])          # WASAPI を先頭へ(安定ソート)
+    out = []
+    seen = []
+    for _rank, name, host in cands:
+        if name in seen:
+            continue
+        # 切り詰められた MME 名は、先に拾ったフル名の頭と一致する。
+        if _looks_truncated(name) and any(f.startswith(name) for f in seen):
+            continue
+        seen.append(name)
         out.append((name, f"{name} ({host})" if host else name))
     return out
 
 
+#: MME はデバイス名を 31 文字で切る(Win32 の WAVEOUTCAPS.szPname が32文字)。
+#: 前後の空白を落とすと 29〜31 文字になる。
+_MME_NAME_MIN_TRUNCATED = 29
+
+
+def _looks_truncated(name: str) -> bool:
+    """MME で切り詰められた名前かもしれない長さか。"""
+    return len(name or "") >= _MME_NAME_MIN_TRUNCATED
+
+
 def _find_output_device(sd, name: str):
     """デバイス名から (index, samplerate, ホストAPI名) を引く。無ければ None。
-    WASAPI のものを優先する(排他モード等でこのアプリが使いたいのは大抵そちら)。"""
+    WASAPI のものを優先する(排他モード等でこのアプリが使いたいのは大抵そちら)。
+
+    **完全一致で見つからなければ前方一致も見る。** 12.1.6 までは設定に
+    MME の切り詰め名(「test (4- High Definition Audio」)が保存されていた。
+    それをそのまま WASAPI のフル名へつなぐための移行措置。短い名前で
+    勝手に別の機器へつながないよう、切り詰めらしい長さのときだけ。
+    """
     if not name:
         return None
     try:
@@ -87,22 +130,56 @@ def _find_output_device(sd, name: str):
         devices = sd.query_devices()
     except Exception:  # noqa: BLE001
         return None
-    best = None
-    for i, dev in enumerate(devices):
-        if int(dev.get("max_output_channels", 0)) < 1:
-            continue
-        if str(dev.get("name", "")).strip() != name:
-            continue
-        try:
-            host = hostapis[int(dev.get("hostapi", 0))]["name"]
-        except Exception:  # noqa: BLE001
-            host = ""
-        cand = (i, int(dev.get("default_samplerate") or 48000), host)
-        if "WASAPI" in host:
-            return cand
-        if best is None:
-            best = cand
-    return best
+
+    def _scan(match):
+        best = None
+        for i, dev in enumerate(devices):
+            if int(dev.get("max_output_channels", 0)) < 1:
+                continue
+            if not match(str(dev.get("name", "")).strip()):
+                continue
+            try:
+                host = hostapis[int(dev.get("hostapi", 0))]["name"]
+            except Exception:  # noqa: BLE001
+                host = ""
+            cand = (i, int(dev.get("default_samplerate") or 48000), host)
+            if "WASAPI" in host:
+                return cand
+            if best is None:
+                best = cand
+        return best
+
+    hit = _scan(lambda n: n == name)
+    if hit is not None and "WASAPI" in hit[2]:
+        return hit
+    if _looks_truncated(name):
+        # 完全一致が MME にしか無い(=保存されていたのが切り詰め名)なら、
+        # 頭が一致する WASAPI のフル名を探す。
+        full = _scan(lambda n: n != name and n.startswith(name))
+        if full is not None and "WASAPI" in full[2]:
+            return full
+        if hit is None:
+            return full
+    return hit
+
+
+def canonical_output_name(name: str) -> str:
+    """設定に保存されている名前を、いまの一覧に並ぶ名前へ直す。
+
+    MME の切り詰め名が残っている設定を、環境設定ダイアログで正しい項目に
+    合わせるのに使う(保存すればフル名へ置き換わり、移行が済む)。
+    見つからなければ渡された名前をそのまま返す。
+    """
+    if not name:
+        return name
+    listed = [n for n, _label in list_output_devices()]
+    if name in listed:
+        return name
+    if _looks_truncated(name):
+        for n in listed:
+            if n.startswith(name):
+                return n
+    return name
 
 
 # ----------------------------------------------------------------------
@@ -232,7 +309,8 @@ class MixerCore:
         self._hit_cursor = 0
         self._metro_cursor = 0
 
-        # --- 発音中ボイス: [pcm, pos(int), is_metro(bool), delay(int)] ---
+        # --- 発音中ボイス: [pcm, pos(int), is_metro(bool), delay(int),
+        #                    fade(int: 追い出し中の残りサンプル、0 = していない)] ---
         self.voices = []
 
         # --- コマンドキュー(GUI -> render)---
@@ -340,11 +418,18 @@ class MixerCore:
 
     # ---- ボイス生成 ----
     def _spawn(self, pcm: np.ndarray, offset: int, is_metro: bool):
+        """ボイスを1本足す。要素は [pcm, 読み位置, メトロノームか, 開始の遅れ,
+        フェードの残り(0 = フェードしていない)]。"""
         if pcm is None or pcm.shape[0] == 0:
             return
+        # 同じ素材が鳴りすぎていたら、いちばん古いものを短く絞って消す。
+        # フェード中のものは数えない(もう消えていく途中なので)。
+        same = [v for v in self.voices if v[0] is pcm and v[4] == 0]
+        if len(same) >= _MAX_VOICES_PER_SOUND:
+            same[0][4] = max(1, int(self.device_sr * _EVICT_FADE_SEC))
         if len(self.voices) >= _MAX_VOICES:
-            self.voices.pop(0)     # 最古を奪う
-        self.voices.append([pcm, 0, is_metro, int(offset)])
+            self.voices.pop(0)     # 最古を奪う(ここまで来るのは想定外の保険)
+        self.voices.append([pcm, 0, is_metro, int(offset), 0])
 
     def _fire_events(self, times, kinds, cursor_attr, is_metro, enabled,
                      block_start_time, block_end_time, frames, mute_before=None):
@@ -449,11 +534,12 @@ class MixerCore:
         # (下の足し込みのあと、_limit() で 1.0 に収める)
         if self.voices:
             master = self.vol_master
+            fade_total = max(1, int(self.device_sr * _EVICT_FADE_SEC))
             gain_sfx = self.vol_sfx * master
             gain_metro = self.vol_metro * master
             remaining = []
             for v in self.voices:
-                pcm, vpos, is_metro, delay = v
+                pcm, vpos, is_metro, delay, fade = v
                 start = delay
                 if start >= frames:
                     v[3] = delay - frames
@@ -461,11 +547,25 @@ class MixerCore:
                     continue
                 avail = pcm.shape[0] - vpos
                 nmix = min(avail, frames - start)
+                if fade > 0:
+                    # 追い出し中。残りのフェード長で打ち切る。
+                    nmix = min(nmix, fade)
                 if nmix > 0:
                     gain = gain_metro if is_metro else gain_sfx
-                    out[start:start + nmix] += pcm[vpos:vpos + nmix] * gain
+                    seg = pcm[vpos:vpos + nmix] * gain
+                    if fade > 0:
+                        # 全体 fade_total サンプルかけて 1 -> 0 へ。残り fade から
+                        # 数えるので、ブロックをまたいでも続きから下がる
+                        # (分母を「残り」にすると2ブロック目で 1.0 に跳ね戻る)。
+                        seg *= (np.arange(fade, fade - nmix, -1,
+                                          dtype=np.float32) / np.float32(fade_total)
+                                )[:, None]
+                        v[4] = fade - nmix
+                    out[start:start + nmix] += seg
                     v[1] = vpos + nmix
                 v[3] = 0
+                if fade > 0 and v[4] <= 0:
+                    continue                    # 絞りきった。捨てる
                 if v[1] < pcm.shape[0]:
                     remaining.append(v)
             self.voices = remaining
@@ -629,6 +729,7 @@ class MixerAudioEngine(QObject):
     mediaStatusChanged = Signal(object)  # QMediaPlayer.MediaStatus 互換
     audioError = Signal(str)             # 音声コールバックが死んだ(1回だけ)
     sfxLoadFailed = Signal(str)          # 打音WAVを解釈できず合成音に戻した
+    outputRecovered = Signal(str)        # 止まった出力を自動で開き直した(結果の文)
 
     def __init__(self, parent=None, device_name: str = ""):
         super().__init__(parent)
@@ -679,6 +780,22 @@ class MixerAudioEngine(QObject):
         self._err_timer.setInterval(500)
         self._err_timer.timeout.connect(self._check_render_error)
         self._err_timer.start()
+
+        # 出力そのものの死活監視。スリープからの復帰や USB の抜き差しで
+        # デバイスが消えると、ストリームは黙って止まる(コールバックが
+        # 呼ばれなくなる)。以前はそれに気づく仕組みが無く、利用者が
+        # 「音声を再接続」を押すまで無音のままだった。
+        self._cb_count = 0
+        self._cb_seen = -1
+        self._cb_stall = 0
+        self._last_recover = 0.0
+        self._recover_gap = self.RECOVER_MIN_GAP_SEC
+        self._recover_failed_notified = False
+        self._closed = False
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(1000)
+        self._health_timer.timeout.connect(self._check_stream_alive)
+        self._health_timer.start()
 
         self._stream.start()
 
@@ -816,16 +933,24 @@ class MixerAudioEngine(QObject):
         if not want or info.get("as_requested"):
             return ""
         got = info.get("name", "") or "既定のデバイス"
-        why = (info.get("errors") or [""])[0]
+        errors = info.get("errors") or []
         if got == want:
             # 同じ機器の別の開き方で通った。落ちたとは言えないので、
             # 「A を開けなかったので A で再生します」にならないようにする。
             return ""
-        return ("設定の出力デバイス「%s」を開けなかったため、%s で再生します。%s"
-                % (want, got, "（%s）" % why if why else ""))
+        if not errors:
+            # 選んだ機器の試行が1つも無かった = 一覧に居なかった(つながって
+            # いない)。「開けなかった」ではなく「見つからない」と言う。
+            return ("設定の出力デバイス「%s」が見つからないため、%s で再生します。"
+                    % (want, got))
+        return ("設定の出力デバイス「%s」を開けなかったため、%s で再生します。（%s）"
+                % (want, got, errors[0]))
 
     # ---- sd コールバック(render に委譲するだけ)----
     def _callback(self, outdata, frames, time_info, status):  # noqa: ARG002
+        # 生きている印。GUI 側の _check_stream_alive が、これが進まなくなった
+        # ことで「出力が止まった」と気づく(整数の加算だけなので実時間を邪魔しない)。
+        self._cb_count += 1
         try:
             buf = self.core.render(frames)
             outdata[:] = buf
@@ -961,7 +1086,77 @@ class MixerAudioEngine(QObject):
     def output_device_name(self) -> str:
         return self._device_name
 
-    def reopen_stream(self, device_name=None):
+    #: 何回続けてコールバックが進まなければ「止まった」とみなすか(1秒刻み)。
+    #: 1回だけだと、重い処理で一瞬詰まっただけのときも開き直してしまう。
+    STALL_TICKS = 2
+    #: 開き直しを試す最短の間隔(秒)。デバイスが消えたままのとき、毎秒
+    #: 開き直そうとして重くならないように。
+    RECOVER_MIN_GAP_SEC = 3.0
+
+    #: 失敗し続けるときの間隔の上限(秒)。倍々に延ばしてここで止める。
+    RECOVER_MAX_GAP_SEC = 60.0
+
+    def _check_stream_alive(self):
+        """出力が止まっていたら開き直す(GUI スレッド、1秒ごと)。"""
+        if getattr(self, "_closed", False):
+            return
+        stream = getattr(self, "_stream", None)
+        if stream is None:
+            return
+        try:
+            active = bool(stream.active)
+        except Exception:  # noqa: BLE001
+            active = False
+        count = self._cb_count
+        if active and count != self._cb_seen:
+            self._cb_seen = count
+            self._cb_stall = 0
+            return
+        self._cb_stall += 1
+        if active and self._cb_stall < self.STALL_TICKS:
+            return
+        now = time.monotonic()
+        if now - self._last_recover < self._recover_gap:
+            return
+        self._last_recover = now
+        self._cb_stall = 0
+        # デバイスの一覧から読み直す — PortAudio は一覧を起動時に1回しか
+        # 読まないので、そのままでは挿し直した機器が見えない。
+        ok, msg = self.reopen_stream(rescan=True)
+        self._cb_seen = self._cb_count
+        if ok:
+            self._recover_gap = self.RECOVER_MIN_GAP_SEC
+            self._recover_failed_notified = False
+            self.outputRecovered.emit("音声出力が止まったため開き直しました。 " + msg)
+            return
+        # 開けないまま。デバイスが消えたままなら何度試しても同じなので、
+        # 間隔を倍々に延ばす(以前は3秒ごとに PortAudio の初期化し直しと
+        # トーストが無期限に続いていた)。知らせるのは最初の1回だけ。
+        self._recover_gap = min(self.RECOVER_MAX_GAP_SEC, self._recover_gap * 2.0)
+        if not self._recover_failed_notified:
+            self._recover_failed_notified = True
+            self.outputRecovered.emit(
+                "音声出力が止まり、開き直せませんでした。 " + msg
+                + " 機器をつなぎ直したら「音声を再接続」を押してください。")
+
+    def _rescan_devices(self):
+        """PortAudio を初期化し直して、デバイスの一覧を読み直す。
+
+        **ストリームを閉じてから呼ぶこと。** 初期化し直すと、開いている
+        ストリームはすべて無効になる。挿し直した USB 機器や、スリープ明けに
+        番号が変わった機器を見えるようにするためのもの。
+        """
+        sd = self._sd
+        try:
+            sd._terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            sd._initialize()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def reopen_stream(self, device_name=None, rescan=False):
         """音声出力を開き直す。(成功したか, メッセージ) を返す。
 
         WASAPI 排他モードへの切替などで PortAudio のストリームが死ぬと、以後
@@ -986,6 +1181,8 @@ class MixerAudioEngine(QObject):
             self._stream.close()
         except Exception:  # noqa: BLE001
             pass
+        if rescan:
+            self._rescan_devices()
 
         try:
             stream, device_sr, latency_ms = self._open_stream(self._sd)
@@ -1081,6 +1278,14 @@ class MixerAudioEngine(QObject):
         self._emit_position()
 
     def close(self):
+        # 死活監視を先に止める。止めずに閉じると、監視が「止まった」と
+        # 見なして閉じたはずのストリームを開き直してしまう(実測で、終了
+        # 処理の 0.9 秒後にストリームが開き直され、トーストまで出ていた)。
+        self._closed = True
+        try:
+            self._health_timer.stop()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self._pos_timer.stop()
             self._err_timer.stop()

@@ -913,7 +913,7 @@ class PreviewDock(QDockWidget):
         self._backend_notice = ""
         if audio_backend != "qt":
             try:
-                from neotja.mixer_engine import MixerAudioEngine, list_output_devices
+                from neotja.mixer_engine import MixerAudioEngine
                 self.audio = MixerAudioEngine(self, device_name=audio_output_device or "")
                 self.metronome = self.audio.metronome
                 self.hit_sounds = self.audio.hit_sounds
@@ -929,11 +929,11 @@ class PreviewDock(QDockWidget):
                     notice = self.audio.output_fallback_notice()
                 except Exception:  # noqa: BLE001
                     notice = ""
-                if not notice and audio_output_device and audio_output_device not in [
-                        n for n, _label in list_output_devices()]:
-                    notice = (
-                        f"設定の出力デバイス「{audio_output_device}」が見つからないため、"
-                        "既定のデバイスで再生します。")
+                # ここで「一覧に名前があるか」を見てはいけない。一覧は WASAPI の
+                # フル名を並べるようになったので、以前の切り詰め名が保存されて
+                # いると、実際には指定の機器から鳴っているのに「見つからない」と
+                # 誤って警告してしまう(実測)。落ちたかどうかは、実際に開けた
+                # 口を覚えている output_fallback_notice() だけで判断する。
                 if not notice:
                     # うまくいった場合も、どこから鳴っているかは出しておく。
                     try:
@@ -966,6 +966,10 @@ class PreviewDock(QDockWidget):
             self.audio.audioError.connect(self._on_audio_error)
         if hasattr(self.audio, "sfxLoadFailed"):
             self.audio.sfxLoadFailed.connect(self._on_sfx_load_failed)
+            # 出力が止まって自動で開き直したときに知らせる。
+            _rec = getattr(self.audio, "outputRecovered", None)
+            if _rec is not None:
+                _rec.connect(self._on_output_recovered)
 
         self.tapper = BpmTapper()
 
@@ -2427,6 +2431,14 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # 音声出力の開き直し / ワイヤレス調整
     # ------------------------------------------------------------------
+    def _on_output_recovered(self, msg):
+        """出力が止まって自動で開き直した(スリープ明け・USB の抜き差し)。"""
+        self.status_label.setText(msg)
+        try:
+            self.chart_preview.show_toast(msg, 6.0)
+        except Exception:  # noqa: BLE001
+            pass
+
     def reopen_audio_output(self, device_name=None):
         """音声出力を開き直す(ボタン / 環境設定でデバイスを変えたとき)。
 
@@ -2434,7 +2446,13 @@ class PreviewDock(QDockWidget):
         まま、が一番困るため。失敗時は警告ダイアログも出す。"""
         reopen = getattr(self.audio, "reopen_stream", None)
         if reopen is not None:
-            ok, msg = reopen(device_name)
+            # デバイスの一覧から読み直す。PortAudio は一覧を起動時に1回しか
+            # 読まないので、そのままでは挿し直した USB 機器が見えず、
+            # このボタンを押しても元の機器に戻れなかった。
+            try:
+                ok, msg = reopen(device_name, rescan=True)
+            except TypeError:
+                ok, msg = reopen(device_name)
         else:
             # レガシー経路(QMediaPlayer)。デバイス選択は持たないので名前は無視。
             legacy = getattr(self.audio, "reopen_output", None)

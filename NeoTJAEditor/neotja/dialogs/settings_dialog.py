@@ -435,11 +435,15 @@ class SettingsDialog(QDialog):
         cfg = self.main_window.config_data
 
         # --- 出力デバイス ---
-        from neotja.mixer_engine import list_output_devices
+        from neotja.mixer_engine import canonical_output_name, list_output_devices
         form = self._group(outer, "出力デバイス")
         self.audio_device_combo = QComboBox()
         self.audio_device_combo.addItem("既定のデバイス", "")
-        current = cfg.get("audio_output_device", "") or ""
+        # 12.1.6 までは MME の切り詰め名(31文字)が保存されていた。一覧は
+        # WASAPI のフル名を並べるようになったので、そのままだと
+        # 「(見つかりません)」になってしまう。フル名へ読み替えて選ばせる
+        # (保存すればフル名に置き換わり、移行が済む)。
+        current = canonical_output_name(cfg.get("audio_output_device", "") or "")
         found = False
         for name, label in list_output_devices():
             self.audio_device_combo.addItem(label, name)
