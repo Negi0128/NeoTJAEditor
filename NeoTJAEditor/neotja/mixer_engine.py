@@ -78,7 +78,7 @@ def list_output_devices():
 
 
 def _find_output_device(sd, name: str):
-    """デバイス名から (index, samplerate) を引く。見つからなければ None。
+    """デバイス名から (index, samplerate, ホストAPI名) を引く。無ければ None。
     WASAPI のものを優先する(排他モード等でこのアプリが使いたいのは大抵そちら)。"""
     if not name:
         return None
@@ -97,7 +97,7 @@ def _find_output_device(sd, name: str):
             host = hostapis[int(dev.get("hostapi", 0))]["name"]
         except Exception:  # noqa: BLE001
             host = ""
-        cand = (i, int(dev.get("default_samplerate") or 48000))
+        cand = (i, int(dev.get("default_samplerate") or 48000), host)
         if "WASAPI" in host:
             return cand
         if best is None:
@@ -210,6 +210,8 @@ class MixerCore:
         self.vol_sfx = 0.9
         self.vol_metro = 0.9
         self.vol_master = 1.0
+        # リミッターがいま掛けているゲイン。1.0 = 何もしていない。
+        self._lim_gain = 1.0
 
         # --- 効果音バンク(すべて device_sr の (M, 2) float32)---
         self.bank = {
@@ -255,6 +257,8 @@ class MixerCore:
         self._inv_frac = np.zeros((cap, 1), dtype=np.float32)  # 1 - frac
         self._g0 = np.zeros((cap, 2), dtype=np.float32)   # song[i0]
         self._g1 = np.zeros((cap, 2), dtype=np.float32)   # song[i1]
+        self._abs = np.zeros((cap, 2), dtype=np.float32)  # リミッターの峰取り用
+        self._ramp = np.zeros((cap, 1), dtype=np.float32)  # 同 ゲインの傾き
 
     def _ensure_capacity(self, frames: int):
         if frames > self._cap:
@@ -271,10 +275,14 @@ class MixerCore:
             op = cmd[0]
             if op == "seek":
                 self._apply_seek(cmd[1])
+                # 沈んだままシーク先の頭を小さく出さない。飛んだ先の音は
+                # 直前の音とつながっていないので、掛けていた減衰も持ち越さない。
+                self._lim_gain = 1.0
             elif op == "play":
                 self.ended = False
                 self.playing = True
                 self._recompute_cursors()
+                self._lim_gain = 1.0
             elif op == "pause":
                 self.playing = False
             elif op == "rate":
@@ -438,6 +446,7 @@ class MixerCore:
                 self.ended = True
 
         # --- 効果音ボイス(停止中でも鳴らして減衰を残す)---
+        # (下の足し込みのあと、_limit() で 1.0 に収める)
         if self.voices:
             master = self.vol_master
             gain_sfx = self.vol_sfx * master
@@ -461,7 +470,66 @@ class MixerCore:
                     remaining.append(v)
             self.voices = remaining
 
+        self._limit(out, frames)
         return out
+
+    #: リミッターが目指す上限。1.0 ぴったりだと丸めで超えることがある。
+    LIMIT_CEILING = 0.98
+    #: 下げたゲインを戻す速さ。**512サンプルあたり**の倍率で持つ。
+    #: 速すぎると音が波打って聞こえ、遅すぎると1発の打音のあと曲がしばらく
+    #: 小さいままになる。デバイスが1回に要求してくるサンプル数は環境で違う
+    #: (このマシンは 480、256 や 1024 のこともある)ので、ブロック数ではなく
+    #: **時間**で揃える — でないと同じ設定でも機械によって復帰の速さが
+    #: 3倍変わる。1.02/512サンプルで、-6dB からの復帰が約 0.35 秒。
+    LIMIT_RELEASE = 1.02
+    LIMIT_RELEASE_FRAMES = 512.0
+
+    def _limit(self, out, frames):
+        """足し合わせた結果を 1.0 に収める。
+
+        **なぜ要るか。** 曲と打音をそのまま足しているので、合計は簡単に
+        1.0 を超える。超えたぶんはデバイス側で切られて歪む(実測: 密な譜面
+        では打音だけで 5.0 まで行く。`don.wav` が 0.83 秒あり、16分の連打で
+        尾を引いたまま次が乗って同時発音が 32 本に張り付くため)。音量を
+        下げても重なった音も一緒に下がるだけなので、比率は変わらない —
+        「全体を小さくしても密なところだけ割れ続ける」状態だった。
+
+        **先読みはしない。** 1ブロック先を見るやり方だと確実に収まるが、
+        その1ブロック(約10ms)ぶん音が遅れる。譜面を合わせる道具で音を
+        遅らせたくない。代わりに「このブロックの峰」から必要なゲインを出し、
+        **下げるときは即座に、戻すときはゆっくり**掛ける。ブロックの両端とも
+        必要なゲイン以下にするので、途中も超えない(線形の傾きなので両端の
+        大きいほうを越えない)。
+
+        割れない場面では何もしない(ゲイン 1.0 のまま)。実測で、割れる曲は
+        -0.19dB、割れない曲は 0.00dB。
+        """
+        n = int(frames)
+        if n <= 0:
+            return
+        blk = out[:n]
+        peak = float(np.abs(blk, out=self._abs[:n]).max())
+        # 戻しの倍率。ブロックの長さぶんだけ進める(上の説明を参照)。
+        rel = self.LIMIT_RELEASE ** (n / self.LIMIT_RELEASE_FRAMES)
+        if peak <= 1e-9:
+            self._lim_gain = min(1.0, self._lim_gain * rel)
+            return
+        allowed = min(1.0, self.LIMIT_CEILING / peak)
+        # 下げは即座に(このブロックの頭から効かせる)。戻しは少しずつ。
+        g0 = min(self._lim_gain, allowed)
+        g1 = min(self._lim_gain * rel, 1.0, allowed)
+        self._lim_gain = g1
+        if g0 >= 1.0 and g1 >= 1.0:
+            return                      # 何もしなくてよい場面(大多数)
+        if g0 == g1:
+            blk *= np.float32(g0)
+        else:
+            ramp = self._ramp[:n]
+            ramp[:, 0] = np.linspace(g0, g1, n, dtype=np.float32)
+            blk *= ramp
+        # 念のための最終段。上の計算で超えないはずだが、浮動小数の誤差まで
+        # デバイスへ渡さない。
+        np.clip(blk, -1.0, 1.0, out=blk)
 
 
 # ----------------------------------------------------------------------
@@ -614,23 +682,53 @@ class MixerAudioEngine(QObject):
 
         self._stream.start()
 
+    @staticmethod
+    def _host_of(sd, dev_index):
+        """デバイス番号からホストAPI名を引く。分からなければ空文字。"""
+        try:
+            info = sd.query_devices(dev_index)
+            return str(sd.query_hostapis()[int(info.get("hostapi", 0))]["name"])
+        except Exception:  # noqa: BLE001
+            return ""
+
     # ---- ストリームを開く(指定デバイス -> WASAPI native -> default -> auto_convert@44100)----
     def _open_stream(self, sd):
         attempts = []
 
+        def _wasapi_kw(dev_index, host):
+            """auto_convert 付きの保険。**WASAPI のときだけ**付ける。
+
+            WASAPI 専用の設定なので、MME や DirectSound のデバイスに渡すと
+            PortAudio が -9984(Incompatible host API specific stream info)で
+            必ず弾く。以前は相手を見ずに付けていたので、この保険は一度も
+            働かないまま毎回失敗していた。
+            """
+            if "WASAPI" not in (host or ""):
+                return None
+            try:
+                kw = dict(samplerate=44100, channels=2, dtype="float32",
+                          latency="low",
+                          extra_settings=sd.WasapiSettings(auto_convert=True))
+                if dev_index is not None:
+                    kw["device"] = dev_index
+                return kw
+            except Exception:  # noqa: BLE001
+                return None
+
         # 0) 明示的に選ばれたデバイス(settings.json の audio_output_device)。
-        #    見つからなければ黙って以下の既定デバイスの試行へ落ちる。
+        #    見つからなければ以下の既定デバイスの試行へ落ちる。
+        picked_attempts = 0
         picked = _find_output_device(sd, self._device_name)
         if picked is not None:
-            dev, native_sr = picked
+            dev, native_sr, host = picked
             attempts.append(dict(device=dev, samplerate=native_sr,
                                  channels=2, dtype="float32", latency="low"))
-            try:
-                attempts.append(dict(device=dev, samplerate=44100, channels=2,
-                                     dtype="float32", latency="low",
-                                     extra_settings=sd.WasapiSettings(auto_convert=True)))
-            except Exception:  # noqa: BLE001
-                pass
+            kw = _wasapi_kw(dev, host)
+            if kw is not None:
+                attempts.append(kw)
+        # ここまでが「選ばれたデバイス」の試行。これより後で開けたなら、
+        # 望みどおりの口ではない。
+        picked_attempts = len(attempts)
 
         # 1) WASAPI ホストの既定出力デバイスをネイティブレートで low latency
         try:
@@ -659,22 +757,72 @@ class MixerAudioEngine(QObject):
 
         # 3) auto_convert 付き 44100(WASAPI が 44100 を直接開けない場合の保険)
         try:
-            attempts.append(dict(samplerate=44100, channels=2, dtype="float32",
-                                 latency="low",
-                                 extra_settings=sd.WasapiSettings(auto_convert=True)))
-        except Exception:
+            info = sd.query_devices(kind="output")
+            kw = _wasapi_kw(None, self._host_of(sd, info.get("index")))
+            if kw is not None:
+                attempts.append(kw)
+        except Exception:  # noqa: BLE001
             pass
 
+        # **どこで開けたのかを必ず残す。** 選んだデバイスが使えずに既定へ
+        # 落ちても、以前は何も伝わらず無言で別の口から鳴っていた
+        # (「時々内蔵音声に切り替わる」の正体がこれだった)。
+        self.output_info = {}
         last_err = None
-        for kw in attempts:
+        errors = []
+        for i, kw in enumerate(attempts):
             try:
                 stream = sd.OutputStream(callback=self._callback, **kw)
                 latency_ms = float(getattr(stream, "latency", 0.0) or 0.0) * 1000.0
+                dev_index = kw.get("device")
+                if dev_index is None:
+                    dev_index = getattr(stream, "device", None)
+                try:
+                    dev_name = str(sd.query_devices(dev_index).get("name", "?"))
+                except Exception:  # noqa: BLE001
+                    dev_name = "?"
+                self.output_info = {
+                    "name": dev_name,
+                    "host": self._host_of(sd, dev_index),
+                    "samplerate": int(stream.samplerate),
+                    "latency_ms": latency_ms,
+                    # 選ばれたデバイスで開けたか。
+                    "as_requested": bool(picked is not None
+                                         and i < picked_attempts),
+                    "requested": self._device_name or "",
+                    "errors": errors,
+                }
                 return stream, int(stream.samplerate), latency_ms
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                errors.append(str(e))
                 continue
         raise RuntimeError(f"出力ストリームを開けませんでした: {last_err}")
+
+    def describe_output(self):
+        """いまどこから音を出しているかの1行。分からなければ空文字。"""
+        info = getattr(self, "output_info", None) or {}
+        if not info:
+            return ""
+        host = info.get("host") or ""
+        return "音声出力: %s%s %dHz" % (
+            info.get("name", "?"), " (%s)" % host if host else "",
+            int(info.get("samplerate") or 0))
+
+    def output_fallback_notice(self):
+        """選んだデバイスで開けず別の口へ落ちたときの説明。無ければ空文字。"""
+        info = getattr(self, "output_info", None) or {}
+        want = info.get("requested") or ""
+        if not want or info.get("as_requested"):
+            return ""
+        got = info.get("name", "") or "既定のデバイス"
+        why = (info.get("errors") or [""])[0]
+        if got == want:
+            # 同じ機器の別の開き方で通った。落ちたとは言えないので、
+            # 「A を開けなかったので A で再生します」にならないようにする。
+            return ""
+        return ("設定の出力デバイス「%s」を開けなかったため、%s で再生します。%s"
+                % (want, got, "（%s）" % why if why else ""))
 
     # ---- sd コールバック(render に委譲するだけ)----
     def _callback(self, outdata, frames, time_info, status):  # noqa: ARG002
@@ -885,12 +1033,17 @@ class MixerAudioEngine(QObject):
         # どこで開いたのかを正直に返す。指定のデバイスが見つからなかったときに
         # 「開き直しました(その名前)」と言うと、指定どおりに繋がったように読めて
         # しまうので、既定へ落ちたことをはっきり書く。
+        # 「見つかるか」ではなく **実際にどこで開けたか** から答える。
+        # 名前が一覧にあっても他のアプリが掴んでいて開けないことがあり、
+        # 以前はその場合に「開き直しました(その名前)」と嘘を言っていた。
+        notice = self.output_fallback_notice()
+        if notice:
+            return True, notice
+        desc = self.describe_output()
         if not self._device_name:
-            return True, "音声出力を開き直しました(既定のデバイス)。"
-        if _find_output_device(self._sd, self._device_name) is None:
-            return True, (f"指定の出力デバイス「{self._device_name}」が見つからないため、"
-                          "既定のデバイスで開き直しました。")
-        return True, f"音声出力を開き直しました({self._device_name})。"
+            return True, "音声出力を開き直しました(既定のデバイス)。" + (
+                " " + desc if desc else "")
+        return True, "音声出力を開き直しました。" + (desc or self._device_name)
 
     def duration(self) -> int:
         return self._duration_ms

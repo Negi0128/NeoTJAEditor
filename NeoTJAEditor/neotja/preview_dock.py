@@ -918,14 +918,29 @@ class PreviewDock(QDockWidget):
                 self.metronome = self.audio.metronome
                 self.hit_sounds = self.audio.hit_sounds
                 self._mixer_active = True
-                # 設定で選んだデバイスが今つながっていないときは既定で開かれる。
-                # 音は出るので致命的ではないが、黙って別の口から鳴っていると
-                # 分からないので一言出す。
-                if audio_output_device and audio_output_device not in [
+                # 選んだデバイスで開けなかったときは、**理由ごと**出す。
+                # 以前はここで「一覧に名前があるか」しか見ておらず、名前は
+                # あるのに開けない場合(他のアプリが掴んでいる等)は何も出ずに
+                # 別の口から鳴っていた。実際に「時々内蔵音声に切り替わる」と
+                # いう形で表に出ている。いまはミキサー側が「どこで開けたか」を
+                # 覚えているので、それを見る。
+                notice = ""
+                try:
+                    notice = self.audio.output_fallback_notice()
+                except Exception:  # noqa: BLE001
+                    notice = ""
+                if not notice and audio_output_device and audio_output_device not in [
                         n for n, _label in list_output_devices()]:
-                    self._backend_notice = (
+                    notice = (
                         f"設定の出力デバイス「{audio_output_device}」が見つからないため、"
                         "既定のデバイスで再生します。")
+                if not notice:
+                    # うまくいった場合も、どこから鳴っているかは出しておく。
+                    try:
+                        notice = self.audio.describe_output()
+                    except Exception:  # noqa: BLE001
+                        notice = ""
+                self._backend_notice = notice
             except Exception:  # noqa: BLE001
                 import traceback
                 traceback.print_exc()
@@ -1329,9 +1344,35 @@ class PreviewDock(QDockWidget):
 
         self.setWidget(content)
 
-        # ミキサー初期化に失敗してレガシーへ退避した場合の非ブロッキング通知。
+        # 音声まわりの知らせ(どこから鳴っているか / 別の口へ落ちたか /
+        # レガシーへ退避したか)。
+        # **ここで setText しても見えない。** この直後に走る起動処理が
+        # 「先にファイルを保存し…」で同じラベルを塗り替えてしまい、実測では
+        # 一度も残らなかった。初期表示が落ち着いてから出す。
         if self._backend_notice:
-            self.status_label.setText(self._backend_notice)
+            QTimer.singleShot(1200, self._show_audio_notice)
+
+    def _show_audio_notice(self):
+        """音声の知らせを出す。
+
+        **トーストで出すのが本体。** 下のラベルは、起動処理の他の知らせ
+        (「先にファイルを保存し…」など)と同じ場所を取り合っていて、実測では
+        29ms で塗り潰されて一度も読めなかった。待つ時間を延ばしても、相手は
+        譜面の解析が終わった時点で出てくるので競走は解けない。トーストは
+        レーンに別で描くので取り合いにならない。
+        """
+        notice = self._backend_notice
+        if not notice:
+            return
+        self.status_label.setText(notice)
+        # 想定どおりに鳴っていないものは長めに。うまくいっているときも、
+        # どこから鳴っているかは一度見せる(出口を取り違えたまま気づかない、
+        # というのがこの一連の不具合の入口だった)。
+        bad = notice.startswith("設定の") or notice.startswith("ミキサー")
+        try:
+            self.chart_preview.show_toast(notice, 6.0 if bad else 3.0)
+        except Exception:  # noqa: BLE001
+            pass
 
     def warm_skin(self):
         """ゲーム風プレビューの素材を、まだなら今のうちに読んでおく。
@@ -2365,12 +2406,19 @@ class PreviewDock(QDockWidget):
         self._apply_legacy_sfx_volume()
 
     def _apply_legacy_sfx_volume(self):
-        """レガシー経路の打音/メトロノームへ「マスター × SE比率」を反映する。
-        ミキサー経路では MixerCore が vol_sfx/vol_metro × vol_master を掛けるので
-        何もしない。"""
+        """効果音へ「マスター × SE比率」を反映する。
+
+        打音とメトロノームはミキサー経路なら MixerCore が掛けてくれるので
+        レガシーのときだけ。**風船の破裂音は両方の経路でミキサーを通らない**
+        (QSoundEffect で直に鳴らしている)ので、必ずここで渡す。
+        """
+        v = self._master_volume * self._sfx_ratio
+        try:
+            self.chart_preview.set_pop_volume(v)
+        except Exception:  # noqa: BLE001
+            pass
         if self._mixer_active:
             return
-        v = self._master_volume * self._sfx_ratio
         for engine in (self.hit_sounds, self.metronome):
             setter = getattr(engine, "set_volume", None)
             if setter is not None:

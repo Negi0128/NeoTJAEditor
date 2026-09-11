@@ -360,7 +360,17 @@ def _coerce(default, loaded):
     return loaded
 
 
+#: いまファイルに載っていると思っている値。save_settings が「自分が変えた
+#: のか、よそが変えたのか」を見分けるのに使う(_merge_for_save 参照)。
+#: 最初の load_settings で1回だけ取り、以降は save_settings が更新する。
+#: **2回目以降の load_settings では取り直さない** — 譜面プレビューは値を1つ
+#: 読むだけのために毎コマ load_settings() を呼ぶので、そのたびに取り直すと
+#: 「よそが変えた」の判定材料が消えてしまう。
+_BASELINE = None
+
+
 def load_settings() -> dict:
+    global _BASELINE
     data = default_settings()
     path = settings_path()
     if path.exists():
@@ -373,7 +383,49 @@ def load_settings() -> dict:
                         data[key] = _coerce(data[key], loaded[key])
         except Exception:
             pass
+    if _BASELINE is None:
+        _BASELINE = dict(data)
     return data
+
+
+def _merge_for_save(config_data: dict) -> dict:
+    """書き込む中身を作る。**よそが変えた値を巻き添えで戻さない。**
+
+    Editor と Player は同じファイルを共有していて、Editor は音量を動かす
+    たびに自分の辞書を丸ごと書く。読み直さないので、その間に Player が
+    変えた値(出力デバイスなど)は Editor の古い値で上書きされて消えていた。
+    実際に audio_output_device が空へ戻り、音が内蔵スピーカーから出る、
+    という報告につながっている。
+
+    そこで3つを突き合わせる:
+      いま渡された値 / 最後にファイルへ載せたと思っている値(_BASELINE) /
+      たったいまファイルに載っている値
+    **自分は変えていない(渡された値 = BASELINE)のに、ファイル側が違う**
+    ものだけ、ファイル側を採る。それ以外は渡された値をそのまま使う
+    (消したい・変えたいという意思なので尊重する)。
+    """
+    merged = dict(config_data)
+    base = _BASELINE
+    if not base:
+        return merged
+    disk = {}
+    try:
+        path = settings_path()
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                disk = loaded
+    except Exception:  # noqa: BLE001
+        return merged
+    for key in _SETTINGS_KEYS:
+        if key not in disk or key not in base:
+            continue
+        if key in merged and merged[key] != base[key]:
+            continue                      # 自分で変えた。こちらを優先
+        if disk[key] != base[key]:
+            merged[key] = _coerce(base[key], disk[key])   # よそが変えた
+    return merged
 
 
 def _write_settings(path: Path, config_data: dict) -> bool:
@@ -413,12 +465,27 @@ def save_settings(config_data: dict) -> bool:
     戻り値を見ない呼び出しがほとんどだが(音量を動かすたびに知らせても
     仕方がない)、起動時の System フォルダの選び直しのように「保存できないと
     利用者が同じところで足止めされる」場面だけは確かめている。"""
-    if _write_settings(settings_path(), config_data):
-        return True
-    fallback = _fallback_settings_path()
-    if fallback == settings_path():
-        return False  # 退避先そのものが書けなかった。もう行き先が無い。
-    return _write_settings(fallback, config_data)
+    global _BASELINE
+    merged = _merge_for_save(config_data)
+    # **呼び出し側の辞書にも書き戻す。** ここでローカル名を差し替えるだけだと、
+    # Editor のメモリ上は古い値のまま残る。次の保存では「BASELINE と違う =
+    # 自分で変えた」と誤判定して堂々と上書きしてしまい、音量スライダーを
+    # 2回動かしただけで元の症状に戻る(実際そうなっていた)。
+    try:
+        config_data.update(merged)
+    except Exception:  # noqa: BLE001
+        pass
+    config_data = merged
+    ok = _write_settings(settings_path(), config_data)
+    if not ok:
+        fallback = _fallback_settings_path()
+        if fallback == settings_path():
+            return False  # 退避先そのものが書けなかった。もう行き先が無い。
+        ok = _write_settings(fallback, config_data)
+    if ok:
+        # 書けたぶんが「いまファイルに載っている値」になる。
+        _BASELINE = dict(config_data)
+    return ok
 
 
 def notes_png_path() -> Path:

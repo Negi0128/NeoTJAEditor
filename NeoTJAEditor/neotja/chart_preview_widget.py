@@ -689,6 +689,9 @@ class ChartPreviewWidget(QWidget):
         self._skin_balloon = None
         self._skin_roll = None
         self._pop_sound = None
+        # 破裂音へ掛ける「マスター × 効果音」。preview_dock が音量を動かす
+        # たびに set_pop_volume() で渡してくる。
+        self._pop_volume = 1.0
         # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
         # これを跨いだ瞬間に _pop_sound を鳴らす。set_preview_data で再構築。
         self._pop_times = []
@@ -1943,6 +1946,26 @@ class ChartPreviewWidget(QWidget):
         except Exception:
             return None
 
+    #: 破裂音そのものの下げ幅。balloon.wav は振幅いっぱい(peak 1.00)まで
+    #: 入っているのに対し、打音は実測 peak 0.53 前後しかない。同じ音量設定で
+    #: 鳴らすと破裂音だけ倍近く大きく聞こえるので、打音の高さへ合わせる。
+    POP_BASE_GAIN = 0.55
+
+    def set_pop_volume(self, volume: float):
+        """破裂音へ「マスター × 効果音」の音量を渡す。
+
+        **以前はここが 0.9 固定で、音量設定を一切見ていなかった。** 打音は
+        マスターと効果音の比率を通るので、マスターを絞るほど破裂音だけが
+        大きく浮く(実測の設定ではマスター 0.26 に対し破裂音 0.9)。
+        「風船を割る音がデカすぎる」の正体がこれ。
+        """
+        self._pop_volume = max(0.0, min(1.0, float(volume)))
+        if self._pop_sound is not None:
+            try:
+                self._pop_sound.setVolume(self._pop_volume * self.POP_BASE_GAIN)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _load_pop_sound(self):
         """風船/くす玉の破裂音を skin/balloon.wav から読み込む。無ければ None
         (音は鳴らさず演出だけ)。QSoundEffect は低遅延で短い WAV に向く。"""
@@ -1952,7 +1975,7 @@ class ChartPreviewWidget(QWidget):
         try:
             snd = QSoundEffect(self)
             snd.setSource(QUrl.fromLocalFile(path))
-            snd.setVolume(0.9)
+            snd.setVolume(getattr(self, "_pop_volume", 1.0) * self.POP_BASE_GAIN)
             return snd
         except Exception:
             return None

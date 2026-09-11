@@ -295,6 +295,7 @@ class PlayerWindow(QMainWindow):
             return
         # 第1引数は「config_data と preview_dock を持つ相手」。この窓が
         # それを満たすので自分を渡す(辞書ではない)。
+        prev_device = self.config_data.get("audio_output_device", "")
         dlg = SettingsDialog(self, self)
         if dlg.exec():
             self._save()
@@ -304,6 +305,16 @@ class PlayerWindow(QMainWindow):
                 self.core.dock.refresh_nameplate()
             except Exception:  # noqa: BLE001
                 pass
+            # 出力デバイスを変えたら、その場で開き直す。以前は書き戻すだけで、
+            # 次に起動するまで音の出口が変わらなかった。しかもその待ち時間に
+            # Editor 側の保存で設定ごと消えることがあり、「選んだのに何も
+            # 変わらない」という形で表に出ていた。
+            new_device = self.config_data.get("audio_output_device", "")
+            if new_device != prev_device:
+                try:
+                    self.core.dock.reopen_audio_output(new_device)
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ---- ドラッグ&ドロップ ----
     def dragEnterEvent(self, event):
