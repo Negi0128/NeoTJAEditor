@@ -3,6 +3,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
+from fractions import Fraction
+
 from neotja.easing import curve_value
 
 CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease-Out)", "S字 (Ease-In-Out)")
@@ -93,36 +95,37 @@ class StrobeGeneratorDialog(QDialog):
             return
 
         curve = self.cb_curve.currentText()
-        length_str = self.cb_length.currentText()
-        if length_str == "1/8小節":
-            fraction = 1 / 8
-        elif length_str == "1/4小節":
-            fraction = 1 / 4
-        elif length_str == "1/2小節":
-            fraction = 1 / 2
-        else:
-            fraction = 1.0
+        # 生成する長さ(全音符 = 1 の単位。4/4 の1小節 = 1)。
+        total = {
+            "1/8小節": Fraction(1, 8), "1/4小節": Fraction(1, 4),
+            "1/2小節": Fraction(1, 2),
+        }.get(self.cb_length.currentText(), Fraction(1))
 
-        measure_den = 0
-        for n in range(1, 10000):
-            x = (n * 240 * fps) / bpm
-            if abs(x - round(x)) < 1e-6:
-                measure_den = int(round(x))
-                break
-
-        if measure_den == 0:
-            self.txt_after.setPlainText("エラー: 適切なMEASUREが算出できません。")
+        # 1小節をちょうど1フレームにする。#MEASURE a/b の長さは
+        # (240 / BPM) × a/b 秒なので、1/FPS 秒にするには a/b = BPM / (240×FPS)。
+        # 以前は分子を 1 に決め打ちして「1/整数」になる倍数を探していたため、
+        # 240×FPS÷BPM が整数にならない組み合わせ(BPM200 の 144fps、BPM210 は
+        # どの FPS でも など)で1小節が1フレームの何分の1かになり、1フレームの
+        # 中で SCROLL が何度も切り替わって止まって見えなかった。分数のまま書けば
+        # どの BPM でもちょうど1フレームになる(1/整数 になる場合は今までと同じ)。
+        try:
+            bpm_q = Fraction(self.ed_bpm.text().strip())
+        except (ValueError, ZeroDivisionError):
             return
-
-        lines_count = int(measure_den * fraction)
-        if lines_count <= 0:
-            lines_count = 1
+        frame_len = bpm_q / (240 * fps)
+        frames = int(total // frame_len)
+        # 1フレームで割り切れない端数。最後に短い小節を1つ足して、ストロボ全体を
+        # 指定の長さぴったりにする(足さないと、後ろの譜面がずれる)。
+        rem = total - frames * frame_len
+        lines_count = frames + (1 if rem else 0)
 
         out = []
         out.append(f"// --- ストロボ開始 (BPM{bpm:g}, {fps}fps) ---")
-        out.append(f"#MEASURE 1/{measure_den}")
+        out.append(f"#MEASURE {frame_len.numerator}/{frame_len.denominator}")
 
         for i in range(lines_count):
+            if rem and i == lines_count - 1:
+                out.append(f"#MEASURE {rem.numerator}/{rem.denominator}")
             t = i / (lines_count - 1) if lines_count > 1 else 0.0
             y = curve_value(t, curve)
             val = f"{s + (e - s) * y:.{p}f}"
