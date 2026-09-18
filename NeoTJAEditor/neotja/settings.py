@@ -7,7 +7,8 @@ _SETTINGS_KEYS = (
     "run_config", "custom_shortcuts", "theme", "font_family", "font_size",
     "resize_ext", "resize_wrap_16", "resize_wrap_12", "roll_speed", "short_roll_comp",
     "preview_volume", "last_project_folder", "check_updates_on_startup", "auto_save_enabled",
-    "hit_sound_don_path", "hit_sound_ka_path", "sfx_volume", "audio_backend",
+    "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
+    "sfx_volume", "audio_backend",
     "master_volume", "audio_output_device",
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
@@ -16,6 +17,8 @@ _SETTINGS_KEYS = (
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "preview_zoom", "preview_speed", "waveform_window",
     "player_select_bgm", "player_select_bgm_volume",
+    # NeoTJAPlayer の演奏モード(実験的機能)。default_settings() と両方に要る。
+    "player_play_mode",
     # 更新で NeoTJAPlayer だけ入れ替えられなかったときの印。**次の起動で
     # 読み戻せないと意味が無い** — Editor 側は最新なので「更新の確認」は
     # 「最新です」と答えるだけで、Player を取りに行く道が無くなる。
@@ -110,6 +113,9 @@ def default_settings() -> dict:
         "show_tuner": False,
         # 実験的機能: アレンジ譜面(表=本家 / 裏=アレンジ を重ねて見る)。
         "arrange_ref": False,
+        # 実験的機能: NeoTJAPlayer の演奏モード(自分で叩いて判定する)。
+        # オンにするとコース選択のあとに「再生／演奏」を選ぶ画面が出る。
+        "player_play_mode": False,
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,
@@ -124,6 +130,9 @@ def default_settings() -> dict:
         "auto_save_enabled": False,
         "hit_sound_don_path": "",
         "hit_sound_ka_path": "",
+        # 上の2つ(自分で選んだ WAV)を使うか。既定は使わない = System の
+        # TNDE-R/Sounds/Taiko の dong.ogg / ka.ogg が鳴る。
+        "hit_sound_use_custom": False,
         # 効果音(打音/メトロノーム共通)の音量。ミキサー経路の SE 音量スライダー。
         "sfx_volume": 0.9,
         # 再生バックエンド: "mixer"(既定, sounddevice の単一ミキサー)/"qt"(旧
@@ -202,7 +211,8 @@ def default_settings() -> dict:
         # 音声波形モードで一度に見せる秒数(表示幅)。Alt/Ctrl+ホイールで
         # 1〜60秒のあいだを変えられ、変えた値がそのまま次回の既定になる。
         # 表示倍率(preview_zoom)やモードと同じ「触ったら覚える」扱い。
-        "waveform_window": 6.0,
+        # 音声波形・作譜の表示幅(秒)。6 ÷ 1.25^5(preview_dock.WAVEFORM_WINDOW_DEFAULT)。
+        "waveform_window": 6.0 / (1.25 ** 5),
         # NeoTJAPlayer の選曲画面で、譜面を開いていないあいだ BGM を流すか。
         # 音源は System の TNDE-R/Sounds/BGM/SongSelect.ogg。
         "player_select_bgm": True,
@@ -558,18 +568,29 @@ def skin_sound_paths():
 
 
 def effective_hit_sound_paths(cfg):
-    """実際に鳴らす打音 (don, ka)。環境設定で指定した自前の WAV が両方とも
-    実在すればそれ、無ければキャッシュのもの、それも無ければ ("", "") =
-    内蔵の合成音。
+    """実際に鳴らす打音 (don, ka)。選ぶ順は:
+
+      1. 環境設定で「自分で選んだ WAV を使う」(hit_sound_use_custom)がオンで、
+         指定の WAV が両方とも実在する → それ
+      2. System(TNDE-R/Sounds/Taiko の dong.ogg / ka.ogg をキャッシュへ
+         デコードしたもの)→ **既定はこれ**
+      3. どちらも無い → ("", "") = 内蔵の合成音
+
+    打音は System から取る(利用者の指定)。以前は太鼓さん次郎のインストール
+    先を自動で探して設定に書いており、System の音があってもそちらが鳴って
+    いた。自動で探すのはやめ、設定に残っている指定のファイルも「自分で
+    選んだ WAV を使う」がオンのときにしか使わない。
 
     再生と動画書き出しはここで足並みを揃える必要がある。設定だけを見ると、
     音がキャッシュ由来のときに録画だけ合成音になってしまい、編集中に
     聞こえている音と違うものが書き出される。"""
-    cfg_don = (cfg or {}).get("hit_sound_don_path", "") or ""
-    cfg_ka = (cfg or {}).get("hit_sound_ka_path", "") or ""
-    if cfg_don and cfg_ka and os.path.exists(cfg_don) and os.path.exists(cfg_ka):
+    cfg = cfg or {}
+    cfg_don = cfg.get("hit_sound_don_path", "") or ""
+    cfg_ka = cfg.get("hit_sound_ka_path", "") or ""
+    have_cfg = bool(cfg_don and cfg_ka and os.path.exists(cfg_don) and os.path.exists(cfg_ka))
+    if cfg.get("hit_sound_use_custom", False) and have_cfg:
         return cfg_don, cfg_ka
     skin_don, skin_ka = skin_sound_paths()
     if skin_don and skin_ka:
         return skin_don, skin_ka
-    return cfg_don, cfg_ka
+    return "", ""

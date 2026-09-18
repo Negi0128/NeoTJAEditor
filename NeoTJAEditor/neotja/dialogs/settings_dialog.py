@@ -43,9 +43,9 @@ class SettingsDialog(QDialog):
         "short_roll_comp", "check_updates_on_startup", "auto_save_enabled",
         "se_text_enabled", "note_input_sound",
         "record_output_dir",
-        "hit_sound_don_path", "hit_sound_ka_path",
+        "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
-        "player_select_bgm", "player_select_bgm_volume",
+        "player_select_bgm", "player_select_bgm_volume", "player_play_mode",
         "peepo_chart_edit", "gpu_render", "gpu_vsync",
         "preview_max_fps",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
@@ -470,6 +470,11 @@ class SettingsDialog(QDialog):
 
         # --- 打音の音源 ---
         form = self._group(outer, "打音の音源")
+        # オフ(既定)なら System の TNDE-R/Sounds/Taiko の dong.ogg / ka.ogg が
+        # 鳴る。下のファイルを選ぶと自動でオンになる。
+        self.hit_custom_check = QCheckBox("自分で選んだ WAV を使う")
+        self.hit_custom_check.setChecked(bool(cfg.get("hit_sound_use_custom", False)))
+        form.addRow(self.hit_custom_check)
         self.hit_don_edit = QLineEdit(cfg.get("hit_sound_don_path", ""))
         self.hit_don_edit.setReadOnly(True)
 
@@ -477,6 +482,7 @@ class SettingsDialog(QDialog):
             p, _ = QFileDialog.getOpenFileName(self, "ドン音源を選択", "", "音声ファイル (*.wav);;すべて (*)")
             if p:
                 self.hit_don_edit.setText(p)
+                self.hit_custom_check.setChecked(True)
 
         form.addRow("ドン(WAV)", self._path_row(self.hit_don_edit, browse_don))
 
@@ -487,9 +493,12 @@ class SettingsDialog(QDialog):
             p, _ = QFileDialog.getOpenFileName(self, "カツ音源を選択", "", "音声ファイル (*.wav);;すべて (*)")
             if p:
                 self.hit_ka_edit.setText(p)
+                self.hit_custom_check.setChecked(True)
 
         form.addRow("カツ(WAV)", self._path_row(self.hit_ka_edit, browse_ka))
-        form.addRow(self._hint("未指定なら内蔵の合成音が鳴ります。"))
+        form.addRow(self._hint(
+            "オフのときは System（TNDE-R/Sounds/Taiko）の dong.ogg / ka.ogg が鳴ります。"
+            "System が見つからないときは内蔵の合成音です。"))
 
         # --- ワイヤレス調整 ---
         form = self._group(outer, "ワイヤレス調整（出力遅延の補正）")
@@ -878,6 +887,14 @@ class SettingsDialog(QDialog):
             "アレンジで足した音符—が薄く出るので、どこを埋めたのかが"
             "見えます。おにとうらの両方がある譜面でだけ出ます。"))
 
+        self.player_play_mode_check = QCheckBox("演奏モード（実験的）")
+        self.player_play_mode_check.setChecked(bool(cfg.get("player_play_mode", False)))
+        form2.addRow(self.player_play_mode_check)
+        form2.addRow(self._hint(
+            "コースを選んだあとに「再生／演奏」を選ぶ画面を出します。演奏を選ぶと、"
+            "D F J K（左縁・左面・右面・右縁）で自分で叩いて判定・スコア・魂ゲージが"
+            "動きます。曲の終わりの演出やリザルトはまだありません。"))
+
         outer.addStretch()
         return w
 
@@ -968,7 +985,9 @@ class SettingsDialog(QDialog):
         cfg["warn_missing_system"] = self.warn_missing_system_check.isChecked()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
+        cfg["hit_sound_use_custom"] = self.hit_custom_check.isChecked()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
+        cfg["player_play_mode"] = self.player_play_mode_check.isChecked()
         cfg["gpu_render"] = self.gpu_render_check.isChecked()
         cfg["gpu_vsync"] = self.gpu_vsync_check.isChecked()
         cfg["preview_max_fps"] = int(self.max_fps_spin.value())

@@ -1087,6 +1087,8 @@ class TJACourseAnalyzer:
         active_roll = None
         active_balloon = None
         active_kusudama = None
+        # 終端 8 が無いまま同じ種類の次の頭に上書きされた長い音符 (時刻, 文字)。
+        orphan_heads = []
         balloon_idx = 0
 
         for m_events in measures:
@@ -1137,13 +1139,21 @@ class TJACourseAnalyzer:
                     if v in "1234":
                         notes.append((total_time, v, curr_bpm, curr_scroll))
                     elif v in "56":
+                        if active_roll is not None:
+                            # 終端 8 の無い連打が次の連打に上書きされる。区間としては
+                            # 今までどおり返さないが、作譜ペインが頭を描けるよう印は残す。
+                            orphan_heads.append((float(active_roll[0]), active_roll[1]))
                         active_roll = (total_time, v, curr_bpm, curr_scroll)
                     elif v == "7":
                         hits = balloon_defs[balloon_idx] if balloon_idx < len(balloon_defs) else 0
+                        if active_balloon is not None:
+                            orphan_heads.append((float(active_balloon[0]), "7"))
                         active_balloon = (total_time, hits, curr_bpm, curr_scroll)
                         balloon_idx += 1
                     elif v == "9":
                         hits = balloon_defs[balloon_idx] if balloon_idx < len(balloon_defs) else 0
+                        if active_kusudama is not None:
+                            orphan_heads.append((float(active_kusudama[0]), "9"))
                         active_kusudama = (total_time, hits, curr_bpm, curr_scroll)
                         balloon_idx += 1
                     elif v == "8":
@@ -1171,13 +1181,21 @@ class TJACourseAnalyzer:
                 if curr_bpm > 0:
                     total_time += Decimal(240) * measure_val / curr_bpm
 
+        # 終端 8 が無いまま譜面が終わった長い音符の開始時刻。区間の形は
+        # 今までどおり「コースの終わりまで」で返し、別にこの印だけを足す
+        # (作譜ペインは、書きかけの連打を先頭の音符だけで描きたい)。
+        # 要素は (開始時刻, 頭の文字)。途中で上書きされた頭も含める。
+        open_spans = list(orphan_heads)
         if active_roll is not None:
             dur = float(total_time - active_roll[0])
             rolls.append((active_roll[0], total_time, active_roll[1], active_roll[2], active_roll[3], self._roll_hits(dur)))
+            open_spans.append((float(active_roll[0]), active_roll[1]))
         if active_balloon is not None:
             balloons.append((active_balloon[0], total_time, active_balloon[2], active_balloon[3], active_balloon[1]))
+            open_spans.append((float(active_balloon[0]), "7"))
         if active_kusudama is not None:
             kusudamas.append((active_kusudama[0], total_time, active_kusudama[2], active_kusudama[3], active_kusudama[1]))
+            open_spans.append((float(active_kusudama[0]), "9"))
         if gogo_start is not None:
             gogo_regions.append((gogo_start, total_time))
 
@@ -1211,6 +1229,7 @@ class TJACourseAnalyzer:
             "rolls": out_rolls,
             "balloons": out_balloons,
             "kusudamas": out_kusudamas,
+            "open_spans": open_spans,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
             # 風船が割れるまでの時間を出すのに使う秒間打数(環境設定の連打秒速)。
             # 譜面と一緒に持たせておくと、描く側が設定を読み直さずに済む。

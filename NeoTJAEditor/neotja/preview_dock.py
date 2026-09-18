@@ -866,12 +866,16 @@ class PreviewDock(QDockWidget):
                  master_volume_cb=None, audio_output_device="",
                  waveform_stereo=True, waveform_stereo_cb=None,
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
+                 chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
                  checkpoint_lines_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
         self.note_edit_cb = note_edit_cb
+        # 作譜モードの PeepoDrumKit 式の操作(置く/消す/敷き詰め/連打など)。
+        # 結果を返してもらう必要があるので、シグナルではなく直接呼ぶ。
+        self.chart_op_cb = chart_op_cb
         self.config_data = config_data if config_data is not None else {}
         # config_data を書き換えたあとディスクへ落とすためのもの(MainWindow が持つ)。
         self.save_settings_cb = save_settings_cb
@@ -1512,12 +1516,19 @@ class PreviewDock(QDockWidget):
         self._wire_waveform(self.chart_edit, sync_stereo=False)
         self.chart_edit.set_stereo_view(False)
         self.chart_edit.set_follow_window(self._waveform_window())
+        # 作譜ペインで Alt+ホイールした幅も、音声波形と同じく次回の既定にする。
+        self.chart_edit.followWindowChanged.connect(self._on_waveform_window_changed)
         # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
         self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
         self.chart_edit.setFixedHeight(170)
         self.chart_edit.set_legend_visible(
             bool(self.config_data.get("chart_edit_legend", True)))
         self.chart_edit.noteEdited.connect(self._on_note_edited)
+        self.chart_edit.set_op_cb(self._on_chart_op)
+        # 編集カーソルと再生位置は同じもの。カーソルを動かしたら再生位置も
+        # そこへ移す(再生位置が動いたときにカーソルが付いていくのは
+        # 編集ペインの set_position 側)。
+        self.chart_edit.cursorMoved.connect(self._on_edit_cursor_moved)
         self.chart_edit.legendToggled.connect(self._on_legend_toggled)
         v.addWidget(self.chart_edit)
         v.addStretch()
@@ -1604,6 +1615,28 @@ class PreviewDock(QDockWidget):
         担当(エディタと Undo を持っているのは向こう)なので、そのまま渡す。"""
         if self.note_edit_cb is not None:
             self.note_edit_cb(m_index, slot, grid, char)
+
+    def _on_chart_op(self, op):
+        """編集ペインの操作を MainWindow へ渡し、結果(暫定表示用)を返す。"""
+        if self.chart_op_cb is None:
+            return None
+        res = self.chart_op_cb(op)
+        if op.get("kind") == "peek_command":
+            # 入力欄の初期値: その位置で今効いている BPM / HS。レーンが持って
+            # いる変化点は **譜面時刻** なので、音源時刻へ OFFSET を足して引く。
+            import bisect as _bisect
+            res = dict(res or {})
+            t = float(op.get("time", 0.0)) + float(getattr(self.chart_edit, "offset", 0.0) or 0.0)
+            try:
+                if op.get("name") == "BPMCHANGE":
+                    res["default"] = float(self.chart_preview.bpm_at(t))
+                else:
+                    ch = list(self.chart_preview._scroll_changes or [(0.0, 1.0)])
+                    i = max(0, _bisect.bisect_right([c[0] for c in ch], t) - 1)
+                    res["default"] = float(ch[i][1])
+            except Exception:  # noqa: BLE001
+                res.setdefault("default", None)
+        return res
 
     def _build_title_page(self) -> QWidget:
         """非表示モードのページ: 情報カードは出さず、曲名とサブタイトルだけを
@@ -1722,17 +1755,23 @@ class PreviewDock(QDockWidget):
     # 25% は小さすぎて譜面が読めないので廃止した。
     ZOOM_STEPS = (100, 75, 50)
 
+    #: 音声波形・作譜の表示幅の既定(秒)。6 秒から Alt+ホイールで5段階拡大した
+    #: 値(6 ÷ 1.25^5)。利用者が作譜で使っている倍率を既定にした。ホイールの
+    #: 刻み(1.25倍)の上に乗る値にしておくと、戻したときに端数が出ない。
+    WAVEFORM_WINDOW_DEFAULT = 6.0 / (1.25 ** 5)
+
     def _waveform_window(self) -> float:
-        """音声波形モードの表示幅(秒)。設定に無ければ 6 秒。
+        """音声波形モードの表示幅(秒)。設定に無ければ WAVEFORM_WINDOW_DEFAULT。
 
         壊れた値(0 や文字列)が入っていても起動できるように、ここで範囲へ
         押し込む。上限・下限は wheelEvent と同じ 1〜60 秒。"""
+        default = self.WAVEFORM_WINDOW_DEFAULT
         try:
-            v = float(self.config_data.get("waveform_window", 6.0))
+            v = float(self.config_data.get("waveform_window", default))
         except (TypeError, ValueError):
-            return 6.0
+            return default
         if v != v or v <= 0:          # NaN / 0 / 負
-            return 6.0
+            return default
         return max(1.0, min(v, 60.0))
 
     def _on_waveform_window_changed(self, seconds: float):
@@ -1743,6 +1782,11 @@ class PreviewDock(QDockWidget):
         戻す操作で前回の起動時の幅に戻ってしまう。"""
         seconds = max(1.0, min(float(seconds), 60.0))
         self.game_waveform.set_follow_window(seconds)
+        # 作譜ペインも同じ幅にそろえる(どちらで変えても次回の既定になる)。
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.set_follow_window(seconds)
+            ce.set_position(ce.position_sec)
         if self.config_data.get("waveform_window") == seconds:
             return
         self.config_data["waveform_window"] = seconds
@@ -1986,6 +2030,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_spans(*self._preview_spans)
         self.chart_edit.set_commands(*self._preview_commands)
         if preview_data is not None:
+            self.chart_edit.set_open_spans(preview_data.get("open_spans", []))
             # 小節時刻が無いと編集カーソルの住所が決まらない。preview_data が
             # 来ていないときは前回の値を残す(消すとカーソルが死ぬ)。
             self.chart_edit.set_bar_times(preview_data.get("bar_times", []),
@@ -2179,6 +2224,12 @@ class PreviewDock(QDockWidget):
         # だけこちらで反映する。
         if not playing:
             self.game_waveform.set_position(ms / 1000.0)
+            # 作譜ペインにも渡す。ここが抜けていて、停止中にカーソルを動かすと
+            # 音源はシークされるのに、作譜ペインの赤い線と表示が元の位置に
+            # 取り残されていた(再生中はレーンの frame_cb が届くので気づかない)。
+            ce = getattr(self, "chart_edit", None)
+            if ce is not None:
+                ce.set_position(ms / 1000.0)
         self.chart_preview.set_playback(ms / 1000.0, playing)
         self.time_label.setText(f"{_fmt_time(ms)} / {_fmt_time(self._duration_ms)}")
         if not self.seek_slider.isSliderDown():
@@ -2228,6 +2279,10 @@ class PreviewDock(QDockWidget):
 
     def _on_playing_changed(self, playing):
         self.btn_play.setText("一時停止" if playing else "再生")
+        # 再生中は作譜ペインの黄色いカーソルを消し、赤い線だけにする。
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.set_playing(playing and not getattr(self, "_audition", False))
         if getattr(self, "_audition", False):
             # 試聴中。音は鳴らすが譜面は動かさない(set_audition 参照)。
             self.chart_preview.set_playback(self.audio.position() / 1000.0, False)
@@ -2263,6 +2318,18 @@ class PreviewDock(QDockWidget):
 
     def _on_seek_requested(self, seconds):
         self.audio.seek(int(seconds * 1000))
+
+    def _on_edit_cursor_moved(self, seconds):
+        """作譜ペインで編集カーソルを動かした。音源をそこへシークし、停止中は
+        上のレーンにも同じ時刻を直接渡す。
+
+        MixerAudioEngine.seek() はシークを音声スレッドへ投げた直後に
+        **シーク前の位置** を positionChanged で出す(実測)。停止中はそのあと
+        位置が届かないこともあり、レーンだけが1つ前の場所に取り残されていた。
+        seek() の中で出た古い位置を、ここで正しい時刻で上書きする。"""
+        self.audio.seek(int(seconds * 1000))
+        if not self.audio.is_playing():
+            self.chart_preview.set_playback(seconds, False)
 
     def seek_to_seconds(self, seconds: float):
         self.audio.seek(max(0, int(seconds * 1000)))
@@ -2331,6 +2398,7 @@ class PreviewDock(QDockWidget):
         # (カーソルの住所計算に要る)。正式な解析が届いたので暫定表示は捨てる。
         self.chart_edit.set_notes(self._preview_notes)
         self.chart_edit.set_spans(*self._preview_spans)
+        self.chart_edit.set_open_spans(data.get("open_spans", []))
         self.chart_edit.set_commands(*self._preview_commands)
         self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
         self.chart_edit.clear_pending()

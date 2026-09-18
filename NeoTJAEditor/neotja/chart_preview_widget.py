@@ -305,13 +305,26 @@ class ChartPreviewWidget(QWidget):
     # 音符の半径。スキン(Notes.png)を使うときは素材の透明な余白ごと
     # この直径へ縮めるため、見た目の円は半径より一回り小さく出る。本家の
     # キャプチャと 1:1 で並べて、円の直径が実測 62px に見えるまで上げた値。
-    NOTE_R_SMALL = 38
-    NOTE_R_BIG = 52
+    # 音符の半径。**本家に合わせた実測値**で、勝手に決めた数ではない。
+    # 出所が2つあり、どちらもほぼ一致する:
+    #   ・スキン素材 Notes.png の駒の実寸(1280x720 用) … 小 71x70 / 大 106x106
+    #   ・Anasoko(本家と同じ見た目のアプリ、1920x1080)の素材を 2/3 換算
+    #     … 小 106 -> 70.7 / 大 160 -> 106.7
+    # 以前は 38 / 52(直径 76 / 104)で、**小音符が 7.5% 大きく**、大音符が
+    # わずかに小さかった。大小の比も本家の 1.51 倍に対し 1.37 倍しかなく、
+    # 「小音符が大きい」という見え方になっていた。
+    # レーンの高さ(LANE_H = 130)は本家と一致している(Anasoko の段の間隔
+    # 195 を 2/3 換算)ので、ずれていたのは音符だけ。
+    NOTE_R_SMALL = 35.5
+    NOTE_R_BIG = 53.0
     # 判定円。本家(TNDE)のキャプチャ実測値: 外径 106px(半径53)、内側の輪は
     # 半径35。音符がこの内側にすっぽり入る比率になっている。
     JUDGE_RING_R = 53
     JUDGE_RING_R_INNER = 35
-    LANE_HEIGHT = NOTE_R_BIG * 2 + 30  # fixed box height too, so resizing the window can't stretch it vertically either
+    # 半径が小数(本家の実測値)になったので整数へ丸める。ゲーム画面では
+    # set_lane_geometry が 130 で上書きするので効かないが、単体で使うときに
+    # レーンの高さが小数になると寸法の計算が揺れる。
+    LANE_HEIGHT = int(round(NOTE_R_BIG * 2)) + 30  # fixed box height too, so resizing the window can't stretch it vertically either
     TOP_MARGIN = 56    # room above the lane box for the live roll/balloon count readout
     # 打音表記 (SE text) strip, directly under the note band and inside the
     # lane box. PeepoDrumKit draws the syllable horizontally centered on the
@@ -469,6 +482,10 @@ class ChartPreviewWidget(QWidget):
         self._added_notes = frozenset()
         # 演奏モードの記録(PlayState)。再生モードでは None のまま。
         self._play_state = None
+        # 演奏モードで、同時押しの猶予(1フレーム)を待っている打。
+        # [(譜面時刻, 種類, 側), ...]。_flush_presses が1つに絞って判定する。
+        self._pending_presses = []
+        self._chord_timer = None
         self._note_bpms = []
         self._note_scrolls = []
         # 音符/小節線の見かけ速度(px/秒)。_rebuild_min_vis_speed で作り直す。
@@ -901,7 +918,10 @@ class ChartPreviewWidget(QWidget):
         st = self._play_state
         if st is not None:
             # 演奏モードでは「時刻から数える」をやめ、叩いた記録を見る。
-            st.advance(now)
+            # 同時押しの猶予を待っている打があるなら、その時刻より先へは
+            # 見送りを進めない(待っている間に窓から出て不可になるのを防ぐ)。
+            pend = self._pending_presses
+            st.advance(min(now, pend[0][0]) if pend else now)
             return now, st.combo, self._play_recent_hit(st, now)
         combo = bisect.bisect_right(self._note_times, now)
         return now, combo, self._recent_hit(now)
@@ -1008,8 +1028,9 @@ class ChartPreviewWidget(QWidget):
         st = self._play_state
         if st is not None:
             # 演奏モードは譜面ではなく**押したキー**で光る。空打ちでも光る。
-            for n, (el, kind) in enumerate(st.recent_presses(now, window)):
-                out.append((el, "1" if kind == KIND_DON else "2", n))
+            # 番号の偶奇が左右なので、叩いた側(0=左 / 1=右)をそのまま渡す。
+            for el, kind, side in st.recent_presses(now, window):
+                out.append((el, "1" if kind == KIND_DON else "2", side))
             return out
         t0 = now - window
         if self._note_times:
@@ -1108,6 +1129,18 @@ class ChartPreviewWidget(QWidget):
 
         叩ききれなかった風船は割れないので、数に入れない(虹も出ない)。"""
         best = None
+        st = self._play_state
+        if st is not None:
+            # 演奏モードは「叩ききった時刻」。区間の終点ではない。
+            for spans in (self._balloons, self._kusudamas):
+                for sp0 in spans:
+                    sp = st.span_at_start(sp0[0])
+                    if sp is None or sp.pop_t is None:
+                        continue
+                    el = now - sp.pop_t
+                    if 0.0 <= el < window and (best is None or el < best):
+                        best = el
+            return best
         for spans, starts, flags in zip(
                 (self._balloons, self._kusudamas), self._span_starts[1:],
                 (self._balloon_pops, self._kusudama_pops)):
@@ -1125,6 +1158,63 @@ class ChartPreviewWidget(QWidget):
                 j -= 1
         return best
 
+    def _play_span_end(self, start, fallback):
+        """演奏モードでの区間の終点。再生モードならそのまま返す。
+
+        レーンが持っている風船の区間は balloon_pop_spans() で「自動で
+        叩ききる時刻」まで切り詰めてある。演奏モードでは本来の終点まで
+        叩けるので、記録側(_Span.end)のほうを使う。"""
+        st = self._play_state
+        if st is None:
+            return fallback
+        sp = st.span_at_start(start)
+        return fallback if sp is None else sp.end
+
+    def _play_balloon_view(self, now: float):
+        """演奏モードで判定枠に出す風船の (コマ, 割れてからの秒)。
+
+        出さないときは None。再生モードとは決め方がまるで違う:
+
+          ふくらみ … 区間の経過時間ではなく **叩いた数の割合**
+          割れる  … 区間の終点ではなく **叩ききった瞬間**
+          出す出さない … 一度も叩いていない風船は出さない(本家も、最初の
+                        1打で初めて風船の絵が出る)。叩ききれなかった風船は
+                        終点で消える。
+
+        割れてからの秒は破裂のコマを出しておく時間に使う。割れていなければ
+        None を返す。"""
+        st = self._play_state
+        if st is None:
+            return None
+        for spans, starts in zip((self._balloons, self._kusudamas),
+                                 self._span_starts[1:]):
+            if not spans:
+                continue
+            j = bisect.bisect_right(starts, now) - 1
+            if j < 0:
+                continue
+            b_start = spans[j][0]
+            if now < b_start:
+                continue
+            sp = st.span_at_start(b_start)
+            if sp is None or not sp.begun:
+                continue
+            # **終点は記録側のものを使う。** レーンが持っている区間は
+            # 「自動で叩ききる時刻」まで切り詰めたほうで、演奏モードだと
+            # まだ叩けるうちに風船が消えてしまう(実際に消えた)。
+            b_end = sp.end
+            if sp.pop_t is not None:
+                el = now - sp.pop_t
+                if 0.0 <= el < self.BALLOON_BURST_SEC:
+                    return (self.BALLOON_BURST_FRAME, el)
+                continue
+            if now >= b_end:
+                continue        # 叩ききれなかった。終点で消す
+            ratio = sp.hits / float(max(1, sp.need))
+            last = self.BALLOON_BURST_FRAME - 1
+            return (max(0, min(last, int(round(ratio * last)))), None)
+        return None
+
     def balloon_sprite_frame(self, now: float):
         """判定枠に固定して出す風船の絵のコマ番号。出さないときは None。
 
@@ -1134,6 +1224,9 @@ class ChartPreviewWidget(QWidget):
         burst = self.BALLOON_BURST_SEC if self._skin_balloon_seq is not None else 0.0
         if self._skin_balloon_seq is None:
             return None
+        if self._play_state is not None:
+            view = self._play_balloon_view(now)
+            return None if view is None else view[0]
         for spans, starts in zip((self._balloons, self._kusudamas),
                                  self._span_starts[1:]):
             if not spans:
@@ -1157,6 +1250,11 @@ class ChartPreviewWidget(QWidget):
         しぼんでから右下へ飛んでいく(BALLOON_* の説明を参照)。"""
         if self._skin_balloon_seq is None:
             return None
+        if self._play_state is not None:
+            # 演奏モードは叩いた数で決まる。しぼんで飛ぶ動きは今は出さない
+            # (再生モードと同じく、叩ききれなければ終点で消す)。
+            view = self._play_balloon_view(now)
+            return None if view is None else (view[0], 0.0, 0.0, 1.0)
         for spans, starts, flags in zip(
                 (self._balloons, self._kusudamas), self._span_starts[1:],
                 (self._balloon_pops, self._kusudama_pops)):
@@ -1266,9 +1364,9 @@ class ChartPreviewWidget(QWidget):
     LOADING_TEXT = "Loading Now"
     LOADING_FONT_SIZE = 34
 
-    ROLL_HOLD_SEC = 1.0
+    ROLL_HOLD_SEC = 1.433
     # そのうち最後の何秒かけて薄くしながら消すか。
-    ROLL_FADE_SEC = 0.1
+    ROLL_FADE_SEC = 0.083
 
     def _loading_font(self):
         """読み込み中の幕に使う字。曲名と同じ勘亭流。
@@ -1315,6 +1413,31 @@ class ChartPreviewWidget(QWidget):
         自然に消えるときだけ最後の ROLL_FADE_SEC で薄くする(次が来て
         入れ替わるときは薄くしない — 一瞬なので、かえって目につく)。"""
         t = self._current_chart_time() if now is None else now
+        st = self._play_state
+        if st is not None:
+            # 演奏モードは叩いた数そのもの。連打は数え上がり、風船は残りを
+            # 減らす。叩ききった風船はその場で消える(残り0を出したままに
+            # しない)。一度も叩いていない風船も出さない。
+            sp = st.span_at(t)
+            if sp is not None:
+                if sp.need <= 0:
+                    return sp.hits, "roll", 1.0
+                if sp.begun and sp.pop_t is None:
+                    return sp.need - sp.hits, "balloon", 1.0
+                return None, None, 0.0
+            held = self._held_roll(t)
+            if held is None:
+                return None, None, 0.0
+            _count, alpha = held
+            last = None
+            for r in self._rolls:
+                if r[1] > t:
+                    break
+                last = r
+            sp = None if last is None else st.span_at_start(last[0])
+            if sp is None or sp.hits <= 0:
+                return None, None, 0.0
+            return sp.hits, "roll", alpha
         for r in self._rolls:
             if r[0] <= t <= r[1]:
                 return self._live_top_count(t), "roll", 1.0
@@ -1376,6 +1499,18 @@ class ChartPreviewWidget(QWidget):
         の3つ目から取れるので、ここでは種類だけを返す。"""
         st = self._play_state
         return st.last_judge[1] if (st is not None and st.last_judge) else None
+
+    def _splash_hit(self, now: float):
+        """演奏モードのしぶき用 (経過秒, 文字, コンボ番号)。
+
+        _recent_hit() は「判定線を通過した音符」を返すので、演奏モードで
+        そのまま使うと **叩かなくても火花が出る**。ここは last_judge を
+        見て、良か可で入ったときだけ返す(不可と見送りでは出さない)。"""
+        st = self._play_state
+        lj = st.last_judge if st is not None else None
+        if lj is None or lj[1] == "bad":
+            return None
+        return (now - lj[0], lj[2], lj[3])
 
     def _recent_hit(self, now: float):
         """直近に判定線を通過した音符の (経過秒, 文字, コンボ番号) を返す。
@@ -1731,6 +1866,11 @@ class ChartPreviewWidget(QWidget):
     def _scan_balloon_pops(self):
         """再生中に譜面時間 now が風船/くす玉の終点を跨いだら破裂音を鳴らす。
         叩ききって割れた瞬間の演出音。停止/一時停止/シーク中は鳴らさない。"""
+        if self._play_state is not None:
+            # 演奏モードの破裂は時刻ではなく打数で決まるので、ここでは鳴らさ
+            # ない。叩ききった瞬間に _play_press が鳴らす。
+            self._last_pop_scan_t = None
+            return
         if not self._playing or self._pop_sound is None or not self._pop_times:
             self._last_pop_scan_t = None
             return
@@ -1817,7 +1957,7 @@ class ChartPreviewWidget(QWidget):
                     # note diameter) so the paint loop just blits it - the
                     # per-frame scaledToHeight it used to do was a frame-drop
                     # source whenever a roll was on screen.
-                    hs = _pil_to_qpixmap(hd).scaledToHeight(int(r * 2),
+                    hs = _pil_to_qpixmap(hd).scaledToHeight(int(round(r * 2)),
                                                             Qt.SmoothTransformation)
                     return hs, _pil_to_qpixmap(mid), _pil_to_qpixmap(cap)
 
@@ -1939,7 +2079,7 @@ class ChartPreviewWidget(QWidget):
             # frame-drop source). face_r/off let the caller center the round
             # face on the judgment point without re-deriving them each frame.
             sprite_h = (2.0 * self.NOTE_R_SMALL) / face_frac
-            scaled = pix.scaledToHeight(max(1, int(sprite_h)), Qt.SmoothTransformation)
+            scaled = pix.scaledToHeight(max(1, int(round(sprite_h))), Qt.SmoothTransformation)
             face_r = sprite_h * face_frac / 2.0
             return {"pix": pix, "face_frac": face_frac,
                     "scaled": scaled, "face_r": face_r}
@@ -2062,11 +2202,11 @@ class ChartPreviewWidget(QWidget):
             pil_sprites = {}
         for c in ("1", "2"):
             if c not in small and c in pil_sprites:
-                d = self.NOTE_R_SMALL * 2
+                d = int(round(self.NOTE_R_SMALL * 2))
                 small[c] = _pil_to_qpixmap(pil_sprites[c].resize((d, d), Image.Resampling.LANCZOS))
         for c in ("3", "4"):
             if c not in big and c in pil_sprites:
-                d = self.NOTE_R_BIG * 2
+                d = int(round(self.NOTE_R_BIG * 2))
                 big[c] = _pil_to_qpixmap(pil_sprites[c].resize((d, d), Image.Resampling.LANCZOS))
         # tier 3: procedural fallback
         for c in ("1", "2"):
@@ -2128,7 +2268,7 @@ class ChartPreviewWidget(QWidget):
                 side = max(cell.width, cell.height)
                 sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
                 sq.paste(cell, ((side - cell.width) // 2, (side - cell.height) // 2))
-                d = r * 2
+                d = int(round(r * 2))     # 半径は小数(本家の実測値)なので丸める
                 target[c] = _pil_to_qpixmap(sq.resize((d, d), Image.Resampling.LANCZOS))
         except Exception:
             return {}, {}
@@ -2348,9 +2488,12 @@ class ChartPreviewWidget(QWidget):
     _KEY_PREV = frozenset((Qt.Key_D, Qt.Key_S, Qt.Key_PageDown, Qt.Key_Left))
     _KEY_NEXT = frozenset((Qt.Key_K, Qt.Key_L, Qt.Key_PageUp, Qt.Key_Right))
 
-    #: 演奏モードの打面。慣例どおり 左カツ=D / 左ドン=F / 右ドン=J / 右カツ=K。
-    _KEY_DON = (Qt.Key_F, Qt.Key_J)
-    _KEY_KA = (Qt.Key_D, Qt.Key_K)
+    #: 演奏モードの打面。D=左縁 / F=左面 / J=右面 / K=右縁。
+    #: 値は (種類, 側)。側は 0=左 / 1=右 で、太鼓のどちらの半分を光らせるか。
+    _KEY_PADS = {Qt.Key_D: (KIND_KA, 0), Qt.Key_F: (KIND_DON, 0),
+                 Qt.Key_J: (KIND_DON, 1), Qt.Key_K: (KIND_KA, 1)}
+    #: 同時押しとみなす猶予。最初の打から1フレーム(60fps)以内の打をまとめる。
+    PRESS_CHORD_SEC = 1.0 / 60.0
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -2360,14 +2503,12 @@ class ChartPreviewWidget(QWidget):
         if self._play_state is not None:
             if event.isAutoRepeat():
                 return          # キーを押しっぱなしの連射は打とみなさない
-            if key in self._KEY_DON:
-                self._play_press(KIND_DON)
+            pad = self._KEY_PADS.get(key)
+            if pad is not None:
+                self._queue_press(*pad)
                 return
-            if key in self._KEY_KA:
-                self._play_press(KIND_KA)
-                return
-            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
-                self.pause()    # 中断だけは残す
+            if key == Qt.Key_Space:
+                self.pause()    # 中断だけは残す(Enter は叩く手の近くで誤爆するので外した)
                 return
             return
         # 再生/一時停止(f/j): 再生中なら一時停止、そうでなければ小節頭の少し前
@@ -2430,21 +2571,63 @@ class ChartPreviewWidget(QWidget):
         いるときだけそちらを見る。**入っていなければ今までどおり時刻から
         導く** ので、Editor の譜面プレビューと録画は何も変わらない。"""
         self._play_state = state
+        self._pending_presses = []
+        if self._chord_timer is not None:
+            self._chord_timer.stop()
         self._request_repaint()
 
     def play_state(self):
         return self._play_state
 
-    def _play_press(self, kind):
-        """打面が押された。判定して、音を鳴らして、描き直す。"""
+    def _queue_press(self, kind, side):
+        """打面が押された。すぐには判定せず、1フレームだけ同時押しを待つ。
+
+        時刻は**押した瞬間の譜面時刻**を覚えておくので、待つぶん判定が
+        ずれることはない(遅れるのは打音と光だけ)。"""
+        if self._play_state is None:
+            return
+        self._pending_presses.append((self._current_chart_time(), kind, side))
+        if len(self._pending_presses) == 1:
+            if self._chord_timer is None:
+                self._chord_timer = QTimer(self)
+                self._chord_timer.setSingleShot(True)
+                self._chord_timer.setTimerType(Qt.PreciseTimer)
+                self._chord_timer.timeout.connect(self._flush_presses)
+            self._chord_timer.start(max(1, int(round(self.PRESS_CHORD_SEC * 1000))))
+
+    def _flush_presses(self):
+        """猶予のあいだに押された打を1つに絞って判定する。
+
+        同時押しは1打として扱い、残りは捨てる(音も光も出さない)。
+          面と縁が混ざっていたら … 面を採る
+          同じ種類どうしなら     … 右を採る
+        両方の条件が同じなら、先に押したほうを採る。"""
+        pend, self._pending_presses = self._pending_presses, []
+        if not pend:
+            return
+        faces = [p for p in pend if p[1] == KIND_DON]
+        pool = faces or pend
+        win = max(pool, key=lambda p: p[2])   # 同点なら max は先頭を返す
+        self._play_press(win[1], win[2], at=win[0])
+
+    def _play_press(self, kind, side=0, at=None):
+        """1打を判定して、音を鳴らして、描き直す。at は押した譜面時刻。"""
         st = self._play_state
         if st is None:
             return
-        now = self._current_chart_time()
+        now = self._current_chart_time() if at is None else at
         st.advance(now)
-        st.press(now, kind)
+        before = st.span_at(now)
+        popped_before = before is not None and before.pop_t is not None
+        st.press(now, kind, side)
         # 空打ちでも鳴らす(本家と同じ)。
         self._feedback("don" if kind == KIND_DON else "ka")
+        # 風船・くす玉を叩ききった打だけ、その場で破裂音を鳴らす。区間の
+        # 終点で鳴らす再生モードの仕掛け(_scan_balloon_pops)は演奏モードでは
+        # 止めてあるので、ここが唯一の鳴らし手。
+        if (before is not None and not popped_before
+                and before.pop_t is not None and self._pop_sound is not None):
+            self._pop_sound.play()
         self._request_repaint()
 
     def keyReleaseEvent(self, event):
@@ -2884,7 +3067,9 @@ class ChartPreviewWidget(QWidget):
     BALLOON_CELL = 280
     BALLOON_ANCHOR = (20.0, 141.5)
     BALLOON_SPRITE_SCALE = 0.62      # 満タン(174px)がレーン(130px)に収まる大きさ
-    BALLOON_BURST_SEC = 0.07         # 割れたあと破片のコマを出す時間
+    BALLOON_BURST_SEC = 0.167        # 割れたあと破片のコマを出す時間
+    #: 素材の最後のコマ(破片)。これより手前がふくらみの段階。
+    BALLOON_BURST_FRAME = 5
 
     def _load_sheet(self, name, cols, cw, ch):
         """横1列のスプライトシートを cols 枚に切る。無ければ None。"""
@@ -2972,7 +3157,10 @@ class ChartPreviewWidget(QWidget):
         (音符より先に描いて、音符が上に来るようにする)。"""
         if not self._skin_explosion:
             return
-        recent = self._recent_hit(now)
+        # 演奏モードでは、叩いて入ったときだけ火花を出す。_recent_hit() は
+        # 「判定線を通過した音符」なので、そのままだと見送りでも火花が出る。
+        recent = (self._splash_hit(now) if self._play_state is not None
+                  else self._recent_hit(now))
         if recent is None:
             return
         elapsed, char, _n = recent
@@ -2981,6 +3169,10 @@ class ChartPreviewWidget(QWidget):
             return
         f = min(self.HIT_EXP_FRAMES - 1, int(elapsed / self.HIT_EXP_FRAME_SEC))
         fire, silver = (2, 3) if char in NOTE_BIG else (0, 1)
+        if self._play_state is not None and self.current_judge() == "ok":
+            # 可は炎を出さず銀だけ。本家も良と可で別の絵を使っていて、
+            # 可のほうは金色に光らない。再生モードは全部が良なので通らない。
+            fire = silver
         c = self.HIT_EXP_CELL
         x, y = int(judge_x - c / 2), int(mid_y - c / 2)
         # 終わり際だけ濃さを落とす。素材の5コマ目も半透明だが、それだけだと
@@ -3016,6 +3208,13 @@ class ChartPreviewWidget(QWidget):
         まとめない — そのときは None を返して、呼ぶ側が2枚のまま描く。"""
         if not self.HIT_EXP_ADDITIVE:
             return None
+        if fire == silver:
+            # 片方だけ使う(可の銀)。足し合わせると倍の明るさになるので、
+            # 素材をそのまま返す。
+            try:
+                return self._skin_explosion[silver][f]
+            except Exception:  # noqa: BLE001
+                return None
         key = (fire, silver, f)
         pm = self._explosion_merge_cache.get(key)
         if pm is None:
@@ -3414,7 +3613,7 @@ class ChartPreviewWidget(QWidget):
     #: 本家の音符を通常の濃さで残したまま、足したぶんだけ引くのが狙い。
     ARRANGE_DIM = 0.42
 
-    def _draw_note(self, painter: QPainter, x: float, y: float, r: int, c: str, big: bool):
+    def _draw_note(self, painter: QPainter, x: float, y: float, r: float, c: str, big: bool):
         sprite = sprite_for_dpr(
             (self._sprites_big if big else self._sprites_small).get(c), self._dpr)
         if sprite is not None:
@@ -3422,10 +3621,11 @@ class ChartPreviewWidget(QWidget):
             return
         painter.setPen(QPen(self._color("fg_bright"), 2))
         painter.setBrush(QBrush(self._color(NOTE_COLOR[c])))
-        painter.drawEllipse(int(x - r), int(y - r), r * 2, r * 2)
+        d = int(round(r * 2))
+        painter.drawEllipse(int(round(x - r)), int(round(y - r)), d, d)
 
-    def _draw_roll_bar(self, painter: QPainter, x0: float, x1: float, cy: float, r: int, color: QColor):
-        d = r * 2
+    def _draw_roll_bar(self, painter: QPainter, x0: float, x1: float, cy: float, r: float, color: QColor):
+        d = int(round(r * 2))
         # A negative/zero #SCROLL (or a big enough mid-span speed change) can
         # put the tail to the LEFT of the head, so the body rect is built
         # from the ordered pair rather than assuming x1 >= x0 - otherwise the
@@ -3456,7 +3656,8 @@ class ChartPreviewWidget(QWidget):
         else:
             painter.setPen(QPen(self._color("fg_bright"), 2))
             painter.setBrush(QBrush(self._color("balloon")))
-            painter.drawEllipse(int(x - r), int(cy - r), r * 2, r * 2)
+            d = int(round(r * 2))
+            painter.drawEllipse(int(round(x - r)), int(round(cy - r)), d, d)
 
     def set_repaint_cb(self, cb):
         """塗り直しの依頼先を差し替える。None で自分の update() に戻す。
@@ -3783,6 +3984,11 @@ class ChartPreviewWidget(QWidget):
         # cull is on the actual pixel extent (Camera.IsRangeVisibleOnLane,
         # chart_editor_widgets_game.cpp:779), not the time window.
         note_t_past = now - self.HIT_ANIM_DURATION
+        if self._play_state is not None:
+            # 演奏モードでは、叩かなかった音符は判定線で消えずに左へ流れ去る。
+            # 飛ぶ演出の 0.25 秒だけでは足りないので、レーンの左端に出るまでの
+            # ぶん(t_past)まで遡って拾う。
+            note_t_past = min(note_t_past, t_past)
         lo = bisect.bisect_left(self._note_times, note_t_past)
         hi = bisect.bisect_right(self._note_times, t_future)
         rs = self.NOTE_R_SMALL
@@ -3794,7 +4000,15 @@ class ChartPreviewWidget(QWidget):
                 continue
             # 叩き込み具合。区間に入る前は 0、入ってからは打数の補間
             # (上部読み出しの数字と同じ数え方)、抜けたあとは赤のまま。
-            if now <= r_start:
+            if self._play_state is not None:
+                # 演奏モードでは、赤みは経過時間ではなく**叩いた手**で決まる。
+                # 1打ごとに濃くなり、叩くのをやめると毎秒1.0の割合で黄色へ
+                # 戻る(4打で最濃、上限1.5ぶん貯まるので手を止めても約0.5秒は
+                # 最濃のまま)。時間で決めていたころは、一度も叩いていない
+                # 連打まで真っ赤になっていた。
+                sp = self._play_state.span_at_start(r_start)
+                heat = 0.0 if sp is None else sp.color_at(now)
+            elif now <= r_start:
                 heat = 0.0
             elif now >= r_end or r_end <= r_start:
                 heat = 1.0
@@ -3808,6 +4022,7 @@ class ChartPreviewWidget(QWidget):
         # 割れたあとも少しだけ破片のコマを残す。
         burst = self.BALLOON_BURST_SEC if self._skin_balloon_seq is not None else 0.0
         for b_start, b_end, sp0, sp1, b_hits in self._balloon_draw:
+            b_end = self._play_span_end(b_start, b_end)
             if now >= b_end + burst:
                 continue
             x0 = judge_x + (b_start - now) * sp0
@@ -3815,6 +4030,7 @@ class ChartPreviewWidget(QWidget):
                 continue
             draw_items.append((b_start, "balloon", (b_start, b_end, sp0, b_hits)))
         for k_start, k_end, sp0, sp1, k_hits in self._kusudama_draw:
+            k_end = self._play_span_end(k_start, k_end)
             if now >= k_end + burst:
                 continue
             x0 = judge_x + (k_start - now) * sp0
@@ -3828,11 +4044,21 @@ class ChartPreviewWidget(QWidget):
         # (実測: ある譜面で 1フレーム 177個の候補のうち可視は 8.8個)。
         # x はここで一度だけ求め、描画側へ渡して二度計算しない。
         rb = self.NOTE_R_BIG
+        st = self._play_state
         for i in range(lo, hi):
             t = self._note_times[i]
             if t > now:
                 x = judge_x + (t - now) * self._note_speeds[i]
                 if x < -rb or x > lane_w + rb:
+                    continue
+                draw_items.append((t, "note", (i, x)))
+            elif st is not None and st.hit_time(i) is None:
+                # 演奏モード: まだ叩いていない音符は飛ばない。判定線を通り
+                # 過ぎて左へ流れ去る(本家と同じ)。不可の窓を出たあとも消さ
+                # ない — 消すと「間に合わなかった」のか「叩けた」のかが
+                # 画面から分からなくなる。
+                x = judge_x + (t - now) * self._note_speeds[i]
+                if x < -rb:
                     continue
                 draw_items.append((t, "note", (i, x)))
             else:
@@ -3870,6 +4096,26 @@ class ChartPreviewWidget(QWidget):
                 # 出すので、面には数字を描かない。区間中は判定枠に固定。
                 b_start, b_end, sp0, b_hits = payload
                 bx = judge_x if now >= b_start else judge_x + (b_start - now) * sp0
+                if self._play_state is not None:
+                    # 演奏モード。ふくらみも割れる瞬間も叩いた数で決まる。
+                    # まだ一度も叩いていない間は、顔つきの音符を判定枠に
+                    # 留めておく(本家も、風船の絵が出るのは最初の1打から)。
+                    sp = self._play_state.span_at_start(b_start)
+                    if self._skin_balloon_seq is not None:
+                        view = self._play_balloon_view(now)
+                        if view is not None:
+                            if self._hide_balloon_sprite:
+                                continue
+                            self._draw_balloon_sprite(painter, judge_x, mid_y,
+                                                      view[0])
+                            continue
+                    # 絵を出さないのは「まだ叩いていない」ときだけ。割れた
+                    # あとや、叩ききれずに終点を過ぎたあとは何も描かない
+                    # (描くと割れた風船が顔の音符に戻って見える)。
+                    if (sp is not None and not sp.begun
+                            and now < self._play_span_end(b_start, b_end)):
+                        self._draw_balloon_note(painter, bx, mid_y)
+                    continue
                 if self._skin_balloon_seq is not None and now >= b_start:
                     # 叩いている間は本家素材に差し替える。残り打数が減るほど
                     # 膨らみ、割れると破片のコマになる。流れてくる間は顔つきの
@@ -3891,13 +4137,18 @@ class ChartPreviewWidget(QWidget):
                 c = self._note_chars[i]
                 big = c in NOTE_BIG
                 r = self.NOTE_R_BIG if big else self.NOTE_R_SMALL
-                if t <= now:
+                if pre_x is None:
                     # 本家レイアウトでは、叩いた音符は判定線から魂ゲージまで
                     # 一続きに飛ぶ。その飛行は画面側(game_screen.py)がレーンの
                     # 外まで描くので、こちらでは二重に出さない。
                     if self._hide_hit_fly:
                         continue
-                    elapsed = now - t
+                    # 演奏モードでは「叩いた時刻」から飛ぶ。音符の時刻から
+                    # 数えると、可で叩いたときに飛びかけの位置から出てしまう。
+                    ht = st.hit_time(i) if st is not None else None
+                    if ht is not None and st.judge_of(i) == "bad":
+                        continue        # 不可で叩いた音符は飛ばずに消える
+                    elapsed = now - (t if ht is None else ht)
                     dx, dy = self.hit_fly_offset(elapsed)
                     x = judge_x + dx
                     y = mid_y + dy   # path y is world-space (down positive), same as Qt
@@ -3921,8 +4172,9 @@ class ChartPreviewWidget(QWidget):
         # --- 叩いた瞬間の判定エフェクト (本家風) --------------------------
         # 直近ヒット音符からの経過時間だけで、判定枠から広がるしぶきと「良」の
         # ポップを描く。判定枠のすぐ上・レーンクリップ内なので他の演出の上に
-        # 重なって出る。全ノーツ自動ヒットのため判定は常に「良」。
-        hit = self._recent_hit(now)
+        # 重なって出る。再生モードは全ノーツ自動ヒットのため判定は常に「良」。
+        # 演奏モードでは、叩いて入ったときだけ出す(見送りと不可では出さない)。
+        hit = self._splash_hit(now) if st is not None else self._recent_hit(now)
         if hit is not None and (reveal_t is None or (now - hit[0]) >= reveal_t):
             h_elapsed, h_char, _h_combo = hit
             h_big = h_char in NOTE_BIG

@@ -24,11 +24,13 @@ PLAYER_KEYS = (
     "preview_zoom", "preview_speed", "preview_bottom_mode", "waveform_window",
     "preview_volume", "sfx_volume", "master_volume", "audio_output_device",
     "audio_backend", "waveform_stereo", "se_text_enabled",
-    "hit_sound_don_path", "hit_sound_ka_path",
+    "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
     "wireless_offset_enabled", "wireless_offset_ms",
     "record_output_dir", "record_last_dir",
     "player_folders", "player_last_file", "player_select_bgm",
     "player_select_bgm_volume", "gpu_render", "gpu_vsync",
+    # 演奏モード(実験的機能)。Player の環境設定で入れても書き戻せるように。
+    "player_play_mode",
     # ネームプレート。ここに書き忘れると、Player の環境設定で変えても
     # ファイルへ落ちず、次に描くときに古い値へ戻る(実際にそうなっていた)。
     "nameplate_name", "nameplate_title", "nameplate_title_type",

@@ -25,7 +25,7 @@ from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
 from neotja.ai_chart_gen import build_ai_variant_content
-from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker, TaikojiroScanWorker
+from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
 from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
 from neotja.theme import apply_theme
@@ -414,6 +414,7 @@ class MainWindow(QMainWindow):
             se_text_enabled=self.config_data.get("se_text_enabled", True),
             record_cb=self.open_video_recorder,
             note_edit_cb=self._apply_note_edit,
+            chart_op_cb=self._apply_chart_op,
             config_data=self.config_data,
             save_settings_cb=self._save_config,
             checkpoint_lines_cb=self._set_checkpoint_lines,
@@ -425,46 +426,19 @@ class MainWindow(QMainWindow):
         self.preview_dock.set_volume(self.config_data.get("preview_volume", 0.8))
         self.preview_dock.set_sfx_volume(self.config_data.get("sfx_volume", 0.9))
         self._apply_wireless_offset()
-        # A skin pack's own hit sounds (skin/don.wav, skin/ka.wav) take
-        # precedence: dropping in a pack is a deliberate "use this" and should
-        # win over a previously auto-detected 太鼓さん次郎 path. An explicit
-        # user-set path still wins over both (handled below / in autodetect).
+        # 打音は System(TNDE-R/Sounds/Taiko の dong.ogg / ka.ogg)が既定。
+        # 環境設定で「自分で選んだ WAV を使う」をオンにしたときだけ指定の
+        # ファイルを使う(選ぶ順は settings.effective_hit_sound_paths)。
         don, ka = settings_mod.effective_hit_sound_paths(self.config_data)
         self.preview_dock.set_hit_sound_files(don, ka)
-        skin_don, skin_ka = settings_mod.skin_sound_paths()
-        if not (skin_don and skin_ka) or (don, ka) != (skin_don, skin_ka):
-            self._maybe_autodetect_hit_sounds()
+        # 打音は System(TNDE-R/Sounds/Taiko)から取る。以前ここで太鼓さん次郎の
+        # インストール先をディスクから探して設定へ書き込んでいたが、やめた
+        # (利用者の指定。System の音を使う)。
         # No close/float/move features: the dock itself always stays docked
         # and visible. Its collapse/expand toggle lives in the status bar
         # (next to the theme switcher), so there's never a state where it
         # vanishes with no obvious way back.
         self.preview_dock.setFeatures(self.preview_dock.DockWidgetFeature(0))
-
-    def _maybe_autodetect_hit_sounds(self):
-        """Point the hit sounds at the user's own 太鼓さん次郎 install if they
-        have one and haven't chosen files themselves.
-
-        The built-in synth is a fallback, not a match for the real thing, and
-        we can't ship 太鼓さん次郎's wavs (no redistribution grant - see
-        find_taikojiro_sounds). Detecting the local copy gets the good sound
-        without redistributing it. A path the user set by hand always wins;
-        a stale one that no longer exists doesn't (it'd silently mean synth).
-        """
-        for key in ("hit_sound_don_path", "hit_sound_ka_path"):
-            p = self.config_data.get(key, "")
-            if p and os.path.exists(p):
-                return
-
-        def on_found(don, ka):
-            self.config_data["hit_sound_don_path"] = don
-            self.config_data["hit_sound_ka_path"] = ka
-            settings_mod.save_settings(self.config_data)
-            self.preview_dock.set_hit_sound_files(don, ka)
-            self.statusBar().showMessage("太鼓さん次郎の打音を検出して設定しました", 5000)
-
-        self._taikojiro_scan = TaikojiroScanWorker(self)
-        self._taikojiro_scan.found.connect(on_found)
-        self._taikojiro_scan.start()
 
     def _set_checkpoint_lines(self, lines):
         """譜面プレビューで P を押した結果をエディタのチェックポイントへ。
@@ -1802,13 +1776,8 @@ class MainWindow(QMainWindow):
             # "QThread: Destroyed while thread is still running" でアプリごと
             # 落ちうる。detach_worker は終了済み/None を安全に無視する。
             from neotja.worker_util import detach_worker
-            # _taikojiro_scan は MainWindow を親にした QThread で、起動直後に
-            # ディスクを走査している(打音のパスが未設定/古いときだけ動く)。
-            # ここに入れていなかったので、走査中に閉じると親ごと破棄されて
-            # "QThread: Destroyed while thread is still running" になっていた。
             for attr in ("_bpm_detect_worker", "_update_check_worker",
-                         "_update_download_worker", "_new_project_chart_gen_worker",
-                         "_taikojiro_scan"):
+                         "_update_download_worker", "_new_project_chart_gen_worker"):
                 detach_worker(getattr(self, attr, None))
             # 解析スレッドは常駐なので必ずここで畳む。走行中のジョブは最長でも
             # 1 パスぶん(数百 ms)で終わるので、その完了を待ってから抜ける。
@@ -2081,6 +2050,73 @@ class MainWindow(QMainWindow):
             hit_sounds = getattr(self.preview_dock, "hit_sounds", None)
             if kind is not None and hit_sounds is not None:
                 hit_sounds.play_once(kind)
+
+    def _apply_chart_op(self, op):
+        """作譜モードの PeepoDrumKit 式の操作(置く/消す/敷き詰め/連打/反転)。
+
+        計算は note_edit.run_op(テキストだけを見る純ロジック)。ここでは
+        結果のテキストを **変わった範囲だけ** 1回で置き換える。風船を足すと
+        本文と BALLOON: 行の2か所が変わるが、1回の置換にまとめるので Undo も
+        1操作で戻る。
+
+        戻り値は run_op の結果 dict(画面の暫定表示に使う)か None。
+        長い音符・範囲の操作は見た目を先回りで作れないので、その場で解析し
+        直す(1音ずつの打ち込みではないので、同期の解析でも引っかからない)。"""
+        text = self.editor.toPlainText()
+        course_key = (self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = self.analyzer.course_line_range(text, course_key) if course_key else None
+        if rng is None:
+            self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
+            return None
+        if op.get("kind") == "peek_command":
+            # 入力欄に出す今の値を読むだけ。テキストは変えない。
+            a = op.get("a") or (0, 0)
+            return {"value": note_edit.command_at(
+                text, rng, int(a[0]), int(a[1]), int(op.get("grid", 16)),
+                str(op.get("name", "")).upper())}
+        if op.get("kind") == "peek_marker":
+            # カーソル位置まわりのゴーゴー / 小節線の状態を読むだけ。
+            a = op.get("a") or (0, 0)
+            return note_edit.marker_info(
+                text, rng, int(a[0]), int(a[1]), int(op.get("grid", 16)),
+                str(op.get("region", "")).upper())
+        if op.get("kind") == "peek_region":
+            # 範囲が全部ゴーゴー中 / 小節線を隠しているかを読むだけ。
+            if op.get("a") is None or op.get("b") is None:
+                return {"value": None}
+            return {"value": note_edit.region_state(
+                text, rng, tuple(op["a"]), tuple(op["b"]), int(op.get("grid", 16)),
+                str(op.get("region", "")).upper())}
+        res = note_edit.run_op(text, rng, op)
+        if res is None:
+            return None
+        new = res["text"]
+        # 先頭と末尾の一致を削って、変わった範囲だけを置き換える。
+        p = 0
+        limit = min(len(text), len(new))
+        while p < limit and text[p] == new[p]:
+            p += 1
+        s = 0
+        while (s < limit - p and text[len(text) - 1 - s] == new[len(new) - 1 - s]):
+            s += 1
+        tc = self.editor.textCursor()
+        tc.beginEditBlock()
+        tc.setPosition(p)
+        tc.setPosition(len(text) - s, QTextCursor.KeepAnchor)
+        tc.insertText(new[p:len(new) - s])
+        tc.endEditBlock()
+        block = self.editor.document().findBlock(min(p, len(new)))
+        self.editor.modified_lines.add(block.blockNumber() + 1)
+        self.setWindowModified(True)
+        if self.config_data.get("note_input_sound", True) and res.get("sound"):
+            kind = self._NOTE_INPUT_SOUND_KIND.get(res["sound"])
+            hit_sounds = getattr(self.preview_dock, "hit_sounds", None)
+            if kind is not None and hit_sounds is not None:
+                hit_sounds.play_once(kind)
+        if res.get("reparse"):
+            self._force_update()
+        return res
 
     def _course_key_at_cursor(self, text):
         """カーソル行が属するコース。プレビューが見ているコースと同じ規則。"""
@@ -2598,9 +2634,10 @@ class MainWindow(QMainWindow):
             self.highlighter.rebuild_formats()
             self.highlighter.rehighlight()
             self.editor.set_mono_font(self.config_data.get("font_family", "Consolas"), self.config_data.get("font_size", 12))
+            # 設定のパスをそのまま渡さず、起動時と同じ選び方(System が既定、
+            # 「自分で選んだ WAV を使う」がオンのときだけ指定のファイル)を通す。
             self.preview_dock.set_hit_sound_files(
-                self.config_data.get("hit_sound_don_path", ""), self.config_data.get("hit_sound_ka_path", ""),
-            )
+                *settings_mod.effective_hit_sound_paths(self.config_data))
             self.preview_dock.refresh_theme()
             self.preview_dock.refresh_nameplate()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))

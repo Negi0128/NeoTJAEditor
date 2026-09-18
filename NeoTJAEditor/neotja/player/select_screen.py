@@ -138,10 +138,11 @@ COURSE_ORDER = ("Easy", "Normal", "Hard", "Oni", "Edit")
 EMPTY_TITLE = "TJAを選んでください"
 EMPTY_SUBTITLE = "ドラッグ＆ドロップでも読み込めます"
 
-#: 「再生／演奏」を選ばせるか。**演奏モードが仕上がるまで False。**
+#: 「再生／演奏」を選ばせるかの既定。演奏モードは実験的機能なので既定は
+#: False(環境設定「実験的機能」の player_play_mode で入れる)。実際に見る
+#: のは画面ごとの play_mode_enabled で、窓(player/window.py)が設定から入れる。
 #: False のときはコースを選んだ時点で再生モードのまま始まり、これまでと
-#: 同じ1手で通る。演奏の中身(判定・スコア・打面キー)はコードに入っているが、
-#: ここを通らない限り PlayState が作られないので一切動かない。
+#: 同じ1手で通る(演奏モードはどこからも始まらない)。
 SHOW_PLAY_MODE = False
 
 #: 再生／演奏 を選ばせる2枚。素材に絵が無いので自前で描く。
@@ -486,7 +487,7 @@ class SelectScreen(QWidget):
 
         **必ずここを通してから courseChosen を出す。** 遊び方が決まって
         いない状態で始めてしまうと、演奏のつもりで再生が始まる。"""
-        if not SHOW_PLAY_MODE:
+        if not getattr(self, "play_mode_enabled", SHOW_PLAY_MODE):
             # 演奏モードを出さない間は、これまでどおり押した時点で始まる。
             self._picking = False
             self._pick_t = 0.0

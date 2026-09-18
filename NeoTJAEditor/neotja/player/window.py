@@ -52,6 +52,8 @@ class PlayerWindow(QMainWindow):
         self._pending_path = ""
 
         self.select = SelectScreen()
+        # 演奏モード(再生／演奏 を選ばせる)は実験的機能。設定で入れたときだけ。
+        self.select.play_mode_enabled = bool(self.cfg.get("player_play_mode", False))
         self.select.click_sound_cb = self.core.click_sound
         self.select.courseChosen.connect(self._on_course_chosen)
         self.select.cancelled.connect(self.pick_chart)
@@ -299,6 +301,16 @@ class PlayerWindow(QMainWindow):
         dlg = SettingsDialog(self, self)
         if dlg.exec():
             self._save()
+            # 演奏モード(実験的機能)の入り切りを選択画面へ。再起動は要らない。
+            self.select.play_mode_enabled = bool(self.config_data.get("player_play_mode", False))
+            # 打音(System / 自分で選んだ WAV)を選び直す。以前は起動時に1回
+            # 決めるだけで、環境設定で変えても次の起動まで音が変わらなかった。
+            try:
+                from neotja import settings as _settings_mod
+                self.core.dock.set_hit_sound_files(
+                    *_settings_mod.effective_hit_sound_paths(self.config_data))
+            except Exception:  # noqa: BLE001
+                pass
             # ネームプレートは描く側が一度読んだら覚えているので、
             # 変えたことを伝えて描き直させる(再起動を待たせない)。
             try:
