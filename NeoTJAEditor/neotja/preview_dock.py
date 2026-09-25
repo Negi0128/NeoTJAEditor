@@ -1129,6 +1129,8 @@ class PreviewDock(QDockWidget):
         self._bottom_h_full = self._bottom_panel.sizeHint().height()
         self._bottom_h_speed_only = self._speed_row.sizeHint().height()
         self._bottom_panel.setFixedHeight(self._bottom_h_full)
+        # 「このモードでページを出すか」。窓の表示状態とは別に持つ。
+        self._bottom_page_shown = True
 
         # 本家レイアウト: レーンを 1280x360 の画面へ組み込む(背景・左パネル・
         # スコア・コンボ・太鼓・魂ゲージはこちらが描く)。レーン自体の描画は
@@ -1217,6 +1219,15 @@ class PreviewDock(QDockWidget):
         # 粗くすると引っかかりに気づけない。
         self._fps_prev = (_time.perf_counter(), self.chart_preview.frames_painted)
         self._fps_timer = QTimer(self)
+        # 作譜モードの命令パネル。ゲーム画面の右の空きに重ねる(利用者の案
+        # 2026-09-25)。作譜以外のモードでは隠す。
+        self.command_panel = None
+        if self._peepo_enabled:
+            from neotja.command_panel import CommandPanel
+            self.command_panel = CommandPanel(self.game_preview_window.scaled_host)
+            self.command_panel.placeCommand.connect(self._on_panel_command)
+            self.command_panel.placeMarker.connect(self._on_panel_marker)
+            self.command_panel.hide()
         self._fps_timer.timeout.connect(self._update_fps_label)
         self._fps_timer.start(500)
 
@@ -1427,8 +1438,14 @@ class PreviewDock(QDockWidget):
         self._apply_bottom_height()
 
     def _apply_bottom_height(self):
-        """下部パネルの高さを、いまのモードとボタンの表示から決め直す。"""
-        show_page = self.bottom_stack.isVisible()
+        """下部パネルの高さを、いまのモードとボタンの表示から決め直す。
+
+        見ているのは isVisible() ではなく「このモードでページを出すか」。
+        isVisible() は**窓がまだ表示されていないと False** なので、起動時の
+        モード復元(窓を開く前)でここを通ると、速度バーだけの高さで固定されて
+        しまい、あとで窓を開いても作譜ペインが数ピクセルの帯になっていた
+        (利用者の報告 2026-09-26)。"""
+        show_page = getattr(self, "_bottom_page_shown", self.bottom_stack.isVisible())
         h = self._bottom_h_full if show_page else self._bottom_h_speed_only
         if not getattr(self, "_overlay_visible", True):
             h -= self._bottom_h_speed_only     # 速度行のぶんを詰める
@@ -1520,7 +1537,9 @@ class PreviewDock(QDockWidget):
         self.chart_edit.followWindowChanged.connect(self._on_waveform_window_changed)
         # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
         self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
-        self.chart_edit.setFixedHeight(170)
+        # 作譜は行レイアウト(左に行の名前・上に小節番号)。7行ぶんの高さが要る
+        # (利用者と決めた固定の高さ。行を広げたぶん 260 -> 300 2026-09-25)。
+        self.chart_edit.setFixedHeight(300)
         self.chart_edit.set_legend_visible(
             bool(self.config_data.get("chart_edit_legend", True)))
         self.chart_edit.noteEdited.connect(self._on_note_edited)
@@ -1813,6 +1832,79 @@ class PreviewDock(QDockWidget):
             if self.save_settings_cb is not None:
                 self.save_settings_cb()
 
+    def _place_command_panel(self, show):
+        """命令パネルをゲーム画面の右上へ置く(作譜モードのときだけ)。"""
+        panel = self.command_panel
+        if panel is None:
+            return
+        if not show:
+            panel.hide()
+            return
+        # ゲーム画面の右上は、譜面も絵も出ていない空き。窓を広げず、
+        # レーンにも触らずに、そこへ置く(利用者の指定 2026-09-25)。
+        # 置き場所はレーンの枠(game_screen の LANE_Y - 56)より上の空き。
+        # 倍率はかけずに、右上へ寄せる。
+        from neotja import game_screen as _gs
+        host = self.game_preview_window.scaled_host
+        scale = host.scale() if hasattr(host, "scale") else 1.0
+        lane_top = int((_gs.LANE_Y - 56) * scale)
+        # 上の端(6px)からレーンの枠の手前までが使える場所。パネルが入り
+        # きらないときは上端から出す(倍率を下げたとき)。
+        y = max(6, lane_top - panel.height() - 4)
+        panel.move(max(0, host.width() - panel.width() - 10), y)
+        panel.show()
+        panel.raise_()
+        self._sync_command_panel()
+
+    def _sync_command_panel(self):
+        """パネルの値を、カーソルの位置で効いている値に合わせる。"""
+        panel = self.command_panel
+        ce = getattr(self, "chart_edit", None)
+        if panel is None or ce is None or not panel.isVisible():
+            return
+        t = ce.cursor_time() + float(getattr(ce, "offset", 0.0) or 0.0)
+        bpm = scroll = measure = None
+        try:
+            bpm = float(self.chart_preview.bpm_at(t))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import bisect as _bisect
+            ch = list(self.chart_preview._scroll_changes or [(0.0, 1.0)])
+            i = max(0, _bisect.bisect_right([c[0] for c in ch], t) - 1)
+            scroll = float(ch[i][1])
+            mc = list((self._preview_commands or [None, None, [], None])[2] or [])
+            if mc:
+                j = max(0, _bisect.bisect_right([c[0] for c in mc], t) - 1)
+                measure = "%d/%d" % (int(mc[j][1]), int(mc[j][2]))
+        except Exception:  # noqa: BLE001
+            pass
+        panel.set_values(bpm=bpm, scroll=scroll, measure=measure)
+
+    def _on_panel_command(self, name, value):
+        """パネルの「追加」: カーソルの位置へ命令を置く。"""
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.place_command(str(name), value)
+
+    def _on_panel_marker(self, kind, which):
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.place_marker(str(kind), str(which))
+
+    def is_chart_edit_visible(self):
+        """いま下部パネルが「作譜」ページかどうか(窓の「作譜」メニュー用)。"""
+        return (self.MODE_EDIT is not None
+                and self.bottom_stack.currentIndex() == self.MODE_EDIT)
+
+    def show_chart_edit(self):
+        """下部パネルを「作譜」にする。"""
+        if self.MODE_EDIT is None:
+            return False
+        self.expand()
+        self.set_bottom_mode(self.MODE_EDIT)
+        return True
+
     def cycle_bottom_mode(self):
         """通常再生→音声波形→(作譜→)情報→… と循環。作譜は実験的機能
         (peepo_chart_edit)が有効なときだけ挟まる(_build_ui でページ自体を
@@ -1858,6 +1950,7 @@ class PreviewDock(QDockWidget):
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
         # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
         show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)
+        self._bottom_page_shown = show_page
         self.bottom_stack.setVisible(show_page)
         self._apply_bottom_height()
         self.game_preview_window.refit()
@@ -1865,7 +1958,10 @@ class PreviewDock(QDockWidget):
         # レーンへ返す(Space/小節移動が今までどおり効くように)。
         if idx == self.MODE_EDIT and self.MODE_EDIT is not None:
             self.chart_edit.setFocus(Qt.OtherFocusReason)
+            self._place_command_panel(True)
         else:
+            if self.command_panel is not None:
+                self._place_command_panel(False)
             # レーンはゲーム画面へ畳んであり、キーはあちらが受けて渡す。
             self.game_screen.setFocus(Qt.OtherFocusReason)
         self._save_bottom_mode(idx)
@@ -2330,6 +2426,8 @@ class PreviewDock(QDockWidget):
         self.audio.seek(int(seconds * 1000))
         if not self.audio.is_playing():
             self.chart_preview.set_playback(seconds, False)
+        # 命令パネルの値も、その位置で効いている値に合わせる。
+        self._sync_command_panel()
 
     def seek_to_seconds(self, seconds: float):
         self.audio.seek(max(0, int(seconds * 1000)))

@@ -584,7 +584,18 @@ def op_long(text, course_range, a, b, grid, char):
 def _items_in(items, a, b, grid, single):
     if single:
         k = _key(a[0], a[1], grid)
-        return [it for it in items if it["k0"] == k]
+        out = []
+        for it in items:
+            if it["k0"] == k:
+                out.append(it)
+            elif _is_long(it) and it["tail"] is not None and it["k0"] < k <= it["k1"]:
+                # 長い音符の途中や終端を指していても、その音符ごと当てる。
+                # 連打・風船を置いた直後、カーソルは終端にいる。頭だけしか
+                # 当たらないと「置いたばかりの連打がその場で消せない」になる。
+                # 終端がまだ無い(k1 が無限)ものは頭だけ — そうしないと、後ろの
+                # 音符を消したつもりで連打が巻き添えになる。
+                out.append(it)
+        return out
     (m0, s0), (m1, s1) = _range_keys(a, b, grid)
     k0, k1 = _key(m0, s0, grid), _key(m1, s1, grid)
     out = []
@@ -616,6 +627,267 @@ def op_delete(text, course_range, a, b, grid):
     simple = single and not any(_is_long(it) for it in hits)
     visual = [(a[0], a[1], grid, "0")] if simple else []
     return _result(text, new, visual=visual, reparse=not simple)
+
+
+#: 開始/終了の命令名 → (種類, which)。範囲を動かすときに使う。
+_MARKER_BY_NAME = {"GOGOSTART": ("GOGO", "on"), "GOGOEND": ("GOGO", "off"),
+                   "BARLINEOFF": ("BARLINE", "on"), "BARLINEON": ("BARLINE", "off")}
+
+
+def command_items(text, body):
+    """本文の命令行を時間順に [(位置(Fraction), 名前, 値の文字列)] で返す。
+
+    位置は「小節番号 + 小節の中の割合」。音符を全部過ぎたところに書かれた行は
+    次の小節の頭と同じ扱い(_region_lines と同じ)。値は名前のうしろの文字列で、
+    無ければ None(開始/終了の命令)。"""
+    out = []
+    for m, (a, b) in enumerate(measure_spans(text, body)):
+        chunk = text[a:b]
+        L = len(_measure_notes(text, (a, b)))
+        for off, line, idx in _chunk_lines(chunk):
+            name = _command_name(line)
+            if name is None:
+                continue
+            frac = Fraction(idx, L) if L else Fraction(0)
+            pos = (m + 1) + Fraction(0) if frac >= 1 else m + frac
+            rest = line.split("//", 1)[0].strip()[1 + len(name):].strip()
+            out.append((Fraction(pos), name, rest or None))
+    out.sort(key=lambda e: e[0])
+    return out
+
+
+def _move_one_command(text, course_range, pos, name, value, d):
+    """命令1つを pos から pos+d へ動かす。戻り値は新しい text(だめなら None)。"""
+    def addr(p):
+        m = int(p)
+        frac = p - m
+        return m, frac.numerator, frac.denominator
+
+    m0, s0, g0 = addr(pos)
+    m1, s1, g1 = addr(pos + d)
+    if m1 < 0:
+        return None
+    if name in _MARKER_BY_NAME:
+        kind, which = _MARKER_BY_NAME[name]
+        t1 = set_marker(text, course_range, m0, s0, g0, kind, which, False)
+        if t1 is None:
+            return None
+        rng = (course_range[0], course_range[1] + t1.count(chr(10)) - text.count(chr(10)))
+        return set_marker(t1, rng, m1, s1, g1, kind, which, True)
+    if name not in COMMAND_NAMES:
+        return None                 # 知らない命令は動かさない(#DELAY など)
+    t1 = set_command(text, course_range, m0, s0, g0, name, None)
+    if t1 is None:
+        return None
+    rng = (course_range[0], course_range[1] + t1.count(chr(10)) - text.count(chr(10)))
+    return set_command(t1, rng, m1, s1, g1, name, value)
+
+
+def op_move(text, course_range, a, b, grid, delta):
+    """範囲 a〜b の音符を delta グリッドぶん左右へ動かす。
+
+    長い音符は終端ごと。風船・くす玉の打数(BALLOON:)は、動かしたあとの
+    並び順で書き直す。行き先にあった音符は上書きされる(本家と同じ)。"""
+    body = course_body_span(text, course_range)
+    delta = int(delta)
+    if body is None or delta == 0 or grid <= 0:
+        return None
+    items = chart_items(text, body)
+    sel = _items_in(items, a, b, grid, False)
+    if not sel:
+        return None
+    d = Fraction(delta, int(grid))
+
+    def pos_of(addr):
+        return Fraction(addr[0]) + Fraction(addr[1], addr[2])
+
+    for it in sel:
+        if pos_of(it["head"]) + d < 0:
+            return None                 # 譜面の頭より前へは出せない
+
+    vals = balloon_values(text, course_range)
+    writes = []
+    for it in sel:
+        writes.extend(_removal_writes(it))
+    for it in sel:
+        moves = [(it["head"], it["char"])]
+        if it["tail"] is not None:
+            moves.append((it["tail"], "8"))
+        for addr, ch in moves:
+            p = pos_of(addr) + d
+            m = int(p)
+            frac = p - m
+            writes.append((m, frac.numerator, frac.denominator, ch))
+    new = _apply_writes(text, body, writes)
+    if new == text:
+        return None
+    # BALLOON: を書き直す。動かした先に元から居た風船は**上書きされて消える**
+    # ので、書き換え後の本文に実際に残っている風船を数えて、その位置の打数を
+    # 拾う(動かしたものを優先)。
+    moved = {id(it) for it in sel}
+    by_pos = {}
+    for it in items:
+        o = it["ord"]
+        if o is None:
+            continue
+        val = vals[o] if o < len(vals) else "5"
+        if id(it) in moved:
+            continue
+        by_pos.setdefault(pos_of(it["head"]), val)
+    for it in sel:
+        if it["ord"] is None:
+            continue
+        o = it["ord"]
+        by_pos[pos_of(it["head"]) + d] = vals[o] if o < len(vals) else "5"
+    # --- 範囲に入っている命令も一緒に動かす ---
+    (mm0, ss0), (mm1, ss1) = _range_keys(a, b, grid)
+    lo_pos = mm0 + Fraction(ss0, grid)
+    hi_pos = mm1 + Fraction(ss1, grid)
+    body_c = course_body_span(new, course_range)
+    cmds = [c for c in (command_items(new, body_c) if body_c else [])
+            if lo_pos <= c[0] <= hi_pos and (c[1] in COMMAND_NAMES
+                                             or c[1] in _MARKER_BY_NAME)]
+    # 右へ動かすときは後ろから、左へ動かすときは前から(自分どうしがぶつからない)。
+    for pos, name, value in sorted(cmds, key=lambda c: c[0], reverse=d > 0):
+        rng_c = (course_range[0], course_range[1] + new.count(chr(10)) - text.count(chr(10)))
+        moved_txt = _move_one_command(new, rng_c, pos, name, value, d)
+        if moved_txt is not None:
+            new = moved_txt
+
+    body2 = course_body_span(new, course_range)
+    out = []
+    for it in chart_items(new, body2) if body2 else []:
+        if it["ord"] is None:
+            continue
+        out.append(by_pos.get(pos_of(it["head"]), "5"))
+    new = set_balloon_values(new, course_range, out)
+    return _result(text, new, reparse=True)
+
+
+# ---------------------------------------------------------------------------
+# 選んだオブジェクトを動かす / 消す(エクスプローラー式の選択)
+# ---------------------------------------------------------------------------
+# items は [{"kind": "note"/"cmd", "name": 命令名かNone, "pos": (分子, 分母)}]。
+# pos は「小節番号 + 小節の中の割合」を約分した分数。音符は頭の位置、命令は
+# その行の位置。範囲ではなく**選んだものだけ**を動かす/消すために使う。
+
+def _item_pos(it):
+    n, d = it["pos"]
+    return Fraction(int(n), int(d))
+
+
+def _head_pos(it):
+    return Fraction(it["head"][0]) + Fraction(it["head"][1], it["head"][2])
+
+
+def op_move_items(text, course_range, items, delta):
+    """選んだオブジェクトを delta(分数・小節単位)ぶん動かす。"""
+    body = course_body_span(text, course_range)
+    d = Fraction(delta)
+    if body is None or not items or d == 0:
+        return None
+    want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
+    want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
+                 for i in items if i.get("kind") == "cmd"}
+    all_items = chart_items(text, body)
+    sel = [it for it in all_items if _head_pos(it) in want_notes]
+    if any(_head_pos(it) + d < 0 for it in sel):
+        return None
+    vals = balloon_values(text, course_range)
+    new = text
+    if sel:
+        writes = []
+        for it in sel:
+            writes.extend(_removal_writes(it))
+        for it in sel:
+            moves = [(it["head"], it["char"])]
+            if it["tail"] is not None:
+                moves.append((it["tail"], "8"))
+            for addr, ch in moves:
+                p = Fraction(addr[0]) + Fraction(addr[1], addr[2]) + d
+                m = int(p)
+                frac = p - m
+                writes.append((m, frac.numerator, frac.denominator, ch))
+        new = _apply_writes(new, body, writes)
+    # --- 命令 ---
+    if want_cmds:
+        body_c = course_body_span(new, course_range)
+        found = [c for c in (command_items(new, body_c) if body_c else [])
+                 if (c[1], c[0]) in want_cmds
+                 and (c[1] in COMMAND_NAMES or c[1] in _MARKER_BY_NAME)]
+        for pos, name, value in sorted(found, key=lambda c: c[0], reverse=d > 0):
+            rng_c = (course_range[0],
+                     course_range[1] + new.count(chr(10)) - text.count(chr(10)))
+            moved_txt = _move_one_command(new, rng_c, pos, name, value, d)
+            if moved_txt is not None:
+                new = moved_txt
+    if new == text:
+        return None
+    # --- BALLOON: を残った風船に合わせて書き直す ---
+    moved_ids = {id(it) for it in sel}
+    by_pos = {}
+    for it in all_items:
+        o = it["ord"]
+        if o is None or id(it) in moved_ids:
+            continue
+        by_pos.setdefault(_head_pos(it), vals[o] if o < len(vals) else "5")
+    for it in sel:
+        o = it["ord"]
+        if o is None:
+            continue
+        by_pos[_head_pos(it) + d] = vals[o] if o < len(vals) else "5"
+    body2 = course_body_span(new, course_range)
+    out = [by_pos.get(_head_pos(it), "5")
+           for it in (chart_items(new, body2) if body2 else [])
+           if it["ord"] is not None]
+    new = set_balloon_values(new, course_range, out)
+    return _result(text, new, reparse=True)
+
+
+def op_delete_items(text, course_range, items):
+    """選んだオブジェクトを消す(音符は長い音符なら終端ごと、命令は行ごと)。"""
+    body = course_body_span(text, course_range)
+    if body is None or not items:
+        return None
+    want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
+    want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
+                 for i in items if i.get("kind") == "cmd"}
+    all_items = chart_items(text, body)
+    sel = [it for it in all_items if _head_pos(it) in want_notes]
+    new = text
+    if sel:
+        writes = []
+        removed = []
+        for it in sel:
+            writes.extend(_removal_writes(it))
+            if it["ord"] is not None:
+                removed.append(it["ord"])
+        new = _apply_writes(new, body, writes)
+        new = _update_balloons(new, course_range, removed)
+    if want_cmds:
+        body_c = course_body_span(new, course_range)
+        found = [c for c in (command_items(new, body_c) if body_c else [])
+                 if (c[1], c[0]) in want_cmds]
+        # 後ろから消す(前の行を消すと後ろの位置がずれるため)
+        for pos, name, _value in sorted(found, key=lambda c: c[0], reverse=True):
+            m = int(pos)
+            frac = pos - m
+            rng_c = (course_range[0],
+                     course_range[1] + new.count(chr(10)) - text.count(chr(10)))
+            if name in _MARKER_BY_NAME:
+                kind, which = _MARKER_BY_NAME[name]
+                t2 = set_marker(new, rng_c, m, frac.numerator, frac.denominator,
+                                kind, which, False)
+            elif name in COMMAND_NAMES:
+                t2 = set_command(new, rng_c, m, frac.numerator, frac.denominator,
+                                 name, None)
+            else:
+                t2 = None
+            if t2 is not None:
+                new = t2
+    if new == text:
+        return None
+    return _result(text, new, reparse=True)
 
 
 def op_transform(text, course_range, a, b, grid, mode):
@@ -656,6 +928,13 @@ def run_op(text, course_range, op):
     """
     kind = op.get("kind")
     g = int(op.get("grid", 16))
+    # 選んだオブジェクトへの操作は住所(a/b)を使わない。下の「a が無ければ
+    # 何もしない」より前で受ける。
+    if kind == "move_items":
+        return op_move_items(text, course_range, op.get("items") or [],
+                             Fraction(op.get("delta_num", 0), op.get("delta_den", 1)))
+    if kind == "delete_items":
+        return op_delete_items(text, course_range, op.get("items") or [])
     a = tuple(op["a"]) if op.get("a") is not None else None
     b = tuple(op["b"]) if op.get("b") is not None else None
     if a is None:
@@ -670,11 +949,17 @@ def run_op(text, course_range, op):
         return op_delete(text, course_range, a, b, g)
     if kind in ("flip", "size"):
         return op_transform(text, course_range, a, b, g, kind)
+    if kind == "move" and b is not None:
+        return op_move(text, course_range, a, b, g, int(op.get("delta", 0)))
     if kind == "command":
         return op_command(text, course_range, a[0], a[1], g, op.get("name", ""), op.get("value"))
     if kind == "marker":
         return op_marker(text, course_range, a[0], a[1], g, str(op.get("region", "")).upper(),
                          str(op.get("which", "on")), bool(op.get("present", True)))
+    if kind == "marker_move" and b is not None:
+        return op_marker_move(text, course_range, a, b, g,
+                              str(op.get("region", "")).upper(),
+                              str(op.get("which", "on")))
     if kind == "region" and b is not None:
         return op_region(text, course_range, a, b, g, str(op.get("region", "")).upper(),
                          bool(op.get("on", True)))
@@ -692,13 +977,34 @@ def run_op(text, course_range, op):
 #     小節を細かく組み直してから足す(既存の命令行は同じ割合の位置に残る)。
 # 同じ位置に同じ命令がもうあれば、足さずに値を書き換える(二重に書かない)。
 
-COMMAND_NAMES = ("BPMCHANGE", "SCROLL")
+COMMAND_NAMES = ("BPMCHANGE", "SCROLL", "MEASURE")
 
 
 def _fmt_number(v):
     """150.0 → "150"、1.25 → "1.25"。小数は6桁まで。"""
     s = ("%.6f" % float(v)).rstrip("0").rstrip(".")
     return "0" if s in ("", "-0") else s
+
+
+def _fmt_value(name, value):
+    """命令の値を行に書く形へ。おかしな値なら None(置かない)。
+
+    #MEASURE だけは数ではなく "7/8" の形。ほかは数として書く。"""
+    if name == "MEASURE":
+        parts = str(value).replace(" ", "").split("/")
+        if len(parts) != 2:
+            return None
+        try:
+            n, d = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+        if n <= 0 or d <= 0:
+            return None
+        return "%d/%d" % (n, d)
+    try:
+        return _fmt_number(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _chunk_lines(chunk):
@@ -828,7 +1134,13 @@ def set_command(text, course_range, m, slot, grid, name, value):
     chunk = text[a:b]
     L = len(_measure_notes(text, (a, b)))
     key = Fraction(int(slot), int(grid))
-    new_line = "#%s %s" % (name, _fmt_number(value)) if value is not None else None
+    if value is None:
+        new_line = None
+    else:
+        v = _fmt_value(name, value)
+        if v is None:
+            return None
+        new_line = "#%s %s" % (name, v)
 
     # --- 同じ位置に同じ命令があれば、書き換える / 消す ---
     hit = _find_command(chunk, L, key, name)
@@ -1079,3 +1391,23 @@ def op_marker(text, course_range, m, slot, grid, kind, which, present):
     if new is None:
         return None
     return _result(text, new, reparse=True)
+
+
+def op_marker_move(text, course_range, a, b, grid, kind, which):
+    """開始/終了の印を a から b へ動かす(帯の端をつかんで動かす操作)。
+
+    消してから置く2手だが、返すのは元テキストとの差分1つなので、書き戻しも
+    Undo も1回で済む(呼び出し側が最小の差し替えにするため)。"""
+    if a == b:
+        return None
+    t1 = set_marker(text, course_range, a[0], a[1], grid, kind, which, False)
+    if t1 is None:
+        return None
+    # 行が1つ減ったので、コースの行範囲もその分ずらす(ずらさないと本文の
+    # 終わりが1行手前になり、最後の小節が見えなくなる)。
+    delta = t1.count(chr(10)) - text.count(chr(10))
+    rng = (course_range[0], course_range[1] + delta)
+    t2 = set_marker(t1, rng, b[0], b[1], grid, kind, which, True)
+    if t2 is None:
+        return None
+    return _result(text, t2, reparse=True)

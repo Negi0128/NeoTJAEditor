@@ -640,6 +640,15 @@ class MainWindow(QMainWindow):
         tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
         tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
+        # 作譜(Peepo式)の命令を置くメニュー。本家 PeepoDrumKit と同じく、
+        # キーを覚えていなくてもメニューから置ける。中身はカーソルの位置で
+        # 変わるので、出す直前にペインから作り直す。実験的機能がオフのときは
+        # 下部パネルに作譜ページ自体が無いので、メニューも出さない。
+        if self.config_data.get("peepo_chart_edit", False):
+            cm = mb.addMenu("作譜")
+            cm.aboutToShow.connect(lambda m=cm: self._fill_chart_menu(m))
+            self._chart_menu = cm
+
         rm = mb.addMenu("起動")
         self._run_actions = {}
         # F1 is reserved for the built-in preview (see _bind_shortcuts /
@@ -663,6 +672,23 @@ class MainWindow(QMainWindow):
         hm.addAction("ヘルプを表示", self.open_help)
         hm.addAction("更新を確認", lambda: self.check_for_updates(manual=True))
         hm.addAction("バージョン情報", self._show_about)
+
+    def _fill_chart_menu(self, menu):
+        """窓の「作譜」メニュー。作譜ペインの右クリックと同じ項目を並べる。
+
+        作譜ページを出していないときは、どこへ入るのか見えないまま命令が
+        入ってしまうので、項目は並べず「作譜にする」だけ出す。"""
+        menu.clear()
+        ce = getattr(self.preview_dock, "chart_edit", None)
+        if ce is None:
+            act = menu.addAction("作譜モードが無効です")
+            act.setEnabled(False)
+            return
+        if not self.preview_dock.is_chart_edit_visible():
+            menu.addAction("下のパネルを「作譜」にする",
+                           self.preview_dock.show_chart_edit)
+            return
+        ce.populate_command_menu(menu)
 
     def _bind_shortcuts(self):
         def ins_space(cmd):

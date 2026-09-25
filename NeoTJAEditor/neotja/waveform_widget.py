@@ -2,7 +2,7 @@ import bisect
 import time
 
 import numpy as np
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QPushButton, QWidget
 
@@ -86,6 +86,13 @@ class WaveformWidget(QWidget):
         self.position_sec = 0.0
         self.zoom = 1.0
         self.view_start = 0.0
+        # 表示を動かすときのトゥイーン(scroll_view_to)。飛ばすと目が位置を
+        # 見失うので、ひと息(VIEW_ANIM_SEC)かけて滑らせる。再生中の追従だけは
+        # 音の位置そのものなので、トゥイーンを挟まず直に入れる。
+        self._view_timer = None
+        self._view_from = 0.0
+        self._view_to = None
+        self._view_t0 = 0.0
         self._dragging = False
         self._last_repaint = 0.0
         # 作譜モードの波形用: 固定幅の窓を再生位置に追従スクロールさせる。
@@ -186,13 +193,15 @@ class WaveformWidget(QWidget):
         除く)を色つきラベルに、GOGO区間を帯にする。引数は build_preview_timeline
         の bpm_changes[(t,bpm)]/scroll_changes[(t,scroll)]/measure_changes[
         (t,num,den)]/gogo_regions[(s,e)] と同じ形。"""
+        # 4つめは種類("bpm"/"hs"/"measure")。作譜ペインが種類ごとの行へ
+        # 振り分けるのに使う(色で見分けていたのをやめた)。
         raw = []
         for t, bpm in (bpm_changes or [])[1:]:
-            raw.append((t, f"BPM{bpm:g}", "#3aa0ff"))
+            raw.append((t, f"BPM{bpm:g}", "#3aa0ff", "bpm"))
         for t, sc in (scroll_changes or [])[1:]:
-            raw.append((t, f"HS{sc:g}", "#ff6b6b"))
+            raw.append((t, f"HS{sc:g}", "#ff6b6b", "hs"))
         for t, num, den in (measure_changes or [])[1:]:
-            raw.append((t, f"{int(num)}/{int(den)}", "#e0c060"))
+            raw.append((t, f"{int(num)}/{int(den)}", "#e0c060", "measure"))
         self._cmd_raw = raw or None
         self._gogo_raw = list(gogo_regions or []) or None
         self._apply_offset_local(self.offset)
@@ -227,11 +236,12 @@ class WaveformWidget(QWidget):
         else:
             self._span_audio = None
         if self._cmd_raw:
-            self._cmd_audio = sorted((t - offset, txt, col) for t, txt, col in self._cmd_raw)
+            self._cmd_audio = sorted(
+                (t - offset, txt, col, kind) for t, txt, col, kind in self._cmd_raw)
             # 命令の時刻だけの列。_draw_command_labels が bisect に使う。音符や
             # 小節線と同じ理由で前計算する(命令が1万件を超える譜面では、毎フレーム
             # のリスト内包だけで 0.7ms かかっていた = 普通の譜面の1フレーム総額より重い)。
-            self._cmd_time_list = [t for t, _txt, _col in self._cmd_audio]
+            self._cmd_time_list = [c[0] for c in self._cmd_audio]
         else:
             self._cmd_audio = None
             self._cmd_time_list = None
@@ -277,18 +287,76 @@ class WaveformWidget(QWidget):
             self.set_position(self.position_sec)
         else:
             self.zoom = 1.0
+            self._stop_view_anim()
             self.view_start = 0.0
         self.update()
+
+    # ------------------------------------------------------------------
+    # 表示を滑らかに動かす
+    # ------------------------------------------------------------------
+    VIEW_ANIM_SEC = 0.18       # トゥイーンの長さ
+    VIEW_ANIM_MS = 8           # トゥイーンの刻み(画面より細かく打って取りこぼさない)
+
+    def view_target(self):
+        """トゥイーン中なら行き先、していなければ今の位置。
+
+        続けて動かすときは今の位置ではなく行き先から足す(1回目が終わる前に
+        2回目が来ても、送った回数ぶんきっちり動く)。"""
+        return self.view_start if self._view_to is None else self._view_to
+
+    def scroll_view_to(self, target, animate=True):
+        """表示の左端を target 秒へ動かす。"""
+        target = max(0.0, float(target))
+        if (not animate or not self.isVisible()
+                or abs(target - self.view_start) < 1e-6):
+            self._stop_view_anim()
+            self.view_start = target
+            self.update()
+            return
+        self._view_from = self.view_start
+        self._view_to = target
+        self._view_t0 = time.monotonic()
+        if self._view_timer is None:
+            self._view_timer = QTimer(self)
+            self._view_timer.setTimerType(Qt.PreciseTimer)
+            self._view_timer.timeout.connect(self._view_anim_step)
+        self._view_timer.start(self.VIEW_ANIM_MS)
+
+    def _stop_view_anim(self):
+        self._view_to = None
+        if self._view_timer is not None:
+            self._view_timer.stop()
+
+    def _view_anim_step(self):
+        if self._view_to is None:
+            self._stop_view_anim()
+            return
+        u = (time.monotonic() - self._view_t0) / max(1e-6, self.VIEW_ANIM_SEC)
+        if u >= 1.0:
+            self.view_start = self._view_to
+            self._stop_view_anim()
+        else:
+            # 動き出しは速く、止まり際はゆっくり(ease-out)。
+            e = 1.0 - (1.0 - u) ** 3
+            self.view_start = self._view_from + (self._view_to - self._view_from) * e
+        self.update()
+
+    def _follow_view_start(self, seconds, span):
+        """追従表示での view_start(派生クラスが振る舞いを差し替える口)。
+
+        既定は「再生位置を窓内の一定割合の位置に保つ」。作譜ペインは、停止中に
+        カーソルで動かすぶんだけ別の決め方(端に寄るまで動かさない)にしている。"""
+        vs = seconds - span * self.FOLLOW_FRAC
+        return max(0.0, min(vs, max(0.0, self.duration - span)))
 
     def set_position(self, seconds: float):
         self.position_sec = seconds
         span = self._visible_span()
         if self._follow_window:
-            # 再生位置を窓内の一定割合の位置に保つようスクロール(端はクランプ)。
-            vs = seconds - span * self.FOLLOW_FRAC
-            self.view_start = max(0.0, min(vs, max(0.0, self.duration - span)))
+            self.view_start = self._follow_view_start(seconds, span)
         elif seconds < self.view_start or seconds > self.view_start + span:
-            self.view_start = max(0.0, seconds - span * 0.1)
+            # 表示の外へ出たときだけ動かす。飛ばさず滑らせる。
+            self.scroll_view_to(max(0.0, seconds - span * 0.1))
 
         # QMediaPlayer can emit positionChanged far more often than a screen
         # refreshes; a full waveform+grid repaint on every tick pegs the GUI
@@ -307,10 +375,9 @@ class WaveformWidget(QWidget):
         self.position_sec = seconds
         span = self._visible_span()
         if self._follow_window:
-            vs = seconds - span * self.FOLLOW_FRAC
-            self.view_start = max(0.0, min(vs, max(0.0, self.duration - span)))
+            self.view_start = self._follow_view_start(seconds, span)
         elif seconds < self.view_start or seconds > self.view_start + span:
-            self.view_start = max(0.0, seconds - span * 0.1)
+            self.scroll_view_to(max(0.0, seconds - span * 0.1))
         self.update()
 
     def refresh_theme(self):
@@ -346,21 +413,28 @@ class WaveformWidget(QWidget):
         self._span_val = val
         return val
 
+    #: 時間軸が始まる x。0 なら今までどおりウィジェットいっぱい。作譜ペインは
+    #: 左に行の名前の列を置くので、そのぶん右から始める(_sec_to_x/_x_to_sec を
+    #: 通る描画は全部そのままずれる)。
+    LANE_X0 = 0
+
+    def _lane_w(self) -> int:
+        return max(1, self.width() - self.LANE_X0)
+
     def _seconds_per_pixel(self) -> float:
-        return self._visible_span() / max(1, self.width())
+        return self._visible_span() / self._lane_w()
 
     def _sec_to_x(self, sec: float) -> int:
         key = (self._follow_window, self.duration, self.zoom, self.width())
         if key != self._xs_key:
             span = self._visible_span()
-            self._xs_val = (self.width() / span) if span > 0 else 0.0
+            self._xs_val = (self._lane_w() / span) if span > 0 else 0.0
             self._xs_key = key
-        return int((sec - self.view_start) * self._xs_val)
+        return self.LANE_X0 + int((sec - self.view_start) * self._xs_val)
 
     def _x_to_sec(self, x: float) -> float:
         span = self._visible_span()
-        w = max(1, self.width())
-        return self.view_start + (x / w) * span
+        return self.view_start + ((x - self.LANE_X0) / self._lane_w()) * span
 
     # ------------------------------------------------------------------
     # Layout
@@ -373,8 +447,13 @@ class WaveformWidget(QWidget):
             hint = btn.sizeHint()
             btn.resize(hint.width() + 8, max(22, hint.height()))
         w = self.width()
-        self.btn_offset.move(w - self.btn_offset.width() - 6, 6)
-        self.btn_stereo.move(w - self.btn_offset.width() - self.btn_stereo.width() - 12, 6)
+        y = self._buttons_y()
+        self.btn_offset.move(w - self.btn_offset.width() - 6, y)
+        self.btn_stereo.move(w - self.btn_offset.width() - self.btn_stereo.width() - 12, y)
+
+    def _buttons_y(self):
+        """ボタンを置く y。既定は左上(従来どおり)。"""
+        return 6
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -498,9 +577,10 @@ class WaveformWidget(QWidget):
                     max(0.0, min(self.position_sec + step,
                                  self.duration if self.duration > 0 else self.position_sec + step)))
             else:
-                self.view_start = max(0.0, min(self.view_start + step,
-                                               max(0.0, self.duration - span)))
-                self.update()
+                # 回したぶんを滑らせて動かす。続けて回したときは、いまの位置では
+                # なく行き先から足す(回した回数ぶんきっちり進む)。
+                self.scroll_view_to(max(0.0, min(self.view_target() + step,
+                                                 max(0.0, self.duration - span))))
             event.accept()
             return
 
@@ -515,6 +595,9 @@ class WaveformWidget(QWidget):
             return
         old_span = self._visible_span()
         mouse_sec = self._x_to_sec(event.position().x())
+        # 拡大縮小はマウスの下の位置を固定して動かすので、トゥイーンは挟まない
+        # (滑らせると指した位置から離れていく)。走っていれば止める。
+        self._stop_view_anim()
         self.zoom = max(self.MIN_ZOOM, min(self.zoom * factor, self.MAX_ZOOM))
         new_span = self._visible_span()
         self.view_start = mouse_sec - (mouse_sec - self.view_start) * (new_span / old_span if old_span else 1)
@@ -585,6 +668,15 @@ class WaveformWidget(QWidget):
             pen.setWidth(width)
             self._pens[cache_key] = pen
         return pen
+
+    #: 音符の丸の半径と、連打/風船のバーの太さ。作譜ペインは行が高いので
+    #: 派生クラスで大きくする(利用者の指定 2026-09-25)。
+    NOTE_R = 8
+    NOTE_R_BIG = 11
+    SPAN_TH = 14
+    SPAN_TH_BIG = 20
+    #: 波形の縦の倍率(1.0 = 行の高さの 0.9 いっぱい)。
+    LANE_GAIN = 1.0
 
     NOTE_STRIP_H = 40  # 音符を波形の下に置く帯(譜面)の高さ
     # 命令ラベルを譜面の下に置く帯の高さ。BPM/SCROLL/拍子が同時刻付近に並ぶと
@@ -665,6 +757,10 @@ class WaveformWidget(QWidget):
                 painter.fillRect(6, h - 24, 240, 18, QColor(self._pal["accent2"]))
                 painter.drawText(10, h - 10, self._readout)
 
+    def _lane_qcolor(self):
+        """波形の色。派生クラスが変えられるようにする。"""
+        return QColor(self._pal["accent"])
+
     def _lane_buffer(self, w: int, h: int):
         buf = self._lane_buf
         if buf is None or buf.shape != (h, w):
@@ -687,11 +783,13 @@ class WaveformWidget(QWidget):
             return
         self._check_theme()
         if self._lane_color is None:
-            self._lane_color = np.uint32(QColor(self._pal["accent"]).rgba())
+            self._lane_color = np.uint32(self._lane_qcolor().rgba())
 
         _mins, maxs = self.mips.peaks(channel, t0, t1, w)
         mid = (lane_h - 1) / 2.0
-        half = mid * 0.9
+        # LANE_GAIN で縦に伸ばす(作譜ペインは行が高いので、素の倍率だと
+        # 真ん中に細い帯が見えるだけになる)。はみ出しは行の高さで頭打ち。
+        half = min(mid, mid * 0.9 * self.LANE_GAIN)
         top = mid - maxs * half
         bottom = mid + maxs * half
 
@@ -700,11 +798,11 @@ class WaveformWidget(QWidget):
         np.multiply(mask, self._lane_color, out=buf, dtype=np.uint32, casting="unsafe")
         # buf は self が保持しているので drawImage が終わるまで生きている。
         img = QImage(buf.data, w, lane_h, QImage.Format_ARGB32_Premultiplied)
-        painter.drawImage(0, int(y_top), img)
+        painter.drawImage(self.LANE_X0, int(y_top), img)
 
         if label:
             painter.setPen(self._pen("fg_dim"))
-            painter.drawText(6, int(y_top) + 14, label)
+            painter.drawText(self.LANE_X0 + 6, int(y_top) + 14, label)
 
     def _note_pixmap(self, fill: QColor, r: int) -> QPixmap:
         """半径 r・色 fill の音符の丸(クリーム色のフチ付き)を1回だけ描いて
@@ -746,12 +844,14 @@ class WaveformWidget(QWidget):
                 xs = self._sec_to_x(s)
                 xe = self._sec_to_x(e)
                 col = span_col.get(kind, QColor("#fcdb38"))
-                th = 20 if kind == "roll_big" else 14
+                th = self.SPAN_TH_BIG if kind == "roll_big" else self.SPAN_TH
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(col))
                 painter.drawRoundedRect(min(xs, xe), cy - th // 2, max(2, abs(xe - xs)), th, th // 2, th // 2)
                 # 頭(始点)を丸で強調。風船/くす玉はそれと分かる色に。
-                hr = 10 if kind in ("balloon", "kusudama") else (11 if kind == "roll_big" else 9)
+                hr = (self.SPAN_TH // 2 + 3 if kind in ("balloon", "kusudama")
+                      else (self.SPAN_TH_BIG // 2 + 1 if kind == "roll_big"
+                            else self.SPAN_TH // 2 + 2))
                 painter.setPen(QPen(ring, 2))
                 painter.setBrush(QBrush(col))
                 painter.drawEllipse(QPoint(xs, cy), hr, hr)
@@ -768,17 +868,30 @@ class WaveformWidget(QWidget):
             ka = QColor(self._pal["ka"])
             # 事前描画したピクスマップを貼るだけ(アンチエイリアスの
             # drawEllipse+ペンを毎フレーム音符数ぶん実行しない)。
+            r, rb = self.NOTE_R, self.NOTE_R_BIG
             spr = {
-                (False, True): self._note_pixmap(don, 8),
-                (False, False): self._note_pixmap(ka, 8),
-                (True, True): self._note_pixmap(don, 11),
-                (True, False): self._note_pixmap(ka, 11),
+                (False, True): self._note_pixmap(don, r),
+                (False, False): self._note_pixmap(ka, r),
+                (True, True): self._note_pixmap(don, rb),
+                (True, False): self._note_pixmap(ka, rb),
             }
             for t, c in na[lo:hi]:
                 x = self._sec_to_x(t)
-                pix = spr[(c in ("3", "4"), c in ("1", "3"))]
+                big, is_don = c in ("3", "4"), c in ("1", "3")
+                sc = self._note_scale(t)
+                if sc == 1.0:
+                    pix = spr[(big, is_don)]
+                else:
+                    # 叩かれた瞬間だけ大きくする。半径は整数へ丸めるので、
+                    # 増える絵は数種類だけ(ピクスマップのキャッシュが効く)。
+                    rr = max(2, int(round((rb if big else r) * sc)))
+                    pix = self._note_pixmap(don if is_don else ka, rr)
                 painter.drawPixmap(x - pix.width() // 2, cy - pix.height() // 2, pix)
         painter.setBrush(Qt.NoBrush)
+
+    def _note_scale(self, t):
+        """その音符を描く倍率。既定は等倍(作譜ペインが叩いた瞬間だけ膨らませる)。"""
+        return 1.0
 
     def _fill_gogo(self, painter, y0: int, height: int, t0: float, t1: float):
         """GOGO区間を [y0, y0+height] に薄い赤で重ねる。波形域・譜面帯の両方に
@@ -869,7 +982,7 @@ class WaveformWidget(QWidget):
         last_end = [-1e9, -1e9, -1e9]     # 3段までの右端 x
         box_brush = self._label_box_brush
         for i in range(lo, hi):
-            t, txt, col = ca[i]
+            t, txt, col = ca[i][0], ca[i][1], ca[i][2]
             x = self._sec_to_x(t)
             tw = tw_cache.get(txt)
             if tw is None:

@@ -136,8 +136,7 @@ class ChartEditWaveform(WaveformWidget):
     #: 再生位置(＝編集カーソル)をペインの真ん中に置く(利用者の指定)。
     #: 作譜は「いま置いた音符」と「これから置く場所」を行き来して見るので、
     #: 左右が同じ幅で見えるほうがよい。音声波形ページは親の 0.3 のまま。
-    FOLLOW_FRAC = 0.5
-    CURSOR_W = 3           # 編集カーソルの太さ
+    FOLLOW_FRAC = 0.33
     # 譜面の末尾より後ろへ、これだけ先までカーソルを進められる。置いた時点で
     # 足りない小節はテキスト側に自動で足される(note_edit.set_slot)。小節が
     # 1つも無い譜面でも打ち始められるようにするための仕組みでもある。
@@ -150,6 +149,18 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_slot = 0
         self._bar_times_raw = []   # 小節の開始時刻(譜面時間。権威データ)
         self._bar_times = []       # 上を OFFSET で音源時間へ直したもの
+        # 「小節線」の行に出す、隠れている区間。譜面時間と音源時間。
+        self._barline_raw = None
+        self._barline_audio = None
+        # 命令を種類ごとに分けた列(_rebuild_cmd_kinds)。
+        self._cmd_by_kind = None
+        self._cmd_kind_times = None
+        # 選んだ範囲の音符をつかんで動かしている最中の情報。
+        self._note_drag = None
+        # 選んだオブジェクトの鍵(エクスプローラー式の選択)。
+        self._sel = set()
+        # 何も無い所を左ドラッグして囲っている最中の四角。
+        self._band = None
         # 小節が1つも無いとき/末尾より先を外挿するときの1小節の長さ。
         # ヘッダの BPM から入れてもらう(既定は BPM120 の 4/4)。
         self._default_measure_len = 2.0
@@ -164,7 +175,6 @@ class ChartEditWaveform(WaveformWidget):
         self._range_start = None
         self._range_end = None
         # 右ドラッグでの範囲選択の起点(画面 x)。
-        self._rdrag_x = None
         # 連打・風船を置いている途中。{"key", "char", "head": (小節, スロット)}
         self._long = None
         # 終端 8 が無い長い音符の開始時刻(譜面時刻)。先頭の音符だけで描く。
@@ -178,8 +188,6 @@ class ChartEditWaveform(WaveformWidget):
         self._playing = False
         # 右クリックを押した時点の範囲と位置。動かさずに離したとき(=メニュー)は
         # 範囲を押す前に戻し、その位置でメニューを出す。
-        self._range_saved = (None, None)
-        self._rclick_addr = None
         # いま出ている命令の入力欄(テストから触るため覚えておく)。
         self._cmd_popup = None
 
@@ -198,14 +206,31 @@ class ChartEditWaveform(WaveformWidget):
         音符だけが動いてグリッドが取り残される。"""
         raw = []
         last_bpm = None
+        vis = []
         for item in (times or []):
             if isinstance(item, (tuple, list)):
                 raw.append(float(item[0]))
                 if len(item) > 1 and item[1]:
                     last_bpm = float(item[1])
+                vis.append(bool(item[3]) if len(item) > 3 else True)
             else:
                 raw.append(float(item))
+                vis.append(True)
         self._bar_times_raw = raw
+        # 「小節線」の行に出す、隠している区間(譜面時間)。bar_times の表示フラグが
+        # 落ちている小節を繋げる。#BARLINEOFF/#BARLINEON そのものの行位置では
+        # なく「結果として隠れている範囲」なので、見たままになる。
+        hidden = []
+        start = None
+        for i, v in enumerate(vis):
+            if not v and start is None:
+                start = raw[i]
+            elif v and start is not None:
+                hidden.append((start, raw[i]))
+                start = None
+        if start is not None:
+            hidden.append((start, raw[-1] if raw else start))
+        self._barline_raw = hidden or None
         # 小節が1つしか無いと間隔から長さを測れない。解析が返してきた BPM を
         # 使う(ヘッダの BPM が空の新規譜面でも、ここは埋まっている)。
         if last_bpm and last_bpm > 0:
@@ -218,12 +243,27 @@ class ChartEditWaveform(WaveformWidget):
         self._clamp_cursor()
         self.update()
 
+    def _rebuild_cmd_kinds(self):
+        """命令を種類ごとに分けて持つ(行ごとの描画用)。"""
+        by = {}
+        for item in (self._cmd_audio or []):
+            if len(item) < 4:
+                continue
+            by.setdefault(item[3], []).append((item[0], item[1]))
+        self._cmd_by_kind = by or None
+        self._cmd_kind_times = ({k: [t for t, _x in v] for k, v in by.items()}
+                                if by else None)
+
     def _rebuild_bar_times(self):
         self._bar_times = [max(0.0, t - self.offset)
                            for t in (self._bar_times_raw or [])]
+        raw = getattr(self, "_barline_raw", None)
+        self._barline_audio = ([(s - self.offset, e - self.offset) for s, e in raw]
+                               if raw else None)
 
     def _apply_offset_local(self, offset):
         super()._apply_offset_local(offset)
+        self._rebuild_cmd_kinds()
         # 親のコンストラクタからも呼ばれるので、まだ属性が無いことがある。
         if getattr(self, "_bar_times_raw", None) is not None:
             self._rebuild_bar_times()
@@ -258,15 +298,37 @@ class ChartEditWaveform(WaveformWidget):
     def _echo_active(self):
         return time.monotonic() < self._own_seek_until
 
+    #: 停止中、カーソルが左右それぞれこの割合まで寄ったら表示を動かす。
+    #: 真ん中に貼り付けていた頃は、1グリッド動かすたびに景色のほうが流れて
+    #: 目が落ち着かなかった(利用者の指摘 2026-09-25)。
+    VIEW_MARGIN_FRAC = 0.25
+
+    def _follow_view_start(self, seconds, span):
+        """追従表示の左端。
+
+        再生中は今までどおり、再生位置を窓の中の一定の場所に保って流す。
+        停止中(カーソルで動かしているとき)は、真ん中の帯にいるあいだは動かさず、
+        端(左右 VIEW_MARGIN_FRAC)まで寄ったときだけ真ん中へ戻すように滑らせる。
+        曲の終わりより先へもカーソルを出せるよう、duration ではクランプしない。"""
+        if span <= 0:
+            return self.view_start
+        if self._playing:
+            self._stop_view_anim()
+            return super()._follow_view_start(seconds, span)
+        left = self.view_target() + span * self.VIEW_MARGIN_FRAC
+        right = self.view_target() + span * (1.0 - self.VIEW_MARGIN_FRAC)
+        if left <= seconds <= right:
+            return self.view_start          # 帯の中 = 景色は動かさない
+        self.scroll_view_to(max(0.0, seconds - span * self.FOLLOW_FRAC))
+        return self.view_start              # 行き先はトゥイーンが書き込む
+
     def _pin_playhead_to_cursor(self):
         """赤い線と表示をカーソルの位置へ直接合わせる(音源の返事を待たない)。"""
         t = self.cursor_time()
         self.position_sec = t
         span = self._visible_span()
         if self._follow_window and span > 0:
-            vs = t - span * self.FOLLOW_FRAC
-            self.view_start = max(0.0, min(vs, max(0.0, self.duration - span))
-                                  if self.duration > 0 else vs)
+            self.view_start = self._follow_view_start(t, span)
         self.update()
 
     def _follow_playhead(self, t, nearest):
@@ -448,19 +510,6 @@ class ChartEditWaveform(WaveformWidget):
         self._clamp_cursor()
         self._cursor_changed()
 
-    def _ensure_cursor_visible(self):
-        """カーソルが表示窓から出そうなら窓のほうを寄せる。
-
-        set_position は使わない — あちらは再生位置(赤い線)も動かしてしまう。
-        曲の終わりより先へも出られるよう、duration ではクランプしない。"""
-        span = self._visible_span()
-        if span <= 0:
-            return
-        t = self.cursor_time()
-        margin = span * 0.1
-        if t < self.view_start + margin or t > self.view_start + span - margin:
-            self.view_start = max(0.0, t - span * self.FOLLOW_FRAC)
-
     def _address_from_time(self, t, nearest=False):
         """時刻から (小節, スロット)。譜面の末尾より先の外挿ぶんも当てる。"""
         if self._grid <= 0:
@@ -497,38 +546,74 @@ class ChartEditWaveform(WaveformWidget):
     def mousePressEvent(self, event):
         """左クリック: その位置へ編集カーソルを置く(再生位置のシークは親)。
         右ドラッグ: 範囲選択(PeepoDrumKit の右ドラッグの箱選択に当たる。
-        こちらの帯は1行しか無いので、時間の範囲だけを選ぶ)。"""
-        if event.button() == Qt.RightButton and not self.offset_mode:
+        こちらの帯は1行しか無いので、時間の範囲だけを選ぶ)。
+
+        左の行名の列(x < LANE_X0)は時間軸の外なので、何も起きない。"""
+        if event.position().x() < self.LANE_X0 and not self.offset_mode:
             self.setFocus(Qt.MouseFocusReason)
-            addr = self._address_from_time(max(0.0, self._x_to_sec(event.position().x())))
-            if addr is not None:
-                self._range_saved = (self._range_start, self._range_end)
-                self._rclick_addr = addr
-                self._rdrag_x = event.position().x()
-                # 分割数を必ず渡す。(小節, スロット) だけを渡すとスロットが
-                # 「小節の何個分」と解釈され、8 が 8/16 ではなく 8 小節ぶんになる
-                # (範囲の終わりが次の小節の頭へ飛んでいた)。
-                self._range_start = self._range_key(addr[0], addr[1], self._grid)
-                self._range_end = self._range_start
-                self.update()
+            return
+        if event.button() == Qt.RightButton and not self.offset_mode:
+            # 囲って選ぶのは右ドラッグだけ(利用者の指定 2026-09-26)。四角は
+            # 縦にも効く — スクロールの行だけを払えば、その命令だけ選べる。
+            self.setFocus(Qt.MouseFocusReason)
+            x, y = event.position().x(), event.position().y()
+            self._band = {"x0": x, "y0": y, "x1": x, "y1": y,
+                          "add": set(self._sel)
+                          if (event.modifiers() & Qt.ControlModifier) else set()}
+            if not (event.modifiers() & Qt.ControlModifier):
+                self.clear_selection()
+            self.update()
             return
         if event.button() == Qt.LeftButton and not self.offset_mode:
-            # 再生位置もグリッドに合わせた位置へ。親のクリック処理は押した
-            # x の時刻そのものへシークするので、ここでは呼ばない(呼ぶと再生
-            # 位置だけがグリッドからずれて、カーソルと食い違う)。
             self.setFocus(Qt.MouseFocusReason)
+            x, y = event.position().x(), event.position().y()
+            ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            obj = self._object_at(x, y)
+            if obj is not None:
+                # オブジェクトを押した = 選ぶ(Ctrl なら足し引き)。そのまま
+                # 横へ引っぱると、選んだものをまとめて動かせる。
+                if ctrl:
+                    sel = set(self._sel)
+                    sel.symmetric_difference_update({obj})
+                    self.set_selection(sel)
+                elif obj not in self._sel:
+                    self.set_selection({obj})
+                if obj in self._sel:
+                    # 既に選ばれているものを押したときは、選択をそのままにして
+                    # つかむ(まとめて動かせる)。動かさずに離したら、その1つ
+                    # だけにする — エクスプローラーと同じ。
+                    self._note_drag = {"x0": x, "dx": 0.0, "anchor": obj[-1],
+                                       "obj": obj, "ctrl": ctrl}
+                    self.setCursor(Qt.SizeHorCursor)
+                # 押した所へカーソルも動かす(選ぶだけだと、そのあと打ちたい
+                # 位置と食い違う)。
+                self._move_cursor_to_x(x)
+                return
+            # 何も無い所 = 選択を外してカーソルを置く(押したまま引っぱると
+            # カーソルが付いてくる)。囲って選ぶのは右ドラッグだけ
+            # (利用者の指定 2026-09-26)。
+            if not ctrl:
+                self.clear_selection()
             self._dragging = True
-            self._move_cursor_to_x(event.position().x())
+            self._move_cursor_to_x(x)
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._rdrag_x is not None and (event.buttons() & Qt.RightButton):
-            addr = self._address_from_time(max(0.0, self._x_to_sec(event.position().x())))
-            if addr is not None:
-                self._range_end = self._range_key(addr[0], addr[1], self._grid)
-                self.update()
+        if self._note_drag is not None and (event.buttons() & Qt.LeftButton):
+            # 掴んでいるあいだは 1px ごとに付いてくる(置くときだけグリッド)。
+            self._note_drag["dx"] = event.position().x() - self._note_drag["x0"]
+            self.update()
             return
+        if self._band is not None and (event.buttons() & Qt.RightButton):
+            self._band["x1"] = event.position().x()
+            self._band["y1"] = event.position().y()
+            self.update()
+            return
+        # オブジェクトの上ではカーソルの形を変える(つかめることが分かる)。
+        if not (event.buttons() & (Qt.LeftButton | Qt.RightButton)):
+            hit = self._object_at(event.position().x(), event.position().y())
+            self.setCursor(Qt.SizeHorCursor if hit is not None else Qt.ArrowCursor)
         # ドラッグでシークするあいだ、編集カーソルも一緒に付いていく
         # (シークはカーソルがグリッドの位置で出す)。
         if self._dragging and not self.offset_mode:
@@ -538,24 +623,21 @@ class ChartEditWaveform(WaveformWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton and self._rdrag_x is not None:
-            clicked = abs(event.position().x() - self._rdrag_x) < 4
-            self._rdrag_x = None
-            if clicked:
-                # ほとんど動かさずに離した = メニュー。押したときに張り直した
-                # 範囲は元に戻し(メニューの「範囲を解除」で消せるように)、
-                # カーソルをその位置へ動かしてからメニューを出す。
-                self._range_start, self._range_end = self._range_saved
-                if self._rclick_addr is not None:
-                    self.set_cursor_address(*self._rclick_addr)
-                self._exec_menu(self._build_command_menu(),
-                                event.globalPosition().toPoint())
+        if event.button() == Qt.LeftButton and self._note_drag is not None:
+            self._finish_note_drag()
+            return
+        if event.button() == Qt.RightButton and self._band is not None:
+            bd, self._band = self._band, None
+            if abs(bd["x1"] - bd["x0"]) >= 4 or abs(bd["y1"] - bd["y0"]) >= 4:
+                self._select_band(bd)
             self.update()
             return
         super().mouseReleaseEvent(event)
 
     def _move_cursor_to_x(self, x):
-        addr = self._address_from_time(max(0.0, self._x_to_sec(x)))
+        # 一番近いグリッドへ合わせる(利用者の指定 2026-09-25)。切り捨てだと
+        # 音符の少し右を押したときに1つ手前へ落ちて、置く場所がずれる。
+        addr = self._address_from_time(max(0.0, self._x_to_sec(x)), nearest=True)
         if addr is None:
             return
         if addr == (self._cur_measure, self._cur_slot):
@@ -572,6 +654,181 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_measure, self._cur_slot = addr
         self._clamp_cursor()
         self.update()
+
+    # ------------------------------------------------------------------
+    # オブジェクトの選択(Windows のエクスプローラー式)
+    # ------------------------------------------------------------------
+    # 選ぶ単位は「音符1つ」「命令1つ」。左クリックで選び、Ctrl で足し引き、
+    # 何も無い所を左ドラッグすると四角で囲って複数選べる(利用者の指定
+    # 2026-09-25)。選んだものは _sel に鍵(key)で持つ:
+    #   ("note", 位置)          … 音符・連打・風船の頭
+    #   ("cmd", 命令名, 位置)   … #BPMCHANGE / #SCROLL / #MEASURE /
+    #                             #GOGOSTART / #GOGOEND / #BARLINEOFF / #BARLINEON
+    # 位置は「小節番号 + 小節の中の割合」の分数(1/192 に丸め)。時刻ではなく
+    # 位置で持つのは、BPM が変わっても同じものを指し続けるため。
+    POS_DEN = 192
+    #: 命令の行の種類 → TJA の命令名。
+    _CMD_NAMES = {"bpm": "BPMCHANGE", "hs": "SCROLL", "measure": "MEASURE"}
+
+    def _pos_of_time(self, t):
+        """音源時刻 → 位置(分数)。"""
+        n = self._measure_count()
+        if n <= 0:
+            return None
+        i = max(0, bisect.bisect_right(self._bar_times, t + 1e-9) - 1)
+        if i >= n:
+            i = n - 1
+        a = self._bar_time(i)
+        b = self._bar_time(i + 1)
+        if a is None or b is None or b <= a:
+            return Fraction(i)
+        frac = (t - a) / (b - a)
+        return Fraction(i) + Fraction(int(round(frac * self.POS_DEN)), self.POS_DEN)
+
+    def _time_of_pos(self, pos):
+        """位置(分数) → 音源時刻。"""
+        m = int(pos)
+        frac = pos - m
+        a = self._bar_time(m)
+        b = self._bar_time(m + 1)
+        if a is None:
+            return None
+        if b is None or b <= a:
+            b = a + self._default_measure_len
+        return a + float(frac) * (b - a)
+
+    def _objects(self):
+        """いま画面に出ているオブジェクト [(鍵, 行, 時刻, つかめる半幅px)]。"""
+        out = []
+        for t, c in (self._note_audio or []):
+            p = self._pos_of_time(t)
+            if p is not None:
+                r = self.NOTE_R_BIG if c in ("3", "4") else self.NOTE_R
+                out.append((("note", p), "note", t, r))
+        for st, _e, kind in (self._span_audio or []):
+            p = self._pos_of_time(st)
+            if p is not None:
+                out.append((("note", p), "note", st,
+                            self.SPAN_TH_BIG // 2 if kind == "roll_big" else self.SPAN_TH // 2))
+        for item in (self._cmd_audio or []):
+            if len(item) < 4:
+                continue
+            name = self._CMD_NAMES.get(item[3])
+            p = self._pos_of_time(item[0])
+            if name and p is not None:
+                out.append((("cmd", name, p), item[3], item[0], 16))
+        for spans, names, row in ((self._gogo_audio, ("GOGOSTART", "GOGOEND"), "gogo"),
+                                  (self._barline_audio, ("BARLINEOFF", "BARLINEON"), "barline")):
+            for st, e in (spans or []):
+                for t, name in ((st, names[0]), (e, names[1])):
+                    p = self._pos_of_time(t)
+                    if p is not None:
+                        out.append((("cmd", name, p), row, t, 8))
+        return out
+
+    def _object_at(self, x, y):
+        """押した場所にあるオブジェクトの鍵。無ければ None。"""
+        row = self._row_at(y)
+        if row is None:
+            return None
+        best, best_d = None, None
+        for key, orow, t, half in self._objects():
+            if orow != row:
+                continue
+            x0, x1 = self._object_hrange(orow, t, half)
+            if not (x0 <= x <= x1):
+                continue
+            d = abs((x0 + x1) / 2.0 - x)
+            if best_d is None or d < best_d:
+                best, best_d = key, d
+        return best
+
+    def _objects_in_rect(self, x0, y0, x1, y1):
+        """四角で囲んだ中のオブジェクト(鍵の集まり)。"""
+        lo_x, hi_x = sorted((x0, x1))
+        lo_y, hi_y = sorted((y0, y1))
+        hit = set()
+        for key, orow, t, half in self._objects():
+            v = self._object_vrange(orow, half)
+            if v is None:
+                continue
+            # そのものが実際に描かれている高さで見る。行の高さで見ていたころは、
+            # スクロールの行だけを囲んだつもりでも、すぐ上の(背の高い)音符の行に
+            # かかって音符まで選ばれていた(利用者の報告 2026-09-26)。
+            if v[1] < lo_y or v[0] > hi_y:
+                continue
+            # エクスプローラーと同じで、四角に**重なった**ものを選ぶ
+            # (中心が入っていなくても、かかっていれば選ぶ)。
+            hx0, hx1 = self._object_hrange(orow, t, half)
+            if hx1 >= lo_x and hx0 <= hi_x:
+                hit.add(key)
+        return hit
+
+    def _object_hrange(self, orow, t, half):
+        """そのオブジェクトが占める横の範囲 (左, 右)。
+
+        命令の札は右へ伸びて描かれる。つかめる場所も**描いてある四角と同じ**に
+        する(利用者の指定 2026-09-26: 右側に判定が無くて動かしにくい)。"""
+        x = self._sec_to_x(t)
+        if orow == "note":
+            return (x - half, x + half)
+        if orow == "gogo":
+            # 帯の端。左右どちらからでもつまめるよう、中心に幅を取る。
+            return (x - 8, x + 8)
+        return (x - 2, x - 2 + half * 3)
+
+    def _object_vrange(self, orow, half):
+        """そのオブジェクトが描かれている縦の範囲 (上, 下)。"""
+        rows = self._row_rects()
+        r = rows.get(orow)
+        if r is None:
+            return None
+        ry, rh = r
+        if orow == "note":
+            # 音符は行の上側(波形の上)に、丸の大きさぶんだけ描かれる。
+            wave_h = int(rh * self.WAVE_FRAC)
+            cy = ry + (rh - wave_h) // 2
+            return (cy - half - 3, cy + half + 3)
+        return (ry + 2, ry + rh - 2)
+
+    def selection(self):
+        return set(self._sel)
+
+    def set_selection(self, keys):
+        """選んだものを入れ替える。
+
+        時間の帯(_range_start/_range_end)は別もの。敷き詰め(Shift+F/J/D/K)や
+        W/Q は「空いているグリッドも含む帯」に効かせたいので、選んだものとは
+        分けて持つ。囲って選んだときは、呼ぶ側が両方を立てる。"""
+        self._sel = set(keys)
+        self.update()
+
+    def clear_selection(self):
+        self.set_selection(())
+
+    def _select_band(self, bd):
+        """囲った四角の中のものを選び、時間の帯も張る。"""
+        hit = self._objects_in_rect(bd["x0"], bd["y0"], bd["x1"], bd["y1"])
+        self.set_selection(set(bd["add"]) | hit)
+        lo_x, hi_x = sorted((bd["x0"], bd["x1"]))
+        a0 = self._address_from_time(max(0.0, self._x_to_sec(lo_x)))
+        a1 = self._address_from_time(max(0.0, self._x_to_sec(hi_x)))
+        if a0 is not None and a1 is not None:
+            self._range_start = self._range_key(a0[0], a0[1], self._grid)
+            self._range_end = self._range_key(a1[0], a1[1], self._grid)
+
+    def selected_items(self):
+        """note_edit へ渡す形 [{kind, name, pos}]。"""
+        out = []
+        for k in self._sel:
+            pos = k[-1]
+            if k[0] == "note":
+                out.append({"kind": "note", "name": None,
+                            "pos": (pos.numerator, pos.denominator)})
+            else:
+                out.append({"kind": "cmd", "name": k[1],
+                            "pos": (pos.numerator, pos.denominator)})
+        return out
 
     # ------------------------------------------------------------------
     # 範囲選択(Tab / 右ドラッグ)
@@ -601,7 +858,10 @@ class ChartEditWaveform(WaveformWidget):
             self.update()
 
     def toggle_range_at_cursor(self):
-        """Tab: 1回目で範囲の始まり、2回目で終わり。同じ所なら取り消し。"""
+        """Tab: 1回目でカーソルの位置を帯の始まり、2回目で終わりにする。
+
+        帯は「空いているグリッドも含む時間の範囲」で、敷き詰め(Shift+F/J/D/K)
+        や W/Q が効く相手。選んだオブジェクト(_sel)とは別もの。"""
         here = self._range_key(self._cur_measure, self._cur_slot, self._grid)
         if self._range_start is None or self._range_end is not None:
             self._range_start = here
@@ -668,6 +928,11 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
 
     def _delete_or_transform(self, kind):
+        if kind == "delete" and self._sel:
+            # 選んだものを消す(音符も命令も。利用者の指定 2026-09-25)。
+            self._run_op({"kind": "delete_items", "items": self.selected_items()})
+            self.clear_selection()
+            return
         rng = self._range_addresses()
         if rng is not None:
             self._run_op({"kind": kind, "a": rng[0], "b": rng[1]})
@@ -677,37 +942,40 @@ class ChartEditWaveform(WaveformWidget):
     # ------------------------------------------------------------------
     # 命令(BPM / HS)を置く
     # ------------------------------------------------------------------
-    #: 命令 → (メニューと入力欄の見出し, キー)
-    _COMMAND_LABELS = {"BPMCHANGE": ("BPM", "B"), "SCROLL": ("スクロール(HS)", "S")}
+    #: 命令 → メニューと入力欄の見出し
+    _COMMAND_LABELS = {"BPMCHANGE": "BPM", "SCROLL": "スクロール(HS)"}
 
     def _build_command_menu(self):
-        """右クリックのメニュー。見出しに位置、項目の右にキーを出す
-        (キーを覚えていなくても使え、使っているうちにキーを覚えられる)。"""
-        m, s = self._cursor_addr()
+        """右クリックのメニュー(と、窓の「作譜」メニューの中身)。"""
         menu = QMenu(self)
+        self.populate_command_menu(menu)
+        return menu
+
+    def populate_command_menu(self, menu):
+        """命令の項目を menu へ足す。カーソルの位置で内容が変わるので、
+        窓のメニュー側は出す直前に clear() して呼び直す。
+
+        命令はキーではなくメニューから置く(利用者の希望 2026-09-25)。以前は
+        B/S/G/L のキーも受けていて、項目の右に "\\t B" のようにキーを出して
+        いたが、覚えるキーを増やさない方針にしたのでキーは外した。"""
+        m, s = self._cursor_addr()
         head = menu.addAction("%d小節目  %d/%d" % (m + 1, s, self._grid))
         head.setEnabled(False)
         menu.addSeparator()
         for name in ("BPMCHANGE", "SCROLL"):
-            label, key = self._COMMAND_LABELS[name]
-            # "\t" の右側はメニューがキーの欄に右寄せで出すだけで、ショートカット
-            # としては登録しない(キーはこのペインの keyPressEvent が受ける)。
-            act = menu.addAction("%sを変える…\t%s" % (label, key))
+            act = menu.addAction("%sを変える…" % self._COMMAND_LABELS[name])
             act.setData(name)
             act.triggered.connect(lambda _c=False, n=name: self.open_command_input(n))
         menu.addSeparator()
         # 開始・終了の命令。範囲ではなく、この位置に1つずつ置く(1小節ずつ書き
         # 進めるとき、終わりの位置は後から決まるため)。その位置にもう同じ行が
-        # あれば「〜を消す」になる。キーは「いま押したら行われる項目」にだけ付ける。
+        # あれば「〜を消す」になる。
         for kind in ("GOGO", "BARLINE"):
             info = self._marker_info(kind) or {}
-            auto = self._marker_action(info)
             for which in ("on", "off"):
                 base = self._MARKER_LABELS[kind][which]
                 present = bool(info.get("here_" + which))
                 text = base + ("を消す" if present else "")
-                if auto == (which, not present):
-                    text += "\t" + self._MARKER_LABELS[kind]["key"]
                 act = menu.addAction(text)
                 act.setData((kind, which))
                 act.triggered.connect(
@@ -718,12 +986,11 @@ class ChartEditWaveform(WaveformWidget):
         clr = menu.addAction("範囲を解除")
         clr.setEnabled(self.has_range())
         clr.triggered.connect(self.clear_range)
-        return menu
 
-    #: 開始・終了の命令の見出しとキー。
+    #: 開始・終了の命令の見出し。
     _MARKER_LABELS = {
-        "GOGO": {"on": "ゴーゴー開始", "off": "ゴーゴー終了", "key": "G"},
-        "BARLINE": {"on": "小節線を隠す", "off": "小節線を出す", "key": "L"},
+        "GOGO": {"on": "ゴーゴー開始", "off": "ゴーゴー終了"},
+        "BARLINE": {"on": "小節線を隠す", "off": "小節線を出す"},
     }
 
     def _marker_info(self, kind):
@@ -732,31 +999,6 @@ class ChartEditWaveform(WaveformWidget):
             return None
         return self._op_cb({"kind": "peek_marker", "a": self._cursor_addr(),
                             "grid": self._grid, "region": kind})
-
-    @staticmethod
-    def _marker_action(info):
-        """G / L を押したときに行うこと (which, present)。
-
-        その位置にもう開始か終了の行があれば、それを消す。無ければ、手前の状態が
-        OFF なら開始を、ON なら終了を置く。"""
-        if not info:
-            return None
-        if info.get("here_on"):
-            return ("on", False)
-        if info.get("here_off"):
-            return ("off", False)
-        return ("off", True) if info.get("before") else ("on", True)
-
-    def toggle_marker(self, kind):
-        """G(ゴーゴー)/ L(小節線): カーソルの位置で開始・終了を自動で切り替える。"""
-        if kind not in self._MARKER_LABELS:
-            return None
-        act = self._marker_action(self._marker_info(kind))
-        if act is None:
-            return None
-        which, present = act
-        return self._run_op({"kind": "marker", "a": self._cursor_addr(),
-                             "region": kind, "which": which, "present": present})
 
     def _exec_menu(self, menu, global_pos):
         """メニューを出す(テストではここを差し替えて、出したメニューを調べる)。"""
@@ -845,7 +1087,7 @@ class ChartEditWaveform(WaveformWidget):
     _OWN_KEYS = frozenset((
         Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Home, Qt.Key_End,
         Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
-        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_B, Qt.Key_S, Qt.Key_G, Qt.Key_L,
+        Qt.Key_W, Qt.Key_Q, Qt.Key_H,
     )) | frozenset(_PLAIN_KEYS) | frozenset(_PEEPO_NOTE_KEYS) | frozenset(_PEEPO_LONG_KEYS)
 
     def event(self, e):
@@ -856,7 +1098,8 @@ class ChartEditWaveform(WaveformWidget):
             if not (mods & (Qt.ControlModifier | Qt.MetaModifier)):
                 # Esc は「範囲や連打の途中を取り消す」ときだけこちらで使う。
                 # それ以外は今までどおり窓の全画面解除へ。
-                if key == Qt.Key_Escape and (self.has_range() or self._long is not None
+                if key == Qt.Key_Escape and (self._sel or self.has_range()
+                                             or self._long is not None
                                              or self._range_start is not None):
                     e.accept()
                     return True
@@ -872,6 +1115,18 @@ class ChartEditWaveform(WaveformWidget):
             return True
         return super().event(e)
 
+    def wheelEvent(self, event):
+        """ホイールはカーソルを1グリッドずつ動かす(利用者の指定 2026-09-25)。
+
+        以前はレーンと同じ「小節ごとの移動」だった。作譜では打つ位置を細かく
+        合わせたいので、グリッドに乗ったまま動くほうが合う。拡大縮小
+        (修飾キー + ホイール)は今までどおり親へ渡す。"""
+        if self.offset_mode or (event.modifiers() & self.ZOOM_MODIFIERS):
+            super().wheelEvent(event)
+            return
+        self.move_cursor(1 if event.angleDelta().y() > 0 else -1)
+        event.accept()
+
     def keyReleaseEvent(self, event):
         # 連打・風船のキーを離したところで置く。押しっぱなしの自動連射は
         # 離す/押すの組が届くので、自動連射ぶんは無視する。
@@ -885,7 +1140,9 @@ class ChartEditWaveform(WaveformWidget):
         key = event.key()
         mods = event.modifiers()
 
-        if key == Qt.Key_Escape and not self.offset_mode and self.has_range():
+        if key == Qt.Key_Escape and not self.offset_mode and (
+                self._sel or self._range_start is not None):
+            self.clear_selection()
             self.clear_range()
             return
         if key in _PEEPO_NOTE_KEYS and not (mods & (Qt.ControlModifier | Qt.MetaModifier)):
@@ -902,12 +1159,8 @@ class ChartEditWaveform(WaveformWidget):
         if key == Qt.Key_Q and not mods & (Qt.ControlModifier | Qt.AltModifier):
             self._delete_or_transform("size")
             return
-        if key in (Qt.Key_B, Qt.Key_S) and not mods & (Qt.ControlModifier | Qt.AltModifier):
-            self.open_command_input("BPMCHANGE" if key == Qt.Key_B else "SCROLL")
-            return
-        if key in (Qt.Key_G, Qt.Key_L) and not mods & (Qt.ControlModifier | Qt.AltModifier):
-            self.toggle_marker("GOGO" if key == Qt.Key_G else "BARLINE")
-            return
+        # 命令(BPM / HS / ゴーゴー / 小節線)はキーでは置かない。右クリックの
+        # メニューか、窓の「作譜」メニューから置く(利用者の希望 2026-09-25)。
         if key == Qt.Key_Home:
             self.jump_to_edge(False)
             return
@@ -1000,25 +1253,479 @@ class ChartEditWaveform(WaveformWidget):
     # ------------------------------------------------------------------
     # 描画
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 行レイアウト(PeepoDrumKit と同じ「左に行の名前・右に時間軸」)
+    # ------------------------------------------------------------------
+    #: 左の行名の列の幅。時間軸はここから右(親の LANE_X0)。
+    LANE_X0 = 130
+    #: 音符の丸とバーは、行が高いぶん大きくする(利用者の指定 2026-09-25)。
+    NOTE_R = 14
+    NOTE_R_BIG = 19
+    SPAN_TH = 24
+    SPAN_TH_BIG = 34
+    #: 波形は音符に隠れないよう、さらに縦へ伸ばす(利用者の指定 2026-09-25)。
+    LANE_GAIN = 3.0
+    #: 音符の行のうち、下から何割を波形に使うか。
+    WAVE_FRAC = 0.45
+    #: 叩かれた瞬間だけ音符を膨らませる(どこが鳴ったかが目で分かるように)。
+    HIT_POP_SEC = 0.13
+    HIT_POP_MAX = 1.45
+    #: 上の目盛り(小節番号と時刻)の高さ。
+    RULER_H = 22
+    #: 行: (種類, 行の名前, 高さ)。音符の行だけは余ったぶんを全部もらう
+    #: (ペインの高さが変わっても、増減するのは波形と音符の行)。
+    ROWS = (
+        ("bpm", "BPM", 30),
+        ("measure", "拍子記号", 30),
+        ("note", "音符", 0),
+        ("hs", "スクロール", 30),
+        ("barline", "小節線", 28),
+        ("gogo", "GOGO", 28),
+    )
+    #: 行の中身の色。区間の行(小節線・ゴーゴー)は同じ灰色にそろえる
+    #: (利用者の指定 2026-09-25: 色が増えると認識しにくい)。
+    ROW_CONTENT_COLOR = "#c8c8c8"
+
+    def _note_scale(self, t):
+        """再生中、再生位置が通り過ぎた直後の音符を少しだけ大きく描く。"""
+        if not self._playing:
+            return 1.0
+        d = self.position_sec - t
+        if 0.0 <= d < self.HIT_POP_SEC:
+            u = 1.0 - d / self.HIT_POP_SEC
+            return 1.0 + (self.HIT_POP_MAX - 1.0) * u
+        return 1.0
+
+    def _lane_qcolor(self):
+        """波形は灰色(利用者の指定)。青いままだと音符と主張し合う。"""
+        return QColor("#9aa3b2")
+
+    def _buttons_y(self):
+        """「合成 / OFFSET調整」は音符の行の中へ(上は小節番号の目盛りなので)。"""
+        top, _h = self._row_rects()["note"]
+        return top + 4
+
+    # ------------------------------------------------------------------
+    # 行の上での編集(命令の行をクリック / 帯の端をつかんで動かす)
+    # ------------------------------------------------------------------
+    #: 命令の行 → その行が持つ命令の名前。拍子(#MEASURE)はまだ置けない。
+    _ROW_COMMANDS = {"bpm": "BPMCHANGE", "hs": "SCROLL"}
+
+    def _row_at(self, y):
+        """y がどの行か。行の外なら None。"""
+        for kind, (top, h) in self._row_rects().items():
+            if top <= y < top + h:
+                return kind
+        return None
+
+    def place_command(self, name, value):
+        """カーソルの位置に命令を置く(命令パネルの「追加」から)。"""
+        m, s = self._cursor_addr()
+        return self._run_op({"kind": "command", "a": (m, s),
+                             "name": str(name).upper(), "value": value})
+
+    def place_marker(self, kind, which):
+        """カーソルの位置に開始/終了の印を置く(命令パネルのボタンから)。"""
+        m, s = self._cursor_addr()
+        return self._run_op({"kind": "marker", "a": (m, s),
+                             "region": str(kind).upper(), "which": str(which),
+                             "present": True})
+
+    def _drag_delta_slots(self, dx, anchor=None):
+        """つかんで動かした px を、グリッド何個ぶんかに直す。
+
+        anchor(つかんだものの位置)があればそこを基準に、無ければ選んだものの
+        先頭を基準にする。"""
+        if anchor is not None:
+            t = self._time_of_pos(anchor)
+            m0, s0 = int(anchor), int(round(float(anchor - int(anchor)) * self._grid))
+        else:
+            a = self._range_addresses()
+            if a is None:
+                return 0
+            (m0, s0), _b = a
+            t = self._address_time(m0, s0, self._grid)
+        if t is None:
+            return 0
+        addr = self._address_from_time(max(0.0, t + dx * self._seconds_per_pixel()),
+                                       nearest=True)
+        if addr is None:
+            return 0
+        return (addr[0] * self._grid + addr[1]) - (m0 * self._grid + s0)
+
+    def _finish_note_drag(self):
+        """離したところの一番近いグリッドへ、選んだものを置き直す。"""
+        dr, self._note_drag = self._note_drag, None
+        self.setCursor(Qt.ArrowCursor)
+        if dr is None:
+            return
+        if abs(dr["dx"]) < 4 or not self._sel:
+            obj = dr.get("obj")
+            if obj is not None and not dr.get("ctrl") and self._sel != {obj}:
+                self.set_selection({obj})
+            self.update()
+            return
+        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+        if steps:
+            d = Fraction(int(steps), int(self._grid))
+            res = self._run_op({"kind": "move_items", "items": self.selected_items(),
+                                "delta_num": d.numerator, "delta_den": d.denominator})
+            if res:
+                # 選んだものも一緒に動かす(続けて動かせるように)。
+                self.set_selection({(k[0], k[1], k[2] + d) if k[0] == "cmd"
+                                    else (k[0], k[1] + d) for k in self._sel})
+        self.update()
+
+    def _shift_addr(self, addr, delta):
+        """(小節, スロット) を delta グリッドぶんずらす。"""
+        k = addr[0] * self._grid + addr[1] + int(delta)
+        k = max(0, k)
+        return (k // self._grid, k % self._grid)
+
+    def _draw_selection(self, p, note_cy):
+        """選んだオブジェクトを1つずつ枠で囲む(エクスプローラーの選択と同じ
+        考え方で、範囲ではなく「選ばれているもの」を示す)。"""
+        if not self._sel and self._band is None:
+            return
+        rows = self._row_rects()
+        r, g, b = self.RANGE_COLOR
+        if self._sel:
+            p.setPen(QPen(QColor(r, g, b, 235), 2))
+            for key, orow, t, half in self._objects():
+                if key not in self._sel:
+                    continue
+                rect = rows.get(orow)
+                if rect is None:
+                    continue
+                x = self._sec_to_x(t)
+                x0, x1 = self._object_hrange(orow, t, half)
+                # つかんで動かしている間は、枠も一緒に付いてくる。
+                dr = self._note_drag
+                if dr is not None and key in self._sel:
+                    dx = (self._drag_dx_for(key[1], t, snap=True) if orow == "gogo"
+                          else int(dr["dx"]))
+                    x0 += dx
+                    x1 += dx
+                if orow == "note":
+                    cy = note_cy
+                    hh = half + 3
+                    p.drawRect(x0 - 3, cy - hh, (x1 - x0) + 6, 2 * hh)
+                else:
+                    ry, rh = rect
+                    p.drawRect(x0, ry + 2, x1 - x0, rh - 4)
+        if self._band is not None:
+            bd = self._band
+            lo_x, hi_x = sorted((bd["x0"], bd["x1"]))
+            lo_y, hi_y = sorted((bd["y0"], bd["y1"]))
+            p.fillRect(int(lo_x), int(lo_y), int(hi_x - lo_x), int(hi_y - lo_y),
+                       QColor(r, g, b, 30))
+            pen = QPen(QColor(r, g, b, 210), 1)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawRect(int(lo_x), int(lo_y), int(hi_x - lo_x), int(hi_y - lo_y))
+
+    def _draw_note_drag(self, p, top, strip, note_cy=None):
+        """つかんで動かしている最中の見せ方。選んだものを掴んだぶんだけ横へ
+        ずらして薄く描く(置くのはグリッドだが、動きは滑らかに)。"""
+        dr = self._note_drag
+        if dr is None or not self._sel:
+            return
+        dx = int(dr["dx"])
+        rows = self._row_rects()
+        r, g, b = self.RANGE_COLOR
+        cy = note_cy if note_cy is not None else top + strip // 2
+        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+        d = Fraction(int(steps), int(self._grid))
+        for key, orow, t, half in self._objects():
+            if key not in self._sel:
+                continue
+            x = self._sec_to_x(t) + dx
+            if orow == "note":
+                p.setOpacity(0.75)
+                c = self._char_at_time(t)
+                pix = self._note_pixmap(
+                    QColor(self._pal["don"] if c in ("1", "3") else self._pal["ka"]),
+                    self.NOTE_R_BIG if c in ("3", "4") else self.NOTE_R)
+                p.drawPixmap(x - pix.width() // 2, cy - pix.height() // 2, pix)
+                p.setOpacity(1.0)
+            elif orow in ("bpm", "measure", "hs"):
+                rect = rows.get(orow)
+                if rect is None:
+                    continue
+                ry, rh = rect
+                p.fillRect(x - 2, ry + 2, half * 3, rh - 4, QColor(r, g, b, 70))
+            # 置かれる位置(グリッド)に細い線
+            gt = self._time_of_pos(key[-1] + d)
+            if gt is not None:
+                p.setPen(QPen(QColor(255, 210, 60, 180), 1))
+                gx = self._sec_to_x(gt)
+                p.drawLine(gx, self.RULER_H, gx, self.height())
+
+    def _char_at_time(self, t):
+        """その時刻の音符の文字(うつしを描くときの色に使う)。"""
+        for tt, c in (self._note_audio or []):
+            if abs(tt - t) < 1e-6:
+                return c
+        return "1"
+
+    def _row_rects(self):
+        """{種類: (上端 y, 高さ)}。音符の行が残りを全部取る。"""
+        fixed = sum(h for _k, _n, h in self.ROWS)
+        note_h = max(40, self.height() - self.RULER_H - fixed)
+        out = {}
+        y = self.RULER_H
+        for kind, _name, h in self.ROWS:
+            hh = note_h if kind == "note" else h
+            out[kind] = (y, hh)
+            y += hh
+        return out
+
+    def _strip_rects(self):
+        """音符の行を「譜面帯」として返す(親の描画・既存の処理と同じ形)。"""
+        top, h = self._row_rects()["note"]
+        return (top, top, h, top + h, 0)
+
     def paintEvent(self, event):
-        super().paintEvent(event)
-        wh, note_top, note_strip, note_bottom, cmd_strip = self._strip_rects()
-        if note_strip <= 0:
-            # 譜面帯が無い(音符データ未着)。グリッドだけ波形域に出す。
-            note_top, note_strip = 0, wh
         p = QPainter(self)
         try:
-            self._draw_range(p, note_top, note_strip)
-            self._draw_edit_grid(p, note_top, note_strip)
-            self._draw_long_preview(p, note_top, note_strip)
-            self._draw_pending(p, note_top, note_strip)
-            if not self._playing:
-                # 再生中は赤い再生位置の線だけで足りる(利用者の指定)。
-                self._draw_cursor(p, note_top, note_strip)
-            if self._show_legend:
-                self._draw_legend(p)
+            self._paint_rows(p)
         finally:
             p.end()
+
+    def _paint_rows(self, p):
+        self._check_theme()
+        w, h = self.width(), self.height()
+        rows = self._row_rects()
+        t0 = self.view_start
+        t1 = t0 + self._visible_span()
+        pal = self._pal
+        p.fillRect(self.rect(), QColor(pal["bg2"]))
+
+        note_top, note_h = rows["note"]
+        # --- 音符の行: 波形を背景に敷いて、その上に譜面 ---
+        p.fillRect(self.LANE_X0, note_top, w - self.LANE_X0, note_h, QColor(pal["bg"]))
+        # 波形は行の下側へ寄せる(利用者の指定 2026-09-25)。音符と重ねると
+        # 丸に隠れてしまうので、音符は上、波形は下。
+        wave_h = int(note_h * self.WAVE_FRAC)
+        wave_top = note_top + note_h - wave_h
+        note_cy = note_top + (note_h - wave_h) // 2
+        mips = self.mips
+        if mips and not mips.is_empty():
+            self._draw_lane(p, mips.MIX, wave_top, wave_h, t0, t1, self._lane_w(), None)
+        # ゴーゴーは専用の行に帯で出すので、音符の行は薄く色を敷くだけにする
+        # (行が高くなったぶん、前と同じ濃さだと真っ赤に見える)。
+        for s, e in (self._gogo_audio or []):
+            if e < t0 or s > t1:
+                continue
+            xs, xe = self._sec_to_x(s), self._sec_to_x(e)
+            p.fillRect(xs, note_top, max(1, xe - xs), note_h,
+                       QColor(255, 120, 120, 18))
+        self._draw_measure_lines(p, note_top, note_h, t0, t1)
+        upper_h = note_h - wave_h          # 音符が並ぶ側(波形の上)
+        self._draw_edit_grid(p, note_top, upper_h)
+        self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
+        self._draw_long_preview(p, note_top, upper_h)
+        self._draw_pending(p, note_top, upper_h)
+
+        # --- 命令の行 ---
+        for kind in ("bpm", "measure", "hs"):
+            y, rh = rows[kind]
+            self._draw_cmd_row(p, kind, y, rh, t0, t1)
+        # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
+        # 指定 2026-09-26)。
+        self._draw_marker_row(p, rows["barline"], self._barline_audio,
+                              ("BARLINEOFF", "BARLINEON"), ("OFF", "ON"), t0, t1)
+        # GOGO は帯のまま(長さが目で分かるように)。端をつかんでいる間は、
+        # その端が付いてきて帯が伸び縮みする。
+        self._draw_span_row(p, rows["gogo"], self._gogo_audio,
+                            self.ROW_CONTENT_COLOR, t0, t1)
+
+        # --- 行の区切り線 ---
+        p.setPen(QPen(QColor(pal["border"])))
+        for kind, _name, _h in self.ROWS:
+            y, rh = rows[kind]
+            p.drawLine(0, y, w, y)
+        p.drawLine(0, self.RULER_H, w, self.RULER_H)
+
+        # --- 範囲の箱は全部の行にかける(命令も一緒に選べる) ---
+        rows_top, rows_h = self.RULER_H, h - self.RULER_H
+        note_cy = note_top + (note_h - wave_h) // 2
+        self._draw_selection(p, note_cy)
+        self._draw_note_drag(p, rows_top, rows_h, note_cy)
+
+        # --- 再生位置の線は全部の行を貫く ---
+        xp = self._sec_to_x(self.position_sec)
+        p.setPen(QPen(QColor(pal["err"]), 2))
+        p.drawLine(xp, self.RULER_H, xp, h)
+        # 黄色いカーソルは出さない(利用者の指定 2026-09-25)。停止中は赤い線が
+        # カーソルの位置に貼り付いているので、それで足りる。
+
+        # --- 目盛りと左の列は最後(譜面がはみ出しても上から隠す) ---
+        self._draw_ruler(p, t0, t1)
+        self._draw_row_labels(p, rows)
+
+    def _draw_row_labels(self, p, rows):
+        """左の列に行の名前を並べる。"""
+        pal = self._pal
+        p.fillRect(0, 0, self.LANE_X0, self.height(), QColor(pal["bg2"]))
+        f = self.font()
+        f.setPixelSize(12)
+        p.setFont(f)
+        for kind, name, _h in self.ROWS:
+            y, rh = rows[kind]
+            # 行の名前は全部同じ色。種類ごとに色を振ると、目に入る情報が増えて
+            # かえって読みにくい(利用者の指定 2026-09-25)。
+            p.setPen(QColor(pal["fg"]))
+            p.drawText(10, y, self.LANE_X0 - 16, rh,
+                       Qt.AlignVCenter | Qt.AlignLeft, name)
+            p.setPen(QPen(QColor(pal["border"])))
+            p.drawLine(0, y, self.LANE_X0, y)
+        p.setPen(QPen(QColor(pal["border"])))
+        p.drawLine(self.LANE_X0, 0, self.LANE_X0, self.height())
+        if self._show_legend:
+            # 左上は「いまの時刻」と「グリッドの分割」(本家と同じ場所)。
+            f.setPixelSize(11)
+            p.setFont(f)
+            p.setPen(QColor(pal["fg_dim"]))
+            p.drawText(10, 0, 70, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
+                       self._time_text(self.position_sec))
+            lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
+            p.setPen(QColor(lr, lg, lb))
+            p.drawText(84, 0, 40, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
+                       "1/%d" % self._grid)
+
+    @staticmethod
+    def _time_text(t):
+        t = max(0.0, float(t))
+        return "%02d:%06.3f" % (int(t // 60), t % 60)
+
+    def _draw_ruler(self, p, t0, t1):
+        """上の帯に小節番号と時刻を出す。"""
+        pal = self._pal
+        p.fillRect(0, 0, self.width(), self.RULER_H, QColor(pal["bg2"]))
+        f = self.font()
+        f.setPixelSize(11)
+        p.setFont(f)
+        n = self._measure_count()
+        prev_x = None
+        for m in range(n):
+            t = self._bar_time(m)
+            if t is None or t < t0 or t > t1:
+                continue
+            x = self._sec_to_x(t)
+            nxt = self._bar_time(m + 1)
+            room = (self._sec_to_x(nxt) - x) if nxt is not None else 999
+            p.setPen(QPen(QColor(pal["border"])))
+            p.drawLine(x, 0, x, self.RULER_H)
+            # 小節番号は必ず、時刻は入るときだけ(小節が詰まっているところで
+            # 数字が重なって読めなくなるのを防ぐ)。
+            p.setPen(QColor(pal["fg"]))
+            p.setClipRect(x + 2, 0, max(1, room - 3), self.RULER_H)
+            p.drawText(x + 4, 0, 60, 12, Qt.AlignVCenter | Qt.AlignLeft, str(m + 1))
+            if room >= 64:
+                p.setPen(QColor(pal["fg_dim"]))
+                f.setPixelSize(9)
+                p.setFont(f)
+                p.drawText(x + 4, 10, 70, 11, Qt.AlignVCenter | Qt.AlignLeft,
+                           self._time_text(t))
+                f.setPixelSize(11)
+                p.setFont(f)
+            p.setClipping(False)
+
+    def _draw_cmd_row(self, p, kind, y, rh, t0, t1):
+        """BPM / 拍子 / スクロールの行。その種類の命令だけを時間順に並べる。
+
+        詰まっていても間引かない(利用者の指定 2026-09-25)。細い縦線でその位置を
+        示し、文字は次の命令の手前までで切る — 本家 PeepoDrumKit と同じで、
+        値が連続で変わっていく場所でも「何が並んでいるか」が読める。"""
+        items = (self._cmd_by_kind or {}).get(kind)
+        if not items:
+            return
+        times = (self._cmd_kind_times or {}).get(kind) or []
+        f = self.font()
+        f.setPixelSize(11)
+        p.setFont(f)
+        col = QColor(self.ROW_CONTENT_COLOR)
+        right = self.width()
+        lo = max(0, bisect.bisect_left(times, t0) - 1)
+        for i in range(lo, len(items)):
+            t, txt = items[i]
+            if t > t1:
+                break
+            x = self._sec_to_x(t)
+            if x > right:
+                break
+            nxt = items[i + 1][0] if i + 1 < len(items) else None
+            xr = self._sec_to_x(nxt) if nxt is not None else x + 200
+            if xr <= x + 2:
+                xr = x + 2
+            p.setPen(QPen(col, 1))
+            p.drawLine(x, y + 1, x, y + rh - 1)
+            if xr - x > 5:
+                p.setClipRect(x + 2, y, max(1, xr - x - 3), rh)
+                p.drawText(x + 3, y, xr - x, rh,
+                           Qt.AlignVCenter | Qt.AlignLeft, txt)
+                p.setClipping(False)
+
+    def _drag_dx_for(self, name, t, snap=False):
+        """その印をいまつかんで動かしているなら、動かした px。
+
+        snap=True なら、そのままの px ではなく「置かれるグリッド」までの px を
+        返す(GOGO の帯は伸びる長さが目で分かるよう、グリッドに乗せたまま
+        伸び縮みさせる — 利用者の指定 2026-09-26)。"""
+        dr = self._note_drag
+        if dr is None:
+            return 0
+        pos = self._pos_of_time(t)
+        if pos is None or ("cmd", name, pos) not in self._sel:
+            return 0
+        if not snap:
+            return int(dr["dx"])
+        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+        gt = self._time_of_pos(pos + Fraction(int(steps), int(self._grid)))
+        if gt is None:
+            return int(dr["dx"])
+        return self._sec_to_x(gt) - self._sec_to_x(t)
+
+    def _draw_span_row(self, p, rect, spans, color, t0, t1):
+        """ゴーゴーの帯。端をつかんでいる間は、その端だけが付いてくる。"""
+        y, rh = rect
+        if not spans:
+            return
+        col = QColor(color)
+        fill = QColor(col)
+        fill.setAlpha(70)
+        for s_t, e_t in spans:
+            if e_t < t0 or s_t > t1:
+                continue
+            xs = self._sec_to_x(s_t) + self._drag_dx_for("GOGOSTART", s_t, snap=True)
+            xe = self._sec_to_x(e_t) + self._drag_dx_for("GOGOEND", e_t, snap=True)
+            lo, hi = sorted((xs, xe))
+            p.fillRect(lo, y + 3, max(2, hi - lo), rh - 6, fill)
+            p.setPen(QPen(col, 1))
+            p.drawRect(lo, y + 3, max(2, hi - lo), rh - 6)
+
+    def _draw_marker_row(self, p, rect, spans, names, labels, t0, t1):
+        """小節線のような「ここから / ここまで」の印。札で出す。"""
+        y, rh = rect
+        if not spans:
+            return
+        f = self.font()
+        f.setPixelSize(11)
+        p.setFont(f)
+        col = QColor(self.ROW_CONTENT_COLOR)
+        fm = p.fontMetrics()
+        for s_t, e_t in spans:
+            for t, name, text in ((s_t, names[0], labels[0]),
+                                  (e_t, names[1], labels[1])):
+                if t < t0 or t > t1:
+                    continue
+                x = self._sec_to_x(t) + self._drag_dx_for(name, t)
+                tw = fm.horizontalAdvance(text)
+                p.setPen(QPen(col, 1))
+                p.drawLine(x, y + 1, x, y + rh - 1)
+                p.drawText(x + 3, y, tw + 6, rh,
+                           Qt.AlignVCenter | Qt.AlignLeft, text)
 
     def _slot_style(self, k):
         """スロット k の線の色と長さ。
@@ -1047,7 +1754,13 @@ class ChartEditWaveform(WaveformWidget):
         # グリッドの目盛りは「いま編集している小節」と「次の小節」だけに引く
         # (利用者の指定)。画面いっぱいに引くと、どこを編集しているのかが
         # かえって読みにくい。末尾より先の小節線(破線)は範囲外でも引く。
-        grid_measures = (self._cur_measure, self._cur_measure + 1)
+        # 再生中は1つ前の小節にも引く(利用者の指定 2026-09-25)。流れていく
+        # 譜面の後ろ側が無地だと、いまどの位置を通ったのかが読めない。
+        grid_measures = ((self._cur_measure - 1, self._cur_measure,
+                          self._cur_measure + 1, self._cur_measure + 2)
+                         if self._playing
+                         else (self._cur_measure, self._cur_measure + 1,
+                               self._cur_measure + 2))
         for m in range(self._measure_count()):
             m_start = self._bar_time(m)
             m_end = self._bar_time(m + 1)
@@ -1102,26 +1815,8 @@ class ChartEditWaveform(WaveformWidget):
         m, frac = key
         return self._address_time(m, frac.numerator, frac.denominator)
 
-    def _draw_range(self, p, top, strip):
-        """範囲選択。終わりが決まるまでは始まりに細い帯だけを出す。"""
-        if self._range_start is None:
-            return
-        t0 = self._key_time(self._range_start)
-        if t0 is None:
-            return
-        x0 = self._sec_to_x(t0)
-        if self._range_end is None:
-            p.fillRect(x0 - 1, top, 3, strip, QColor(120, 190, 255, 200))
-            return
-        t1 = self._key_time(self._range_end)
-        if t1 is None:
-            return
-        x1 = self._sec_to_x(t1)
-        lo, hi = min(x0, x1), max(x0, x1)
-        p.fillRect(lo, top, max(2, hi - lo), strip, QColor(120, 190, 255, 55))
-        p.setPen(QPen(QColor(120, 190, 255, 200), 1))
-        p.drawLine(lo, top, lo, top + strip)
-        p.drawLine(hi, top, hi, top + strip)
+    #: 範囲選択の色(PeepoDrumKit と同じ、緑の箱で囲う)。
+    RANGE_COLOR = (124, 207, 124)
 
     def _draw_long_preview(self, p, top, strip):
         """連打・風船のキーを押している間、置かれる予定の帯を出す。"""
@@ -1142,34 +1837,4 @@ class ChartEditWaveform(WaveformWidget):
         p.drawRoundedRect(lo, cy - 8, max(4, hi - lo), 16, 8, 8)
         p.setBrush(Qt.NoBrush)
 
-    def _draw_cursor(self, p, top, strip):
-        """編集カーソル。音符はグリッド線の上に置かれるので、枠はその線を
-        中心に左右半グリッドずつ取り、縦線も中心に引く(音符が枠の真ん中に
-        来る)。以前は線から右へ1グリッドぶん塗っていて、音符が枠の左端に
-        乗って見えた。"""
-        t = self.cursor_time()
-        x = self._sec_to_x(t)
-        m_end_t = self._address_time(self._cur_measure, self._cur_slot + 1,
-                                     self._grid)
-        if m_end_t is not None:
-            half = max(1, (self._sec_to_x(m_end_t) - x) // 2)
-            p.fillRect(x - half, top, half * 2, strip, QColor(255, 210, 60, 45))
-        p.setPen(QPen(QColor(255, 210, 60), self.CURSOR_W))
-        p.drawLine(x, top, x, top + strip)
 
-    def _draw_legend(self, p):
-        """どのキーがどの音符かを常に出しておく。ゲーム窓は固定サイズで縦の
-        余裕が無いので、行を増やさずウィジェット内へ半透明で重ねる。"""
-        h = self.LEGEND_H
-        p.fillRect(0, 0, 52, h, QColor(0, 0, 0, 150))
-        f = self.font()
-        f.setPixelSize(11)
-        p.setFont(f)
-        x = 6
-        # 現在のグリッド。
-        # 現在の分割の色でラベルを出す(グリッド線の色と対応が付くように)。
-        lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
-        p.setPen(QColor(lr, lg, lb))
-        label = "1/%d" % self._grid
-        p.drawText(x, 0, 44, h, Qt.AlignVCenter | Qt.AlignLeft, label)
-        # キーの一覧は出さない(利用者の指定)。グリッドの間隔だけ。
