@@ -15,6 +15,7 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "gpu_render", "gpu_vsync",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
+    "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
     "player_select_bgm", "player_select_bgm_volume",
     # NeoTJAPlayer の演奏モード(実験的機能)。default_settings() と両方に要る。
@@ -233,6 +234,12 @@ def default_settings() -> dict:
         # 変更でき、反映はアプリの再起動後(preview_dock.py がここを見て
         # 「作譜」ページを最初から作るかどうかを決めるため)。
         "peepo_chart_edit": False,
+        # 作譜モードで、再生中にペインを塗り直す回数の上限(0 = レーンの
+        # フレームごと)。ゲーム画面と同じ窓に居る普通のウィジェットなので、
+        # 1回塗るたびに窓ぜんたいの組み直しが走り、レーンの fps がその分
+        # 落ちる(chart_edit_widget.REDRAW_FPS_DEFAULT に実測値がある)。
+        # 30 でレーンは約 280fps、0 だと約 70fps。
+        "peepo_edit_redraw_fps": 30,
     }
 
 

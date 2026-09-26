@@ -16,8 +16,8 @@ import math
 import time
 from fractions import Fraction
 
-from PySide6.QtCore import QEvent, QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QWidget)  # noqa: F401  (QWidget は型注釈用)
 
@@ -142,6 +142,44 @@ class ChartEditWaveform(WaveformWidget):
     # 1つも無い譜面でも打ち始められるようにするための仕組みでもある。
     EXTEND_MEASURES = 64
 
+    # ------------------------------------------------------------------
+    # 再生中の塗り直しの回数 (settings.json の peepo_edit_redraw_fps)
+    # ------------------------------------------------------------------
+    # このペインは **ゲーム画面と同じ窓の中に居る普通の Qt ウィジェット** で、
+    # ゲーム画面のほうは GPU の面へ直に出している。そのため、ここを1回塗り直す
+    # たびに窓ぜんたいを組み直す処理(GPU の絵を窓の絵へ合成 → 窓へ出す)が
+    # 走る。実測(1280x708 の窓 / 120Hz):
+    #
+    #   ペインを塗らない          レーン 405 fps
+    #   ペインを毎フレーム塗る    レーン  66 fps  (1回あたり約 13ms)
+    #   ペインを 30 回/秒に間引く レーン 253 fps
+    #
+    # **中身を空にしても 87 fps しか出ない**ので、この 13ms はこちらの描画では
+    # なく合成の値段。つまりレーンの fps を上げる道は「ペインを塗る回数を
+    # 減らす」しかない。レーンのフレームごとに塗るのをやめ、ここで決めた回数
+    # までに間引く(位置そのものは毎フレーム受け取って進めるので、赤い線の
+    # 場所は間引いても正しい — 見え方が粗くなるだけ)。
+    #
+    # 0 を入れるとレーンのフレームごとに塗る(以前の動き。ペインはいちばん
+    # 滑らかで、レーンの fps はいちばん低い)。
+    REDRAW_FPS_DEFAULT = 30
+    # 親の __init__ の途中で update() が呼ばれても落ちないように、クラス側にも
+    # 既定値を置く(下の __init__ で本物を入れる)。
+    _quiet = False
+    _redraw_fps = 0
+    _last_paint_wall = 0.0
+
+    def _load_redraw_fps(self):
+        try:
+            from neotja import settings as settings_mod
+            v = int(settings_mod.load_settings().get("peepo_edit_redraw_fps",
+                                                    self.REDRAW_FPS_DEFAULT))
+        except Exception:  # noqa: BLE001
+            return self.REDRAW_FPS_DEFAULT
+        if v <= 0:
+            return 0
+        return max(5, min(240, v))
+
     def __init__(self, parent=None, toggle_play_cb=None):
         super().__init__(parent, toggle_play_cb=toggle_play_cb, force_dark=True)
         self._grid = 16
@@ -190,6 +228,19 @@ class ChartEditWaveform(WaveformWidget):
         # 範囲を押す前に戻し、その位置でメニューを出す。
         # いま出ている命令の入力欄(テストから触るため覚えておく)。
         self._cmd_popup = None
+        # --- 再生中の塗り直しの間引き(REDRAW_FPS_DEFAULT の説明を参照) ---
+        self._redraw_fps = self._load_redraw_fps()
+        self._last_paint_wall = 0.0
+        # True のあいだ update() を飲み込む(状態だけ進めて塗らない)。
+        self._quiet = False
+        # 間引いたぶんを最後に1回出すためのタイマー。取りこぼした位置が
+        # 描かれないまま残らないように、必ず追いの1枚を出す。
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.timeout.connect(self.update)
+        # 左の行名の列は動かないので、1枚に焼いて使い回す。
+        self._labels_pm = None
+        self._labels_key = None
 
     # ------------------------------------------------------------------
     # 外から入れるもの
@@ -291,9 +342,45 @@ class ChartEditWaveform(WaveformWidget):
         こちらはこだまを無視しない。再生中にここを止めると、←→を押してから
         0.8 秒のあいだ赤い線が止まって見える。レーンのクロックはシーク先へ
         1フレームで移るし、ここからシークを出し直すことも無いので、
-        引き戻し合いにはならない。"""
-        super().set_position_smooth(seconds)
-        self._follow_playhead(seconds, nearest=False)
+        引き戻し合いにはならない。
+
+        塗り直しは REDRAW_FPS_DEFAULT の回数までに間引く。位置・表示範囲・
+        カーソルは毎フレームぶん進める(間引くのは絵だけ)。"""
+        if self._repaint_due():
+            super().set_position_smooth(seconds)
+            self._follow_playhead(seconds, nearest=False)
+            return
+        self._quiet = True
+        try:
+            super().set_position_smooth(seconds)
+            self._follow_playhead(seconds, nearest=False)
+        finally:
+            self._quiet = False
+        self._arm_redraw()
+
+    def _repaint_due(self):
+        """いま塗ってよいか。再生中だけ間引く(止まっているときは即座に)。"""
+        if self._redraw_fps <= 0 or not self._playing:
+            return True
+        return (time.monotonic() - self._last_paint_wall
+                >= 1.0 / self._redraw_fps)
+
+    def _arm_redraw(self):
+        """間引いたぶんの追いの1枚を予約する。"""
+        if self._redraw_timer.isActive():
+            return
+        wait = 1.0 / self._redraw_fps - (time.monotonic() - self._last_paint_wall)
+        self._redraw_timer.start(max(1, int(wait * 1000.0)))
+
+    def update(self, *args):
+        """間引いている最中(_quiet)は塗らない。
+
+        set_position_smooth の中から呼ばれる update() を全部まとめて止める
+        ための入口。ここを通さないと、位置を進める途中で呼ばれる
+        _follow_playhead → _cursor_changed などが個別に塗り直してしまう。"""
+        if self._quiet:
+            return
+        super().update(*args)
 
     def _echo_active(self):
         return time.monotonic() < self._own_seek_until
@@ -478,6 +565,27 @@ class ChartEditWaveform(WaveformWidget):
         # 届いた瞬間にカーソルと表示が OFFSET ぶん飛ぶ。
         base = self._bar_times[-1] if n else max(0.0, -self.offset)
         return base + self._measure_len() * (m - (n - 1 if n else 0))
+
+    def _measure_range(self, t0, t1):
+        """[t0, t1] に掛かっている小節の番号の範囲 (最初, 最後+1)。
+
+        描画のたびに全小節を見に行かないための下ごしらえ。既知の小節は開始
+        時刻が並んでいるので bisect で切り出し、末尾より先の外挿ぶんは等間隔
+        なので割り算で出す(式は _bar_time と同じものを解く)。長い曲では
+        ここが効く — 300小節の譜面なら、以前は定規とグリッドで毎コマ
+        600回の _bar_time を呼んでいた。"""
+        total = self._measure_count()
+        n = self._known_measures()
+        lo, hi = 0, 0
+        if n:
+            lo = max(0, bisect.bisect_right(self._bar_times, t0) - 1)
+            hi = bisect.bisect_right(self._bar_times, t1) + 1
+        if hi >= n:
+            base = self._bar_times[-1] if n else max(0.0, -self.offset)
+            m0 = (n - 1) if n else 0
+            hi = m0 + int(max(0.0, t1 - base) / self._measure_len()) + 2
+        lo = min(lo, total)
+        return lo, min(total, max(lo + 1, hi))
 
     def _address_time(self, m, slot, grid):
         """(小節, スロット) の時刻。既知の小節の外でも返す。"""
@@ -1486,6 +1594,7 @@ class ChartEditWaveform(WaveformWidget):
         return (top, top, h, top + h, 0)
 
     def paintEvent(self, event):
+        self._last_paint_wall = time.monotonic()
         p = QPainter(self)
         try:
             self._paint_rows(p)
@@ -1565,9 +1674,45 @@ class ChartEditWaveform(WaveformWidget):
         self._draw_row_labels(p, rows)
 
     def _draw_row_labels(self, p, rows):
-        """左の列に行の名前を並べる。"""
+        """左の列に行の名前を並べる。
+
+        名前と区切り線は動かないので1枚に焼いて使い回す(高さ・テーマ・行の
+        並びが変わったときだけ焼き直す)。変わるのは左上の時刻と分割だけ。"""
         pal = self._pal
-        p.fillRect(0, 0, self.LANE_X0, self.height(), QColor(pal["bg2"]))
+        h = self.height()
+        key = (self.LANE_X0, h, pal.get("bg2"), pal.get("fg"), pal.get("border"),
+               self.devicePixelRatioF(), tuple(rows.items()))
+        if self._labels_key != key or self._labels_pm is None:
+            dpr = self.devicePixelRatioF()
+            # 右端の縦の区切り線(x = LANE_X0)まで入れるので 1px 広く焼く。
+            pm = QPixmap(max(1, int((self.LANE_X0 + 1) * dpr)),
+                         max(1, int(h * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(QColor(pal["bg2"]))
+            q = QPainter(pm)
+            try:
+                self._paint_row_labels_static(q, rows, h)
+            finally:
+                q.end()
+            self._labels_pm = pm
+            self._labels_key = key
+        p.drawPixmap(0, 0, self._labels_pm)
+        if self._show_legend:
+            # 左上は「いまの時刻」と「グリッドの分割」(本家と同じ場所)。
+            f = self.font()
+            f.setPixelSize(11)
+            p.setFont(f)
+            p.setPen(QColor(pal["fg_dim"]))
+            p.drawText(10, 0, 70, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
+                       self._time_text(self.position_sec))
+            lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
+            p.setPen(QColor(lr, lg, lb))
+            p.drawText(84, 0, 40, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
+                       "1/%d" % self._grid)
+
+    def _paint_row_labels_static(self, p, rows, h):
+        """行名の列の、動かない部分(名前・区切り線)。焼き付け用。"""
+        pal = self._pal
         f = self.font()
         f.setPixelSize(12)
         p.setFont(f)
@@ -1581,18 +1726,7 @@ class ChartEditWaveform(WaveformWidget):
             p.setPen(QPen(QColor(pal["border"])))
             p.drawLine(0, y, self.LANE_X0, y)
         p.setPen(QPen(QColor(pal["border"])))
-        p.drawLine(self.LANE_X0, 0, self.LANE_X0, self.height())
-        if self._show_legend:
-            # 左上は「いまの時刻」と「グリッドの分割」(本家と同じ場所)。
-            f.setPixelSize(11)
-            p.setFont(f)
-            p.setPen(QColor(pal["fg_dim"]))
-            p.drawText(10, 0, 70, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
-                       self._time_text(self.position_sec))
-            lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
-            p.setPen(QColor(lr, lg, lb))
-            p.drawText(84, 0, 40, self.RULER_H, Qt.AlignVCenter | Qt.AlignLeft,
-                       "1/%d" % self._grid)
+        p.drawLine(self.LANE_X0, 0, self.LANE_X0, h)
 
     @staticmethod
     def _time_text(t):
@@ -1606,9 +1740,7 @@ class ChartEditWaveform(WaveformWidget):
         f = self.font()
         f.setPixelSize(11)
         p.setFont(f)
-        n = self._measure_count()
-        prev_x = None
-        for m in range(n):
+        for m in range(*self._measure_range(t0, t1)):
             t = self._bar_time(m)
             if t is None or t < t0 or t > t1:
                 continue
@@ -1761,7 +1893,7 @@ class ChartEditWaveform(WaveformWidget):
                          if self._playing
                          else (self._cur_measure, self._cur_measure + 1,
                                self._cur_measure + 2))
-        for m in range(self._measure_count()):
+        for m in range(*self._measure_range(t0, t1)):
             m_start = self._bar_time(m)
             m_end = self._bar_time(m + 1)
             if m_start is None or m_end is None or m_end < t0 or m_start > t1:
