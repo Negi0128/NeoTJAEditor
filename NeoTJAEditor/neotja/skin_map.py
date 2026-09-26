@@ -1006,6 +1006,21 @@ SKIN_MAP = {
         "note": "自作のサンプル譜面。System には無いのでアプリに同梱する。"},
 }
 
+# --- 叩いた瞬間の火花(判定ごとの15コマ) -------------------------------------
+# 旧 skin には Explosion.png(5コマのシート。炎+銀を重ねる古い素材)しか無く、
+# 良でも金色にならず白っぽい橙になっていた(実測 (250,174,93)。本家の良は
+# (236,191,0) の金)。TNDE-R には判定ごと・大きさごとの15コマが入っているので、
+# そちらを取り出して使う(利用者の報告 2026-09-26)。
+for _folder, _prefix in (("Great", "HitGreat"), ("Good", "HitGood"),
+                         ("Great_Big", "HitGreatBig"), ("Good_Big", "HitGoodBig")):
+    for _i in range(15):
+        SKIN_MAP["%s/%d.png" % (_prefix, _i)] = {
+            "kind": KIND_COPY,
+            "source": "TNDE-R/Graphics/5_Game/10_Effects/Hit/%s/%d.png" % (_folder, _i),
+            "rect": None, "exact": True, "note": None,
+        }
+
+
 #: 種別ごとの件数(生成時点の実測値)。合計は skin/ の全ファイル数と一致する。
 #: これは「旧 skin/ を System から作り直せるか」を数えたもので、あとから
 #: **足した**素材(Bg_down_Clear.png / 2_Dancer/Normal/*.png)はここに数えない。旧 skin に無かった

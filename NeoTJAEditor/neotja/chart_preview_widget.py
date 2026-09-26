@@ -663,8 +663,9 @@ class ChartPreviewWidget(QWidget):
         self._skin_lane_sub = None
         self._skin_se = None
         self._skin_explosion = None
-        # 火花の「火+銀」を1枚に足した作り置き。(火, 銀, コマ) -> QPixmap。
-        self._explosion_merge_cache = {}
+        self._skin_hit_seq = None
+        # 通常再生以外(軽量・音声波形・作譜・情報)は火花を出さない。
+        self._effects_lite = False
         self._skin_judge_ring = None
         self._skin_balloon_seq = None
         self._skin_gogo_fire = None
@@ -752,9 +753,9 @@ class ChartPreviewWidget(QWidget):
         self._skin_lane_sub = self._load_skin_pixmap("Lane_Sub.png")
         # 打音表記の文字も素材で描く(自前のフォント描きは細くて本家と違う)。
         self._skin_se = self._load_se_sprites()
-        # 叩いた瞬間の火花。
+        # 叩いた瞬間の火花。判定ごとの15コマがあればそちらを使う。
+        self._skin_hit_seq = self._load_hit_sequences()
         self._skin_explosion = self._load_explosion_sprites()
-        self._explosion_merge_cache = {}   # 素材が変わったので作り直す
         # 判定円。Notes.png の左上1コマ目がそれ(音符ではない)。
         self._skin_judge_ring = self._load_judge_ring()
         # 風船が膨らんで割れるまで (Breaking_0..5.png)。
@@ -1566,6 +1567,10 @@ class ChartPreviewWidget(QWidget):
             v = 2.0 * (ft / self.GOGO_ATT)
         v *= 0.5
         return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+    def set_effects_lite(self, lite: bool):
+        """通常再生以外かどうか。True の間は火花を出さず、判定円の光りだけにする。"""
+        self._effects_lite = bool(lite)
 
     def paint_hit_explosion(self, painter, now, cx, cy):
         """判定枠の火花を (cx, cy) を中心に描く。
@@ -3141,6 +3146,29 @@ class ChartPreviewWidget(QWidget):
     HIT_EXP_FADE_FROM = 0.55       # 0..1 のうちどこからフェードを始めるか
     HIT_EXP_ROWS = (0, 1, 2, 3)    # 小炎, 小銀, 大炎, 大銀
 
+    # 判定ごとの火花(TNDE-R の 10_Effects/Hit/{Great,Good}{,_Big}/0-14.png)。
+    # 良は金、可は銀で、絵そのものが分かれている。古い Explosion.png(炎+銀を
+    # 加算で重ねるシート)では良が白っぽい橙にしかならなかった。
+    HIT_SEQ_FRAMES = 15
+    HIT_SEQ_FRAME_SEC = 1.0 / 60.0        # 本家と同じ 60fps 刻み(15コマ=0.25秒)
+    HIT_SEQ_DIRS = {("great", False): "HitGreat", ("great", True): "HitGreatBig",
+                    ("good", False): "HitGood", ("good", True): "HitGoodBig"}
+
+    def _load_hit_sequences(self):
+        """判定ごとの火花を読む。1枚でも欠けたらその組は使わない。"""
+        out = {}
+        for key, folder in self.HIT_SEQ_DIRS.items():
+            frames = []
+            for i in range(self.HIT_SEQ_FRAMES):
+                pm = self._load_skin_pixmap("%s/%d.png" % (folder, i))
+                if pm is None:
+                    frames = None
+                    break
+                frames.append(pm)
+            if frames:
+                out[key] = frames
+        return out or None
+
     def _load_explosion_sprites(self):
         """HitExplosion.png を 4行x5コマに切り出す。無ければ None。"""
         sheet = self._load_skin_pixmap("HitExplosion.png")
@@ -3155,6 +3183,15 @@ class ChartPreviewWidget(QWidget):
     def _draw_hit_explosion(self, painter, now, judge_x, mid_y):
         """判定円の位置に火花を出す。音符帯にクリップされたまま呼ぶこと
         (音符より先に描いて、音符が上に来るようにする)。"""
+        # 判定円の光り(良=金 / 可=銀)は火花とは別の絵。先に円を光らせてから
+        # 火花を重ねる(本家も両方出る。Great/Good は円の中で光るだけの小さい絵で、
+        # これだけにすると火花が消えてしまう — 2026-09-26 の取り違え)。
+        self._draw_judge_flash(painter, now, judge_x, mid_y)
+        if self._effects_lite:
+            # 通常再生以外(軽量・音声波形・作譜・情報)は、判定円の金色だけに
+            # する(利用者の指定 2026-09-26)。画面が上半分に縮んでいて、
+            # 大きい火花は帯からはみ出して切れるため。
+            return
         if not self._skin_explosion:
             return
         # 演奏モードでは、叩いて入ったときだけ火花を出す。_recent_hit() は
@@ -3168,11 +3205,13 @@ class ChartPreviewWidget(QWidget):
         if not (0.0 <= elapsed < span):
             return
         f = min(self.HIT_EXP_FRAMES - 1, int(elapsed / self.HIT_EXP_FRAME_SEC))
+        # 行は「層」ではなく**判定ごとの絵**。良は炎(橙)、可は銀。重ねて
+        # 描いていたころは橙が白っぽくなって本家と違って見えた
+        # (利用者の指摘 2026-09-26)。再生モードは全部が良なので常に炎。
         fire, silver = (2, 3) if char in NOTE_BIG else (0, 1)
+        row = fire
         if self._play_state is not None and self.current_judge() == "ok":
-            # 可は炎を出さず銀だけ。本家も良と可で別の絵を使っていて、
-            # 可のほうは金色に光らない。再生モードは全部が良なので通らない。
-            fire = silver
+            row = silver
         c = self.HIT_EXP_CELL
         x, y = int(judge_x - c / 2), int(mid_y - c / 2)
         # 終わり際だけ濃さを落とす。素材の5コマ目も半透明だが、それだけだと
@@ -3185,53 +3224,42 @@ class ChartPreviewWidget(QWidget):
         if self.HIT_EXP_ADDITIVE:
             painter.setCompositionMode(QPainter.CompositionMode_Plus)
         painter.setOpacity(op)
-        pm = self._explosion_merged(fire, silver, f)
-        if pm is not None:
-            blit_sprite(painter, x, y, pm, self._dpr, self._dev_off)
-        else:
-            blit_sprite(painter, x, y, self._skin_explosion[fire][f],
-                        self._dpr, self._dev_off)
-            blit_sprite(painter, x, y, self._skin_explosion[silver][f],
-                        self._dpr, self._dev_off)
+        try:
+            pm = self._skin_explosion[row][f]
+        except (IndexError, TypeError):
+            pm = None
+        blit_sprite(painter, x, y, pm, self._dpr, self._dev_off)
         painter.restore()
 
-    def _explosion_merged(self, fire, silver, f):
-        """火花の「火」と「銀」を1枚に足したもの。加算合成のときだけ使う。
+    def _draw_judge_flash(self, painter, now, judge_x, mid_y):
+        """叩いた瞬間、判定円が光る絵(良=金 / 可=銀)を15コマで描く。
 
-        いまは 地 + 火 + 銀 と2回加算している。先に 火+銀 を1枚にしておけば
-        1回で済む。加算は足し算なので **絵は1画素も変わらない**
-        (全20コマを地の上で突き合わせて、最大の差が 0/255 なのを確認済み)。
-        実測 0.195 → 0.097 ms。この関数は1コマに2回呼ばれる(音符帯と
-        打音表記帯)ので、効きはその倍。
-
-        加算でないとき(HIT_EXP_ADDITIVE が False)は足し算にならないので
-        まとめない — そのときは None を返して、呼ぶ側が2枚のまま描く。"""
-        if not self.HIT_EXP_ADDITIVE:
-            return None
-        if fire == silver:
-            # 片方だけ使う(可の銀)。足し合わせると倍の明るさになるので、
-            # 素材をそのまま返す。
-            try:
-                return self._skin_explosion[silver][f]
-            except Exception:  # noqa: BLE001
-                return None
-        key = (fire, silver, f)
-        pm = self._explosion_merge_cache.get(key)
-        if pm is None:
-            try:
-                a = self._skin_explosion[fire][f]
-                b = self._skin_explosion[silver][f]
-                pm = QPixmap(a.size())
-                pm.fill(Qt.transparent)
-                q = QPainter(pm)
-                q.drawPixmap(0, 0, a)
-                q.setCompositionMode(QPainter.CompositionMode_Plus)
-                q.drawPixmap(0, 0, b)
-                q.end()
-            except Exception:  # noqa: BLE001
-                return None
-            self._explosion_merge_cache[key] = pm
-        return pm
+        TNDE-R の 10_Effects/Hit/{Great,Good}{,_Big}/0-14.png。円の中で光るだけの
+        小さい絵で、火花(Explosion.png)とは別物。素材が無ければ何もしない。"""
+        if not self._skin_hit_seq:
+            return
+        recent = (self._splash_hit(now) if self._play_state is not None
+                  else self._recent_hit(now))
+        if recent is None:
+            return
+        elapsed, char, _n = recent
+        span = self.HIT_SEQ_FRAME_SEC * self.HIT_SEQ_FRAMES
+        if not (0.0 <= elapsed < span):
+            return
+        f = min(self.HIT_SEQ_FRAMES - 1, int(elapsed / self.HIT_SEQ_FRAME_SEC))
+        # 再生モードは全部が良。演奏モードでは可のときだけ銀の絵になる。
+        judge = "good" if (self._play_state is not None
+                           and self.current_judge() == "ok") else "great"
+        frames = self._skin_hit_seq.get((judge, char in NOTE_BIG))
+        if not frames:
+            return
+        pm = frames[f]
+        painter.save()
+        painter.setOpacity(self.HIT_EXP_OPACITY)
+        # 素材は 260x260。古い経路(HIT_EXP_CELL)と同じ置き方にする。
+        blit_sprite(painter, int(judge_x - pm.width() / 2),
+                    int(mid_y - pm.height() / 2), pm, self._dpr, self._dev_off)
+        painter.restore()
 
     def _se_scaled(self, label, big, footer_h):
         """打音表記スプライトを帯の高さに合わせて縮小したものを返す(キャッシュ)。
