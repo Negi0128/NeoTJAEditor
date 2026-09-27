@@ -24,8 +24,14 @@ from PySide6.QtWidgets import (QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout,
 class CommandPanel(QFrame):
     #: 値のある命令を置く。(名前, 値)。名前は note_edit.COMMAND_NAMES。
     placeCommand = Signal(str, object)
+    #: すでに置いてある命令の値を書き換える。(名前, 値)。どの命令かは
+    #: 呼ばれた側(preview_dock)が、選んでいるもの/カーソルの位置から決める。
+    editCommand = Signal(str, object)
     #: 開始/終了の印を置く。(種類, "on"/"off")。種類は GOGO / BARLINE。
     placeMarker = Signal(str, str)
+
+    #: 命令の行の種類 → その枠を持っている欄の名前(set_values の editing 用)。
+    KINDS = ("bpm", "measure", "hs")
 
     WIDTH = 672
     HEIGHT = 132
@@ -35,6 +41,10 @@ class CommandPanel(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 種類 → (枠, ボタン)。「追加」と「変更」を切り替えるために持つ。
+        self._boxes = {}
+        # いま「変更」になっている種類。
+        self._editing = set()
         self.setObjectName("commandPanel")
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         # ゲーム画面の上に置くので、窓の QSS 任せにせず自前で色を決める
@@ -65,8 +75,8 @@ class CommandPanel(QFrame):
         self.sp_bpm.setRange(1.0, 9999.0)
         self.sp_bpm.setValue(120.0)
         self.sp_bpm.setFixedWidth(108)
-        grid.addWidget(self._box("BPM", [self.sp_bpm], "追加",
-                                 lambda: self.placeCommand.emit("BPMCHANGE", self.sp_bpm.value())),
+        grid.addWidget(self._box("bpm", "BPM", [self.sp_bpm], "BPMCHANGE",
+                                 lambda: self.sp_bpm.value()),
                        0, 0)
 
         # --- 拍子記号 ---
@@ -81,10 +91,10 @@ class CommandPanel(QFrame):
         slash = QLabel("/")
         slash.setFixedWidth(8)
         slash.setAlignment(Qt.AlignCenter)
-        grid.addWidget(self._box("拍子記号", [self.sp_num, slash, self.sp_den], "追加",
-                                 lambda: self.placeCommand.emit(
-                                     "MEASURE",
-                                     "%d/%d" % (self.sp_num.value(), self.sp_den.value()))),
+        grid.addWidget(self._box("measure", "拍子記号",
+                                 [self.sp_num, slash, self.sp_den], "MEASURE",
+                                 lambda: "%d/%d" % (self.sp_num.value(),
+                                                    self.sp_den.value())),
                        0, 1)
 
         # --- スクロール(HS) ---
@@ -94,8 +104,8 @@ class CommandPanel(QFrame):
         self.sp_hs.setSingleStep(0.05)
         self.sp_hs.setValue(1.0)
         self.sp_hs.setFixedWidth(108)
-        grid.addWidget(self._box("スクロール", [self.sp_hs], "追加",
-                                 lambda: self.placeCommand.emit("SCROLL", self.sp_hs.value())),
+        grid.addWidget(self._box("hs", "スクロール", [self.sp_hs], "SCROLL",
+                                 lambda: self.sp_hs.value()),
                        0, 2)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
@@ -108,13 +118,14 @@ class CommandPanel(QFrame):
                                       lambda: self.placeMarker.emit("GOGO", "off")),
                        1, 1)
 
-        note = QLabel("カーソルの位置に置きます")
-        f = note.font()
+        self._hint = QLabel("カーソルの位置に置きます")
+        f = self._hint.font()
         f.setPixelSize(12)
-        note.setFont(f)
-        note.setStyleSheet("color: #6c7a96;")
-        note.setAlignment(Qt.AlignCenter)
-        grid.addWidget(note, 1, 2)
+        self._hint.setFont(f)
+        self._hint.setStyleSheet("color: #6c7a96;")
+        self._hint.setAlignment(Qt.AlignCenter)
+        self._hint.setWordWrap(True)
+        grid.addWidget(self._hint, 1, 2)
 
     # ------------------------------------------------------------------
     def _new_box(self, title):
@@ -136,16 +147,27 @@ class CommandPanel(QFrame):
         v.addLayout(row)
         return box, row
 
-    def _box(self, title, widgets, add_text, on_add):
-        """[見出し / 値の欄… + 追加] の枠。"""
+    def _box(self, kind, title, widgets, name, get_value):
+        """[見出し / 値の欄… + 追加(変更)] の枠。
+
+        その位置に同じ命令が居るときはボタンが「変更」になり、押すと
+        editCommand が飛ぶ(新しく足すのではなく、その行の値を書き換える)。
+        居なければ今までどおり「追加」で placeCommand。"""
         box, row = self._new_box(title)
         for wdg in widgets:
             row.addWidget(wdg)
         row.addStretch()
-        btn = QPushButton(add_text)
+        btn = QPushButton("追加")
         btn.setFixedWidth(52)
-        btn.clicked.connect(lambda _c=False: on_add())
+
+        def pressed(_c=False, _k=kind, _n=name, _v=get_value):
+            if _k in self._editing:
+                self.editCommand.emit(_n, _v())
+            else:
+                self.placeCommand.emit(_n, _v())
+        btn.clicked.connect(pressed)
         row.addWidget(btn)
+        self._boxes[kind] = (box, btn)
         return box
 
     def _pair_box(self, title, a_text, b_text, on_a, on_b):
@@ -158,6 +180,26 @@ class CommandPanel(QFrame):
         return box
 
     # ------------------------------------------------------------------
+    def set_editing(self, kinds):
+        """「変更」にする枠を決める(kinds は "bpm"/"hs"/"measure" の集まり)。
+
+        その位置に同じ命令が置いてある枠だけ、ボタンが「変更」に変わり、枠の
+        線が明るくなる。欄の値は set_values でその命令自身の値になっている。"""
+        kinds = set(kinds or ())
+        if kinds == self._editing:
+            return
+        self._editing = kinds
+        for kind, (box, btn) in self._boxes.items():
+            on = kind in kinds
+            btn.setText("変更" if on else "追加")
+            box.setProperty("editing", "1" if on else "0")
+            # 枠1つだけに当て直す(全体の QSS は触らない)。
+            box.setStyleSheet(
+                "QFrame#cmdBox { background: rgba(28,34,50,230);"
+                " border: 1px solid #7aa2f7; border-radius: 4px; }" if on else "")
+        self._hint.setText("選んでいる命令の値を変えます" if kinds
+                           else "カーソルの位置に置きます")
+
     def set_values(self, bpm=None, scroll=None, measure=None):
         """カーソルの位置で効いている値へ欄を合わせる。
 

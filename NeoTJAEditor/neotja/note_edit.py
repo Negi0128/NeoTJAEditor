@@ -935,6 +935,10 @@ def run_op(text, course_range, op):
                              Fraction(op.get("delta_num", 0), op.get("delta_den", 1)))
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
+    if kind == "command_value":
+        p = op.get("pos") or (0, 1)
+        return op_command_value(text, course_range, Fraction(int(p[0]), int(p[1])),
+                                str(op.get("name", "")).upper(), op.get("value"))
     a = tuple(op["a"]) if op.get("a") is not None else None
     b = tuple(op["b"]) if op.get("b") is not None else None
     if a is None:
@@ -1195,6 +1199,28 @@ def _insert_line_at(text, body, spans, m, slot, grid, new_line):
 
 def op_command(text, course_range, m, slot, grid, name, value):
     new = set_command(text, course_range, m, slot, grid, name, value)
+    if new is None:
+        return None
+    return _result(text, new, reparse=True)
+
+
+def op_command_value(text, course_range, pos, name, value):
+    """すでに置いてある命令の**値だけ**を書き換える。
+
+    住所(小節, スロット)ではなく位置(Fraction = 小節番号 + 小節の中の割合)で
+    指す。命令パネルから選んだ命令を直すときの入口で、今のグリッドに乗って
+    いない位置(1/24 の所に置いた #SCROLL など)でも、その行をそのまま
+    書き換えられるようにするため。set_command は同じ位置の同じ命令があれば
+    値を書き換えるので、置くのと同じ道を通る。"""
+    if name not in COMMAND_NAMES:
+        return None
+    pos = Fraction(pos)
+    m = int(pos)
+    frac = pos - m
+    if m < 0:
+        return None
+    new = set_command(text, course_range, m, frac.numerator, frac.denominator,
+                      name, value)
     if new is None:
         return None
     return _result(text, new, reparse=True)

@@ -1226,6 +1226,11 @@ class PreviewDock(QDockWidget):
             from neotja.command_panel import CommandPanel
             self.command_panel = CommandPanel(self.game_preview_window.scaled_host)
             self.command_panel.placeCommand.connect(self._on_panel_command)
+            self.command_panel.editCommand.connect(self._on_panel_edit)
+            # 選んだ命令が変わったら、パネルの「追加/変更」も切り替える。
+            self.chart_edit.selectionChanged.connect(self._sync_command_panel)
+            #: 「変更」を押したときに書き換える相手 {行の種類: 位置}。
+            self._panel_targets = {}
             self.command_panel.placeMarker.connect(self._on_panel_marker)
             self.command_panel.hide()
         self._fps_timer.timeout.connect(self._update_fps_label)
@@ -1857,12 +1862,17 @@ class PreviewDock(QDockWidget):
         self._sync_command_panel()
 
     def _sync_command_panel(self):
-        """パネルの値を、カーソルの位置で効いている値に合わせる。"""
+        """パネルの値を、カーソルの位置で効いている値に合わせる。
+
+        その位置に命令そのものが置いてあれば(または命令を1つだけ選んで
+        いれば)、欄にはその命令自身の値を出し、ボタンを「変更」にする。
+        押すと新しく足すのではなく、その行の値が書き換わる。"""
         panel = self.command_panel
         ce = getattr(self, "chart_edit", None)
         if panel is None or ce is None or not panel.isVisible():
             return
-        t = ce.cursor_time() + float(getattr(ce, "offset", 0.0) or 0.0)
+        offset = float(getattr(ce, "offset", 0.0) or 0.0)
+        t = ce.cursor_time() + offset
         bpm = scroll = measure = None
         try:
             bpm = float(self.chart_preview.bpm_at(t))
@@ -1879,13 +1889,70 @@ class PreviewDock(QDockWidget):
                 measure = "%d/%d" % (int(mc[j][1]), int(mc[j][2]))
         except Exception:  # noqa: BLE001
             pass
+        # その位置に置いてある命令は、効いている値ではなく**その行の値**を出す
+        # (同じ値に見えても、書き換える相手はその行だから)。
+        self._panel_targets = {}
+        for kind, (pos, at) in (ce.commands_at_cursor() or {}).items():
+            val = self._command_value_at(kind, at + offset)
+            if val is None:
+                continue
+            self._panel_targets[kind] = pos
+            if kind == "bpm":
+                bpm = val
+            elif kind == "hs":
+                scroll = val
+            elif kind == "measure":
+                measure = val
         panel.set_values(bpm=bpm, scroll=scroll, measure=measure)
+        panel.set_editing(self._panel_targets.keys())
+
+    #: 命令の行の種類 → (_preview_commands の何番目か, 値の作り方)。
+    _PANEL_VALUE_SRC = {
+        "bpm": (0, lambda e: float(e[1])),
+        "hs": (1, lambda e: float(e[1])),
+        "measure": (2, lambda e: "%d/%d" % (int(e[1]), int(e[2]))),
+    }
+
+    def _command_value_at(self, kind, chart_t):
+        """その時刻ちょうどに置いてある命令の値。無ければ None。
+
+        作譜ペインが持っているのは描画用の札の文字("BPM180")なので、値は
+        解析から来た数値の列(_preview_commands)から引き直す。時刻は同じ列を
+        元にしているので、ずれても浮動小数の誤差ぶんしかない。"""
+        src = self._PANEL_VALUE_SRC.get(kind)
+        if src is None or not self._preview_commands:
+            return None
+        idx, make = src
+        best, best_d = None, 1e-3
+        for e in (self._preview_commands[idx] or []):
+            d = abs(float(e[0]) - chart_t)
+            if d <= best_d:
+                best, best_d = e, d
+        if best is None:
+            return None
+        try:
+            return make(best)
+        except (TypeError, ValueError, IndexError):
+            return None
 
     def _on_panel_command(self, name, value):
         """パネルの「追加」: カーソルの位置へ命令を置く。"""
         ce = getattr(self, "chart_edit", None)
         if ce is not None:
             ce.place_command(str(name), value)
+
+    #: 命令の名前 → 行の種類(パネルの「変更」から引くため)。
+    _PANEL_KIND_BY_NAME = {"BPMCHANGE": "bpm", "SCROLL": "hs", "MEASURE": "measure"}
+
+    def _on_panel_edit(self, name, value):
+        """パネルの「変更」: その位置に置いてある命令の値を書き換える。"""
+        ce = getattr(self, "chart_edit", None)
+        kind = self._PANEL_KIND_BY_NAME.get(str(name).upper())
+        pos = (getattr(self, "_panel_targets", None) or {}).get(kind)
+        if ce is None or pos is None:
+            return
+        ce.set_command_value(str(name), pos, value)
+        self._sync_command_panel()
 
     def _on_panel_marker(self, kind, which):
         ce = getattr(self, "chart_edit", None)
@@ -2135,6 +2202,8 @@ class PreviewDock(QDockWidget):
             self.chart_edit.set_bar_times(preview_data.get("bar_times", []),
                                           self.spin_offset.value())
         self.chart_edit.clear_pending()
+        # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
+        self._sync_command_panel()
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
@@ -2503,6 +2572,8 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_commands(*self._preview_commands)
         self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
         self.chart_edit.clear_pending()
+        # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
+        self._sync_command_panel()
         self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
         self._take_bar_lines(data)
         self.chart_preview.set_preview_data(data)

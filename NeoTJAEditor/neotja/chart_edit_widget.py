@@ -131,6 +131,8 @@ class ChartEditWaveform(WaveformWidget):
     # 凡例の表示を「ユーザーが」切り替えたときだけ飛ぶ。設定へ覚えさせるため。
     # set_legend_visible() では出さない(起動時の復元で保存を呼び返さないよう)。
     legendToggled = Signal(bool)
+    # 選んだものが変わった(命令パネルを「追加/変更」へ切り替えるため)。
+    selectionChanged = Signal()
 
     LEGEND_H = 18          # 凡例の帯の高さ
     #: 再生位置(＝編集カーソル)をペインの真ん中に置く(利用者の指定)。
@@ -910,6 +912,7 @@ class ChartEditWaveform(WaveformWidget):
         分けて持つ。囲って選んだときは、呼ぶ側が両方を立てる。"""
         self._sel = set(keys)
         self.update()
+        self.selectionChanged.emit()
 
     def clear_selection(self):
         self.set_selection(())
@@ -1430,6 +1433,38 @@ class ChartEditWaveform(WaveformWidget):
         """カーソルの位置に命令を置く(命令パネルの「追加」から)。"""
         m, s = self._cursor_addr()
         return self._run_op({"kind": "command", "a": (m, s),
+                             "name": str(name).upper(), "value": value})
+
+    def commands_at_cursor(self):
+        """いま値をいじれる命令 {種類: (位置(Fraction), 音源時刻)}。
+
+        種類は "bpm" / "hs" / "measure"(命令の行と同じ)。見つけ方は2通り:
+          ・命令を1つだけ選んでいれば、それ。行の札をクリックして選んだ
+            ものが、そのまま対象になる(グリッドに乗っていない位置でもよい)。
+          ・何も選んでいなければ、カーソルの位置にある命令。
+        どちらも無ければ空の辞書(= パネルは「追加」のまま)。"""
+        by_name = {v: k for k, v in self._CMD_NAMES.items()}
+        sel = [k for k in self._sel if k[0] == "cmd" and k[1] in by_name]
+        if len(sel) == 1:
+            kind = by_name[sel[0][1]]
+            return {kind: (sel[0][2], self._time_of_pos(sel[0][2]))}
+        if self._sel:
+            return {}               # 複数選んでいるときは触らせない
+        cur = Fraction(self._cur_measure) + Fraction(self._cur_slot, self._grid)
+        out = {}
+        for item in (self._cmd_audio or []):
+            if len(item) < 4 or item[3] not in self._CMD_NAMES:
+                continue
+            p = self._pos_of_time(item[0])
+            if p is not None and p == cur:
+                out[item[3]] = (p, item[0])
+        return out
+
+    def set_command_value(self, name, pos, value):
+        """すでに置いてある命令の値を書き換える(命令パネルの「変更」から)。"""
+        pos = Fraction(pos)
+        return self._run_op({"kind": "command_value",
+                             "pos": (pos.numerator, pos.denominator),
                              "name": str(name).upper(), "value": value})
 
     def place_marker(self, kind, which):
