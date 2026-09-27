@@ -251,6 +251,44 @@ class ScaledHost(QWidget):
         self._timer.timeout.connect(self.update)
         self.refit()
 
+    def childEvent(self, event):
+        """ゲーム画面が native な窓のときは、**上に重ねるものも native にする**。
+
+        native な窓は兄弟のウィジェットより前に出る決まりなので、ふつうの
+        ままではボタン・命令パネル・fps 表示が絵の下に隠れる(実測で隠れた)。
+        重ねるものは置く側(preview_dock)があとから足すので、ここで受けて
+        付ける。ゲーム画面が CPU 版・QOpenGLWidget 版のときは何もしない。
+        """
+        super().childEvent(event)
+        if event.type() != QEvent.ChildAdded:
+            return
+        content = getattr(self, "_content", None)
+        if not getattr(content, "native_screen_window", False):
+            return
+        child = event.child()
+        if isinstance(child, QWidget) and child is not content:
+            child.setAttribute(Qt.WA_NativeWindow, True)
+            # 窓の前後は OS が持っている。ここで raise_() しても、GL の窓の
+            # 実体(HWND)はまだ無いことがあるので、出来上がってから出し直す。
+            QTimer.singleShot(0, self.raise_overlays)
+
+    def raise_overlays(self):
+        """重ねたものを GL の窓より前へ出し直す。
+
+        native な窓どうしの前後は OS が決める。作った順のままだと、あとから
+        実体のできた GL の窓が上に来て、ボタンも命令パネルも絵の下に沈む
+        (OS に「その点にある窓」を聞いて確認済み)。出したとき・重ねるものを
+        出し入れしたときに、ここで並べ直す。ゲーム画面が CPU 版・
+        QOpenGLWidget 版のときは何もしない(ふつうの前後で足りている)。
+        """
+        content = getattr(self, "_content", None)
+        if not getattr(content, "native_screen_window", False):
+            return
+        for child in self.children():
+            if (isinstance(child, QWidget) and child is not content
+                    and child.isVisible()):
+                child.raise_()
+
     def scale(self) -> float:
         return self._scale
 
@@ -594,6 +632,10 @@ class GamePreviewWindow(QWidget):
         import time as _time
         self._shown_at = _time.monotonic()
         super().showEvent(event)
+        # ゲーム画面が native な窓のときは、重ねたものを前へ出し直す
+        # (ScaledHost.raise_overlays の説明を参照)。窓の実体ができてから
+        # でないと効かないので、出たあとの手すきに回す。
+        QTimer.singleShot(0, self.scaled_host.raise_overlays)
 
     def _in_show_grace(self):
         """出した直後かどうか。
@@ -706,6 +748,7 @@ class GamePreviewWindow(QWidget):
             if child is self._chart_preview:
                 continue
             child.setVisible(visible)
+        self.scaled_host.raise_overlays()
         cb = getattr(self, "_overlay_cb", None)
         if cb is not None:
             cb(visible)
@@ -1141,7 +1184,14 @@ class PreviewDock(QDockWidget):
         from neotja.game_screen import make_game_screen
         self.game_screen = make_game_screen(
             self.chart_preview, compact=True,
-            gpu=bool(self.config_data.get("gpu_render", True)))
+            gpu=bool(self.config_data.get("gpu_render", True)),
+            native=bool(self.config_data.get("gpu_screen_window", True)))
+        # ゲーム画面が別の窓(GLScreenHost)なら、塗り直しの綱引きが無いので
+        # 作譜ペインを間引かない(ChartEditWaveform.REDRAW_FPS_DEFAULT 参照)。
+        # 作譜ページはここより前に組んでいるので、画面ができてから教える。
+        if self.chart_edit is not None:
+            self.chart_edit.set_screen_uncoupled(
+                bool(getattr(self.game_screen, "native_screen_window", False)))
         self.game_preview_window = GamePreviewWindow(
             self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
             lane_widget=self.chart_preview,
@@ -1860,6 +1910,8 @@ class PreviewDock(QDockWidget):
         panel.move(max(0, host.width() - panel.width() - 10), y)
         panel.show()
         panel.raise_()
+        # ゲーム画面が native な窓のときは、OS 側の前後も並べ直す。
+        host.raise_overlays()
         self._sync_command_panel()
 
     def _sync_command_panel(self):

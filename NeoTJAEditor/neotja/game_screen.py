@@ -25,7 +25,7 @@ import os
 import time as _time
 
 from PySide6.QtCore import (Qt, QEvent, QPoint, QPointF, QRect, QRectF,
-                            QTimer)
+                            QSize, QTimer)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QImage, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap, QTransform)
@@ -35,6 +35,11 @@ try:
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
 except ImportError:  # OpenGL の入っていない環境。CPU 版だけで動く。
     QOpenGLWidget = None
+
+try:
+    from PySide6.QtOpenGL import QOpenGLWindow
+except ImportError:  # 同上。native な窓の版が作れないだけ。
+    QOpenGLWindow = None
 
 from neotja import chara as chara_mod
 from neotja import gauge as gauge_mod
@@ -4042,16 +4047,185 @@ class GameScreenGLWidget(_GameScreenBase, QOpenGLWidget or QWidget):
         p.end()
 
 
-def make_game_screen(chart_preview, compact=False, gpu=False, parent=None):
+class _GLWindow(QOpenGLWindow or QWidget):
+    """QOpenGLWindow を「親ウィジェットを渡される形」に合わせる下敷き。
+
+    _GameScreenBase は最後に super().__init__(parent) を呼ぶが、窓の親に
+    できるのは窓だけ(ウィジェットは渡せない)。ここで飲み込む。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__()
+
+
+class GameScreenGLWindow(_GameScreenBase, _GLWindow):
+    """GPU で塗る画面を、**OS 側の窓**として持つもの(入れ物は GLScreenHost)。
+
+    描く中身は QOpenGLWidget 版(GameScreenGLWidget)と同じ paint_screen 1本
+    で、違うのは絵ではなく**窓の組み立てかた**。
+
+    QOpenGLWidget は自分のバッファへ描いたものを「窓ぜんたいの組み立て」に
+    混ぜてもらう作りなので、同じ窓のふつうのウィジェット(作譜ペイン)が
+    塗り直すたびに、こちらもその組み立てへ巻き込まれる。**中身が空でも
+    起きる**ので、描画をいくら速くしても効かない。実測(模型・GTX970・
+    垂直同期なし)では、レーンとペインが手をつないで 131fps まで落ちた。
+
+    別の native な窓にすると、その縁が切れる。同じ模型で
+    レーン 227fps / ペイン 340回/秒。
+
+    代わりに気をつけることが2つある:
+      ・native な窓は兄弟のウィジェットより**前に出る**。画面の上に重ねる
+        もの(命令パネル・ボタン・fps 表示)は WA_NativeWindow を付けないと
+        絵の下に隠れる(ScaledHost.childEvent が付けている)。
+      ・GDI の画面撮り(QScreen.grabWindow 等)にはこの面が写らない。
+        アプリの録画と画像出力は CPU 版を通るので、そちらは無事。
+    """
+
+    def __init__(self, chart_preview, compact=False, parent=None):
+        # setFixedSize が基底の __init__ の中から呼ばれるので、先に置く。
+        self._size_cb = None
+        super().__init__(chart_preview, compact=compact, parent=None)
+
+    def set_size_cb(self, cb):
+        """大きさが変わったときの知らせ先。入れ物が自分の寸法も合わせる。"""
+        self._size_cb = cb
+
+    # --- ウィジェットにしか無い呼び出しを埋める -------------------------
+    def setFixedSize(self, w, h=None):
+        if h is None:                      # QSize ひとつで来る形も受ける
+            w, h = w.width(), w.height()
+        w, h = int(w), int(h)
+        self.setMinimumSize(QSize(w, h))
+        self.setMaximumSize(QSize(w, h))
+        self.resize(w, h)
+        if self._size_cb is not None:
+            self._size_cb(w, h)
+
+    def setFocusPolicy(self, policy):
+        pass                               # 窓は自分でフォーカスを持つ
+
+    def setAutoFillBackground(self, on):
+        pass
+
+    def setAttribute(self, *args):
+        pass                               # WA_* はウィジェット用
+
+    def rect(self):
+        return QRect(0, 0, self.width(), self.height())
+
+    def setFocus(self, reason=None):
+        self.requestActivate()
+
+    def paintGL(self):
+        p = QPainter(self)
+        self.paint_screen(p)
+        p.end()
+
+
+class GLScreenHost(QWidget):
+    """native な GL の窓を入れる器。外からは今までのゲーム画面と同じに見える。
+
+    知らない呼び出しは中の窓へそのまま流す(__getattr__)。**書き込みは
+    流さない**ので、外からゲーム画面へ属性を足すコードは書かないこと。
+
+    縮小表示(ScaledHost の倍率 != 1)のときは中の窓が隠され、絵は入れ物側が
+    CPU で描き直す。そのあいだキーとマウスは Qt からこちらへ来るので、
+    ここで受けて中へ渡す。
+    """
+
+    #: ScaledHost への合図。上に重ねるものを native にしてもらう。
+    native_screen_window = True
+
+    def __init__(self, screen, parent=None):
+        super().__init__(parent)
+        self._screen = screen
+        self._container = None
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        # **自分を先に OS 側の窓にしておく。** そうしないと、あとで入れる GL の
+        # 窓が「いちばん近い native な先祖」=再生窓の直下にぶら下がり、
+        # 画面に重ねるボタンや命令パネル(もう一段内側に居る)より必ず前に出て
+        # しまう。前後を並べ替えることもできない(実測: raise_ も
+        # SetWindowPos も効かなかった — 相手が兄弟ではないため)。
+        self.setAttribute(Qt.WA_NativeWindow, True)
+        screen.set_size_cb(self._fit)
+        self._fit(screen.width(), screen.height())
+
+    def _ensure_container(self):
+        """GL の窓を入れる。**自分の実体ができてから**でないと親が変わる。"""
+        if self._container is not None:
+            return
+        self.winId()                       # 自分の実体(HWND)を先に作らせる
+        self._container = QWidget.createWindowContainer(self._screen, self)
+        self._container.move(0, 0)
+        self._container.setFixedSize(self.width(), self.height())
+        self._container.winId()            # 入れ物の実体も先に作らせる
+        self._container.show()
+        # **GL の窓を入れ物の中へ入れ直す。** Qt に任せると、窓の実体が
+        # 先にできていたぶん再生窓の直下へぶら下がることがあり、そうなると
+        # 画面に重ねるボタン類(もう一段内側)より必ず前に出てしまう。
+        handle = self._container.windowHandle()
+        if handle is not None:
+            self._screen.setParent(handle)
+            self._screen.setPosition(0, 0)
+            self._screen.resize(self.width(), self.height())
+
+    def showEvent(self, event):
+        self._ensure_container()
+        super().showEvent(event)
+
+    def _fit(self, w, h):
+        self.setFixedSize(w, h)
+        if self._container is not None:
+            self._container.setFixedSize(w, h)
+
+    def game_screen(self):
+        """中の窓。**screen() は QWidget のもの(モニタ)なので使えない。**"""
+        return self._screen
+
+    def __getattr__(self, name):
+        # __init__ の途中(_screen がまだ無い)でも壊れないようにする。
+        screen = self.__dict__.get("_screen")
+        if screen is None:
+            raise AttributeError(name)
+        return getattr(screen, name)
+
+    # --- 縮小表示のときの受け渡し ---------------------------------------
+    def keyPressEvent(self, event):
+        self._screen.keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        self._screen.keyReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        self._screen.wheelEvent(event)
+
+    def mousePressEvent(self, event):
+        # ScaledHost が「誰も受け取らなかった」と判断すると親へ送り返し、
+        # 行き場のないイベントが往復して落ちる(ScaledHost._forward 参照)。
+        self.setFocus(Qt.MouseFocusReason)
+        event.accept()
+
+
+def make_game_screen(chart_preview, compact=False, gpu=False, parent=None,
+                     native=True):
     """画面を1つ作る。gpu=True なら OpenGL で塗るほうを返す。
 
     OpenGL が使えない環境(古い機械・リモートデスクトップ・PySide6 に
     QtOpenGLWidgets が入っていない)では黙って CPU 版へ落とす。**画面が
     真っ黒になるより、少し重くても映るほうがよい。**
 
+    native=True なら、GL を **OS 側の窓**にして入れ物(GLScreenHost)へ入れた
+    ものを返す。同じ窓の作譜ペインと塗り直しの縁が切れて、両方が速くなる
+    (GameScreenGLWindow の説明を参照)。native=False は従来の
+    QOpenGLWidget 版で、設定 gpu_screen_window で選べる。
+
     録画からは gpu=True で呼ばないこと。録画は QWidget.render() で QImage へ
     描く経路で、OpenGL 版はそれができない(GameScreenGLWidget の説明を参照)。
     """
+    if gpu and native and QOpenGLWindow is not None:
+        return GLScreenHost(GameScreenGLWindow(chart_preview, compact=compact),
+                            parent)
     if gpu and QOpenGLWidget is not None:
         return GameScreenGLWidget(chart_preview, compact=compact, parent=parent)
     return GameScreenWidget(chart_preview, compact=compact, parent=parent)

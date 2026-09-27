@@ -13,7 +13,7 @@ _SETTINGS_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
-    "gpu_render", "gpu_vsync",
+    "gpu_render", "gpu_vsync", "gpu_screen_window",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -193,6 +193,15 @@ def default_settings() -> dict:
         # 頼っていない(preview_max_fps 参照)。
         # gpu_render が False のときは関係ない。
         "gpu_vsync": False,
+        # GPU 描画のとき、ゲーム画面を **OS 側の窓** として持つか。既定 True。
+        # 同じ窓のふつうのウィジェット(作譜ペイン)と塗り直しの縁が切れるので、
+        # 上も下も速くなる。実測(模型・GTX970・垂直同期なし): 今までの作りだと
+        # レーンとペインが手をつないで 131fps、窓にすると 227fps / 340回/秒。
+        # 代わりに、画面の上に重ねるものは native なウィジェットになり、
+        # GDI の画面撮りにこの面が写らない(録画と画像出力は CPU 版なので無事)。
+        # うまく映らない機械があったら False で今までの作り(QOpenGLWidget)へ。
+        # gpu_render が False のときは関係ない。
+        "gpu_screen_window": True,
         # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
         # 確認するための目安)。既定True。気になる場合はfalseで消せる。
         "preview_show_fps": True,
@@ -234,15 +243,17 @@ def default_settings() -> dict:
         # 変更でき、反映はアプリの再起動後(preview_dock.py がここを見て
         # 「作譜」ページを最初から作るかどうかを決めるため)。
         "peepo_chart_edit": False,
-        # 作譜モードで、再生中にペインを塗り直す回数の上限(0 = レーンの
-        # フレームごと)。ゲーム画面と同じ窓に居る普通のウィジェットなので、
-        # 1回塗るたびに窓ぜんたいの組み直しが走り、レーンの fps がその分
-        # 落ちる(chart_edit_widget.REDRAW_FPS_DEFAULT に実測値がある)。
-        # 120Hz のモニタでの実測: 60 でレーン 168fps・ペイン 53回/秒、
-        # 30 なら 329fps・24回/秒、0(レーンのフレームごと)なら 76fps・76回/秒。
-        # 既定は 60 — モニタが出せるのは 120 コマ/秒までなので、レーンを
-        # それ以上速くするより、余りをペインへ回したほうが得。
-        "peepo_edit_redraw_fps": 60,
+        # 作譜モードで、再生中にペインを塗り直す回数の上限。
+        #   -1 … おまかせ(既定)。ゲーム画面が別の窓(gpu_screen_window)なら
+        #        上限なし、同じ窓に組み込まれているなら 60。
+        #    0 … レーンのフレームごとに塗る
+        #  5〜240 … その回数まで
+        # ゲーム画面と同じ窓で1枚に組み立てられていると、ここを1回塗るたびに
+        # 窓ぜんたいの組み直しが走り、レーンの fps がそのぶん落ちる
+        # (chart_edit_widget.REDRAW_FPS_DEFAULT に実測値の表がある)。
+        # 別の窓にしてあればその綱引きが無いので、上限なしでレーン 196fps・
+        # ペイン 212回/秒 と、上も下も一番良くなる。
+        "peepo_edit_redraw_fps": -1,
     }
 
 

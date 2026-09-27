@@ -146,47 +146,70 @@ class ChartEditWaveform(WaveformWidget):
     EXTEND_MEASURES = 64
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 再生中の塗り直しの回数 (settings.json の peepo_edit_redraw_fps)
     # ------------------------------------------------------------------
-    # このペインは **ゲーム画面と同じ窓の中に居る普通の Qt ウィジェット** で、
-    # ゲーム画面のほうは GPU の面へ直に出している。そのため、ここを1回塗り直す
-    # たびに窓ぜんたいを組み直す処理(GPU の絵を窓の絵へ合成 → 窓へ出す)が
-    # 走る。**中身を空にしても 87 fps しか出ない**ので、この値段はこちらの
-    # 描画ではなく合成のほう。つまりレーンの fps を上げる道は「ペインを塗る
-    # 回数を減らす」しかない。レーンのフレームごとに塗るのをやめ、ここで
-    # 決めた回数までに間引く(位置そのものは毎フレーム受け取って進めるので、
-    # 赤い線の場所は間引いても正しい — 見え方が粗くなるだけ)。
+    # このペインはふつうの Qt ウィジェットで、ゲーム画面のほうは GPU の面へ
+    # 出している。**この2つが同じ窓の中で1枚に組み立てられていると、ここを
+    # 1回塗り直すたびに窓ぜんたいの組み直しが走る** — 中身を空にしても
+    # 87 fps しか出なかったので、値段はこちらの描画ではなく組み立てのほう。
+    # そのときはレーンの fps を上げる道が「ペインを塗る回数を減らす」しか
+    # なく、レーンのフレームごとに塗るのをやめて間引いていた(位置そのものは
+    # 毎フレーム受け取って進めるので、赤い線の場所は間引いても正しい。
+    # 見え方が粗くなるだけ)。
     #
-    # 実測(1280x708 の窓 / 120Hz のモニタ):
+    # **ゲーム画面を別の窓(GLScreenHost)にすると、この綱引きが消える。**
+    # そのときは間引かないほうが素直に速い。実測(1280x708 / 120Hz / GTX970):
     #
-    #   上限      レーン     ペイン
-    #     30      329 fps     24 回/秒
-    #     60      168 fps     53 回/秒   ← 既定
-    #     90      115 fps     65 回/秒
-    #      0       76 fps     76 回/秒   (レーンのフレームごとに塗る)
+    #                    上限      レーン     ペイン
+    #   同じ窓(従来)       60      215 fps     47 回/秒
+    #   同じ窓(従来)        0       76 fps     76 回/秒  ← 綱引き
+    #   別の窓(既定)       60      259 fps     73 回/秒
+    #   別の窓(既定)        0      196 fps    212 回/秒  ← これが一番良い
+    #   CPU 描画           60      121 fps     44 回/秒
+    #   CPU 描画            0       95 fps     95 回/秒
     #
-    # 既定が 60 なのは、**モニタが出せるのは毎秒 120 コマまで**で、レーンが
-    # 168 fps も出ていれば見え方はそれ以上良くならないから。余ったぶんを
-    # ペインへ回したほうが下画面のかくつきが減って得になる(利用者の指摘
-    # 2026-09-27「上画面はぬるぬるだけど下画面はかくかく」)。上げるとペインは
-    # さらに滑らかになるが、レーンがモニタの Hz を下回ると上画面が粗くなる。
-    REDRAW_FPS_DEFAULT = 60
+    # よって既定は「おまかせ(-1)」。ゲーム画面が別の窓なら上限なし、同じ窓
+    # (従来の GPU 描画・CPU 描画)なら 60 にする。数を書けばそれに従う
+    # (0 で毎フレーム、5〜240 でその回数)。
+    REDRAW_FPS_DEFAULT = -1
+    #: 綱引きがあるときの上限。モニタが出せるのは毎秒 120 コマまでなので、
+    #: レーンがそれを上回る範囲でペインへ回せるぶんを回した値。
+    REDRAW_FPS_COUPLED = 60
     # 親の __init__ の途中で update() が呼ばれても落ちないように、クラス側にも
     # 既定値を置く(下の __init__ で本物を入れる)。
     _quiet = False
     _redraw_fps = 0
+    _redraw_setting = -1
+    #: ゲーム画面が別の窓か(綱引きが無いか)。上位が set_screen_uncoupled で
+    #: 教える。分からないうちは「同じ窓」= 安全側で見ておく。
+    _screen_uncoupled = False
     _last_paint_wall = 0.0
 
     def _load_redraw_fps(self):
+        """設定に書いてある値。-1 は「おまかせ」。"""
         try:
             from neotja import settings as settings_mod
             v = int(settings_mod.load_settings().get("peepo_edit_redraw_fps",
                                                     self.REDRAW_FPS_DEFAULT))
         except Exception:  # noqa: BLE001
             return self.REDRAW_FPS_DEFAULT
-        if v <= 0:
+        if v < 0:
+            return -1
+        if v == 0:
             return 0
         return max(5, min(240, v))
+
+    def set_screen_uncoupled(self, uncoupled: bool):
+        """ゲーム画面が別の窓かどうかを教える(おまかせの判断に使う)。"""
+        self._screen_uncoupled = bool(uncoupled)
+        self._apply_redraw_cap()
+
+    def _apply_redraw_cap(self):
+        v = self._redraw_setting
+        if v < 0:
+            v = 0 if self._screen_uncoupled else self.REDRAW_FPS_COUPLED
+        self._redraw_fps = v
 
     def __init__(self, parent=None, toggle_play_cb=None):
         super().__init__(parent, toggle_play_cb=toggle_play_cb, force_dark=True)
@@ -237,7 +260,8 @@ class ChartEditWaveform(WaveformWidget):
         # いま出ている命令の入力欄(テストから触るため覚えておく)。
         self._cmd_popup = None
         # --- 再生中の塗り直しの間引き(REDRAW_FPS_DEFAULT の説明を参照) ---
-        self._redraw_fps = self._load_redraw_fps()
+        self._redraw_setting = self._load_redraw_fps()
+        self._apply_redraw_cap()
         self._last_paint_wall = 0.0
         # True のあいだ update() を飲み込む(状態だけ進めて塗らない)。
         self._quiet = False
