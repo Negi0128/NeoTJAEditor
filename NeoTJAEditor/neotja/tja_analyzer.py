@@ -134,12 +134,13 @@ class TJACourseAnalyzer:
             })
         return out
 
-    def _pick_branch(self, cond, prev_roll_hits, forced, available=None):
+    def _pick_branch(self, cond, roll_hits, forced, available=None):
         """#BRANCHSTART の条件から、その区間で流す系統を決める。
 
         自動演奏(全部「良」)として見るので:
           p(精度%)  … 常に 100%
-          r(連打数) … **直前の1小節**の連打の打数(連打秒速の設定から出す)
+          r(連打数) … **そこまでの連打の打数の合計**(連打秒速の設定から出す。
+                      風船・くす玉の打数も足す)
           その他    … 100 扱い(最良。s=スコアなどはここに落ちる)
         しきい値は「以上」。負の数なら必ず満たすので強制分岐になる。
         どちらも満たさなければ普通(命令が来るまでも普通)。
@@ -153,7 +154,7 @@ class TJACourseAnalyzer:
             want = forced
         else:
             typ, x, y = cond if cond else ("", None, None)
-            val = float(prev_roll_hits) if typ == "r" else 100.0
+            val = float(roll_hits) if typ == "r" else 100.0
             if y is not None and val >= y:
                 want = "M"
             elif x is not None and val >= x:
@@ -1193,9 +1194,11 @@ class TJACourseAnalyzer:
         chosen = None
         sec_idx = -1
         branch_path = []
-        # 直前の小節の連打の打数(r 条件の判定に使う)。
-        prev_roll_hits = 0
-        measure_roll_hits = 0
+        # r 条件(連打数)の判定に使う、**そこまでの連打の打数の合計**
+        # (利用者の指定 2026-09-27: 「r はそれまでの連打合計、すべて」)。
+        # 自動演奏なので連打は全部拾える前提で数える。風船・くす玉も、割る
+        # までの打数をそのまま足す。流していない系統のぶんは数えない。
+        roll_hits_total = 0
         for blk, m_events in measures:
             # 分岐の印は、どの系統の小節に書いてあっても効かせる。ただし
             # **書いてある位置のまま**にする — 小節の音符より前に書いてあれば
@@ -1213,7 +1216,7 @@ class TJACourseAnalyzer:
                 if t == "BRANCHSTART":
                     sec_idx += 1
                     avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
-                    chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
+                    chosen = self._pick_branch(v, roll_hits_total, branch_level, avail)
                     branch_path.append(chosen)
                     # #BRANCHEND を書かずに次の #BRANCHSTART が来る書き方が
                     # ある。そのときは前の区間をここで閉じて、新しい系統で
@@ -1253,7 +1256,6 @@ class TJACourseAnalyzer:
                             branch_start = None
                         chosen = None
                 continue
-            measure_roll_hits = 0
             # Recorded once we reach this measure's first NOTE (or at the
             # end, if it has none) rather than unconditionally up front - a
             # #SCROLL/#BPMCHANGE/#MEASURE command placed before this
@@ -1326,17 +1328,18 @@ class TJACourseAnalyzer:
                             hits = self._roll_hits(dur)
                             rolls.append((active_roll[0], total_time, active_roll[1], active_roll[2], active_roll[3], hits))
                             active_roll = None
-                            # r 条件(連打数)の判定に使う。自動演奏なので
+                            # r 条件の合計へ足す。自動演奏なので
                             # 「叩ける数 = 連打秒速 × 長さ」をそのまま数える。
-                            measure_roll_hits += hits
+                            roll_hits_total += hits
                         elif active_balloon is not None:
                             balloons.append((active_balloon[0], total_time, active_balloon[2], active_balloon[3], active_balloon[1]))
+                            roll_hits_total += int(active_balloon[1] or 0)
                             active_balloon = None
                         elif active_kusudama is not None:
                             kusudamas.append((active_kusudama[0], total_time, active_kusudama[2], active_kusudama[3], active_kusudama[1]))
+                            roll_hits_total += int(active_kusudama[1] or 0)
                             active_kusudama = None
                     total_time += time_per_note
-            prev_roll_hits = measure_roll_hits
             for t, v in tail_marks:
                 if t == "BRANCHEND":
                     if branch_start is not None:
@@ -1347,7 +1350,7 @@ class TJACourseAnalyzer:
                 elif t == "BRANCHSTART":
                     sec_idx += 1
                     avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
-                    chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
+                    chosen = self._pick_branch(v, roll_hits_total, branch_level, avail)
                     branch_path.append(chosen)
                     if branch_start is not None and chosen != branch_start_level:
                         branch_regions.append((branch_start, total_time,
