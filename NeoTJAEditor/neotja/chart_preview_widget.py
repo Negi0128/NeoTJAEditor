@@ -3204,6 +3204,10 @@ class ChartPreviewWidget(QWidget):
                     "E": ("Lane_Branch_Expert.png", "Branch_Expert.png"),
                     "M": ("Lane_Branch_Master.png", "Branch_Master.png")}
 
+    #: 分岐の色が変わるときの混ぜ時間(秒)。本家の映像を1コマずつ測った値
+    #: (60fps で 11コマ ≒ 0.18秒かけて、前の色から次の色へ移る)。
+    BRANCH_FADE_SEC = 0.18
+
     def _branch_active(self, now):
         """いま分岐している区間の中か。"""
         if not self._branch_regions:
@@ -3212,6 +3216,24 @@ class ChartPreviewWidget(QWidget):
         if i < 0:
             return False
         return now < self._branch_regions[i][1]
+
+    def _branch_alpha(self, now):
+        """分岐の地の色の濃さ(0 = 素のレーン / 1 = その系統の色)。
+
+        区間の境目で 0.18 秒かけて混ぜる。時刻から直に出しているので、
+        シークしても早送りしても同じ見え方になる(壁時計のアニメーションだと
+        シークのたびに切り替わりが再生されてしまう)。"""
+        if not self._branch_regions:
+            return 0.0
+        fade = max(1e-6, self.BRANCH_FADE_SEC)
+        i = bisect.bisect_right(self._branch_starts, now) - 1
+        if i < 0:
+            return 0.0
+        start, end = self._branch_regions[i]
+        if now < end:                      # 区間の中: 入ってから濃くなる
+            return min(1.0, max(0.0, (now - start) / fade))
+        out = now - end                    # 出たあと: 薄れて素へ戻る
+        return max(0.0, 1.0 - out / fade)
 
     def _draw_branch_lane(self, painter, now, lane_w, band_top, band_h):
         """レーンの地の色(分岐している間だけ)と、系統の字(曲の最初からずっと)。
@@ -3226,11 +3248,16 @@ class ChartPreviewWidget(QWidget):
         if names is None:
             return
         base_name, text_name = names
-        if base_name and self._branch_active(now):
-            pm = self._branch_pixmap(base_name)
-            if pm is not None:
-                blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
-                            self._dpr, self._dev_off)
+        if base_name:
+            alpha = self._branch_alpha(now)
+            if alpha > 0.002:
+                pm = self._branch_pixmap(base_name)
+                if pm is not None:
+                    painter.save()
+                    painter.setOpacity(alpha)
+                    blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
+                                self._dpr, self._dev_off)
+                    painter.restore()
         pm = self._branch_pixmap(text_name)
         if pm is None:
             return

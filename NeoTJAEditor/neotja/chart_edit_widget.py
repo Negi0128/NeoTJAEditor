@@ -1724,8 +1724,7 @@ class ChartEditWaveform(WaveformWidget):
         pal = self._pal
         h = self.height()
         key = (self.LANE_X0, h, pal.get("bg2"), pal.get("fg"), pal.get("border"),
-               self.devicePixelRatioF(), tuple(rows.items()),
-               self._branch_level, self._has_branches)
+               self.devicePixelRatioF(), tuple(rows.items()))
         if self._labels_key != key or self._labels_pm is None:
             dpr = self.devicePixelRatioF()
             # 右端の縦の区切り線(x = LANE_X0)まで入れるので 1px 広く焼く。
@@ -1757,46 +1756,21 @@ class ChartEditWaveform(WaveformWidget):
     # ------------------------------------------------------------------
     # 譜面分岐(いまどの系統を編集しているか)
     # ------------------------------------------------------------------
-    #: 系統 → 行名の列に出す字の絵(TNDE のレーンに出るものと同じ)。
-    _BRANCH_IMAGES = {"N": "Branch_Normal.png", "E": "Branch_Expert.png",
-                      "M": "Branch_Master.png"}
+    # 系統の字はゲーム画面のレーンに出るので、ここ(行名の列)には出さない
+    # (利用者の指定 2026-09-27。同じ字が2か所に出て煩いため)。どの系統を
+    # 編集しているかは命令パネルの「譜面分岐」で分かる。ここで覚えるのは、
+    # 今後この行の見せ方を変えるときのため。
     _branch_level = None
     _has_branches = False
-    _branch_pm = None
-    _branch_pm_key = None
 
     def set_branch(self, level, has_branches):
-        """いま見て(編集して)いる系統。分岐の無い譜面では出さない。
-
-        どの系統を触っているのかが分からないと打ち込めないので、行名の列に
-        「普通譜面 / 玄人譜面 / 達人譜面」の字を出す。切り替えは命令パネルの
-        「譜面分岐」から(ここは表示だけ)。"""
-        level = level if level in self._BRANCH_IMAGES else None
+        """いま見て(編集して)いる系統を控える。"""
+        level = level if level in ("N", "E", "M") else None
         has_branches = bool(has_branches)
         if (level, has_branches) == (self._branch_level, self._has_branches):
             return
         self._branch_level = level
         self._has_branches = has_branches
-        self._labels_key = None          # 行名の列を焼き直す
-        self.update()
-
-    def _branch_pixmap(self):
-        """いまの系統の字の絵。素材が無ければ None(そのときは字で出す)。"""
-        name = self._BRANCH_IMAGES.get(self._branch_level)
-        if not name:
-            return None
-        if self._branch_pm_key != name:
-            self._branch_pm_key = name
-            self._branch_pm = None
-            try:
-                from neotja import settings as settings_mod
-                path = os.path.join(str(settings_mod.skin_dir()), name)
-                if os.path.exists(path):
-                    pm = QPixmap(path)
-                    self._branch_pm = None if pm.isNull() else pm
-            except Exception:  # noqa: BLE001
-                self._branch_pm = None
-        return self._branch_pm
 
     def _paint_row_labels_static(self, p, rows, h):
         """行名の列の、動かない部分(名前・区切り線)。焼き付け用。"""
@@ -1815,30 +1789,6 @@ class ChartEditWaveform(WaveformWidget):
             p.drawLine(0, y, self.LANE_X0, y)
         p.setPen(QPen(QColor(pal["border"])))
         p.drawLine(self.LANE_X0, 0, self.LANE_X0, h)
-        self._paint_branch_label(p, rows)
-
-    def _paint_branch_label(self, p, rows):
-        """音符の行の左に、いまの系統の字を出す(分岐のある譜面だけ)。"""
-        if not self._has_branches or not self._branch_level:
-            return
-        y, rh = rows["note"]
-        pm = self._branch_pixmap()
-        w = self.LANE_X0 - 20
-        if pm is not None and not pm.isNull():
-            sw = max(1, w)
-            sh = max(1, int(pm.height() * sw / max(1, pm.width())))
-            # 「音符」の字は行の真ん中にあるので、こちらは下へ寄せる。
-            p.drawPixmap(10, y + rh - sh - 14, sw, sh, pm)
-            return
-        # 素材が無いときは字で(色は命令パネルのボタンと同じ考え方)。
-        f = self.font()
-        f.setPixelSize(13)
-        p.setFont(f)
-        p.setPen(QColor({"N": "#c8c8c8", "E": "#7fd4ea",
-                         "M": "#e79bdf"}.get(self._branch_level, "#c8c8c8")))
-        p.drawText(10, y + rh - 28, w, 20, Qt.AlignVCenter | Qt.AlignLeft,
-                   {"N": "普通譜面", "E": "玄人譜面",
-                    "M": "達人譜面"}.get(self._branch_level, ""))
 
     @staticmethod
     def _time_text(t):
