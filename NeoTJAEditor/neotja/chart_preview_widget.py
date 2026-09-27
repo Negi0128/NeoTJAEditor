@@ -3214,14 +3214,19 @@ class ChartPreviewWidget(QWidget):
         return now < self._branch_regions[i][1]
 
     def _draw_branch_lane(self, painter, now, lane_w, band_top, band_h):
-        """分岐している間の、レーンの地の色と系統の字。"""
-        if not self._branch_active(now):
+        """レーンの地の色(分岐している間だけ)と、系統の字(曲の最初からずっと)。
+
+        字は分岐のある譜面なら**最初から最後まで**出しておく(利用者の指定
+        2026-09-27)。このプレビューは系統を1つ選んで通して見せるものなので、
+        「いまどの系統を見ているのか」が分岐の外でも分かるようにする。
+        地の色は本家どおり、分岐している間だけ。"""
+        if not self._has_branches:
             return
         names = self._BRANCH_SKIN.get(self._branch_level)
         if names is None:
             return
         base_name, text_name = names
-        if base_name:
+        if base_name and self._branch_active(now):
             pm = self._branch_pixmap(base_name)
             if pm is not None:
                 blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
