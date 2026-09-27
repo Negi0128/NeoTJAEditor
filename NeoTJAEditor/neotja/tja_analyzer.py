@@ -1215,6 +1215,14 @@ class TJACourseAnalyzer:
                     avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
                     chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
                     branch_path.append(chosen)
+                    # #BRANCHEND を書かずに次の #BRANCHSTART が来る書き方が
+                    # ある。そのときは前の区間をここで閉じて、新しい系統で
+                    # 開き直す(でないと区間が1本につながって、系統が変わった
+                    # ことがレーンに出ない)。
+                    if branch_start is not None and chosen != branch_start_level:
+                        branch_regions.append((branch_start, total_time,
+                                               branch_start_level))
+                        branch_start = None
                     if branch_start is None:
                         branch_start = total_time
                         branch_start_level = chosen
@@ -1341,6 +1349,10 @@ class TJACourseAnalyzer:
                     avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
                     chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
                     branch_path.append(chosen)
+                    if branch_start is not None and chosen != branch_start_level:
+                        branch_regions.append((branch_start, total_time,
+                                               branch_start_level))
+                        branch_start = None
                     if branch_start is None:
                         branch_start = total_time
                         branch_start_level = chosen
