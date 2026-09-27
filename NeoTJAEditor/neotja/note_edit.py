@@ -1198,8 +1198,237 @@ def _insert_line_at(text, body, spans, m, slot, grid, new_line):
 
 
 def op_command(text, course_range, m, slot, grid, name, value):
+    # 拍子は音符の間隔を変えてしまうので、置くだけでなく後ろを組み直す
+    # (op_measure の説明を参照)。置く場所はその小節の頭。
+    if str(name).upper() == "MEASURE" and value is not None:
+        return op_measure(text, course_range, m, value)
     new = set_command(text, course_range, m, slot, grid, name, value)
     if new is None:
+        return None
+    return _result(text, new, reparse=True)
+
+
+# ---------------------------------------------------------------------------
+# 拍子を変える(後ろを組み直す)
+# ---------------------------------------------------------------------------
+# TJA の小節は「書いてある文字の数」で等分されるので、拍子(#MEASURE)だけを
+# 変えて文字数をそのままにすると、1文字ぶんの長さが変わって音符の間隔が
+# 詰まる(4/4 の16文字をそのまま 3/4 にすると 3/4 の速さになる)。
+#
+# 利用者の指定(2026-09-27)は「拍子をいじっても音符の間隔はそのまま」。
+# つまり **音符は1つも動かさず、小節線の位置だけが変わる**(PeepoDrumKit と
+# 同じ考え方)。そのためには、入りきらなくなった音符を次の小節へ送る必要が
+# あり、それは譜面の終わりまで連鎖する。ここでやっているのはその組み直し:
+#
+#   1. 変える小節から後ろの中身(音符・命令の行)を、**拍**で拾い直す。
+#   2. 新しい拍子で小節を切り直し、各小節に入るものを並べ直す。
+#      小節の文字数はその小節に入る位置の分母の最小公倍数(必要なぶんだけ)。
+#   3. 譜面の長さ(拍の合計)は変えない。足りないぶんは空小節で埋める。
+#
+# 拍子は小節の頭にしか置かない。小節の途中に書かれた #MEASURE は、解析側が
+# 「その小節の残りの音符だけ」に効かせる形になっていて(tja_analyzer の
+# measure_val)、意味が定まらないため。カーソルが小節の途中にあるときは、
+# その小節の頭へ寄せる。
+_DEFAULT_METER = (4, 4)
+#: 組み直しで作る小節の数の上限(暴走よけ)。
+_REFLOW_MAX_MEASURES = 100000
+
+
+def _parse_meter(value):
+    """"3/4" → (3, 4)。おかしな値なら None。"""
+    try:
+        n, d = (int(x) for x in str(value).split("/"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return (n, d) if n > 0 and d > 0 else None
+
+
+def _meter_beats(meter):
+    """拍子 → 1小節の長さ(4分音符いくつぶん)。4/4 なら 4。"""
+    return Fraction(4 * int(meter[0]), int(meter[1]))
+
+
+def _command_value_text(line):
+    """"#MEASURE 3/4 //ここから" → "3/4"。"""
+    s = line.split("//", 1)[0].strip()
+    parts = s.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _meters_by_measure(text, spans):
+    """小節ごとの拍子を頭から追って [(num, den)] で返す。"""
+    out = []
+    cur = _DEFAULT_METER
+    for a, b in spans:
+        for _off, line, _idx in _chunk_lines(text[a:b]):
+            if _command_name(line) == "MEASURE":
+                mt = _parse_meter(_command_value_text(line))
+                if mt:
+                    cur = mt
+                break
+        out.append(cur)
+    return out
+
+
+#: 分岐まわりの命令。これがある譜面では組み直さない(op_measure を参照)。
+_BRANCH_COMMANDS = ("BRANCHSTART", "BRANCHEND", "N", "E", "M", "SECTION",
+                    "LEVELHOLD")
+
+
+def _has_branch(text, spans, m0):
+    """m0 以降(と、分岐の途中から始めていないかの確認で全体)に分岐があるか。"""
+    for a, b in spans:
+        for _off, line, _idx in _chunk_lines(text[a:b]):
+            if _command_name(line) in _BRANCH_COMMANDS:
+                return True
+    return False
+
+
+def _elements_from(text, spans, m0, meters):
+    """m0 以降の中身を「m0 の頭からの拍」で拾う。
+
+    戻り値は ([(拍, 種類, 中身)], 拾った拍の合計, 細かさ)。種類は "note"(音符
+    1文字)か "line"(命令行・コメント行をそのまま)。休みの 0 は拾わない
+    (並べ直すときに埋める)。同じ拍では行が先、音符が後。
+
+    細かさは [(始まりの拍, 終わりの拍, 1拍あたりの文字数)]。元の譜面が
+    16分で書いてあったなら並べ直したあとも16分で書きたい — 音符の位置だけ
+    から決めると、8分しか無い小節が "111111," のように書き換わってしまい、
+    見た目が別物になるため。"""
+    out = []
+    dens = []
+    beat = Fraction(0)
+    for m in range(m0, len(spans)):
+        a, b = spans[m]
+        chunk = text[a:b]
+        notes = _measure_notes(text, (a, b))
+        span = _meter_beats(meters[m])
+        L = len(notes)
+        for _off, line, idx in _chunk_lines(chunk):
+            s = line.strip()
+            if not s.startswith("#") and not s.startswith("//"):
+                continue
+            frac = Fraction(idx, L) if L else Fraction(0)
+            out.append((beat + span * frac, "line", s))
+        for i, ch in enumerate(notes):
+            if ch != "0":
+                out.append((beat + span * Fraction(i, L), "note", ch))
+        if L and span > 0:
+            dens.append((beat, beat + span, Fraction(L, 1) / span))
+        beat += span
+    out.sort(key=lambda e: (e[0], 0 if e[1] == "line" else 1))
+    return out, beat, dens
+
+
+def _density_at(dens, start, end):
+    """[start, end) に掛かっていた元の小節の「1拍あたりの文字数」の最大。"""
+    best = Fraction(0)
+    for a, b, d in dens:
+        if b > start and a < end and d > best:
+            best = d
+    return best
+
+
+def _emit_measures(elements, total_beats, meter, dens=()):
+    """拍で持っている中身を、拍子 meter の小節へ並べ直して本文を作る。"""
+    out = []
+    i = 0
+    n = len(elements)
+    beat = Fraction(0)
+    cur = meter
+    while (i < n or beat < total_beats) and len(out) < _REFLOW_MAX_MEASURES:
+        # この小節の頭に #MEASURE があれば、この小節から効かせる。
+        j = i
+        while j < n and elements[j][0] == beat:
+            if elements[j][1] == "line" and _command_name(elements[j][2]) == "MEASURE":
+                mt = _parse_meter(_command_value_text(elements[j][2]))
+                if mt:
+                    cur = mt
+            j += 1
+        span = _meter_beats(cur)
+        end = beat + span
+        take = []
+        while i < n and elements[i][0] < end:
+            take.append(elements[i])
+            i += 1
+        # 割る数は、その小節に入るものの位置の分母の最小公倍数。必要なぶん
+        # だけ細かくする(全部 4分なら "0000," のまま)。
+        L = 1
+        fracs = []
+        for bt, _kind, _payload in take:
+            f = (bt - beat) / span
+            fracs.append(f)
+            L = L * f.denominator // math.gcd(L, f.denominator)
+        L = max(1, min(L, MAX_DIVISION))
+        # 元の譜面と同じ細かさで書く(16分で書いてあったなら16分のまま)。
+        target = span * _density_at(dens, beat, end)
+        if target.denominator == 1 and 1 <= target <= MAX_DIVISION:
+            t = int(target)
+            lc = L * t // math.gcd(L, t)
+            if lc <= MAX_DIVISION:
+                L = lc
+        if not take:
+            # 空小節は素直に。3/4 なら "000,"。
+            L = int(span) if span.denominator == 1 and span >= 1 else 4
+        chars = ["0"] * L
+        lines_at = {}
+        for (bt, kind, payload), f in zip(take, fracs):
+            slot = int(f * L)
+            slot = max(0, min(L - 1, slot))
+            if kind == "note":
+                chars[slot] = payload
+            else:
+                lines_at.setdefault(slot, []).append(payload)
+        if lines_at:
+            pieces = []
+            prev = 0
+            for slot in sorted(lines_at):
+                if slot > prev:
+                    pieces.append("".join(chars[prev:slot]))
+                pieces.extend(lines_at[slot])
+                prev = slot
+            pieces.append("".join(chars[prev:]) + ",")
+            out.append("\n".join(pieces))
+        else:
+            out.append("".join(chars) + ",")
+        beat = end
+    return "\n".join(out) + "\n"
+
+
+def op_measure(text, course_range, m, value):
+    """m 小節目から拍子を value にして、後ろを組み直す。
+
+    音符は1つも動かない(拍の位置をそのまま保つ)。小節線の位置と、テキストの
+    小節の区切り方だけが変わる。"""
+    meter = _parse_meter(value)
+    body = course_body_span(text, course_range)
+    if body is None or meter is None or m < 0:
+        return None
+    spans = measure_spans(text, body)
+    if m >= len(spans):
+        # 譜面の末尾より先。足りない小節を作って置くだけでよい(後ろに
+        # 組み直すものが無い)。
+        return op_command(text, course_range, m, 0, 16, "MEASURE",
+                          "%d/%d" % meter)
+    if _has_branch(text, spans, m):
+        # 分岐のある譜面は、同じ時間に複数の小節が並ぶ(#N/#E/#M)。ここの
+        # 組み直しは小節が1本に並んでいる前提なので、触るとぐちゃぐちゃに
+        # なる。置くだけにして、中身はそのままにしておく。
+        new = set_command(text, course_range, m, 0, 16, "MEASURE",
+                          "%d/%d" % meter)
+        return _result(text, new, reparse=True) if new is not None else None
+    meters = _meters_by_measure(text, spans)
+    elements, total, dens = _elements_from(text, spans, m, meters)
+    # 同じ所にあった古い #MEASURE は捨てて、新しいものを頭に置く。
+    elements = [e for e in elements
+                if not (e[0] == 0 and e[1] == "line"
+                        and _command_name(e[2]) == "MEASURE")]
+    elements.insert(0, (Fraction(0), "line", "#MEASURE %d/%d" % meter))
+    elements.sort(key=lambda e: (e[0], 0 if e[1] == "line" else 1))
+    new = (text[:spans[m][0]]
+           + _emit_measures(elements, total, meter, dens)
+           + text[body[1]:])
+    if new == text:
         return None
     return _result(text, new, reparse=True)
 
@@ -1219,6 +1448,8 @@ def op_command_value(text, course_range, pos, name, value):
     frac = pos - m
     if m < 0:
         return None
+    if name == "MEASURE" and value is not None:
+        return op_measure(text, course_range, m, value)
     new = set_command(text, course_range, m, frac.numerator, frac.denominator,
                       name, value)
     if new is None:

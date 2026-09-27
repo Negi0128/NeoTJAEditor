@@ -1456,7 +1456,14 @@ class ChartEditWaveform(WaveformWidget):
             if len(item) < 4 or item[3] not in self._CMD_NAMES:
                 continue
             p = self._pos_of_time(item[0])
-            if p is not None and p == cur:
+            if p is None:
+                continue
+            # 拍子だけは「その小節のもの」。小節の頭にしか置けない(音符の
+            # 間隔を保って組み直す都合。note_edit.op_measure を参照)ので、
+            # 小節のどこにカーソルがあってもその拍子を指す。
+            hit = (int(p) == self._cur_measure if item[3] == "measure"
+                   else p == cur)
+            if hit:
                 out[item[3]] = (p, item[0])
         return out
 
