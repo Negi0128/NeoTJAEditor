@@ -973,6 +973,14 @@ SKIN_MAP = {
     # 達人譜面」の字。原本(947x130)はレーンの帯ぜんたいの大きさで、字は
     # 右端に寄っている。3枚とも字のある所は (743,38)-(918,88) に収まるので、
     # 同じ矩形で切り出して 176x50 にそろえる(作譜モードの行名の列に出す)。
+    # 分岐している間のレーンの地(玄人=青緑 / 達人=紫)。普通は地のままなので
+    # 足さない(Lane_Main.png = Base_Normal と同じ絵)。
+    "Lane_Branch_Expert.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/12_Lane/Base_Expert.png",
+         "rect": None, "exact": True, "note": "Lane_Base_Hard.png と同じ原本。あちらはコースの色として使っている(本家では分岐の色)ので、役割で名前を分けてある。"},
+    "Lane_Branch_Master.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/12_Lane/Base_Master.png",
+         "rect": None, "exact": True, "note": "Lane_Base_Oni.png と同じ原本。役割で名前を分けてある。"},
     "Branch_Normal.png":
         {"kind": KIND_CROP, "source": "TNDE-R/Graphics/5_Game/12_Lane/Text_Normal.png",
          "rect": (743, 38, 176, 50), "exact": False,

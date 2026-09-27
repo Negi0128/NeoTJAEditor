@@ -822,6 +822,9 @@ class TJACourseAnalyzer:
             big-roll ('5'/'6') spans closed by a '8' tail (an unclosed roll runs to the
             end of the course)
           - "gogo_regions": [(start_seconds, end_seconds)] from #GOGOSTART/#GOGOEND
+          - "branch_regions": [(start_seconds, end_seconds)] 分岐している区間
+            (#BRANCHSTART 〜 #BRANCHEND)。本家はこの間だけレーンの地が系統の
+            色になり、右端に「普通譜面/玄人譜面/達人譜面」の字が出る。
           - "bar_times": [(chart_time_seconds, bpm, scroll, visible), ...] one entry per
             measure boundary. `visible` (bool) reflects #BARLINEOFF/#BARLINEON state at
             that boundary (see below) - always True if the chart never uses them. This
@@ -915,7 +918,8 @@ class TJACourseAnalyzer:
                 start = None
 
         empty = {
-            "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [], "bar_times": [],
+            "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [],
+            "branch_regions": [], "bar_times": [],
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "title": _header_value(content, "TITLE"),
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
@@ -1026,8 +1030,13 @@ class TJACourseAnalyzer:
                         events.append(("BARLINEON", None))
                 elif s.startswith("#BRANCHSTART"):
                     has_branches = True
+                    # 分岐している区間の時刻を拾う(レーンの地の色と
+                    # 「普通譜面/玄人譜面/達人譜面」の字に使う)。本家は分岐に
+                    # 入ってから出るまでの間だけ、その系統の色と字になる。
+                    events.append(("BRANCHSTART", None))
                     branch_active = False  # nothing counts until the first #N/#E/#M
                 elif s.startswith("#BRANCHEND"):
+                    events.append(("BRANCHEND", None))
                     branch_active = True
                 elif s == "#N":
                     branch_active = (branch_level == "N")
@@ -1060,8 +1069,14 @@ class TJACourseAnalyzer:
                 cur_m = []
             else:
                 cur_m.append(ev)
-        if cur_m:
+        # 最後のカンマより後ろに残ったものも1小節として扱う。ただし分岐の印
+        # (BRANCHSTART/BRANCHEND)**だけ**の残りでは小節を作らない — 譜面の
+        # 末尾に #BRANCHEND を書く譜面で小節が1つ増え、bar_times が実際より
+        # 1本多くなってしまうため(印は区間の時刻を拾うためだけのもの)。
+        if any(ev[0] not in ("BRANCHSTART", "BRANCHEND") for ev in cur_m):
             measures.append(cur_m)
+        elif cur_m and measures:
+            measures[-1].extend(cur_m)
 
         total_time = Decimal("0")
         curr_bpm = bpm
@@ -1084,6 +1099,9 @@ class TJACourseAnalyzer:
         measure_changes = [(Decimal(0), curr_num, curr_den)]
         scroll_changes = [(Decimal(0), curr_scroll)]
         gogo_start = None
+        # 分岐している区間(#BRANCHSTART 〜 #BRANCHEND)。
+        branch_regions = []
+        branch_start = None
         active_roll = None
         active_balloon = None
         active_kusudama = None
@@ -1130,6 +1148,13 @@ class TJACourseAnalyzer:
                     if gogo_start is not None:
                         gogo_regions.append((gogo_start, total_time))
                         gogo_start = None
+                elif t == "BRANCHSTART":
+                    if branch_start is None:
+                        branch_start = total_time
+                elif t == "BRANCHEND":
+                    if branch_start is not None:
+                        branch_regions.append((branch_start, total_time))
+                        branch_start = None
                 elif t == "BARLINEOFF":
                     curr_bar_visible = False
                 elif t == "BARLINEON":
@@ -1198,6 +1223,8 @@ class TJACourseAnalyzer:
             open_spans.append((float(active_kusudama[0]), "9"))
         if gogo_start is not None:
             gogo_regions.append((gogo_start, total_time))
+        if branch_start is not None:      # #BRANCHEND を書かない譜面
+            branch_regions.append((branch_start, total_time))
 
         out_notes = [(float(t), c, float(bpm_), float(sc)) for t, c, bpm_, sc in notes]
         out_rolls = [(float(s0), float(e0), c, float(bpm_), float(sc), hits) for s0, e0, c, bpm_, sc, hits in rolls]
@@ -1231,6 +1258,7 @@ class TJACourseAnalyzer:
             "kusudamas": out_kusudamas,
             "open_spans": open_spans,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
+            "branch_regions": [(float(s0), float(e0)) for s0, e0 in branch_regions],
             # 風船が割れるまでの時間を出すのに使う秒間打数(環境設定の連打秒速)。
             # 譜面と一緒に持たせておくと、描く側が設定を読み直さずに済む。
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),

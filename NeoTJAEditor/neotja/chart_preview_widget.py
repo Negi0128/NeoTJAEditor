@@ -505,6 +505,8 @@ class ChartPreviewWidget(QWidget):
         self._bar_scrolls = []
         self._bar_visible = []
         self._gogo_regions = []
+        self._branch_regions = []
+        self._branch_starts = []
         # Start-time column of _gogo_regions, so gogo_pulse() can bisect for
         # "the last region at or before now" instead of scanning every frame.
         self._gogo_starts = []
@@ -2387,6 +2389,10 @@ class ChartPreviewWidget(QWidget):
         )
         self._gogo_regions = sorted(data.get("gogo_regions") or [])
         self._gogo_starts = [g[0] for g in self._gogo_regions]
+        # 分岐している区間。この間だけレーンの地が系統の色になり、右端に
+        # 「普通譜面/玄人譜面/達人譜面」の字が出る(本家と同じ)。
+        self._branch_regions = sorted(data.get("branch_regions") or [])
+        self._branch_starts = [b[0] for b in self._branch_regions]
         bars = sorted(data.get("bar_times") or [])
         self._bar_times = [t for t, _, _, _ in bars]
         self._bar_bpms = [bpm for _, bpm, _, _ in bars]
@@ -3180,6 +3186,65 @@ class ChartPreviewWidget(QWidget):
         return [[sheet.copy(QRect(f * c, r * c, c, c))
                  for f in range(self.HIT_EXP_FRAMES)] for r in range(4)]
 
+    # ------------------------------------------------------------------
+    # 譜面分岐のレーン(本家の映像に合わせたもの)
+    # ------------------------------------------------------------------
+    # 本家は、分岐している間だけレーンの地が系統の色(普通=そのまま/玄人=青緑/
+    # 達人=紫)になり、レーンの右端に「普通譜面 / 玄人譜面 / 達人譜面」の字が
+    # 出る。分岐の外(共通の小節)では普通のレーンに戻る。
+    #
+    # このプレビューは系統を1つ選んで静止して見せるもの(build_preview_timeline
+    # の説明を参照)なので、切り替わる瞬間の「レベルアップ」の札は出さない。
+    #
+    # 字の置き場所は原本の比で決める。原本のレーンの帯は 947x130 で、字は
+    # (743,38)-(919,88) にある。レーンの幅・高さが違っても同じ見え方になる。
+    _BRANCH_TEXT_SRC = (947.0, 130.0, 743.0, 38.0, 176.0, 50.0)
+    #: 系統 → (地の絵, 字の絵)。普通の地は素の Lane_Main.png のまま。
+    _BRANCH_SKIN = {"N": (None, "Branch_Normal.png"),
+                    "E": ("Lane_Branch_Expert.png", "Branch_Expert.png"),
+                    "M": ("Lane_Branch_Master.png", "Branch_Master.png")}
+
+    def _branch_active(self, now):
+        """いま分岐している区間の中か。"""
+        if not self._branch_regions:
+            return False
+        i = bisect.bisect_right(self._branch_starts, now) - 1
+        if i < 0:
+            return False
+        return now < self._branch_regions[i][1]
+
+    def _draw_branch_lane(self, painter, now, lane_w, band_top, band_h):
+        """分岐している間の、レーンの地の色と系統の字。"""
+        if not self._branch_active(now):
+            return
+        names = self._BRANCH_SKIN.get(self._branch_level)
+        if names is None:
+            return
+        base_name, text_name = names
+        if base_name:
+            pm = self._branch_pixmap(base_name)
+            if pm is not None:
+                blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
+                            self._dpr, self._dev_off)
+        pm = self._branch_pixmap(text_name)
+        if pm is None:
+            return
+        sw, sh, tx, ty, tw, th = self._BRANCH_TEXT_SRC
+        w = lane_w * tw / sw
+        h = band_h * th / sh
+        x = lane_w * tx / sw
+        y = band_top + band_h * ty / sh
+        blit_fitted(painter, x, y, w, h, pm, self._dpr, self._dev_off)
+
+    def _branch_pixmap(self, name):
+        """分岐まわりの素材を1回だけ読んで使い回す。"""
+        cache = getattr(self, "_branch_pm_cache", None)
+        if cache is None:
+            cache = self._branch_pm_cache = {}
+        if name not in cache:
+            cache[name] = self._load_skin_pixmap(name)
+        return cache[name]
+
     def _draw_hit_explosion(self, painter, now, judge_x, mid_y):
         """判定円の位置に火花を出す。音符帯にクリップされたまま呼ぶこと
         (音符より先に描いて、音符が上に来るようにする)。"""
@@ -3858,6 +3923,10 @@ class ChartPreviewWidget(QWidget):
                         self._skin_lane_main, self._dpr, self._dev_off)
         else:
             painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
+
+        # 譜面分岐。分岐している間だけ、地をその系統の色に差し替えて、右端に
+        # 系統の字を出す(本家の映像どおり。利用者提供 2026-09-27)。
+        self._draw_branch_lane(painter, now, lane_w, band_top, band_h)
 
         # ゴーゴー。本家の素材は「半透明の赤(左が濃く右へ薄れる)」なので、
         # 地に差し替えるのではなく地の上に重ねる。素材が無いときだけ、
