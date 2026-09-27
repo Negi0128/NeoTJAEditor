@@ -383,7 +383,16 @@ class ChartEditWaveform(WaveformWidget):
         引き戻し合いにはならない。
 
         塗り直しは REDRAW_FPS_DEFAULT の回数までに間引く。位置・表示範囲・
-        カーソルは毎フレームぶん進める(間引くのは絵だけ)。"""
+        カーソルは毎フレームぶん進める(間引くのは絵だけ)。
+
+        **止まっているあいだだけは、自分で動かした直後を守る。** 停止中でも
+        小節移動のトゥイーンが残っているとレーンのクロックは動き続けていて、
+        その位置に素直に従うと、置いたばかりのカーソルが引き戻される
+        (実測: ペインを画面の中で描くようにして塗り直しが速くなったら、
+        毎回これに負けるようになった)。再生中は今までどおり従う — 止めると
+        ←→ を押してから 0.8 秒、赤い線が止まって見えるため。"""
+        if self._echo_active() and not self._playing:
+            return
         if self._repaint_due():
             super().set_position_smooth(seconds)
             self._follow_playhead(seconds, nearest=False)
@@ -1672,13 +1681,11 @@ class ChartEditWaveform(WaveformWidget):
         top, h = self._row_rects()["note"]
         return (top, top, h, top + h, 0)
 
-    def paintEvent(self, event):
+    def paint_pane(self, p):
+        # 描き先は自分のウィジェットのことも、ゲーム画面の GPU の面のことも
+        # ある(WaveformWidget.set_drawn_by を参照)。どちらでも同じ絵になる。
         self._last_paint_wall = time.monotonic()
-        p = QPainter(self)
-        try:
-            self._paint_rows(p)
-        finally:
-            p.end()
+        self._paint_rows(p)
 
     # ------------------------------------------------------------------
     # 時間の関数でしかない絵は、幅の広い帯に焼いてずらして貼る

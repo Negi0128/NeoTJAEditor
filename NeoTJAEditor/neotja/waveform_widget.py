@@ -707,8 +707,47 @@ class WaveformWidget(QWidget):
         wh = h - note_strip - cmd_strip
         return (wh, wh, note_strip, wh + note_strip, cmd_strip)
 
+    # ------------------------------------------------------------------
+    # 絵をゲーム画面の面の中へ描いてもらう
+    # ------------------------------------------------------------------
+    # ペインとゲーム画面が同じ窓に並んでいると、ペインを1回塗るたびに窓
+    # ぜんたいの組み直しが走って、レーンと綱引きになる(中身が空でも起きる)。
+    # ゲーム画面の GPU の面へ続けて描いてもらえば、1コマで一度に出るので
+    # 綱引きが消える(game_screen.attach_pane に実測値がある)。
+    #
+    # そのときも**ウィジェットそのものは残す** — マウス・キー・上に乗せた
+    # ボタン・命令の入力欄は今までどおりに効かせたいので、画面の子として
+    # 置いたまま、中身だけ描かないで透かしておく。
+    #: 「塗り直して」の言い先。None なら今までどおり自分で塗る。
+    _drawn_by = None
+
+    def set_drawn_by(self, cb):
+        """絵を誰かに描いてもらうかどうか(cb は塗り直しを頼む先)。"""
+        self._drawn_by = cb
+        on = cb is not None
+        # 自分では塗らないので、地も持たない(下の面が透ける)。
+        self.setAttribute(Qt.WA_NoSystemBackground, on)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setAttribute(Qt.WA_TranslucentBackground, on)
+
+    def update(self, *args):
+        cb = self._drawn_by
+        if cb is not None:
+            cb()                       # 描くのは画面のほう。そちらを塗り直す
+            return
+        super().update(*args)
+
     def paintEvent(self, event):
+        if self._drawn_by is not None:
+            return                     # 中身はゲーム画面の面へ描かれている
         painter = QPainter(self)
+        try:
+            self.paint_pane(painter)
+        finally:
+            painter.end()
+
+    def paint_pane(self, painter):
+        """ペインの中身を painter へ描く。描き先は自分でも画面の面でもよい。"""
         w = self.width()
         h = self.height()
         painter.fillRect(self.rect(), QColor(self._pal["bg2"]))

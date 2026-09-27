@@ -648,7 +648,20 @@ class GamePreviewWindow(QWidget):
         return (_time.monotonic() - getattr(self, "_shown_at", 0.0)
                 < self.SHOW_GRACE_SEC)
 
+    def set_pane_cb(self, cb):
+        """窓の大きさを取り直す前に呼ぶ先(下のペインを画面の中へ入れる/戻す)。
+
+        倍率や全画面が変わるとペインの置き場も変わるので、寸法を決める前に
+        決着をつけてもらう。"""
+        self._pane_cb = cb
+
+    def is_fullscreen(self) -> bool:
+        return bool(self._fullscreen)
+
     def _refit(self):
+        cb = getattr(self, "_pane_cb", None)
+        if cb is not None:
+            cb()
         if self._fullscreen:
             # 全画面のあいだは窓の大きさを固定しない(固定すると画面いっぱいの
             # 表示が壊れる)。モード切替で中身の高さが変わったときは、倍率を
@@ -1068,6 +1081,9 @@ class PreviewDock(QDockWidget):
         # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ
         # ならなくなり事故りやすいので、ページに載せないだけに留める方が安全。
         self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
+        #: ペイン → それが元々入っていたページの入れ物。ゲーム画面の中へ
+        #: 移したペインを戻すときに使う(_update_pane_host)。
+        self._pane_layouts = {}
         # ネームプレートの中身は、ファイルではなくこの設定から読ませる。
         try:
             from . import game_screen as _gs
@@ -1159,6 +1175,9 @@ class PreviewDock(QDockWidget):
         if self._peepo_enabled:
             heights.append(self._edit_page.sizeHint().height())
         bottom_h = max(heights)
+        #: ページを出すときのスタックの高さ。ペインをゲーム画面の中へ移した
+        #: ときは、そのぶん縮める(_apply_bottom_height)。
+        self._bottom_h_stack = bottom_h
         self.bottom_stack.setFixedHeight(bottom_h)
         self._bottom_panel = QWidget()
         bp = QVBoxLayout(self._bottom_panel)
@@ -1196,6 +1215,7 @@ class PreviewDock(QDockWidget):
             self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
             lane_widget=self.chart_preview,
         )
+        self.game_preview_window.set_pane_cb(self._update_pane_host)
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
@@ -1505,7 +1525,75 @@ class PreviewDock(QDockWidget):
         h = self._bottom_h_full if show_page else self._bottom_h_speed_only
         if not getattr(self, "_overlay_visible", True):
             h -= self._bottom_h_speed_only     # 速度行のぶんを詰める
+        # ペインをゲーム画面の中へ移しているぶんは、こちらから詰める
+        # (画面がそのぶん高くなっているので、窓ぜんたいの高さは変わらない)。
+        band = 0
+        get = getattr(self.game_screen, "pane_band_height", None)
+        if show_page and callable(get):
+            band = int(get())
+        if band:
+            h -= band
+            # 中身の無くなったページぶんも詰める(帯だけが残らないように)。
+            self.bottom_stack.setFixedHeight(max(0, self._bottom_h_stack - band))
+        else:
+            self.bottom_stack.setFixedHeight(self._bottom_h_stack)
         self._bottom_panel.setFixedHeight(max(0, h))
+
+    # ------------------------------------------------------------------
+    # 下のペインを、ゲーム画面の GPU の面の中で描いてもらう
+    # ------------------------------------------------------------------
+    # ペインとゲーム画面が同じ窓に並んでいると、ペインを1回塗るたびに窓
+    # ぜんたいの組み直しが走って綱引きになる(game_screen.attach_pane 参照)。
+    # 画面の中へ入れると 1コマで一度に出るので、上下とも 300fps を超える。
+    # ウィジェットそのものは残すので、マウス・キー・ボタン・命令の入力欄は
+    # 今までどおり効く。
+
+    def _hosted_pane(self):
+        """いまゲーム画面の中に入っているペイン(無ければ None)。"""
+        get = getattr(self.game_screen, "pane", None)
+        return get() if callable(get) else None
+
+    def _pane_for_mode(self, idx):
+        """そのモードで画面の下に出すペイン。置かないモードは None。"""
+        if self.MODE_EDIT is not None and idx == self.MODE_EDIT:
+            return self.chart_edit
+        if idx == self.MODE_WAVE:
+            return self.game_waveform
+        return None
+
+    def _update_pane_host(self):
+        """ペインを画面の中へ入れるか、下部パネルへ戻すかを決め直す。
+
+        中へ入れられるのは**等倍で、全画面でない**ときだけ。縮めていると
+        画面は ScaledHost が CPU で描き直す経路に移り、画面の子は隠される。
+        ペインに乗っているボタン(合成/OFFSET調整)まで消えてしまうので、
+        そのときは下部パネルへ戻す。
+        """
+        screen = self.game_screen
+        if getattr(screen, "native_screen_window", False):
+            return          # 別の窓の作り。重ねたものが下に沈むので入れない
+        gw = self.game_preview_window
+        want = self._pane_for_mode(self.bottom_stack.currentIndex())
+        if want is not None and (gw.is_fullscreen()
+                                 or abs(gw.scaled_host.scale() - 1.0) > 0.001):
+            want = None
+        cur = self._hosted_pane()
+        if cur is want:
+            return
+        if cur is not None:
+            screen.detach_pane()
+            lay = self._pane_layouts.get(cur)
+            if lay is not None:
+                lay.insertWidget(0, cur)
+            cur.show()
+            if hasattr(cur, "set_screen_uncoupled"):
+                cur.set_screen_uncoupled(False)
+        if want is not None:
+            screen.attach_pane(want)
+            # 画面が毎コマ描くので、塗り直しの間引きは要らない。
+            if hasattr(want, "set_screen_uncoupled"):
+                want.set_screen_uncoupled(True)
+        self._apply_bottom_height()
 
     def _on_game_preview_closed(self):
         # 窓を閉じたら**必ず止める。** 閉じても曲と打音は鳴り続けていて、
@@ -1559,6 +1647,8 @@ class PreviewDock(QDockWidget):
         # no-op になるため、そのときの追加コストは無い。
         self.chart_preview.set_frame_cb(self._on_preview_frame)
         v.addWidget(self.game_waveform)
+        # 画面の中へ移したペインを戻す先(_update_pane_host)。
+        self._pane_layouts[self.game_waveform] = v
         v.addStretch()
         return page
 
@@ -1606,6 +1696,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.cursorMoved.connect(self._on_edit_cursor_moved)
         self.chart_edit.legendToggled.connect(self._on_legend_toggled)
         v.addWidget(self.chart_edit)
+        self._pane_layouts[self.chart_edit] = v
         v.addStretch()
         return page
 

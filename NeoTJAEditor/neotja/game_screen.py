@@ -44,8 +44,14 @@ except ImportError:  # 同上。native な窓の版が作れないだけ。
 from neotja import chara as chara_mod
 from neotja import gauge as gauge_mod
 from neotja import settings as settings_mod
+from neotja import theme
 from neotja.chart_preview_widget import (ChartPreviewWidget, blit_fitted,
                                          blit_sprite, dev_info)
+
+#: 画面の中へ入れたペインのまわりを埋める色。再生窓はテーマに関わらず
+#: ダーク固定(GamePreviewWindow が dark の QSS を当てている)ので、その
+#: 下地の色に合わせる。下部パネルに居たときと同じ見え方にするため。
+PANE_BAND_COLOR = theme.THEMES["dark"]["bg2"]
 
 SCREEN_W = 1280
 SCREEN_H_FULL = 720
@@ -3227,8 +3233,14 @@ class _GameScreenBase:
         return SCREEN_H_LITE if self._lite else SCREEN_H_FULL
 
     def _apply_geometry(self):
-        """画面の高さを、いまの compact/lite に合わせ直す。"""
-        self.setFixedSize(SCREEN_W, self._screen_height())
+        """画面の高さを、いまの compact/lite/ペインに合わせ直す。"""
+        h = self._screen_height()
+        pane = self._pane
+        if pane is not None:
+            pane.setGeometry(self.PANE_MARGIN_X, h + self.PANE_MARGIN_Y,
+                             SCREEN_W - 2 * self.PANE_MARGIN_X, pane.height())
+            h += self.pane_band_height()
+        self.setFixedSize(SCREEN_W, h)
         self._static_layer = None      # 大きさ/中身が変わるので焼き直す
 
     # ------------------------------------------------------------------
@@ -3978,6 +3990,74 @@ class _GameScreenBase:
         p.setClipRect(*SOUL_FLY_RECT)
         self._draw_lane_front(p)
         p.restore()
+
+        # --- 下のペイン(作譜/音声波形)も、この面の中へ続けて描く ---
+        pane = self._pane
+        if pane is not None:
+            p.save()
+            top = self._screen_height()
+            # ペインのまわりの余白は、下部パネルに居たときと同じく地色で埋める。
+            p.fillRect(0, top, SCREEN_W, self.pane_band_height(),
+                       QColor(PANE_BAND_COLOR))
+            x, y = self.PANE_MARGIN_X, top + self.PANE_MARGIN_Y
+            p.setClipRect(x, y, pane.width(), pane.height())
+            p.translate(x, y)
+            pane.paint_pane(p)
+            p.restore()
+
+    # ------------------------------------------------------------------
+    # 下のペインを画面の中へ入れる
+    # ------------------------------------------------------------------
+    # 作譜ペイン・音声波形ペインは、ゲーム画面と同じ窓に並ぶ普通のウィジェット
+    # だった。そのぶん**ペインを1回塗るたびに窓ぜんたいの組み直しが走り**、
+    # レーンと綱引きになる(中身が空でも起きる)。ここで受け取って同じ面へ
+    # 続けて描けば、1コマで一度に出るので綱引きそのものが無くなる。
+    #
+    # 実測(1280 幅 / 120Hz / GTX970 / 作譜モード):
+    #   別の窓 + 帯    レーン 233fps / ペイン 280回per秒
+    #   この中へ描く   上下とも 304fps(ゲーム画面 0.85ms + ペイン 0.57ms)
+    # ペインは GPU の面へ描くほうが安い(ラスタの 1.04ms -> 0.57ms)。
+    #
+    # **ウィジェットそのものは残す。** マウス・キー・ボタン(合成/OFFSET調整)・
+    # 命令の入力欄は今までどおりウィジェットとして効かせたいので、画面の子に
+    # 置いて透かしておき、中身だけこちらが描く。
+    _pane = None
+    #: 画面の中へ入れたペインの余白。**下部パネルのページと同じ値**にして、
+    #: 置き場所が変わっても見え方が1px も変わらないようにする
+    #: (preview_dock の _build_edit_page / _build_wave_page の
+    #: setContentsMargins(10, 8, 10, 8) と揃えること)。
+    PANE_MARGIN_X = 10
+    PANE_MARGIN_Y = 8
+
+    def pane_band_height(self):
+        """ペインが画面に足している高さ(余白こみ)。0 なら入っていない。"""
+        pane = self._pane
+        if pane is None:
+            return 0
+        return pane.height() + 2 * self.PANE_MARGIN_Y
+
+    def attach_pane(self, pane):
+        """ペインを画面の中へ入れる。pane は画面の子になり、絵はここが描く。"""
+        if self._pane is pane:
+            return
+        self._pane = pane
+        if pane is not None:
+            pane.setParent(self)
+            pane.set_drawn_by(self.update)
+            pane.show()
+            pane.raise_()
+        self._apply_geometry()
+
+    def detach_pane(self):
+        """ペインを画面から外す(縮小表示・全画面・別のモードのとき)。"""
+        pane, self._pane = self._pane, None
+        if pane is not None:
+            pane.set_drawn_by(None)
+        self._apply_geometry()
+        return pane
+
+    def pane(self):
+        return self._pane
 
     def _draw_lane_front(self, p, ox=0, oy=0):
         """レーンより手前に出すもの。後のものほど手前。
