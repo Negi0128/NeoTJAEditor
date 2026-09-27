@@ -424,13 +424,21 @@ class WaveformWidget(QWidget):
     def _seconds_per_pixel(self) -> float:
         return self._visible_span() / self._lane_w()
 
+    #: 描くときだけ、出した x からこれを引く。既定 0(何も変わらない)。
+    #: 作譜ペインが「幅の広い帯に焼いた絵」を左へずらして貼るときに使う
+    #: (chart_edit_widget._static_strip 参照)。**引き算をこの1か所でやるのが
+    #: 肝心** — 呼ぶ側で view_start をずらして同じ位置を出そうとすると、
+    #: 掛け算の丸めが整数の境目で揺れて、小節線と音符が 1px 食い違う。
+    _x_shift = 0
+
     def _sec_to_x(self, sec: float) -> int:
         key = (self._follow_window, self.duration, self.zoom, self.width())
         if key != self._xs_key:
             span = self._visible_span()
             self._xs_val = (self._lane_w() / span) if span > 0 else 0.0
             self._xs_key = key
-        return self.LANE_X0 + int((sec - self.view_start) * self._xs_val)
+        return (self.LANE_X0 + int((sec - self.view_start) * self._xs_val)
+                - self._x_shift)
 
     def _x_to_sec(self, x: float) -> float:
         span = self._visible_span()

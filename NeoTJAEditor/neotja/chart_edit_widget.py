@@ -337,7 +337,13 @@ class ChartEditWaveform(WaveformWidget):
         self._cmd_kind_times = ({k: [t for t, _x in v] for k, v in by.items()}
                                 if by else None)
 
+    def set_commands(self, *args, **kwargs):
+        # ゴーゴーの薄い色と小節線は帯に焼いてある(_static_strip を参照)。
+        super().set_commands(*args, **kwargs)
+        self._bump_strip()
+
     def _rebuild_bar_times(self):
+        self._bump_strip()             # 小節線・目盛りは帯に焼いてある
         self._bar_times = [max(0.0, t - self.offset)
                            for t in (self._bar_times_raw or [])]
         raw = getattr(self, "_barline_raw", None)
@@ -501,6 +507,7 @@ class ChartEditWaveform(WaveformWidget):
 
     def set_spans(self, rolls, balloons, kusudamas):
         super().set_spans(rolls, balloons, kusudamas)
+        self._bump_strip()
         self._spans_full = list(self._spans_raw or [])
         self._collapse_open_spans()
 
@@ -1673,26 +1680,101 @@ class ChartEditWaveform(WaveformWidget):
         finally:
             p.end()
 
-    def _paint_rows(self, p):
-        self._check_theme()
-        w, h = self.width(), self.height()
-        rows = self._row_rects()
-        t0 = self.view_start
-        t1 = t0 + self._visible_span()
-        pal = self._pal
-        p.fillRect(self.rect(), QColor(pal["bg2"]))
+    # ------------------------------------------------------------------
+    # 時間の関数でしかない絵は、幅の広い帯に焼いてずらして貼る
+    # ------------------------------------------------------------------
+    # 波形・目盛り・小節線・編集グリッド・ゴーゴーの薄い色・行の地は、どれも
+    # 「いつからいつまでを映しているか」だけで決まる。再生中はその窓が右へ
+    # 少しずつ動くだけなので、毎コマ描き直すのはまるごとむだになる。
+    #
+    # 実測(1280x300 の1コマ 2.10ms の内訳):
+    #   波形 0.44 / 目盛り 0.35 / グリッド 0.33 / 小節線 0.03 / 地の塗り 約0.4
+    # 合わせて 1.5ms ぶんが、帯からの貼り付け1回(約0.1ms)に変わる。
+    #
+    # 画面の STRIP_FACTOR 倍の幅で焼いておき、窓が端まで流れたら焼き直す。
+    # 焼き直しは1回ぶんの描画より少し重いだけで、数秒に1回しか起きない。
+    STRIP_FACTOR = 2.5
+    #: 焼く帯の幅の上限(px)。極端に広い窓・細かい表示でも取り過ぎないように。
+    STRIP_MAX_PX = 9000
+    _strip_pm = None
+    _strip_t0 = 0.0
+    _strip_span = 0.0
+    _strip_key = None
+    #: 譜面の中身が変わったら数を増やす。帯の焼き直しの合図(_bump_strip)。
+    _strip_rev = 0
 
+    def _bump_strip(self):
+        """帯に焼いた中身(小節線・波形・ゴーゴー等)が変わったことを知らせる。"""
+        self._strip_rev += 1
+        self._strip_pm = None
+
+    def _strip_key_now(self):
+        pal = self._pal
+        return (self.width(), self.height(), self.LANE_X0,
+                self.devicePixelRatioF(), round(self._visible_span(), 6),
+                self._grid, self._cur_measure, self._playing, self._strip_rev,
+                self._show_legend, pal.get("bg"), pal.get("bg2"),
+                pal.get("border"), pal.get("fg"),
+                # 波形そのものが差し替わったとき(曲を開き直した等)も焼き直す。
+                id(self.mips), round(float(self.duration or 0.0), 3))
+
+    def _static_strip(self):
+        """いまの表示に使える帯 (帯, 左端の時刻)。作れないときは None。"""
+        span = self._visible_span()
+        if span <= 0 or self.height() < 8:
+            return None
+        self._sec_to_x(0.0)                 # 1秒あたりの px を最新にする
+        xs = self._xs_val
+        if xs <= 0:
+            return None
+        t0 = self.view_start
+        key = self._strip_key_now()
+        if (self._strip_pm is not None and self._strip_key == key
+                and self._strip_t0 <= t0
+                and t0 + span <= self._strip_t0 + self._strip_span):
+            return self._strip_pm, self._strip_t0
+        strip_px = int(span * self.STRIP_FACTOR * xs) + 2
+        if strip_px > self.STRIP_MAX_PX:
+            strip_px = self.STRIP_MAX_PX
+        strip_span = strip_px / xs
+        # 少し後ろ(左)にも余裕を持たせる。巻き戻しでも焼き直さずに済む。
+        base = max(0.0, t0 - span * 0.5)
+        dpr = self.devicePixelRatioF()
+        img_w = self.LANE_X0 + strip_px
+        pm = QPixmap(max(1, int(img_w * dpr)), max(1, int(self.height() * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(QColor(self._pal["bg2"]))
+        q = QPainter(pm)
+        old_view = self.view_start
+        self.view_start = base              # 帯の中では左端が base 時刻
+        try:
+            self._paint_static(q, img_w, base, base + strip_span)
+        finally:
+            self.view_start = old_view
+            q.end()
+        self._strip_pm = pm
+        self._strip_t0 = base
+        self._strip_span = strip_span
+        self._strip_key = key
+        return pm, base
+
+    def _paint_static(self, p, w, t0, t1):
+        """時間の関数でしかない絵。帯へ焼くときも、直に描くときも同じ道。
+
+        w は描き先の幅(帯のときは画面より広い)。呼ぶ側が self.view_start を
+        t0 に合わせておくこと。"""
+        pal = self._pal
+        rows = self._row_rects()
         note_top, note_h = rows["note"]
-        # --- 音符の行: 波形を背景に敷いて、その上に譜面 ---
-        p.fillRect(self.LANE_X0, note_top, w - self.LANE_X0, note_h, QColor(pal["bg"]))
+        lane_w = max(1, w - self.LANE_X0)
+        p.fillRect(self.LANE_X0, note_top, lane_w, note_h, QColor(pal["bg"]))
         # 波形は行の下側へ寄せる(利用者の指定 2026-09-25)。音符と重ねると
         # 丸に隠れてしまうので、音符は上、波形は下。
         wave_h = int(note_h * self.WAVE_FRAC)
         wave_top = note_top + note_h - wave_h
-        note_cy = note_top + (note_h - wave_h) // 2
         mips = self.mips
         if mips and not mips.is_empty():
-            self._draw_lane(p, mips.MIX, wave_top, wave_h, t0, t1, self._lane_w(), None)
+            self._draw_lane(p, mips.MIX, wave_top, wave_h, t0, t1, lane_w, None)
         # ゴーゴーは専用の行に帯で出すので、音符の行は薄く色を敷くだけにする
         # (行が高くなったぶん、前と同じ濃さだと真っ赤に見える)。
         for s, e in (self._gogo_audio or []):
@@ -1702,8 +1784,49 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(xs, note_top, max(1, xe - xs), note_h,
                        QColor(255, 120, 120, 18))
         self._draw_measure_lines(p, note_top, note_h, t0, t1)
+        self._draw_edit_grid(p, note_top, note_h - wave_h, t0, t1)
+        self._draw_ruler(p, t0, t1)
+
+    def _paint_rows(self, p):
+        saved_view = self.view_start
+        try:
+            self._paint_rows_inner(p)
+        finally:
+            # 帯に合わせて起点をずらしていることがある(下を参照)。描き終えたら
+            # 必ず戻す — マウスの座標変換も同じ式を通るため。
+            self.view_start = saved_view
+            self._x_shift = 0
+
+    def _paint_rows_inner(self, p):
+        self._check_theme()
+        w, h = self.width(), self.height()
+        rows = self._row_rects()
+        t0 = self.view_start
+        t1 = t0 + self._visible_span()
+        pal = self._pal
+
+        note_top, note_h = rows["note"]
+        wave_h = int(note_h * self.WAVE_FRAC)
+        note_cy = note_top + (note_h - wave_h) // 2
         upper_h = note_h - wave_h          # 音符が並ぶ側(波形の上)
-        self._draw_edit_grid(p, note_top, upper_h)
+        strip = self._static_strip()
+        if strip is None:                  # 帯が作れないときは直に描く
+            p.fillRect(self.rect(), QColor(pal["bg2"]))
+            self._paint_static(p, w, t0, t1)
+            strip_off = None
+        else:
+            pm, base = strip
+            strip_off = int((t0 - base) * self._xs_val)
+            p.drawPixmap(-strip_off, 0, pm)
+            # 動くもの(音符・命令の札・再生位置の線)も、**帯とまったく同じ
+            # 式で** x を出す。帯の中では x = LANE_X0 + int((t-base)*xs) で、
+            # それを strip_off だけ左へ貼っているので、こちらも起点を base に
+            # して同じぶん引く(_x_shift)。合わせないと、同じ時刻でも丸めの
+            # 違いで小節線と音符が 1px 食い違う(実測: 小節の境目で起きた)。
+            self.view_start = base
+            self._x_shift = strip_off
+            t0 = base + strip_off / self._xs_val
+            t1 = t0 + self._visible_span()
         self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
         self._draw_long_preview(p, note_top, upper_h)
         self._draw_pending(p, note_top, upper_h)
@@ -1742,7 +1865,13 @@ class ChartEditWaveform(WaveformWidget):
         # カーソルの位置に貼り付いているので、それで足りる。
 
         # --- 目盛りと左の列は最後(譜面がはみ出しても上から隠す) ---
-        self._draw_ruler(p, t0, t1)
+        if strip_off is None:
+            self._draw_ruler(p, t0, t1)
+        else:
+            # 目盛りは帯に焼いてあるので、その帯を上の高さぶんだけ貼り直す。
+            p.setClipRect(0, 0, w, self.RULER_H)
+            p.drawPixmap(-strip_off, 0, self._strip_pm)
+            p.setClipping(False)
         self._draw_row_labels(p, rows)
 
     def _draw_row_labels(self, p, rows):
@@ -1959,16 +2088,20 @@ class ChartEditWaveform(WaveformWidget):
             return (BEAT_COLOR, BEAT_FRAC)
         return (GRID_COLORS.get(self._grid, GRID_COLORS[64]), SUB_FRAC)
 
-    def _draw_edit_grid(self, p, top, strip):
+    def _draw_edit_grid(self, p, top, strip, t0=None, t1=None):
         """小節をグリッド分割で割る線。小節線そのものは親が描く。
+
+        t0/t1 を渡すとその範囲に引く(帯へ焼くとき。既定は画面の範囲)。
 
         定規と同じで、4分(拍)にだけ長い白線、その間は今の分割の色で短い線。
         帯の下端から生やす。全部同じ長さにすると細かいグリッドで画面が
         埋まって音符が読めなくなるため。"""
         if strip <= 0:
             return
-        t0 = self.view_start
-        t1 = t0 + self._visible_span()
+        if t0 is None:
+            t0 = self.view_start
+        if t1 is None:
+            t1 = t0 + self._visible_span()
         known = self._known_measures()
         # 譜面の末尾より先の小節線は親が描かないので、ここで描く
         # (どこまでが既存の譜面かが分かるように色と線種を変える)。
@@ -1999,7 +2132,9 @@ class ChartEditWaveform(WaveformWidget):
             if span <= 0:
                 continue
             # 線が潰れるほど細かいときは引かない(見づらいだけなので)。
-            if span / self._grid * (self.width() / max(1e-6, t1 - t0)) < 4:
+            # 1秒あたりの px は _xs_val を使う(帯へ焼くときは t1-t0 が
+            # 画面より広いので、幅から割り出すと細かさを読み違える)。
+            if span / self._grid * self._xs_val < 4:
                 continue
             for k in range(1, self._grid):
                 t = m_start + span * (k / self._grid)
