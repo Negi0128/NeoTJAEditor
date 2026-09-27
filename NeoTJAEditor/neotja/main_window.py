@@ -2095,6 +2095,14 @@ class MainWindow(QMainWindow):
         if rng is None:
             self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
             return None
+        # 分岐のある譜面では、編集も**いま見ている系統**に効かせる。作譜ペインの
+        # 「何小節目」は選んだ系統の中での番号なので(tja_analyzer が選んだ系統
+        # だけを数える)、書く側も同じ数え方にしないと別の小節へ書いてしまう。
+        with note_edit.editing_branch(self._preview_branch_level):
+            return self._chart_op_in_branch(text, rng, op)
+
+    def _chart_op_in_branch(self, text, rng, op):
+        """_apply_chart_op の中身(系統を決めたあと)。"""
         if op.get("kind") == "peek_command":
             # 入力欄に出す今の値を読むだけ。テキストは変えない。
             a = op.get("a") or (0, 0)

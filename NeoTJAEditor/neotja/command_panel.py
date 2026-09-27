@@ -29,6 +29,8 @@ class CommandPanel(QFrame):
     editCommand = Signal(str, object)
     #: 開始/終了の印を置く。(種類, "on"/"off")。種類は GOGO / BARLINE。
     placeMarker = Signal(str, str)
+    #: 譜面分岐の系統を選ぶ。("N"/"E"/"M")
+    selectBranch = Signal(str)
 
     #: 命令の行の種類 → その枠を持っている欄の名前(set_values の editing 用)。
     KINDS = ("bpm", "measure", "hs")
@@ -45,6 +47,10 @@ class CommandPanel(QFrame):
         self._boxes = {}
         # いま「変更」になっている種類。
         self._editing = set()
+        # 譜面分岐の入れ物(_branch_box で作る)。
+        self._branch_buttons = {}
+        self._branch_title = None
+        self._branch_level = None
         self.setObjectName("commandPanel")
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         # ゲーム画面の上に置くので、窓の QSS 任せにせず自前で色を決める
@@ -118,14 +124,8 @@ class CommandPanel(QFrame):
                                       lambda: self.placeMarker.emit("GOGO", "off")),
                        1, 1)
 
-        self._hint = QLabel("カーソルの位置に置きます")
-        f = self._hint.font()
-        f.setPixelSize(12)
-        self._hint.setFont(f)
-        self._hint.setStyleSheet("color: #6c7a96;")
-        self._hint.setAlignment(Qt.AlignCenter)
-        self._hint.setWordWrap(True)
-        grid.addWidget(self._hint, 1, 2)
+        # --- 譜面分岐: どの系統を見て(編集して)いるか ---
+        grid.addWidget(self._branch_box(), 1, 2)
 
     # ------------------------------------------------------------------
     def _new_box(self, title):
@@ -170,6 +170,44 @@ class CommandPanel(QFrame):
         self._boxes[kind] = (box, btn)
         return box
 
+    #: 系統 → (ボタンの文字, 選ばれているときの色)。色は TNDE-R のレーンの
+    #: 地の色に合わせた(普通=灰、玄人=青緑、達人=紫)。
+    BRANCHES = (("N", "普通", "#5b6470"), ("E", "玄人", "#2f6f86"),
+                ("M", "達人", "#7d2a72"))
+
+    def _branch_box(self):
+        """[譜面分岐 / 普通・玄人・達人] の枠。
+
+        分岐のある譜面でだけ押せる。押すとゲーム画面の表示と、**作譜モードの
+        編集先**が、その系統に切り替わる(分岐は同じ時間の別案なので、どれを
+        編集しているのかが分からないと打ち込めない)。"""
+        box, row = self._new_box("譜面分岐")
+        self._branch_title = box.findChild(QLabel, "boxTitle")
+        self._branch_buttons = {}
+        for key, text, _col in self.BRANCHES:
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _c=False, k=key: self.selectBranch.emit(k))
+            row.addWidget(btn)
+            self._branch_buttons[key] = btn
+        self._branch_box_w = box
+        self.set_branch(None, False)
+        return box
+
+    def set_branch(self, level, has_branches):
+        """いまの系統を反映する。分岐の無い譜面では押せなくする。"""
+        self._branch_level = level if level in self._branch_buttons else None
+        for key, _text, col in self.BRANCHES:
+            btn = self._branch_buttons[key]
+            btn.setEnabled(bool(has_branches))
+            on = bool(has_branches) and key == self._branch_level
+            btn.setStyleSheet(
+                ("color: #ffffff; background: %s; border: 1px solid #cdd6f4;"
+                 " border-radius: 3px; padding: 2px 4px; min-height: 24px;"
+                 " font-size: 13px;" % col) if on else "")
+        if self._branch_title is not None:
+            self._branch_title.setText("譜面分岐" if has_branches
+                                       else "譜面分岐（この譜面には無い）")
+
     def _pair_box(self, title, a_text, b_text, on_a, on_b):
         """[見出し / ボタン2つ] の枠(値が無い命令)。"""
         box, row = self._new_box(title)
@@ -197,8 +235,7 @@ class CommandPanel(QFrame):
             box.setStyleSheet(
                 "QFrame#cmdBox { background: rgba(28,34,50,230);"
                 " border: 1px solid #7aa2f7; border-radius: 4px; }" if on else "")
-        self._hint.setText("選んでいる命令の値を変えます" if kinds
-                           else "カーソルの位置に置きます")
+
 
     def set_values(self, bpm=None, scroll=None, measure=None):
         """カーソルの位置で効いている値へ欄を合わせる。

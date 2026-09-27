@@ -1232,6 +1232,7 @@ class PreviewDock(QDockWidget):
             #: 「変更」を押したときに書き換える相手 {行の種類: 位置}。
             self._panel_targets = {}
             self.command_panel.placeMarker.connect(self._on_panel_marker)
+            self.command_panel.selectBranch.connect(self._on_panel_branch)
             self.command_panel.hide()
         self._fps_timer.timeout.connect(self._update_fps_label)
         self._fps_timer.start(500)
@@ -1954,6 +1955,14 @@ class PreviewDock(QDockWidget):
         ce.set_command_value(str(name), pos, value)
         self._sync_command_panel()
 
+    def _on_panel_branch(self, level):
+        """パネルの「譜面分岐」: 見る系統(＝作譜で編集する系統)を選ぶ。
+
+        情報バーの「分岐:」ボタンと同じ入口(branch_select_cb)へ渡す。解析が
+        その系統で組み直され、作譜ペインもその系統の譜面になる。"""
+        if self.branch_select_cb is not None:
+            self.branch_select_cb(str(level))
+
     def _on_panel_marker(self, kind, which):
         ce = getattr(self, "chart_edit", None)
         if ce is not None:
@@ -2217,6 +2226,11 @@ class PreviewDock(QDockWidget):
                                         preview_data.get("course_color"))
             self.game_screen.set_chart(preview_data, preview_data.get("course_key"))
             self.info_bar.set_branch_info(preview_data.get("branch_level"), preview_data.get("has_branches"))
+            if self.command_panel is not None:
+                self.command_panel.set_branch(preview_data.get("branch_level"),
+                                              preview_data.get("has_branches"))
+            self.chart_edit.set_branch(preview_data.get("branch_level"),
+                                       preview_data.get("has_branches"))
         self.info_bar.set_static_info(headers["title"], headers["subtitle"], course_stats)
         self._sync_title_page(headers["title"], headers["subtitle"])
 
@@ -2581,6 +2595,11 @@ class PreviewDock(QDockWidget):
         self._set_lane_course_label(data.get("course_label"), data.get("course_color"))
         self.game_screen.set_chart(data, data.get("course_key"))
         self.info_bar.set_branch_info(data.get("branch_level"), data.get("has_branches"))
+        if self.command_panel is not None:
+            self.command_panel.set_branch(data.get("branch_level"),
+                                          data.get("has_branches"))
+        self.chart_edit.set_branch(data.get("branch_level"),
+                                   data.get("has_branches"))
         self.info_bar.set_static_info(self.title_label.text(), self._editor_subtitle, course_stats)
         self._sync_title_page(self.title_label.text(), self._editor_subtitle)
 

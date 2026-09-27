@@ -969,6 +969,22 @@ SKIN_MAP = {
     "Panel.png":
         {"kind": KIND_CROP, "source": "TNDE-R/Graphics/5_Game/6_Taiko/1P_Background.png", "rect": (0, 0, 332, 176), "exact": False,
         "note": "332x176。左パネルの地。1P_Background.png(333x176)の左332px と絵柄は同じで、色が全体にずれているだけ(Photoshop で書き出し直されたもの。画素の絶対差の中央値 8)。同じ矩形を素直に切り出す。なお skin/Taiko_Background.png のほうは 1P_Background.png と MD5 完全一致で、現在のコードが読んでいるのはそちら。Panel.png はどこからも読まれていない。"},
+    # 譜面分岐の系統名。TNDE のレーンの右上に出る「普通譜面 / 玄人譜面 /
+    # 達人譜面」の字。原本(947x130)はレーンの帯ぜんたいの大きさで、字は
+    # 右端に寄っている。3枚とも字のある所は (743,38)-(918,88) に収まるので、
+    # 同じ矩形で切り出して 176x50 にそろえる(作譜モードの行名の列に出す)。
+    "Branch_Normal.png":
+        {"kind": KIND_CROP, "source": "TNDE-R/Graphics/5_Game/12_Lane/Text_Normal.png",
+         "rect": (743, 38, 176, 50), "exact": False,
+         "note": "原本の字の部分だけを切り出したもの(skin には元から無い)。"},
+    "Branch_Expert.png":
+        {"kind": KIND_CROP, "source": "TNDE-R/Graphics/5_Game/12_Lane/Text_Expert.png",
+         "rect": (743, 38, 176, 50), "exact": False,
+         "note": "原本の字の部分だけを切り出したもの(skin には元から無い)。"},
+    "Branch_Master.png":
+        {"kind": KIND_CROP, "source": "TNDE-R/Graphics/5_Game/12_Lane/Text_Master.png",
+         "rect": (743, 38, 176, 50), "exact": False,
+         "note": "原本の字の部分だけを切り出したもの(skin には元から無い)。"},
     "Rainbow.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/5_Game/10_Effects/Rainbow.png", "rect": None, "exact": True, "note": None},
     "Roll.png":

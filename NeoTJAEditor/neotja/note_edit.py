@@ -61,28 +61,114 @@ def course_body_span(text, course_line_range):
     return (body_start, body_end)
 
 
-def measure_spans(text, body):
-    """本文 (body_start, body_end) 内の全小節の文字範囲を順に返す。
+# ---------------------------------------------------------------------------
+# 譜面分岐(#BRANCHSTART / #N / #E / #M / #BRANCHEND)
+# ---------------------------------------------------------------------------
+# 分岐は「同じ時間の別案」なので、系統(普通/玄人/達人)ごとに小節が並ぶ。
+# プレビューは **選んだ系統だけ** を数える(tja_analyzer.build_preview_timeline)
+# ので、作譜ペインの「何小節目」も選んだ系統の中での番号になる。編集する側も
+# 同じ数え方にしないと、狙った所と違う小節へ書いてしまう。
+#
+# そこで measure_spans に系統を渡せるようにして、その系統に属する小節だけを
+# 返す。どの系統に属するかの決め方は解析側と同じ:
+#   #BRANCHSTART … 次の #N/#E/#M まではどの系統でもない
+#   #N / #E / #M  … そこから先はその系統
+#   #BRANCHEND    … 共通へ戻る
+BRANCH_LEVELS = ("N", "E", "M")
+#: 系統を渡さなかったときに使う値(editing_branch で差し替える)。
+_edit_branch = None
+#: measure_spans の level 引数の「渡されなかった」印。None は「分岐を見ない」
+#: という**指定**なので、区別できるようにする。
+_INHERIT = object()
+
+
+def editing_branch(level):
+    """この中の編集は系統 level の小節だけを見る、という囲み。
+
+        with note_edit.editing_branch("E"):
+            note_edit.run_op(...)
+
+    分岐の無い譜面では何も変わらない(全部の小節が共通のため)。"""
+
+    class _Ctx:
+        def __enter__(self_inner):
+            global _edit_branch
+            self_inner.old = _edit_branch
+            _edit_branch = level if level in BRANCH_LEVELS else None
+            return self_inner
+
+        def __exit__(self_inner, *exc):
+            global _edit_branch
+            _edit_branch = self_inner.old
+            return False
+
+    return _Ctx()
+
+
+def _branch_of_line(line):
+    """その行が系統を切り替えるなら、切り替え後の状態を返す。
+
+    戻り値は "N"/"E"/"M"(その系統だけ)、"" (どの系統でもない)、
+    None(共通へ戻る)、False(系統に関係ない行)。"""
+    name = _command_name(line)
+    if name in BRANCH_LEVELS:
+        return name
+    if name == "BRANCHSTART":
+        return ""
+    if name == "BRANCHEND":
+        return None
+    return False
+
+
+def measure_spans(text, body, level=_INHERIT):
+    """本文 (body_start, body_end) 内の小節の文字範囲を順に返す。
 
     measure_edit.measure_span と同じく「カンマまで + 直後の改行1つ」を
     1小節とする。最後のカンマより後ろに文字が残っていれば、それも
     (カンマの無い)小節として1つ返す — 書きかけの末尾小節に音符を置ける
-    ようにするため。"""
+    ようにするため。
+
+    **命令行とコメント行の中のカンマは区切りにしない。** `#BRANCHSTART r,2,3`
+    のように命令の引数にカンマが入ることがあり、数えると小節番号がずれる
+    (解析側は前から同じ扱いにしている)。
+
+    level に "N"/"E"/"M" を渡すと、その系統に属する小節だけを返す。None なら
+    分岐を見ない(全部返す)。省略したときは editing_branch の値を使う。"""
     if body is None:
         return []
+    if level is _INHERIT:
+        level = _edit_branch
     bstart, bend = body
     spans = []
     a = bstart
     i = bstart
+    active = True            # いまの系統に属する小節かどうか
     while i < bend:
-        if text[i] == ",":
-            b = i + 1
+        nl = text.find("\n", i, bend)
+        line_end = bend if nl < 0 else nl
+        line = text[i:line_end]
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("//"):
+            if level is not None:
+                br = _branch_of_line(line)
+                if br is not False:
+                    active = True if br is None else (br == level)
+            i = line_end + 1
+            continue
+        code_end = line.find("//")
+        if code_end < 0:
+            code_end = len(line)
+        for j in range(code_end):
+            if line[j] != ",":
+                continue
+            b = i + j + 1
             if b < bend and text[b] == "\n":
                 b += 1
-            spans.append((a, b))
+            if active:
+                spans.append((a, b))
             a = b
-        i += 1
-    if a < bend and text[a:bend].strip():
+        i = line_end + 1
+    if active and a < bend and text[a:bend].strip():
         spans.append((a, bend))
     return spans
 
