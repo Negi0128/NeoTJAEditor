@@ -16,6 +16,34 @@ def _header_value(content, key):
     return ""
 
 
+#: 譜面分岐の系統。本家の呼び名は 普通 / 玄人 / 達人。
+BRANCH_LEVELS = ("N", "E", "M")
+#: 「自動」= 本家と同じく #BRANCHSTART の条件で区間ごとに決める。
+BRANCH_AUTO = "auto"
+
+
+def _branch_cond(line):
+    """`#BRANCHSTART r,2,3` → ("r", 2.0, 3.0)。読めなければ ("", None, None)。
+
+    種類は r(連打数) / p(精度%) / s(スコア) など。しきい値は「以上」で、
+    負の数を書くと必ず満たす = 強制分岐になる(`#BRANCHSTART r,-2,-1` なら
+    いつでも達人)。書き方が壊れていても落とさない — 壊れた条件は「条件なし」
+    として扱い、普通のまま流す。"""
+    body = line.split("//", 1)[0].strip()
+    parts = body.split(None, 1)
+    if len(parts) < 2:
+        return ("", None, None)
+    args = [x.strip() for x in parts[1].split(",")]
+    typ = args[0].lower() if args else ""
+
+    def num(i):
+        try:
+            return float(args[i])
+        except (IndexError, ValueError):
+            return None
+    return (typ, num(1), num(2))
+
+
 def balloon_pop_spans(spans, roll_hit_speed):
     """風船・くす玉の区間を「叩ききって割れる時刻」で切り詰めて返す。
 
@@ -105,6 +133,38 @@ class TJACourseAnalyzer:
                 **stats
             })
         return out
+
+    def _pick_branch(self, cond, prev_roll_hits, forced, available=None):
+        """#BRANCHSTART の条件から、その区間で流す系統を決める。
+
+        自動演奏(全部「良」)として見るので:
+          p(精度%)  … 常に 100%
+          r(連打数) … **直前の1小節**の連打の打数(連打秒速の設定から出す)
+          その他    … 100 扱い(最良。s=スコアなどはここに落ちる)
+        しきい値は「以上」。負の数なら必ず満たすので強制分岐になる。
+        どちらも満たさなければ普通(命令が来るまでも普通)。
+
+        forced に "N"/"E"/"M" が入っていれば条件を見ずにそれで固定する
+        (作譜モードで系統を選んで編集するときに使う)。
+
+        available はその区間に書かれている系統の集合。選んだ系統が書かれて
+        いなければ、下の系統へ落とす(達人→玄人→普通)。"""
+        if forced in BRANCH_LEVELS:
+            want = forced
+        else:
+            typ, x, y = cond if cond else ("", None, None)
+            val = float(prev_roll_hits) if typ == "r" else 100.0
+            if y is not None and val >= y:
+                want = "M"
+            elif x is not None and val >= x:
+                want = "E"
+            else:
+                want = "N"
+        if available:
+            for lv in ("M", "E", "N")[("M", "E", "N").index(want):]:
+                if lv in available:
+                    return lv
+        return want
 
     def _roll_hits(self, duration: float) -> int:
         """Estimated tap count for a roll/big-roll of the given duration
@@ -804,7 +864,7 @@ class TJACourseAnalyzer:
         return [(float(t), is_measure) for t, is_measure in clicks]
 
     def build_preview_timeline(self, content: str, cursor_line: int = None, course_key: str = None,
-                                branch_level: str = "M") -> dict:
+                                branch_level: str = BRANCH_AUTO) -> dict:
         """Returns everything the real-time scrolling chart preview needs.
         Course selection: `course_key` (e.g. "Oni") wins if given and present;
         otherwise whichever course contains cursor_line; otherwise the first
@@ -919,7 +979,7 @@ class TJACourseAnalyzer:
 
         empty = {
             "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [],
-            "branch_regions": [], "bar_times": [],
+            "branch_regions": [], "branch_path": [], "bar_times": [],
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "title": _header_value(content, "TITLE"),
             "bpm_changes": [], "measure_changes": [], "scroll_changes": [],
@@ -977,12 +1037,13 @@ class TJACourseAnalyzer:
         # #GOGOSTART/#GOGOEND fell between two note-bearing lines.
         events = []
         has_branches = False
-        # branch_active gates only NOTE/COMMA below - a non-selected branch's
-        # commas don't count as measure boundaries either, so a chart with
-        # branching ends up with exactly one branch's worth of measures/
-        # duration instead of all three concatenated. See the branching note
-        # in this method's docstring.
-        branch_active = True
+        # 収集の段階では系統で捨てない。**どの系統の行か**を BLOCK の印で
+        # 流しておき、どれを流すかは下の時間割り当ての段階で決める
+        # (#BRANCHSTART の条件は「直前の小節の連打数」で決まることがあり、
+        # それは時間が決まってからでないと分からないため)。選ばれなかった
+        # 系統の小節は、そこで時間も音符も数えない(カンマも小節にしない)ので、
+        # 3系統ぶんつながった譜面にはならない。
+        branch_active = True        # 互換のため残す(いまは常に True)
         for idx in range(a + 1, b):
             s = lines[idx - 1].split("//")[0].strip()
             if not s:
@@ -1006,67 +1067,71 @@ class TJACourseAnalyzer:
                         # #BPMCHANGE と #MEASURE は系統をまたいで同じでないと
                         # そもそも譜面が成立しないので、従来どおり系統を問わず
                         # 適用する(取りこぼしへの保険)。
-                        if branch_active:
-                            events.append(("DELAY", Decimal(s.split()[1])))
+                        events.append(("DELAY", Decimal(s.split()[1])))
                     except Exception:
                         pass
                 elif s.startswith("#SCROLL"):
                     try:
-                        if branch_active:
-                            events.append(("SCROLL", Decimal(s.split()[1])))
+                        events.append(("SCROLL", Decimal(s.split()[1])))
                     except Exception:
                         pass
                 elif s.startswith("#GOGOSTART"):
-                    if branch_active:
-                        events.append(("GOGOSTART", None))
+                    events.append(("GOGOSTART", None))
                 elif s.startswith("#GOGOEND"):
-                    if branch_active:
-                        events.append(("GOGOEND", None))
+                    events.append(("GOGOEND", None))
                 elif s.startswith("#BARLINEOFF"):
-                    if branch_active:
-                        events.append(("BARLINEOFF", None))
+                    events.append(("BARLINEOFF", None))
                 elif s.startswith("#BARLINEON"):
-                    if branch_active:
-                        events.append(("BARLINEON", None))
+                    events.append(("BARLINEON", None))
                 elif s.startswith("#BRANCHSTART"):
                     has_branches = True
-                    # 分岐している区間の時刻を拾う(レーンの地の色と
-                    # 「普通譜面/玄人譜面/達人譜面」の字に使う)。本家は分岐に
-                    # 入ってから出るまでの間だけ、その系統の色と字になる。
-                    events.append(("BRANCHSTART", None))
-                    branch_active = False  # nothing counts until the first #N/#E/#M
+                    # 条件(種類, 玄人のしきい値, 達人のしきい値)ごと持っておく。
+                    events.append(("BRANCHSTART", _branch_cond(s)))
+                    events.append(("BLOCK", "?"))   # #N/#E/#M が来るまでは宙ぶらりん
                 elif s.startswith("#BRANCHEND"):
                     events.append(("BRANCHEND", None))
-                    branch_active = True
-                elif s == "#N":
-                    branch_active = (branch_level == "N")
-                elif s == "#E":
-                    branch_active = (branch_level == "E")
-                elif s == "#M":
-                    branch_active = (branch_level == "M")
+                    events.append(("BLOCK", None))  # 共通へ戻る
+                elif s in ("#N", "#E", "#M"):
+                    events.append(("BLOCK", s[1:]))
                 continue
             # 行番号を混ぜておく。小節の開始が「エディタの何行目か」を後で
             # 引けるようにするため(譜面プレビューのチェックポイントを
             # エディタの行と共通にするのに要る)。NOTE/COMMA と同じ列に
             # 流すだけなので、これを読まない側は素通りする。
-            if branch_active:
-                events.append(("LINE", idx))
+            events.append(("LINE", idx))
             for c in s:
                 if c in "0123456789":
-                    if not branch_active:
-                        continue
                     events.append(("NOTE", c))
                 elif c == ",":
-                    if not branch_active:
-                        continue
                     events.append(("COMMA", None))
 
+        # 小節に切り分ける。1小節は (どの系統の小節か, イベント列)。
+        # 系統は None(共通) / "N" / "E" / "M" / "?"(#BRANCHSTART の直後、
+        # まだ #N/#E/#M が来ていない所)。
         measures = []
         cur_m = []
+        cur_blk = None
+        blk_of_m = None
+        def _only_marks(evs):
+            """まだ中身(音符・行)が無いか。印(BRANCHSTART/BRANCHEND)は数えない。
+
+            #BRANCHSTART / #BRANCHEND は #N や共通の行より**前**に来るので、
+            これを中身と数えると、その後に来る #N/#E/#M の印でその小節の系統を
+            付け直せなくなる(分岐の小節が共通として流れてしまう)。"""
+            return all(e[0] in ("BRANCHSTART", "BRANCHEND") for e in evs)
+
         for ev in events:
+            if ev[0] == "BLOCK":
+                cur_blk = ev[1]
+                if _only_marks(cur_m):
+                    blk_of_m = cur_blk
+                continue
+            if _only_marks(cur_m):
+                blk_of_m = cur_blk
             if ev[0] == "COMMA":
-                measures.append(cur_m)
+                measures.append((blk_of_m, cur_m))
                 cur_m = []
+                blk_of_m = cur_blk
             else:
                 cur_m.append(ev)
         # 最後のカンマより後ろに残ったものも1小節として扱う。ただし分岐の印
@@ -1074,9 +1139,22 @@ class TJACourseAnalyzer:
         # 末尾に #BRANCHEND を書く譜面で小節が1つ増え、bar_times が実際より
         # 1本多くなってしまうため(印は区間の時刻を拾うためだけのもの)。
         if any(ev[0] not in ("BRANCHSTART", "BRANCHEND") for ev in cur_m):
-            measures.append(cur_m)
+            measures.append((blk_of_m, cur_m))
         elif cur_m and measures:
-            measures[-1].extend(cur_m)
+            measures[-1][1].extend(cur_m)
+
+        # 区間ごとに、書いてある系統(#N/#E/#M のどれがあるか)を控えておく。
+        # 選ばれた系統がその区間に書かれていないときの落とし先に使う。
+        sec_blocks = []
+        cur_set = None
+        for blk, evs in measures:
+            if any(e[0] == "BRANCHSTART" for e in evs):
+                cur_set = set()
+                sec_blocks.append(cur_set)
+            if cur_set is not None and blk in ("N", "E", "M"):
+                cur_set.add(blk)
+            if any(e[0] == "BRANCHEND" for e in evs):
+                cur_set = None
 
         total_time = Decimal("0")
         curr_bpm = bpm
@@ -1099,9 +1177,10 @@ class TJACourseAnalyzer:
         measure_changes = [(Decimal(0), curr_num, curr_den)]
         scroll_changes = [(Decimal(0), curr_scroll)]
         gogo_start = None
-        # 分岐している区間(#BRANCHSTART 〜 #BRANCHEND)。
+        # 分岐している区間 [(始まり, 終わり, その区間で流した系統)]。
         branch_regions = []
         branch_start = None
+        branch_start_level = None
         active_roll = None
         active_balloon = None
         active_kusudama = None
@@ -1109,7 +1188,64 @@ class TJACourseAnalyzer:
         orphan_heads = []
         balloon_idx = 0
 
-        for m_events in measures:
+        # いま流している系統(共通の所は None)。auto のときは #BRANCHSTART の
+        # 条件で決まり、"N"/"E"/"M" を指定されたときはそれで固定する。
+        chosen = None
+        sec_idx = -1
+        branch_path = []
+        # 直前の小節の連打の打数(r 条件の判定に使う)。
+        prev_roll_hits = 0
+        measure_roll_hits = 0
+        for blk, m_events in measures:
+            # 分岐の印は、どの系統の小節に書いてあっても効かせる。ただし
+            # **書いてある位置のまま**にする — 小節の音符より前に書いてあれば
+            # その小節の前、後ろに書いてあれば後ろ。末尾の #BRANCHEND は
+            # 直前の小節へぶら下げてあるので、これを先に効かせてしまうと
+            # その小節ごと「選ばれていない系統」として捨ててしまう。
+            head_marks, tail_marks = [], []
+            seen_content = False
+            for ev in m_events:
+                if ev[0] in ("BRANCHSTART", "BRANCHEND"):
+                    (tail_marks if seen_content else head_marks).append(ev)
+                elif ev[0] in ("NOTE", "LINE"):
+                    seen_content = True
+            for t, v in head_marks:
+                if t == "BRANCHSTART":
+                    sec_idx += 1
+                    avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
+                    chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
+                    branch_path.append(chosen)
+                    if branch_start is None:
+                        branch_start = total_time
+                        branch_start_level = chosen
+                else:
+                    if branch_start is not None:
+                        branch_regions.append((branch_start, total_time,
+                                               branch_start_level))
+                        branch_start = None
+                    chosen = None
+            if blk in ("N", "E", "M", "?") and blk != chosen:
+                # 選ばれていない系統の小節。時間も音符も数えない。ただし
+                # #BPMCHANGE と #MEASURE だけは系統を問わず効かせる(この2つが
+                # 系統ごとに違うと譜面そのものが成立しないので、取りこぼしへの
+                # 保険。従来どおりの扱い)。
+                for t, v in m_events:
+                    if t == "BPMCHANGE":
+                        curr_bpm = v
+                        bpm_changes.append((total_time, curr_bpm))
+                    elif t == "MEASURE" and v[1] != 0:
+                        curr_num, curr_den = v
+                        measure_val = curr_num / curr_den
+                        measure_changes.append((total_time, curr_num, curr_den))
+                for t, v in tail_marks:
+                    if t == "BRANCHEND":
+                        if branch_start is not None:
+                            branch_regions.append((branch_start, total_time,
+                                                   branch_start_level))
+                            branch_start = None
+                        chosen = None
+                continue
+            measure_roll_hits = 0
             # Recorded once we reach this measure's first NOTE (or at the
             # end, if it has none) rather than unconditionally up front - a
             # #SCROLL/#BPMCHANGE/#MEASURE command placed before this
@@ -1148,13 +1284,8 @@ class TJACourseAnalyzer:
                     if gogo_start is not None:
                         gogo_regions.append((gogo_start, total_time))
                         gogo_start = None
-                elif t == "BRANCHSTART":
-                    if branch_start is None:
-                        branch_start = total_time
-                elif t == "BRANCHEND":
-                    if branch_start is not None:
-                        branch_regions.append((branch_start, total_time))
-                        branch_start = None
+                elif t in ("BRANCHSTART", "BRANCHEND"):
+                    continue        # 上の「先に効かせる」で処理済み
                 elif t == "BARLINEOFF":
                     curr_bar_visible = False
                 elif t == "BARLINEON":
@@ -1187,6 +1318,9 @@ class TJACourseAnalyzer:
                             hits = self._roll_hits(dur)
                             rolls.append((active_roll[0], total_time, active_roll[1], active_roll[2], active_roll[3], hits))
                             active_roll = None
+                            # r 条件(連打数)の判定に使う。自動演奏なので
+                            # 「叩ける数 = 連打秒速 × 長さ」をそのまま数える。
+                            measure_roll_hits += hits
                         elif active_balloon is not None:
                             balloons.append((active_balloon[0], total_time, active_balloon[2], active_balloon[3], active_balloon[1]))
                             active_balloon = None
@@ -1194,6 +1328,22 @@ class TJACourseAnalyzer:
                             kusudamas.append((active_kusudama[0], total_time, active_kusudama[2], active_kusudama[3], active_kusudama[1]))
                             active_kusudama = None
                     total_time += time_per_note
+            prev_roll_hits = measure_roll_hits
+            for t, v in tail_marks:
+                if t == "BRANCHEND":
+                    if branch_start is not None:
+                        branch_regions.append((branch_start, total_time,
+                                               branch_start_level))
+                        branch_start = None
+                    chosen = None
+                elif t == "BRANCHSTART":
+                    sec_idx += 1
+                    avail = sec_blocks[sec_idx] if sec_idx < len(sec_blocks) else None
+                    chosen = self._pick_branch(v, prev_roll_hits, branch_level, avail)
+                    branch_path.append(chosen)
+                    if branch_start is None:
+                        branch_start = total_time
+                        branch_start_level = chosen
             if not bar_recorded:
                 bar_times.append((total_time, curr_bpm, curr_scroll, curr_bar_visible))
                 bar_lines.append(curr_line)
@@ -1224,7 +1374,7 @@ class TJACourseAnalyzer:
         if gogo_start is not None:
             gogo_regions.append((gogo_start, total_time))
         if branch_start is not None:      # #BRANCHEND を書かない譜面
-            branch_regions.append((branch_start, total_time))
+            branch_regions.append((branch_start, total_time, branch_start_level))
 
         out_notes = [(float(t), c, float(bpm_), float(sc)) for t, c, bpm_, sc in notes]
         out_rolls = [(float(s0), float(e0), c, float(bpm_), float(sc), hits) for s0, e0, c, bpm_, sc, hits in rolls]
@@ -1258,7 +1408,9 @@ class TJACourseAnalyzer:
             "kusudamas": out_kusudamas,
             "open_spans": open_spans,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
-            "branch_regions": [(float(s0), float(e0)) for s0, e0 in branch_regions],
+            "branch_regions": [(float(s0), float(e0), lv) for s0, e0, lv in branch_regions],
+            # 区間ごとに流した系統の並び(作譜モードの書き込み先に使う)。
+            "branch_path": list(branch_path),
             # 風船が割れるまでの時間を出すのに使う秒間打数(環境設定の連打秒速)。
             # 譜面と一緒に持たせておくと、描く側が設定を読み直さずに済む。
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),

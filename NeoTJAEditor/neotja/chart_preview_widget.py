@@ -507,6 +507,8 @@ class ChartPreviewWidget(QWidget):
         self._gogo_regions = []
         self._branch_regions = []
         self._branch_starts = []
+        self._branch_states = [(0.0, "N")]
+        self._branch_state_times = [0.0]
         # Start-time column of _gogo_regions, so gogo_pulse() can bisect for
         # "the last region at or before now" instead of scanning every frame.
         self._gogo_starts = []
@@ -2389,10 +2391,26 @@ class ChartPreviewWidget(QWidget):
         )
         self._gogo_regions = sorted(data.get("gogo_regions") or [])
         self._gogo_starts = [g[0] for g in self._gogo_regions]
-        # 分岐している区間。この間だけレーンの地が系統の色になり、右端に
-        # 「普通譜面/玄人譜面/達人譜面」の字が出る(本家と同じ)。
+        # 分岐している区間 [(始まり, 終わり, その区間の系統)]。これを元に、
+        # 「いつどの系統を流しているか」の並び(_branch_states)を作る。
+        # 分岐の外は普通譜面(命令が来るまでの既定)。
         self._branch_regions = sorted(data.get("branch_regions") or [])
         self._branch_starts = [b[0] for b in self._branch_regions]
+        states = [(0.0, "N")]
+        for reg in self._branch_regions:
+            st, en = float(reg[0]), float(reg[1])
+            lv = reg[2] if len(reg) > 2 else self._branch_level
+            states.append((st, lv or "N"))
+            states.append((en, "N"))
+        # 同じ時刻の重なり(区間が続いているところ)は後ろを残す。
+        merged = []
+        for t, lv in states:
+            if merged and abs(merged[-1][0] - t) < 1e-9:
+                merged[-1] = (t, lv)
+            elif not merged or merged[-1][1] != lv:
+                merged.append((t, lv))
+        self._branch_states = merged
+        self._branch_state_times = [t for t, _lv in merged]
         bars = sorted(data.get("bar_times") or [])
         self._bar_times = [t for t, _, _, _ in bars]
         self._bar_bpms = [bpm for _, bpm, _, _ in bars]
@@ -3209,7 +3227,7 @@ class ChartPreviewWidget(QWidget):
     BRANCH_FADE_SEC = 0.18
 
     def _branch_active(self, now):
-        """いま分岐している区間の中か。"""
+        """いま分岐している区間の中か(テストと外からの問い合わせ用)。"""
         if not self._branch_regions:
             return False
         i = bisect.bisect_right(self._branch_starts, now) - 1
@@ -3217,56 +3235,58 @@ class ChartPreviewWidget(QWidget):
             return False
         return now < self._branch_regions[i][1]
 
-    def _branch_alpha(self, now):
-        """分岐の地の色の濃さ(0 = 素のレーン / 1 = その系統の色)。
+    def _branch_view(self, now):
+        """(前の系統, いまの系統, 混ざり具合) を返す。
 
-        区間の境目で 0.18 秒かけて混ぜる。時刻から直に出しているので、
-        シークしても早送りしても同じ見え方になる(壁時計のアニメーションだと
-        シークのたびに切り替わりが再生されてしまう)。"""
-        if not self._branch_regions:
-            return 0.0
-        fade = max(1e-6, self.BRANCH_FADE_SEC)
-        i = bisect.bisect_right(self._branch_starts, now) - 1
+        混ざり具合は 0→1 で、切り替わりの時刻から 0.18 秒かけて 1 になる。
+        時刻から直に出しているので、シークしても早送りしても同じ見え方に
+        なる(壁時計のアニメーションだと、シークのたびに切り替わりが
+        再生されてしまう)。"""
+        states = self._branch_states or [(0.0, "N")]
+        i = bisect.bisect_right(self._branch_state_times, now) - 1
         if i < 0:
-            return 0.0
-        start, end = self._branch_regions[i]
-        if now < end:                      # 区間の中: 入ってから濃くなる
-            return min(1.0, max(0.0, (now - start) / fade))
-        out = now - end                    # 出たあと: 薄れて素へ戻る
-        return max(0.0, 1.0 - out / fade)
+            return (None, states[0][1], 1.0)
+        t0, lv = states[i]
+        prev = states[i - 1][1] if i > 0 else None
+        fade = max(1e-6, self.BRANCH_FADE_SEC)
+        mix = min(1.0, max(0.0, (now - t0) / fade))
+        return (prev, lv, mix)
 
     def _draw_branch_lane(self, painter, now, lane_w, band_top, band_h):
-        """レーンの地の色(分岐している間だけ)と、系統の字(曲の最初からずっと)。
+        """レーンの地の色と系統の字。分岐のある譜面なら曲の最初から出す。
 
-        字は分岐のある譜面なら**最初から最後まで**出しておく(利用者の指定
-        2026-09-27)。このプレビューは系統を1つ選んで通して見せるものなので、
-        「いまどの系統を見ているのか」が分岐の外でも分かるようにする。
-        地の色は本家どおり、分岐している間だけ。"""
+        本家は #BRANCHSTART の条件で区間ごとに系統が決まる(命令が来るまでは
+        普通譜面)。切り替わりは前の系統から次の系統へ 0.18 秒かけて混ざる
+        (本家の映像を1コマずつ測った値)。"""
         if not self._has_branches:
             return
-        names = self._BRANCH_SKIN.get(self._branch_level)
-        if names is None:
+        prev, cur, mix = self._branch_view(now)
+        if prev is not None and mix < 1.0:
+            self._draw_branch_layer(painter, prev, 1.0 - mix,
+                                    lane_w, band_top, band_h)
+        self._draw_branch_layer(painter, cur, mix if prev is not None else 1.0,
+                                lane_w, band_top, band_h)
+
+    def _draw_branch_layer(self, painter, level, alpha, lane_w, band_top, band_h):
+        """系統1つぶんの地と字を、濃さ alpha で重ねる。"""
+        names = self._BRANCH_SKIN.get(level)
+        if names is None or alpha <= 0.002:
             return
         base_name, text_name = names
+        painter.save()
+        painter.setOpacity(min(1.0, alpha))
         if base_name:
-            alpha = self._branch_alpha(now)
-            if alpha > 0.002:
-                pm = self._branch_pixmap(base_name)
-                if pm is not None:
-                    painter.save()
-                    painter.setOpacity(alpha)
-                    blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
-                                self._dpr, self._dev_off)
-                    painter.restore()
+            pm = self._branch_pixmap(base_name)
+            if pm is not None:
+                blit_fitted(painter, 0, band_top, lane_w, band_h, pm,
+                            self._dpr, self._dev_off)
         pm = self._branch_pixmap(text_name)
-        if pm is None:
-            return
-        sw, sh, tx, ty, tw, th = self._BRANCH_TEXT_SRC
-        w = lane_w * tw / sw
-        h = band_h * th / sh
-        x = lane_w * tx / sw
-        y = band_top + band_h * ty / sh
-        blit_fitted(painter, x, y, w, h, pm, self._dpr, self._dev_off)
+        if pm is not None:
+            sw, sh, tx, ty, tw, th = self._BRANCH_TEXT_SRC
+            blit_fitted(painter, lane_w * tx / sw, band_top + band_h * ty / sh,
+                        lane_w * tw / sw, band_h * th / sh, pm,
+                        self._dpr, self._dev_off)
+        painter.restore()
 
     def _branch_pixmap(self, name):
         """分岐まわりの素材を1回だけ読んで使い回す。"""

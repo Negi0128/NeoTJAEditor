@@ -75,31 +75,41 @@ def course_body_span(text, course_line_range):
 #   #N / #E / #M  … そこから先はその系統
 #   #BRANCHEND    … 共通へ戻る
 BRANCH_LEVELS = ("N", "E", "M")
+#: 「自動」= 本家と同じく #BRANCHSTART の条件で区間ごとに決まる。どの区間が
+#: どの系統になったかは、解析が出す並び(branch_path)で受け取る。
+BRANCH_AUTO = "auto"
 #: 系統を渡さなかったときに使う値(editing_branch で差し替える)。
 _edit_branch = None
+#: 自動のときの、区間ごとの系統の並び。
+_edit_branch_path = ()
 #: measure_spans の level 引数の「渡されなかった」印。None は「分岐を見ない」
 #: という**指定**なので、区別できるようにする。
 _INHERIT = object()
 
 
-def editing_branch(level):
-    """この中の編集は系統 level の小節だけを見る、という囲み。
+def editing_branch(level, path=None):
+    """この中の編集は、いま流している系統の小節だけを見る、という囲み。
 
-        with note_edit.editing_branch("E"):
-            note_edit.run_op(...)
+        with note_edit.editing_branch("E"):            # 玄人で固定
+        with note_edit.editing_branch("auto", path):  # 区間ごと(本家と同じ)
 
-    分岐の無い譜面では何も変わらない(全部の小節が共通のため)。"""
+    path は解析が出す branch_path(区間ごとの系統の並び)で、level が "auto" の
+    ときだけ使う。分岐の無い譜面では何も変わらない(全部の小節が共通のため)。"""
 
     class _Ctx:
         def __enter__(self_inner):
-            global _edit_branch
-            self_inner.old = _edit_branch
-            _edit_branch = level if level in BRANCH_LEVELS else None
+            global _edit_branch, _edit_branch_path
+            self_inner.old = (_edit_branch, _edit_branch_path)
+            if level in BRANCH_LEVELS:
+                _edit_branch = level
+            else:
+                _edit_branch = BRANCH_AUTO if path else None
+            _edit_branch_path = tuple(path or ())
             return self_inner
 
         def __exit__(self_inner, *exc):
-            global _edit_branch
-            _edit_branch = self_inner.old
+            global _edit_branch, _edit_branch_path
+            _edit_branch, _edit_branch_path = self_inner.old
             return False
 
     return _Ctx()
@@ -120,7 +130,7 @@ def _branch_of_line(line):
     return False
 
 
-def measure_spans(text, body, level=_INHERIT):
+def measure_spans(text, body, level=_INHERIT, path=None):
     """本文 (body_start, body_end) 内の小節の文字範囲を順に返す。
 
     measure_edit.measure_span と同じく「カンマまで + 直後の改行1つ」を
@@ -132,27 +142,41 @@ def measure_spans(text, body, level=_INHERIT):
     のように命令の引数にカンマが入ることがあり、数えると小節番号がずれる
     (解析側は前から同じ扱いにしている)。
 
-    level に "N"/"E"/"M" を渡すと、その系統に属する小節だけを返す。None なら
-    分岐を見ない(全部返す)。省略したときは editing_branch の値を使う。"""
+    level に "N"/"E"/"M" を渡すと、その系統に属する小節だけを返す。"auto" なら
+    path(区間ごとの系統の並び = 解析の branch_path)に沿って、区間ごとに系統を
+    切り替えながら返す — 本家と同じ流れ方で編集するため。None なら分岐を
+    見ない(全部返す)。省略したときは editing_branch の値を使う。"""
     if body is None:
         return []
     if level is _INHERIT:
         level = _edit_branch
+        if path is None:
+            path = _edit_branch_path
+    auto = (level == BRANCH_AUTO)
     bstart, bend = body
     spans = []
     a = bstart
     i = bstart
     active = True            # いまの系統に属する小節かどうか
+    want = None if auto else level      # いま流している系統
+    sec = -1                 # 何個目の分岐区間か(auto のとき path を引く)
     while i < bend:
-        nl = text.find("\n", i, bend)
+        nl = text.find(chr(10), i, bend)
         line_end = bend if nl < 0 else nl
         line = text[i:line_end]
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("//"):
             if level is not None:
                 br = _branch_of_line(line)
-                if br is not False:
-                    active = True if br is None else (br == level)
+                if br == "":                 # #BRANCHSTART
+                    sec += 1
+                    if auto:
+                        want = (path[sec] if path and sec < len(path) else "N")
+                    active = True
+                elif br is None:             # #BRANCHEND
+                    active = True
+                elif br is not False:        # #N / #E / #M
+                    active = (br == want)
             i = line_end + 1
             continue
         code_end = line.find("//")

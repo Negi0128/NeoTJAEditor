@@ -164,7 +164,12 @@ class MainWindow(QMainWindow):
         self.current_file = None
         self.courses_info = []
         self._preview_course_override = None
-        self._preview_branch_level = "M"
+        # 譜面分岐。既定は「自動」= 本家と同じく #BRANCHSTART の条件で区間
+        # ごとに決まる。普通/玄人/達人を選ぶと、そこだけを通して流す
+        # (作譜モードで系統を選んで編集するとき用)。
+        self._preview_branch_level = note_edit.BRANCH_AUTO
+        # 直近の解析が返した「区間ごとの系統」。編集の書き込み先に使う。
+        self._preview_branch_path = []
         # プレビュー(NeoTJAPlayer/情報/打音/メトロノーム)が映す譜面テキスト。
         # 入力中のバッファではなく、最後に保存/読込した内容を保持する。保存/開く/
         # 新規のときだけ更新し、打鍵では変えない(=プレビューは保存済みの譜面を
@@ -1009,6 +1014,9 @@ class MainWindow(QMainWindow):
             self._update_status()
             self._highlight_apply_sec = time.perf_counter() - t0
 
+            # 区間ごとの系統。作譜モードの書き込み先に要る(本家と同じ流れ方で
+            # 編集するため)。
+            self._preview_branch_path = list(result["preview"].get("branch_path") or [])
             payload = (content, result["clicks"], result["preview"], cursor_line)
             if self._preview_build_sec > self.PREVIEW_DEFER_SEC:
                 self._pending_preview = payload
@@ -1019,6 +1027,7 @@ class MainWindow(QMainWindow):
             # プレビューだけの差し替えは元から軽い(貼るだけ)ので分割しない。
             t0 = time.perf_counter()
             self.preview_dock.set_metronome_clicks(result["clicks"])
+            self._preview_branch_path = list(result["preview"].get("branch_path") or [])
             self.preview_dock.set_preview_data(
                 result["preview"], self._find_course_stats(result["preview"].get("course_key")),
             )
@@ -1172,6 +1181,7 @@ class MainWindow(QMainWindow):
         preview_data = self.analyzer.build_preview_timeline(
             content, cursor_line, self._preview_course_override, branch_level=self._preview_branch_level,
         )
+        self._preview_branch_path = list(preview_data.get("branch_path") or [])
         course_stats = self._find_course_stats(preview_data.get("course_key"))
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
         # 今組み立てた条件を控える。この直後にカーソル移動で走る
@@ -2098,7 +2108,8 @@ class MainWindow(QMainWindow):
         # 分岐のある譜面では、編集も**いま見ている系統**に効かせる。作譜ペインの
         # 「何小節目」は選んだ系統の中での番号なので(tja_analyzer が選んだ系統
         # だけを数える)、書く側も同じ数え方にしないと別の小節へ書いてしまう。
-        with note_edit.editing_branch(self._preview_branch_level):
+        with note_edit.editing_branch(self._preview_branch_level,
+                                      self._preview_branch_path):
             return self._chart_op_in_branch(text, rng, op)
 
     def _chart_op_in_branch(self, text, rng, op):

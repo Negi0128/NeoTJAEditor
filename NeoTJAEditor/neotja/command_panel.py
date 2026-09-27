@@ -171,21 +171,28 @@ class CommandPanel(QFrame):
         return box
 
     #: 系統 → (ボタンの文字, 選ばれているときの色)。色は TNDE-R のレーンの
-    #: 地の色に合わせた(普通=灰、玄人=青緑、達人=紫)。
-    BRANCHES = (("N", "普通", "#5b6470"), ("E", "玄人", "#2f6f86"),
-                ("M", "達人", "#7d2a72"))
+    #: 地の色に合わせた(普通=灰、玄人=青緑、達人=紫)。先頭の「自動」は
+    #: 本家と同じ動き(#BRANCHSTART の条件で区間ごとに決まる)。
+    BRANCHES = (("auto", "自動", "#3f6b3f"), ("N", "普通", "#5b6470"),
+                ("E", "玄人", "#2f6f86"), ("M", "達人", "#7d2a72"))
 
     def _branch_box(self):
         """[譜面分岐 / 普通・玄人・達人] の枠。
 
         分岐のある譜面でだけ押せる。押すとゲーム画面の表示と、**作譜モードの
         編集先**が、その系統に切り替わる(分岐は同じ時間の別案なので、どれを
-        編集しているのかが分からないと打ち込めない)。"""
+        編集しているのかが分からないと打ち込めない)。
+
+        「自動」は本家と同じ — #BRANCHSTART の条件で区間ごとに決まる
+        (自動演奏なので精度は常に100%、連打は全部拾う)。普通/玄人/達人を
+        選ぶと、条件を見ずにその系統だけを通して流す。"""
         box, row = self._new_box("譜面分岐")
         self._branch_title = box.findChild(QLabel, "boxTitle")
         self._branch_buttons = {}
+        row.setSpacing(3)
         for key, text, _col in self.BRANCHES:
             btn = QPushButton(text)
+            btn.setFixedWidth(46)
             btn.clicked.connect(lambda _c=False, k=key: self.selectBranch.emit(k))
             row.addWidget(btn)
             self._branch_buttons[key] = btn
