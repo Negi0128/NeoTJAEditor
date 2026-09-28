@@ -1309,9 +1309,11 @@ def _insert_line_at(text, body, spans, m, slot, grid, new_line):
 
 def op_command(text, course_range, m, slot, grid, name, value):
     # 拍子は音符の間隔を変えてしまうので、置くだけでなく後ろを組み直す
-    # (op_measure の説明を参照)。置く場所はその小節の頭。
+    # (op_measure の説明を参照)。**カーソルが小節の途中なら、その位置から**
+    # 変える(そこで小節を切る)。
     if str(name).upper() == "MEASURE" and value is not None:
-        return op_measure(text, course_range, m, value)
+        return op_measure(text, course_range, m, value,
+                          Fraction(int(slot), int(grid)) if grid else 0)
     new = set_command(text, course_range, m, slot, grid, name, value)
     if new is None:
         return None
@@ -1457,6 +1459,23 @@ def _emit_measures(elements, total_beats, meter, dens=()):
             j += 1
         span = _meter_beats(cur)
         end = beat + span
+        # **小節の途中に #MEASURE が来たら、そこで小節を切る。**
+        # 切らずに進むと、その拍子が効かないまま後ろがずれていき、元は別々
+        # だった小節が1つに合体する(実測: LAMIA (Laur Remix) の 89 小節目を
+        # 1/1000 にすると、4/4 へ戻ったあとの音符行が3小節ぶん 48 文字に
+        # 繋がり、#SCROLL が同じ小節に3行重なった)。
+        # 切った小節は拍子どおりの長さではないので、その長さの #MEASURE を
+        # 頭に足す(#MEASURE n/d = 4*n/d 拍。どんな長さも分数で書ける)。
+        for k in range(i, n):
+            bt, kind, payload = elements[k]
+            if bt <= beat:
+                continue
+            if bt >= end:
+                break
+            if kind == "line" and _command_name(payload) == "MEASURE":
+                end = bt
+                span = end - beat
+                break
         take = []
         while i < n and elements[i][0] < end:
             take.append(elements[i])
@@ -1482,6 +1501,11 @@ def _emit_measures(elements, total_beats, meter, dens=()):
             L = int(span) if span.denominator == 1 and span >= 1 else 4
         chars = ["0"] * L
         lines_at = {}
+        if span != _meter_beats(cur):
+            # 途中で切った小節。長さを分数で書いておく(上の説明を参照)。
+            fr = span / 4
+            lines_at.setdefault(0, []).append(
+                "#MEASURE %d/%d" % (fr.numerator, fr.denominator))
         for (bt, kind, payload), f in zip(take, fracs):
             slot = int(f * L)
             slot = max(0, min(L - 1, slot))
@@ -1505,12 +1529,20 @@ def _emit_measures(elements, total_beats, meter, dens=()):
     return "\n".join(out) + "\n"
 
 
-def op_measure(text, course_range, m, value):
+def op_measure(text, course_range, m, value, frac=0):
     """m 小節目から拍子を value にして、後ろを組み直す。
 
     音符は1つも動かない(拍の位置をそのまま保つ)。小節線の位置と、テキストの
-    小節の区切り方だけが変わる。"""
+    小節の区切り方だけが変わる。
+
+    frac は「小節の中のどこから変えるか」(0 = 小節の頭、1/2 = 真ん中)。
+    途中から変えるときは、そこで小節を切って前半を元の長さのまま残す
+    (切った前半の長さは #MEASURE で書く)。カーソルの所から拍子を変えたい、
+    という求めに応えるもの(利用者の指定 2026-09-28)。"""
     meter = _parse_meter(value)
+    frac = Fraction(frac)
+    if frac < 0 or frac >= 1:
+        frac = Fraction(0)
     body = course_body_span(text, course_range)
     if body is None or meter is None or m < 0:
         return None
@@ -1529,14 +1561,28 @@ def op_measure(text, course_range, m, value):
         return _result(text, new, reparse=True) if new is not None else None
     meters = _meters_by_measure(text, spans)
     elements, total, dens = _elements_from(text, spans, m, meters)
-    # 同じ所にあった古い #MEASURE は捨てて、新しいものを頭に置く。
-    elements = [e for e in elements
-                if not (e[0] == 0 and e[1] == "line"
-                        and _command_name(e[2]) == "MEASURE")]
-    elements.insert(0, (Fraction(0), "line", "#MEASURE %d/%d" % meter))
+    at = _meter_beats(meters[m]) * frac      # 変え始める拍(小節の頭から)
+    if at == 0:
+        # 小節の頭から変える。同じ所にあった古い #MEASURE は捨てる。
+        elements = [e for e in elements
+                    if not (e[0] == 0 and e[1] == "line"
+                            and _command_name(e[2]) == "MEASURE")]
+    elements.append((at, "line", "#MEASURE %d/%d" % meter))
     elements.sort(key=lambda e: (e[0], 0 if e[1] == "line" else 1))
-    new = (text[:spans[m][0]]
-           + _emit_measures(elements, total, meter, dens)
+    head = text[:spans[m][0]]
+    # 小節の範囲は前の小節のカンマの**直後**から始まる(頭の改行も範囲に入って
+    # いる)。組み直した本文はいきなり行で始まるので、そのまま差し込むと
+    # 「1,#MEASURE 1/1000」のように前の行と1行に繋がる。そうなると解析側は
+    # #MEASURE を命令と読まず、拍子が効かないまま先へ進む(実測: LAMIA で
+    # 89 小節目を 1/1000 にしたら、504 小節ぶんが 2/4 のままになって曲が
+    # 302 秒伸びた)。切れ目が無ければ改行を1つ足す。
+    if head and not head.endswith(("\n", "\r")):
+        head += "\n"
+    new = (head
+           # 途中から変えるときは、そこまでは**元の拍子のまま**で並べる
+           # (新しい拍子は at に入れた #MEASURE が効かせる)。
+           + _emit_measures(elements, total,
+                            meter if at == 0 else meters[m], dens)
            + text[body[1]:])
     if new == text:
         return None
@@ -1559,7 +1605,7 @@ def op_command_value(text, course_range, pos, name, value):
     if m < 0:
         return None
     if name == "MEASURE" and value is not None:
-        return op_measure(text, course_range, m, value)
+        return op_measure(text, course_range, m, value, frac)
     new = set_command(text, course_range, m, frac.numerator, frac.denominator,
                       name, value)
     if new is None:
