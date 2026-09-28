@@ -6,8 +6,9 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (QKeySequence, QMouseEvent, QPainter,
                            QRegion, QShortcut)
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QDockWidget, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QMessageBox, QPushButton, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFrame,
+    QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 #: Qt の「上限なし」。setFixedSize で入った上下限を外すのに使う。
@@ -1284,6 +1285,45 @@ class PreviewDock(QDockWidget):
             " border: 1px solid rgba(255,255,255,40); border-radius: 3px;")
         self.fps_label.move(left, 6)
         self.fps_label.raise_()
+        left += 74 + 2
+
+        # ギミック区間(ストロボ等)を「何fpsのシミュレータで見た絵」にするか。
+        #
+        # ストロボは1小節がシミュレータの1フレームぶんで、絵を作っているのは
+        # 小節線そのもの。**見る側のfpsで見え方そのものが変わる**ので、
+        # 作った絵がプレイヤーの画面でどう出るかは、その環境と同じ刻みで
+        # 見ないと分からない(実測: LAMIA の53刻み/秒の区間は 60fps で逆走、
+        # 120fps でガタつく)。ここで切り替えて見比べられるようにする。
+        #   60fps / 120fps … その刻みで標本を取る(本家と同じ見え方)
+        #   MAX            … 丸めない。回しているfpsのまま(今までの見え方)
+        # settings.json の preview_sim_fps を 0 にすると「小節の頭で止める
+        # (作ったとおりの絵)」も選べる。ここには出していない — 本家の環境を
+        # 真似るための道具で、そちらは作者だけが見る絵のため。
+        self.sim_fps_combo = QComboBox(self.game_preview_window.scaled_host)
+        self.sim_fps_combo.addItem("60fps", 60)
+        self.sim_fps_combo.addItem("120fps", 120)
+        self.sim_fps_combo.addItem("MAX", 0)
+        self.sim_fps_combo.setToolTip(
+            "ストロボなどのギミックを、何fpsのシミュレータで見た絵にするか"
+            "（MAX = 丸めずにそのまま）")
+        # 幅は詰める。右隣(x=598〜)は作譜モードの命令パネルの場所なので、
+        # ここを広げるとその下に潜る。字が切れないよう、矢印と余白も細くする。
+        self.sim_fps_combo.setFixedSize(62, LANE_BUTTON_H)
+        self.sim_fps_combo.setStyleSheet(
+            "QComboBox { color: #cfe0f0; background: rgba(0,0,0,140);"
+            " border: 1px solid rgba(255,255,255,40); border-radius: 3px;"
+            " padding: 0 2px 0 4px; }"
+            "QComboBox::drop-down { width: 12px; border: none; }"
+            "QComboBox QAbstractItemView { color: #e8e8e8; background: #20232b;"
+            " selection-background-color: #2f6f86; }")
+        self.sim_fps_combo.setFocusPolicy(Qt.NoFocus)
+        _f = self.sim_fps_combo.font()
+        _f.setPixelSize(LANE_BUTTON_FONT_PX)
+        self.sim_fps_combo.setFont(_f)
+        self.sim_fps_combo.move(left, 6)
+        self.sim_fps_combo.raise_()
+        self._load_sim_fps_choice()
+        self.sim_fps_combo.currentIndexChanged.connect(self._on_sim_fps_changed)
 
         # 0.5 秒ごとに数え直す。刻みを細かくすると数字が落ち着かず読めないし、
         # 粗くすると引っかかりに気づけない。
@@ -1893,6 +1933,53 @@ class PreviewDock(QDockWidget):
         b.setFont(f)
         b.raise_()          # 等倍のときは中身が子として乗るので、その上へ
         return b
+
+    # ------------------------------------------------------------------
+    # ギミックを見る刻み(60fps / 120fps / MAX)
+    # ------------------------------------------------------------------
+    # 中身の切り替えはレーン側の2つの値だけ(chart_preview_widget._strobe_time)。
+    #   _strobe_snap … 丸めるかどうか(MAX なら False)
+    #   _sim_fps     … 丸める刻み(60 / 120 …)。0 は小節の頭へ丸める
+    # 設定にも書き戻すので、次に開いたときも同じ見かたで始まる。
+
+    def _load_sim_fps_choice(self):
+        snap = bool(self.config_data.get("preview_strobe_snap", True))
+        try:
+            fps = int(self.config_data.get("preview_sim_fps", 120))
+        except (TypeError, ValueError):
+            fps = 120
+        want = 0 if not snap else fps
+        i = self.sim_fps_combo.findData(want)
+        if i < 0:
+            # 設定に「小節の頭で止める(0)」など一覧に無い値が入っているとき。
+            # 見かたはそのまま活かして、選び直されるまで触らない。
+            self.sim_fps_combo.blockSignals(True)
+            self.sim_fps_combo.setCurrentIndex(1 if snap else 2)
+            self.sim_fps_combo.blockSignals(False)
+            return
+        self.sim_fps_combo.blockSignals(True)
+        self.sim_fps_combo.setCurrentIndex(i)
+        self.sim_fps_combo.blockSignals(False)
+        self._apply_sim_fps(want, save=False)
+
+    def _apply_sim_fps(self, fps: int, save: bool = True):
+        cp = self.chart_preview
+        if fps == 0:                     # MAX = 丸めない
+            cp._strobe_snap = False
+        else:
+            cp._strobe_snap = True
+            cp._sim_fps = int(fps)
+        cp.update()
+        if not save:
+            return
+        self.config_data["preview_strobe_snap"] = bool(fps != 0)
+        if fps:
+            self.config_data["preview_sim_fps"] = int(fps)
+        if self.save_settings_cb is not None:
+            self.save_settings_cb()
+
+    def _on_sim_fps_changed(self, _index):
+        self._apply_sim_fps(int(self.sim_fps_combo.currentData()))
 
     def _update_fps_label(self):
         """出ているコマ数を数え直して表示する。
