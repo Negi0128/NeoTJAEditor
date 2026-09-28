@@ -13,7 +13,7 @@ _SETTINGS_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
-    "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap",
+    "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -214,6 +214,16 @@ def default_settings() -> dict:
         # 頭へ丸めて、120fps のシミュレータと同じ絵にする。音と再生位置は
         # そのまま(chart_preview_widget.STROBE_MEASURE_MAX_SEC に実測値)。
         "preview_strobe_snap": True,
+        # ギミック区間(小節がとても短い所)を「何fps のシミュレータで見た絵」に
+        # するか。既定 120。60 / 120 / 144 / 240 など、確かめたい環境に合わせる。
+        # 0 にすると小節の頭へ丸める = 作ったとおりの絵(エイリアシング無し)。
+        #
+        # ここが効くのは、見る側の fps で**見え方そのものが変わる**から。
+        # 実測(LAMIA (Laur Remix) の 53刻み/秒の区間): 60fps では差の 6.7Hz で
+        # ゆっくり逆走して見え、120fps では 2.25 コマに1刻みで乱れて見える。
+        # プレイヤーの画面でどう出るかを確かめるには、その環境と同じ刻みで
+        # 見る必要がある。preview_strobe_snap が False ならどちらも効かない。
+        "preview_sim_fps": 120,
         # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
         # 確認するための目安)。既定True。気になる場合はfalseで消せる。
         "preview_show_fps": True,

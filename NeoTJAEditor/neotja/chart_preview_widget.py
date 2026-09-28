@@ -1,4 +1,5 @@
 import bisect
+import math
 import os
 import time as _time
 
@@ -569,8 +570,14 @@ class ChartPreviewWidget(QWidget):
         self._constant_speed = False
         # ストロボ区間で「描く時刻をその小節の頭へ丸める」か(_strobe_time)。
         # 既定は入り。切ると今までどおり、回している fps そのままで見える。
-        self._strobe_snap = bool(
-            settings_mod.load_settings().get("preview_strobe_snap", True))
+        _cfg = settings_mod.load_settings()
+        self._strobe_snap = bool(_cfg.get("preview_strobe_snap", True))
+        #: ギミック区間を「何fps のシミュレータで見た絵」にするか。
+        #: 0 なら小節の頭へ丸める(作ったとおりの絵)。_strobe_time を参照。
+        try:
+            self._sim_fps = int(_cfg.get("preview_sim_fps", 120))
+        except (TypeError, ValueError):
+            self._sim_fps = 120
         # 下部パネルのモード循環(Tab / トグルボタン)と速度変更([ ] キー)を
         # ゲーム窓側へ通知するコールバック(フェーズ3)。
         self._cycle_bottom_mode_cb = cycle_bottom_mode_cb
@@ -3581,12 +3588,26 @@ class ChartPreviewWidget(QWidget):
     # うちのプレビューは 300〜450fps で回っているので、1つの刻みを3〜4回に
     # 割って見てしまい、線が暴れていた(利用者の報告 2026-09-28)。
     #
-    # そこで**描く時刻だけ**、いまいる小節の頭へ丸める。何 fps で回していても
-    # 「その小節の頭で見た絵」になるので、120fps のシミュレータと同じ絵が出る
-    # (しかもタイマーのゆらぎに左右されない)。丸めるのは小節が
-    # STROBE_MEASURE_MAX_SEC より短いところだけなので、ふつうの譜面は素通り。
-    # 音(打音)と再生位置そのものには触らない。
-    STROBE_MEASURE_MAX_SEC = 1.0 / 30.0
+    # そこで**描く時刻だけ**を丸める。丸めかたは2通りあり、preview_sim_fps で
+    # 選ぶ(音(打音)と再生位置そのものには触らない)。
+    #
+    #   preview_sim_fps = 60/120/144/240 …「そのfpsのシミュレータで見た絵」。
+    #       描く時刻を 1/fps の格子へ落とす。本家(TNDE 等)と同じ標本の取り方
+    #       なので、**エイリアシングまで同じに出る**。これが要る場面がある:
+    #       LAMIA(Laur Remix) の 53刻み/秒の区間は、60fps で見ると差の
+    #       6.7Hz でゆっくり**逆走して見え**、120fps では 2.25 コマに1刻みで
+    #       乱れて見える(利用者の実機での見え方 2026-09-28)。作った絵が
+    #       プレイヤーの画面でどう出るかを確かめるには、この道が要る。
+    #
+    #   preview_sim_fps = 0 … 小節の頭へ丸める。1小節につき1枚だけ見せる
+    #       ので、エイリアシングの無い「作ったとおりの絵」になる。
+    #
+    # どちらも、小節が STROBE_MEASURE_MAX_SEC より短い所でだけ効かせる。
+    # ふつうの譜面(1小節 1〜2秒)は素通りで、今までどおり滑らかに流れる。
+    #: ここより短い小節が続く所を「ギミック区間」とみなす。LAMIA の刻みは
+    #: 0.0012〜0.0375 秒なので、その全部が入るように 0.05 秒にしてある
+    #: (ふつうの譜面は 1小節 1秒前後なので掛からない)。
+    STROBE_MEASURE_MAX_SEC = 0.05
 
     def _strobe_time(self, now: float) -> float:
         bars = self._bar_times
@@ -3597,6 +3618,9 @@ class ChartPreviewWidget(QWidget):
             return now
         if bars[i + 1] - bars[i] > self.STROBE_MEASURE_MAX_SEC:
             return now
+        fps = self._sim_fps
+        if fps and fps > 0:
+            return math.floor(now * fps) / fps
         return bars[i]
 
     def _speed(self, bpm: float, scroll: float = 1.0) -> float:
