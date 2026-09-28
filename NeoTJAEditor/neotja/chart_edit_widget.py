@@ -1277,12 +1277,57 @@ class ChartEditWaveform(WaveformWidget):
 
         以前はレーンと同じ「小節ごとの移動」だった。作譜では打つ位置を細かく
         合わせたいので、グリッドに乗ったまま動くほうが合う。拡大縮小
-        (修飾キー + ホイール)は今までどおり親へ渡す。"""
+        (修飾キー + ホイール)は今までどおり親へ渡す。
+
+        **動き方はレーンの上で回したときと同じ**(滑らせる。利用者の指定
+        2026-09-28)。以前はその場へ飛んでいて、1グリッドでも景色が飛ぶので
+        どこへ動いたのか目で追えなかった。"""
         if self.offset_mode or (event.modifiers() & self.ZOOM_MODIFIERS):
             super().wheelEvent(event)
             return
-        self.move_cursor(1 if event.angleDelta().y() > 0 else -1)
+        self.grid_step(1 if event.angleDelta().y() > 0 else -1)
         event.accept()
+
+    # ホイールでの移動を「レーンと同じ速さで滑らせる」ための口。
+    #   _scroll_target_cb … いまの行き先(トゥイーン中はその目標)を返す
+    #   _scroll_to_cb     … その時刻へ滑らせて移る
+    # どちらも無ければ今までどおりその場へ飛ぶ(ペイン単体でも動くように)。
+    _scroll_target_cb = None
+    _scroll_to_cb = None
+
+    def set_scroll_cbs(self, target_cb, scroll_cb):
+        """レーンの「滑らせて移る」に繋ぐ(chart_preview の同名メソッド)。"""
+        self._scroll_target_cb = target_cb
+        self._scroll_to_cb = scroll_cb
+
+    def grid_step(self, direction):
+        """グリッド1つぶん先/手前へ、レーンと同じ速さで滑らせて移る。
+
+        続けて回したときは**行き先から足す**(回した回数ぶんきっちり進む)。
+        基準をいまの表示位置にすると、滑っている途中の位置から数え直して
+        しまい、速く回したぶんが取りこぼされる。
+        """
+        if self._scroll_to_cb is None or self._grid <= 0:
+            self.move_cursor(direction)          # 繋がっていなければ飛ぶ
+            return
+        base = (self._scroll_target_cb() if self._scroll_target_cb is not None
+                else self.position_sec)
+        addr = self._address_from_time(max(0.0, float(base)), nearest=True)
+        if addr is None:
+            self.move_cursor(direction)
+            return
+        total = addr[0] * self._grid + addr[1] + int(direction)
+        total = max(0, total)
+        count = self._measure_count()
+        if count > 0:
+            total = min(total, count * self._grid - 1)
+        m, s = divmod(total, self._grid)
+        t = self._address_time(m, s, self._grid)
+        if t is None:
+            return
+        # カーソルはレーンのクロックに付いてくる(_follow_playhead)。ここで
+        # 先に動かすと、滑っている途中の位置に引き戻されて競り合う。
+        self._scroll_to_cb(t)
 
     def keyReleaseEvent(self, event):
         # 連打・風船のキーを離したところで置く。押しっぱなしの自動連射は

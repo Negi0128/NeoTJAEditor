@@ -2975,6 +2975,35 @@ class ChartPreviewWidget(QWidget):
             base = self._nav_idx_at_or_before(self._current_audio_time())
         self._seek_to_nav_idx(base + direction)
 
+    def scroll_target_time(self) -> float:
+        """いまの行き先。トゥイーン中はその目標、でなければ今の位置。
+
+        続けて回したときに「行き先から足す」ための基準(小節移動が
+        _current_idx でやっているのと同じ考え方)。
+        """
+        if self._animating:
+            return float(self._anim_target_sec)
+        return float(self._current_audio_time())
+
+    def scroll_to_seconds(self, seconds: float):
+        """任意の時刻へ、**小節移動と同じ速さで滑らせて**移る。
+
+        作譜ペインのホイール(グリッド1つぶん)から使う。表示が飛ばないので
+        譜面の流れが目で追え、赤い線もカーソルも付いてくる。
+        """
+        if not self._seek_seconds_cb:
+            return
+        target = max(0.0, float(seconds))
+        self._clear_reveal()       # 手動で動かしたらリード表示は解除
+        if self._state == "playing":
+            # 再生中はトゥイーンせず、その位置へシークして再生継続。
+            self._pos_sec = target
+            self._pos_wall = _time.monotonic()
+            self._animating = False
+        else:
+            self._start_scroll_anim(target)
+        self._seek_seconds_cb(target)
+
     def _pause_for_jump(self):
         """曲頭/最終小節へ飛ぶ前に止める。
 

@@ -1683,6 +1683,10 @@ class PreviewDock(QDockWidget):
         self.chart_edit.followWindowChanged.connect(self._on_waveform_window_changed)
         # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
         self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
+        # ただし作譜ペインのホイールはグリッド1つぶん。動き方(滑らせ方)は
+        # レーンの上で回したときと同じにする(利用者の指定 2026-09-28)。
+        self.chart_edit.set_scroll_cbs(self.chart_preview.scroll_target_time,
+                                       self.chart_preview.scroll_to_seconds)
         # 作譜は行レイアウト(左に行の名前・上に小節番号)。7行ぶんの高さが要る
         # (利用者と決めた固定の高さ。行を広げたぶん 260 -> 300 2026-09-25)。
         self.chart_edit.setFixedHeight(300)
