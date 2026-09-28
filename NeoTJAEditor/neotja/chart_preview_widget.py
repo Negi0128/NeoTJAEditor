@@ -567,6 +567,10 @@ class ChartPreviewWidget(QWidget):
         # #SCROLL/HS ギミックを無視して一定速でスクロールする「表示だけ」の
         # モード(譜面データ自体は変えない)。BPM による間隔は通常どおり。
         self._constant_speed = False
+        # ストロボ区間で「描く時刻をその小節の頭へ丸める」か(_strobe_time)。
+        # 既定は入り。切ると今までどおり、回している fps そのままで見える。
+        self._strobe_snap = bool(
+            settings_mod.load_settings().get("preview_strobe_snap", True))
         # 下部パネルのモード循環(Tab / トグルボタン)と速度変更([ ] キー)を
         # ゲーム窓側へ通知するコールバック(フェーズ3)。
         self._cycle_bottom_mode_cb = cycle_bottom_mode_cb
@@ -3563,6 +3567,38 @@ class ChartPreviewWidget(QWidget):
         # OFFSET convention: chart_time = audio_time + OFFSET.
         return self._current_audio_time() + self._offset
 
+    # ------------------------------------------------------------------
+    # ストロボ(1小節がちょうど1フレームの区間)の見え方
+    # ------------------------------------------------------------------
+    # ストロボは「1小節 = シミュレータの1フレーム」にして、その小節ごとに
+    # #SCROLL を刻む作り。区間の中身は音符なし(0,)で、**絵を作っているのは
+    # 小節線そのもの**。だから、その刻みで見たときだけ狙った絵になる。
+    #
+    # 実測(BPM200 / 120fps のストロボ / 判定枠にいちばん近い小節線の x):
+    #   120fps で刻む … 0.0 0.0 0.0 0.0 …  ぴたりと止まる(本家の見え方)
+    #    60fps(約数) … 0.0 0.0 0.0 0.0 …  同じく止まる
+    #   400fps       … 0.0 -6.2 8.5 2.1 -4.2 … 1本が前後に暴れる
+    # うちのプレビューは 300〜450fps で回っているので、1つの刻みを3〜4回に
+    # 割って見てしまい、線が暴れていた(利用者の報告 2026-09-28)。
+    #
+    # そこで**描く時刻だけ**、いまいる小節の頭へ丸める。何 fps で回していても
+    # 「その小節の頭で見た絵」になるので、120fps のシミュレータと同じ絵が出る
+    # (しかもタイマーのゆらぎに左右されない)。丸めるのは小節が
+    # STROBE_MEASURE_MAX_SEC より短いところだけなので、ふつうの譜面は素通り。
+    # 音(打音)と再生位置そのものには触らない。
+    STROBE_MEASURE_MAX_SEC = 1.0 / 30.0
+
+    def _strobe_time(self, now: float) -> float:
+        bars = self._bar_times
+        if not self._strobe_snap or not bars:
+            return now
+        i = bisect.bisect_right(bars, now) - 1
+        if i < 0 or i + 1 >= len(bars):
+            return now
+        if bars[i + 1] - bars[i] > self.STROBE_MEASURE_MAX_SEC:
+            return now
+        return bars[i]
+
     def _speed(self, bpm: float, scroll: float = 1.0) -> float:
         b = bpm if bpm and bpm > 0 else DEFAULT_BPM
         # 等速モードでは HS(scroll)を 1.0 固定にする(表示だけ)。
@@ -3926,7 +3962,7 @@ class ChartPreviewWidget(QWidget):
 
         painter.fillRect(self.rect(), self._color("bg"))
 
-        now = self._current_chart_time()
+        now = self._strobe_time(self._current_chart_time())
         # f/j リード再生: 再生開始位置(reveal_t)より前の音符/連打/風船だけを
         # 隠す。開始位置以降の音符は通常どおり右から流れてくる(いきなり全部が
         # 出現しない)。到達後(reveal_cb で None化)は全表示に戻る。

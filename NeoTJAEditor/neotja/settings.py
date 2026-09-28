@@ -13,7 +13,7 @@ _SETTINGS_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
-    "gpu_render", "gpu_vsync", "gpu_screen_window",
+    "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap",
     "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -204,6 +204,16 @@ def default_settings() -> dict:
         # 画面だけを出すモード(通常再生・軽量)では別の窓のほうが速いので、
         # そこを重く見るなら true にする。gpu_render が False なら関係ない。
         "gpu_screen_window": False,
+        # ストロボ(1小節がちょうど1フレームの区間)を、その刻みで見せるか。
+        # 既定 True。ストロボは「1小節 = シミュレータの1フレーム」で作る絵で、
+        # その刻みで見たときだけ狙いどおりに止まって見える(区間の中身は
+        # 音符なしで、絵を作っているのは小節線そのもの)。プレビューは 400fps
+        # 前後で回っているので、そのままだと1つの刻みを3〜4回に割って見る
+        # ことになり、判定枠のあたりで小節線が暴れる。
+        # True にすると、**小節がとても短い区間でだけ**描く時刻をその小節の
+        # 頭へ丸めて、120fps のシミュレータと同じ絵にする。音と再生位置は
+        # そのまま(chart_preview_widget.STROBE_MEASURE_MAX_SEC に実測値)。
+        "preview_strobe_snap": True,
         # 譜面プレビュー左上に実測fpsを小さく表示する(描画が本当に出ているか
         # 確認するための目安)。既定True。気になる場合はfalseで消せる。
         "preview_show_fps": True,
