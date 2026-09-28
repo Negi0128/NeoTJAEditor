@@ -2260,6 +2260,11 @@ class PreviewDock(QDockWidget):
         # 火花(大きい放射)は通常再生のときだけ。ほかのモードは判定円の金色だけ
         # にする(利用者の指定 2026-09-26)。
         self.chart_preview.set_effects_lite(idx != self.MODE_TITLE)
+        # レーンの小節線に小節番号を出すのは作譜モードだけ(PeepoDrumKit の
+        # ゲーム画面と同じ見せ方)。書いている最中は「画面に出ているのが何小節
+        # 目か」が要るが、ふだんの再生では邪魔になる。
+        self.chart_preview.set_bar_numbers(
+            self.MODE_EDIT is not None and idx == self.MODE_EDIT)
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
         # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
         show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)

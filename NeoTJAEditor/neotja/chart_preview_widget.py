@@ -5,7 +5,7 @@ import time as _time
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QRadialGradient,
+    QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QRadialGradient,
     QRegion, QStaticText,
 )
 from PySide6.QtMultimedia import QSoundEffect
@@ -3609,6 +3609,57 @@ class ChartPreviewWidget(QWidget):
     #: (ふつうの譜面は 1小節 1秒前後なので掛からない)。
     STROBE_MEASURE_MAX_SEC = 0.05
 
+    # ------------------------------------------------------------------
+    # レーンの小節番号(作譜モードのときだけ)
+    # ------------------------------------------------------------------
+    # PeepoDrumKit はゲーム画面の小節線のすぐ右に小節番号を出している
+    # (chart_editor_widgets_game.cpp の DrawGamePreviewNumericText)。
+    # 譜面を書いている最中は「いま画面に出ているのが何小節目か」が要るので
+    # 同じものを出す。ふだんの再生では邪魔なので作譜モードのときだけ。
+    #: 番号を出す間隔の下限(px)。これより詰まったら間引く。
+    BAR_NUM_MIN_GAP = 26.0
+    _bar_numbers = False
+    #: 焼いた番号の絵。(文字, DPR, 色) -> (1枚, 上への持ち上げ)。
+    #: **文字の組み立ては高い。** そのまま描いていたら作譜モードが 330 -> 260fps
+    #: まで落ちた(LAMIA での実測)。画面に出る番号は数十通りしかなく、流れても
+    #: 同じ番号が何コマも続くので、1枚に焼いて貼れば貼り付け1回で済む。
+    _bar_num_cache = None
+    BAR_NUM_CACHE_MAX = 512
+
+    def _bar_num_pixmap(self, text, color):
+        cache = self._bar_num_cache
+        if cache is None:
+            cache = self._bar_num_cache = {}
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        key = (text, round(dpr, 3), color.rgba())
+        got = cache.get(key)
+        if got is None:
+            f = self._font(9)
+            fm = QFontMetricsF(f)
+            w = int(fm.horizontalAdvance(text)) + 2
+            h = int(fm.height()) + 2
+            pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            try:
+                q.setFont(f)
+                q.setPen(color)
+                q.drawText(1, int(fm.ascent()) + 1, text)
+            finally:
+                q.end()
+            if len(cache) > self.BAR_NUM_CACHE_MAX:
+                cache.clear()
+            got = (pm, int(fm.ascent()) + 1)
+            cache[key] = got
+        return got
+
+    def set_bar_numbers(self, on: bool):
+        on = bool(on)
+        if on != self._bar_numbers:
+            self._bar_numbers = on
+            self.update()
+
     def _strobe_time(self, now: float) -> float:
         bars = self._bar_times
         if not self._strobe_snap or not bars:
@@ -4137,6 +4188,12 @@ class ChartPreviewWidget(QWidget):
         bar_speeds = self._bar_speeds
         bar_visible = self._bar_visible
         x_lo, x_hi = -8.0, lane_w + 8.0
+        # 小節番号(作譜モードのときだけ)。詰まっている所では間引く —
+        # ギミック区間は1画面に何百本も来るので、全部に数字を振ると読めない
+        # 塊になるうえ、文字の組み立てだけでコマが落ちる。
+        show_bar_nums = self._bar_numbers
+        bar_num_x = -1e9
+        col_num = self._color("fg_dim")
         for i in range(lo_bar, hi_bar):
             if not bar_visible[i]:
                 continue
@@ -4153,6 +4210,14 @@ class ChartPreviewWidget(QWidget):
                         break
             painter.setPen(pen_cp if is_cp else pen_bar)
             painter.drawLine(int(x), band_top, int(x), band_bottom)
+            # 小節番号。PeepoDrumKit のゲーム画面と同じで、線のすぐ右に出す
+            # (あちらは DrawGamePreviewNumericText で BarIndex を描いている)。
+            # 出すのは作譜モードのときだけ — 譜面を書いている最中は「いま
+            # どの小節を見ているか」が要るが、ふだんの再生では邪魔になる。
+            if show_bar_nums and x - bar_num_x >= self.BAR_NUM_MIN_GAP:
+                pm_num, lift = self._bar_num_pixmap(str(i + 1), col_num)
+                painter.drawPixmap(int(x) + 3, band_top + 10 - lift, pm_num)
+                bar_num_x = x
 
         # --- judgment ring (drawn BEFORE notes/rolls so they pass over it,
         # like notes crossing the drum face in the real game). ---

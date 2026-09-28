@@ -954,6 +954,12 @@ class WaveformWidget(QWidget):
             xe = self._sec_to_x(e)
             painter.fillRect(xs, y0, max(1, xe - xs), height, gogo_col)
 
+    #: 小節線どうしの間隔の下限(px)。これより近い線は引かない(_draw_measure_lines)。
+    #: 3px あれば「線・すきま・線」が見分けられる。PeepoDrumKit の編集タイム
+    #: ラインは 128px で間引いているが、あちらは番号つきの目盛りで、こちらは
+    #: 音符を置く画面なので、構造が読める最小限だけにしてある。
+    MEASURE_MIN_GAP = 3.0
+
     def _draw_measure_lines(self, painter, y0: int, height: int, t0: float, t1: float):
         """譜面帯 [y0, y0+height] に白い小節線を引く(音符を小節ごとに区切る)。
         小節位置はグリッド用クリック(_click_audio_times)の is_measure から。"""
@@ -965,9 +971,19 @@ class WaveformWidget(QWidget):
         lo = bisect.bisect_left(mt, t0)
         hi = bisect.bisect_right(mt, t1)
         painter.setPen(QPen(QColor("#ffffff"), 1))
+        # **詰まったら間引く。** ギミック譜面には1小節が 0.0012 秒(1秒に833本)
+        # という所があり(LAMIA (Laur Remix))、そのまま引くと線が潰れて白い塊に
+        # なって、どこが小節の切れ目かも読めない。PeepoDrumKit も編集タイム
+        # ラインで同じことをしている(最低 128px の間隔を保つよう間引く)。
+        # こちらは音符を置く画面なので間隔はもっと詰めてよく、MEASURE_MIN_GAP
+        # まで近づいたぶんだけ落とす。線を引く回数も減るので軽くもなる。
+        last_x = None
         for i in range(lo, hi):
             x = self._sec_to_x(mt[i])
+            if last_x is not None and (x - last_x) < self.MEASURE_MIN_GAP:
+                continue
             painter.drawLine(x, y0, x, y0 + height)
+            last_x = x
 
     # 命令ラベル用の使い回し。作譜モードは120fpsで描き直すので、ここで作る物を
     # 毎フレーム作り直すと命令の多い譜面では効いてくる(QFont は毎 paintEvent、
