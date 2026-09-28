@@ -514,6 +514,11 @@ class ChartEditWaveform(WaveformWidget):
             self._default_measure_len = sec
             self.update()
 
+    def set_notes(self, notes):
+        # 音符も帯に焼いてある(_static_strip)。
+        super().set_notes(notes)
+        self._bump_strip()
+
     def set_spans(self, rolls, balloons, kusudamas):
         super().set_spans(rolls, balloons, kusudamas)
         self._bump_strip()
@@ -1488,9 +1493,12 @@ class ChartEditWaveform(WaveformWidget):
     #: (利用者の指定 2026-09-25: 色が増えると認識しにくい)。
     ROW_CONTENT_COLOR = "#c8c8c8"
 
+    #: 帯へ焼いている最中か(_static_strip)。焼くあいだは膨らませない。
+    _baking = False
+
     def _note_scale(self, t):
         """再生中、再生位置が通り過ぎた直後の音符を少しだけ大きく描く。"""
-        if not self._playing:
+        if not self._playing or self._baking:
             return 1.0
         d = self.position_sec - t
         if 0.0 <= d < self.HIT_POP_SEC:
@@ -1837,6 +1845,20 @@ class ChartEditWaveform(WaveformWidget):
                        QColor(255, 120, 120, 18))
         self._draw_measure_lines(p, note_top, note_h, t0, t1)
         self._draw_edit_grid(p, note_top, note_h - wave_h, t0, t1)
+        # 音符も焼く。**叩いた瞬間の膨らみだけは焼かない**(再生位置との
+        # 差で決まるので、帯に焼くと置き去りになる)。膨らむのは再生位置の
+        # 直後 HIT_POP_SEC ぶんの数個だけなので、そこは毎コマ上から描く。
+        self._baking = True
+        try:
+            note_cy = note_top + (note_h - wave_h) // 2
+            self._draw_notes(p, lane_w, t0, t1, note_cy)
+        finally:
+            self._baking = False
+        # 命令の行(BPM・拍子・スクロール)も時間の関数。右端は帯の幅で見る。
+        rows = self._row_rects()
+        for kind in ("bpm", "measure", "hs"):
+            y, rh = rows[kind]
+            self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
         self._draw_ruler(p, t0, t1)
 
     def _paint_rows(self, p):
@@ -1879,14 +1901,14 @@ class ChartEditWaveform(WaveformWidget):
             self._x_shift = strip_off
             t0 = base + strip_off / self._xs_val
             t1 = t0 + self._visible_span()
-        self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
+        if self._playing:
+            # 叩いた瞬間だけ膨らむ音符(帯には等倍で焼いてある)。膨らんだ絵の
+            # ほうが大きいので、上から描けばそのまま隠れる。
+            self._draw_notes(p, self._lane_w(),
+                             max(0.0, self.position_sec - self.HIT_POP_SEC),
+                             self.position_sec, note_cy)
         self._draw_long_preview(p, note_top, upper_h)
         self._draw_pending(p, note_top, upper_h)
-
-        # --- 命令の行 ---
-        for kind in ("bpm", "measure", "hs"):
-            y, rh = rows[kind]
-            self._draw_cmd_row(p, kind, y, rh, t0, t1)
         # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
         # 指定 2026-09-26)。
         self._draw_marker_row(p, rows["barline"], self._barline_audio,
@@ -2036,7 +2058,7 @@ class ChartEditWaveform(WaveformWidget):
                 p.setFont(f)
             p.setClipping(False)
 
-    def _draw_cmd_row(self, p, kind, y, rh, t0, t1):
+    def _draw_cmd_row(self, p, kind, y, rh, t0, t1, right=None):
         """BPM / 拍子 / スクロールの行。その種類の命令だけを時間順に並べる。
 
         詰まっていても間引かない(利用者の指定 2026-09-25)。細い縦線でその位置を
@@ -2050,7 +2072,8 @@ class ChartEditWaveform(WaveformWidget):
         f.setPixelSize(11)
         p.setFont(f)
         col = QColor(self.ROW_CONTENT_COLOR)
-        right = self.width()
+        if right is None:
+            right = self.width()
         lo = max(0, bisect.bisect_left(times, t0) - 1)
         for i in range(lo, len(items)):
             t, txt = items[i]
