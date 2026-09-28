@@ -925,7 +925,7 @@ class PreviewDock(QDockWidget):
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
                  chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
-                 checkpoint_lines_cb=None):
+                 checkpoint_lines_cb=None, undo_cb=None, redo_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
@@ -939,6 +939,11 @@ class PreviewDock(QDockWidget):
         # チェックポイントはエディタの「行」が正。プレビューで作ったものも
         # 行へ直してエディタへ返し、エディタ側の変更もここへ流れてくる。
         self.checkpoint_lines_cb = checkpoint_lines_cb
+        # 元に戻す / やり直し(エディタの取り消し履歴)。作譜モードは再生
+        # ウィンドウの中で操作するので、あちらでも Ctrl+Z が効くように
+        # ショートカットを張る(_build_undo_keys)。
+        self.undo_cb = undo_cb
+        self.redo_cb = redo_cb
         self._checkpoint_lines = set()
         self._bar_lines = []          # 小節ごとの開始行(1始まり)
         self._bar_times_chart = []    # 同じ並びの開始時刻(譜面時間)
@@ -1217,6 +1222,7 @@ class PreviewDock(QDockWidget):
             lane_widget=self.chart_preview,
         )
         self.game_preview_window.set_pane_cb(self._update_pane_host)
+        self._build_undo_keys()
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
@@ -1587,6 +1593,31 @@ class PreviewDock(QDockWidget):
     # 画面の中へ入れると 1コマで一度に出るので、上下とも 300fps を超える。
     # ウィジェットそのものは残すので、マウス・キー・ボタン・命令の入力欄は
     # 今までどおり効く。
+
+    # ------------------------------------------------------------------
+    # 元に戻す / やり直し(再生ウィンドウの中でも効かせる)
+    # ------------------------------------------------------------------
+    # 作譜モードの操作は再生ウィンドウの中で行うが、取り消し履歴を持って
+    # いるのはエディタ(本文の QPlainTextEdit)。あちらは別の窓なので、
+    # そのままでは Ctrl+Z がどこにも届かない(利用者の報告 2026-09-28
+    # 「ctrlZ が使えない」)。窓ごとにショートカットを張って、エディタの
+    # 取り消しを呼ぶ。
+    def _build_undo_keys(self):
+        # QKeySequence.Redo は Windows では Ctrl+Y。**同じキーを二重に張ると
+        # Qt が「どちらか分からない」として両方止める**ので、標準の並びに
+        # 無いもの(Ctrl+Shift+Z)だけを足す。
+        for seq, cb in ((QKeySequence.Undo, lambda: self._do_undo(False)),
+                        (QKeySequence.Redo, lambda: self._do_undo(True)),
+                        (QKeySequence("Ctrl+Shift+Z"), lambda: self._do_undo(True))):
+            sc = QShortcut(seq, self.game_preview_window)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(cb)
+
+    def _do_undo(self, redo):
+        cb = self.redo_cb if redo else self.undo_cb
+        if cb is None:
+            return
+        cb()
 
     def _hosted_pane(self):
         """いまゲーム画面の中に入っているペイン(無ければ None)。"""

@@ -422,6 +422,8 @@ class MainWindow(QMainWindow):
             chart_op_cb=self._apply_chart_op,
             config_data=self.config_data,
             save_settings_cb=self._save_config,
+            undo_cb=self.editor.undo,
+            redo_cb=self.editor.redo,
             checkpoint_lines_cb=self._set_checkpoint_lines,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)

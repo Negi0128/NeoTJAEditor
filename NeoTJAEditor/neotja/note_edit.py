@@ -988,6 +988,12 @@ def op_delete_items(text, course_range, items):
                 kind, which = _MARKER_BY_NAME[name]
                 t2 = set_marker(new, rng_c, m, frac.numerator, frac.denominator,
                                 kind, which, False)
+            elif name == "MEASURE":
+                # 拍子は消すときも組み直す。行を消すだけだと、そこから先の
+                # 小節が元の拍子に戻って音符の間隔が変わってしまう(実測:
+                # 1/1000 を消したら、そのぶんが 2/4 に戻って曲が伸び、音符が
+                # 画面から消えたように見えた)。op_measure_remove を参照。
+                t2 = op_measure_remove(new, rng_c, m, frac)
             elif name in COMMAND_NAMES:
                 t2 = set_command(new, rng_c, m, frac.numerator, frac.denominator,
                                  name, None)
@@ -1529,6 +1535,41 @@ def _emit_measures(elements, total_beats, meter, dens=()):
     return "\n".join(out) + "\n"
 
 
+def op_measure_remove(text, course_range, m, frac=0):
+    """その位置の #MEASURE を**消して**、後ろを組み直す。
+
+    行を消すだけだと、そこから先が1つ前の拍子に戻って音符の間隔が変わる
+    (実測: 1/1000 を消したら、そのぶんが 2/4 に戻って曲が伸び、音符が画面
+    から消えたように見えた)。消したあとに効く拍子で並べ直せば、音符は
+    1つも動かない。戻り値は本文の文字列(消すものが無ければ None)。
+    """
+    body = course_body_span(text, course_range)
+    if body is None or m < 0:
+        return None
+    spans = measure_spans(text, body)
+    if m >= len(spans) or _has_branch(text, spans, m):
+        return None
+    meters = _meters_by_measure(text, spans)
+    frac = Fraction(frac)
+    at = _meter_beats(meters[m]) * frac
+    # 消したあとに効く拍子。小節の頭にあったものなら1つ前の小節の拍子、
+    # 途中にあったものならその小節の拍子がそのまま続く。
+    keep = meters[m - 1] if (at == 0 and m > 0) else (
+        _DEFAULT_METER if at == 0 else meters[m])
+    elements, total, dens = _elements_from(text, spans, m, meters)
+    before = len(elements)
+    elements = [e for e in elements
+                if not (e[0] == at and e[1] == "line"
+                        and _command_name(e[2]) == "MEASURE")]
+    if len(elements) == before:
+        return None                      # そこに #MEASURE が無い
+    head = text[:spans[m][0]]
+    if head and not head.endswith(("\n", "\r")):
+        head += "\n"                     # 前の行と繋げない(op_measure 参照)
+    new = head + _emit_measures(elements, total, keep, dens) + text[body[1]:]
+    return None if new == text else new
+
+
 def op_measure(text, course_range, m, value, frac=0):
     """m 小節目から拍子を value にして、後ろを組み直す。
 
@@ -1567,7 +1608,10 @@ def op_measure(text, course_range, m, value, frac=0):
         elements = [e for e in elements
                     if not (e[0] == 0 and e[1] == "line"
                             and _command_name(e[2]) == "MEASURE")]
-    elements.append((at, "line", "#MEASURE %d/%d" % meter))
+    # 同じ位置にほかの命令があっても、拍子は**その先頭**に置く(小節の切れ目
+    # を決める行なので、読んだときに分かりやすい)。
+    _idx = next((k for k, e in enumerate(elements) if e[0] >= at), len(elements))
+    elements.insert(_idx, (at, "line", "#MEASURE %d/%d" % meter))
     elements.sort(key=lambda e: (e[0], 0 if e[1] == "line" else 1))
     head = text[:spans[m][0]]
     # 小節の範囲は前の小節のカンマの**直後**から始まる(頭の改行も範囲に入って
