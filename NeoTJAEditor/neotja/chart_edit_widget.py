@@ -979,6 +979,32 @@ class ChartEditWaveform(WaveformWidget):
             self._range_start = self._range_key(a0[0], a0[1], self._grid)
             self._range_end = self._range_key(a1[0], a1[1], self._grid)
 
+    #: 帯(ゴーゴー)の端の名前。つかんだときは「同じ側の端」だけを動かす。
+    SPAN_EDGE_NAMES = ("GOGOSTART", "GOGOEND")
+
+    def _drag_edge_name(self):
+        """いま帯の端をつかんでいるなら、その端の名前。でなければ None。
+
+        端をつかんだときは、選んでいる**同じ側の端だけ**を動かす。両端を
+        一緒に動かすと帯がそのまま平行移動するだけで、長さが変わらない。
+        ゴーゴーを複数選んで端を持ち、まとめて伸縮できるようにするための
+        決まり(利用者の指定 2026-09-28)。
+        """
+        dr = self._note_drag
+        if dr is None:
+            return None
+        obj = dr.get("obj")
+        if obj is None or obj[0] != "cmd" or obj[1] not in self.SPAN_EDGE_NAMES:
+            return None
+        return obj[1]
+
+    def _drag_keys(self):
+        """いま動かしているものの鍵。ふだんは選んでいるもの全部。"""
+        edge = self._drag_edge_name()
+        if edge is None:
+            return set(self._sel)
+        return {k for k in self._sel if k[0] == "cmd" and k[1] == edge}
+
     def selected_items(self):
         """note_edit へ渡す形 [{kind, name, pos}]。"""
         out = []
@@ -1617,12 +1643,23 @@ class ChartEditWaveform(WaveformWidget):
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
         if steps:
             d = Fraction(int(steps), int(self._grid))
-            res = self._run_op({"kind": "move_items", "items": self.selected_items(),
-                                "delta_num": d.numerator, "delta_den": d.denominator})
+            # 帯の端をつかんだときは、同じ側の端だけを動かす(_drag_edge_name)。
+            self._note_drag = dr          # _drag_keys が見るので戻しておく
+            move_keys = self._drag_keys()
+            self._note_drag = None
+            items = [{"kind": "cmd" if k[0] == "cmd" else "note",
+                      "name": k[1] if k[0] == "cmd" else None,
+                      "pos": (k[-1].numerator, k[-1].denominator)}
+                     for k in move_keys]
+            res = items and self._run_op(
+                {"kind": "move_items", "items": items,
+                 "delta_num": d.numerator, "delta_den": d.denominator})
             if res:
-                # 選んだものも一緒に動かす(続けて動かせるように)。
-                self.set_selection({(k[0], k[1], k[2] + d) if k[0] == "cmd"
-                                    else (k[0], k[1] + d) for k in self._sel})
+                # 動かしたものは選んだまま付いていく(続けて動かせるように)。
+                self.set_selection({
+                    ((k[0], k[1], k[2] + d) if k[0] == "cmd" else (k[0], k[1] + d))
+                    if k in move_keys else k
+                    for k in self._sel})
         self.update()
 
     def _shift_addr(self, addr, delta):
@@ -1651,8 +1688,12 @@ class ChartEditWaveform(WaveformWidget):
                 # つかんで動かしている間は、枠も一緒に付いてくる。
                 dr = self._note_drag
                 if dr is not None and key in self._sel:
-                    dx = (self._drag_dx_for(key[1], t, snap=True) if orow == "gogo"
-                          else int(dr["dx"]))
+                    if orow == "gogo":
+                        dx = self._drag_dx_for(key[1], t, snap=True)
+                    elif self._drag_edge_name() is not None:
+                        dx = 0      # 端をつかんでいる間は帯の端だけが動く
+                    else:
+                        dx = int(dr["dx"])
                     x0 += dx
                     x1 += dx
                 if orow == "note":
@@ -1680,13 +1721,15 @@ class ChartEditWaveform(WaveformWidget):
         if dr is None or not self._sel:
             return
         dx = int(dr["dx"])
+        # 帯の端をつかんでいる間は、動くのは同じ側の端だけ(_drag_edge_name)。
+        move_keys = self._drag_keys()
         rows = self._row_rects()
         r, g, b = self.RANGE_COLOR
         cy = note_cy if note_cy is not None else top + strip // 2
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
         d = Fraction(int(steps), int(self._grid))
         for key, orow, t, half in self._objects():
-            if key not in self._sel:
+            if key not in move_keys:
                 continue
             x = self._sec_to_x(t) + dx
             if orow == "note":
@@ -2141,6 +2184,9 @@ class ChartEditWaveform(WaveformWidget):
         pos = self._pos_of_time(t)
         if pos is None or ("cmd", name, pos) not in self._sel:
             return 0
+        edge = self._drag_edge_name()
+        if edge is not None and name != edge:
+            return 0            # 端をつかんでいる間は、反対側の端は動かさない
         if not snap:
             return int(dr["dx"])
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
