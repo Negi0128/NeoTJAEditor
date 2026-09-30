@@ -4194,6 +4194,12 @@ class ChartPreviewWidget(QWidget):
         show_bar_nums = self._bar_numbers
         bar_num_x = -1e9
         col_num = self._color("fg_dim")
+        # ペンは変わったときだけ立てる。チェックポイントは数個しかないので、
+        # ほとんどの小節線は同じペンで引ける。1小節が 1px の譜面(幸福な死を:
+        # 1秒に781本)では1コマ 2000本を越えるので、setPen を毎回呼ぶかどうかで
+        # コマの値段が変わる。
+        painter.setPen(pen_bar)
+        pen_is_cp = False
         for i in range(lo_bar, hi_bar):
             if not bar_visible[i]:
                 continue
@@ -4208,7 +4214,9 @@ class ChartPreviewWidget(QWidget):
                     if abs(c - at) < snap:
                         is_cp = True
                         break
-            painter.setPen(pen_cp if is_cp else pen_bar)
+            if is_cp != pen_is_cp:
+                painter.setPen(pen_cp if is_cp else pen_bar)
+                pen_is_cp = is_cp
             painter.drawLine(int(x), band_top, int(x), band_bottom)
             # 小節番号。PeepoDrumKit のゲーム画面と同じで、線のすぐ右に出す
             # (あちらは DrawGamePreviewNumericText で BarIndex を描いている)。

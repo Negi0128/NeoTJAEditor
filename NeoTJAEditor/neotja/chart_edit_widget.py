@@ -514,14 +514,8 @@ class ChartEditWaveform(WaveformWidget):
             self._default_measure_len = sec
             self.update()
 
-    def set_notes(self, notes):
-        # 音符も帯に焼いてある(_static_strip)。
-        super().set_notes(notes)
-        self._bump_strip()
-
     def set_spans(self, rolls, balloons, kusudamas):
         super().set_spans(rolls, balloons, kusudamas)
-        self._bump_strip()
         self._spans_full = list(self._spans_raw or [])
         self._collapse_open_spans()
 
@@ -1288,6 +1282,7 @@ class ChartEditWaveform(WaveformWidget):
                 # それ以外は今までどおり窓の全画面解除へ。
                 if key == Qt.Key_Escape and (self._sel or self.has_range()
                                              or self._long is not None
+                                             or self._offset_drag is not None
                                              or self._range_start is not None):
                     e.accept()
                     return True
@@ -1296,7 +1291,8 @@ class ChartEditWaveform(WaveformWidget):
                     return True
         # Tab は keyPressEvent に届く前にフォーカス移動で消費されるので、
         # ここで横取りする(PeepoDrumKit と同じく範囲選択に使う)。
-        if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab:
+        if (e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab
+                and not self.offset_mode):
             if not e.isAutoRepeat():
                 self.toggle_range_at_cursor()
             e.accept()
@@ -1372,6 +1368,15 @@ class ChartEditWaveform(WaveformWidget):
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()
+
+        # OFFSET調整のあいだは譜面を書かない。この行が無いと、← → は
+        # 「OFFSET を 1ms ずつ動かす」ではなく編集カーソルの移動になり、
+        # F/J や数字はそのまま音符を置いてしまう。合わせている最中に譜面が
+        # 書き換わるので、作譜モードでは OFFSET を合わせられなかった。
+        # 親(WaveformWidget)が Esc・← →・スペース・0 を受け持つ。
+        if self.offset_mode:
+            super().keyPressEvent(event)
+            return
 
         if key == Qt.Key_Escape and not self.offset_mode and (
                 self._sel or self._range_start is not None):
@@ -1519,12 +1524,9 @@ class ChartEditWaveform(WaveformWidget):
     #: (利用者の指定 2026-09-25: 色が増えると認識しにくい)。
     ROW_CONTENT_COLOR = "#c8c8c8"
 
-    #: 帯へ焼いている最中か(_static_strip)。焼くあいだは膨らませない。
-    _baking = False
-
     def _note_scale(self, t):
         """再生中、再生位置が通り過ぎた直後の音符を少しだけ大きく描く。"""
-        if not self._playing or self._baking:
+        if not self._playing:
             return 1.0
         d = self.position_sec - t
         if 0.0 <= d < self.HIT_POP_SEC:
@@ -1815,7 +1817,12 @@ class ChartEditWaveform(WaveformWidget):
         pal = self._pal
         return (self.width(), self.height(), self.LANE_X0,
                 self.devicePixelRatioF(), round(self._visible_span(), 6),
-                self._grid, self._cur_measure, self._playing, self._strip_rev,
+                # 「いま編集している小節」「再生中か」はここに入れない。それで
+                # 変わるのは編集グリッドと音符だけで、どちらも帯から外して
+                # 貼ったあとに直に描いている(_paint_static を参照)。入れて
+                # いたころは、1秒に781小節ある譜面(幸福な死を)で毎コマ
+                # 焼き直しになり、1コマ 340ms(3fps)まで落ちていた。
+                self._grid, self._strip_rev,
                 self._show_legend, pal.get("bg"), pal.get("bg2"),
                 pal.get("border"), pal.get("fg"),
                 # 波形そのものが差し替わったとき(曲を開き直した等)も焼き直す。
@@ -1865,7 +1872,12 @@ class ChartEditWaveform(WaveformWidget):
         """時間の関数でしかない絵。帯へ焼くときも、直に描くときも同じ道。
 
         w は描き先の幅(帯のときは画面より広い)。呼ぶ側が self.view_start を
-        t0 に合わせておくこと。"""
+        t0 に合わせておくこと。
+
+        **編集グリッドと音符はここで描かない。** どちらも「いま編集している
+        小節」「再生位置」で変わるので、帯に焼くと小節が変わるたびに焼き直しに
+        なる(1秒に781小節ある譜面では毎コマ焼き直しで 340ms 払っていた)。
+        帯を貼ったあとに直に引く(_paint_rows_inner)。"""
         pal = self._pal
         rows = self._row_rects()
         note_top, note_h = rows["note"]
@@ -1887,16 +1899,6 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(xs, note_top, max(1, xe - xs), note_h,
                        QColor(255, 120, 120, 18))
         self._draw_measure_lines(p, note_top, note_h, t0, t1)
-        self._draw_edit_grid(p, note_top, note_h - wave_h, t0, t1)
-        # 音符も焼く。**叩いた瞬間の膨らみだけは焼かない**(再生位置との
-        # 差で決まるので、帯に焼くと置き去りになる)。膨らむのは再生位置の
-        # 直後 HIT_POP_SEC ぶんの数個だけなので、そこは毎コマ上から描く。
-        self._baking = True
-        try:
-            note_cy = note_top + (note_h - wave_h) // 2
-            self._draw_notes(p, lane_w, t0, t1, note_cy)
-        finally:
-            self._baking = False
         # 命令の行(BPM・拍子・スクロール)も時間の関数。右端は帯の幅で見る。
         rows = self._row_rects()
         for kind in ("bpm", "measure", "hs"):
@@ -1944,12 +1946,11 @@ class ChartEditWaveform(WaveformWidget):
             self._x_shift = strip_off
             t0 = base + strip_off / self._xs_val
             t1 = t0 + self._visible_span()
-        if self._playing:
-            # 叩いた瞬間だけ膨らむ音符(帯には等倍で焼いてある)。膨らんだ絵の
-            # ほうが大きいので、上から描けばそのまま隠れる。
-            self._draw_notes(p, self._lane_w(),
-                             max(0.0, self.position_sec - self.HIT_POP_SEC),
-                             self.position_sec, note_cy)
+        # 編集グリッドと音符は帯に焼かず、毎コマここで引く(_paint_static の
+        # 説明を参照)。重なりの順番は帯に焼いていたころと同じ
+        # 「小節線 → グリッド → 音符」。
+        self._draw_edit_grid(p, note_top, upper_h, t0, t1)
+        self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
         self._draw_long_preview(p, note_top, upper_h)
         self._draw_pending(p, note_top, upper_h)
         # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
@@ -1990,6 +1991,22 @@ class ChartEditWaveform(WaveformWidget):
             p.drawPixmap(-strip_off, 0, self._strip_pm)
             p.setClipping(False)
         self._draw_row_labels(p, rows)
+        self._draw_offset_mode(p, w, h)
+
+    def _draw_offset_mode(self, p, w, h):
+        """OFFSET調整中の見た目。音声波形ペインと同じ「強調色の枠 + 読み値」。
+
+        作譜ペインは親の paintEvent を使わず自分で並べ直しているので、この
+        2つが抜け落ちていた。合わせている最中に何も変わらないように見えて、
+        作譜モードでは OFFSET を合わせられない、という状態になっていた。"""
+        if not self.offset_mode:
+            return
+        p.setPen(self._pen("accent2", 2))
+        p.drawRect(1, 1, w - 2, h - 2)
+        if self._readout:
+            p.setPen(QColor(self._pal["bg"]))
+            p.fillRect(6, h - 24, 240, 18, QColor(self._pal["accent2"]))
+            p.drawText(10, h - 10, self._readout)
 
     def _draw_row_labels(self, p, rows):
         """左の列に行の名前を並べる。
@@ -2105,36 +2122,72 @@ class ChartEditWaveform(WaveformWidget):
         t = max(0.0, float(t))
         return "%02d:%06.3f" % (int(t // 60), t % 60)
 
+    #: 定規の目盛りどうしの間隔の下限(px)。譜面帯の小節線と同じ 3px。
+    RULER_MIN_GAP = 3.0
+    #: 小節番号を出すのに要る幅(px)。これより狭いと、番号は1画素ぶんの
+    #: 切れ端しか出ず(clipRect で切るので)読めないうえ、その切れ端のために
+    #: 小節ごとに drawText を1回払うことになる。
+    RULER_NUM_MIN_ROOM = 10
+
     def _draw_ruler(self, p, t0, t1):
-        """上の帯に小節番号と時刻を出す。"""
+        """上の帯に小節番号と時刻を出す。
+
+        小節が詰まっているところは、譜面帯の小節線と同じく間引く
+        (_draw_measure_lines を参照。落とす目盛りは bisect で跳ばす)。
+        番号も、読める幅が無いときは出さない。"""
         pal = self._pal
         p.fillRect(0, 0, self.width(), self.RULER_H, QColor(pal["bg2"]))
         f = self.font()
         f.setPixelSize(11)
         p.setFont(f)
-        for m in range(*self._measure_range(t0, t1)):
+        lo, hi = self._measure_range(t0, t1)
+        self._sec_to_x(t0)                 # 1秒あたりの px を最新にする
+        dt = (self.RULER_MIN_GAP / self._xs_val) if self._xs_val > 0 else 0.0
+        bars = self._bar_times
+        known = self._known_measures()
+        pen_line = QPen(QColor(pal["border"]))
+        col_fg = QColor(pal["fg"])
+        col_dim = QColor(pal["fg_dim"])
+        last_x = None
+        m = lo
+        while m < hi:
             t = self._bar_time(m)
-            if t is None or t < t0 or t > t1:
+            if t is None or t > t1:
+                break
+            if t < t0:
+                m += 1
                 continue
             x = self._sec_to_x(t)
-            nxt = self._bar_time(m + 1)
-            room = (self._sec_to_x(nxt) - x) if nxt is not None else 999
-            p.setPen(QPen(QColor(pal["border"])))
-            p.drawLine(x, 0, x, self.RULER_H)
-            # 小節番号は必ず、時刻は入るときだけ(小節が詰まっているところで
-            # 数字が重なって読めなくなるのを防ぐ)。
-            p.setPen(QColor(pal["fg"]))
-            p.setClipRect(x + 2, 0, max(1, room - 3), self.RULER_H)
-            p.drawText(x + 4, 0, 60, 12, Qt.AlignVCenter | Qt.AlignLeft, str(m + 1))
-            if room >= 64:
-                p.setPen(QColor(pal["fg_dim"]))
-                f.setPixelSize(9)
-                p.setFont(f)
-                p.drawText(x + 4, 10, 70, 11, Qt.AlignVCenter | Qt.AlignLeft,
-                           self._time_text(t))
-                f.setPixelSize(11)
-                p.setFont(f)
-            p.setClipping(False)
+            if last_x is None or (x - last_x) >= self.RULER_MIN_GAP:
+                nxt = self._bar_time(m + 1)
+                room = (self._sec_to_x(nxt) - x) if nxt is not None else 999
+                p.setPen(pen_line)
+                p.drawLine(x, 0, x, self.RULER_H)
+                # 小節番号は入るときだけ、時刻はもっと空いているときだけ
+                # (小節が詰まっているところで数字が重なって読めなくなるのを
+                # 防ぐ)。
+                if room >= self.RULER_NUM_MIN_ROOM:
+                    p.setPen(col_fg)
+                    p.setClipRect(x + 2, 0, max(1, room - 3), self.RULER_H)
+                    p.drawText(x + 4, 0, 60, 12,
+                               Qt.AlignVCenter | Qt.AlignLeft, str(m + 1))
+                    if room >= 64:
+                        p.setPen(col_dim)
+                        f.setPixelSize(9)
+                        p.setFont(f)
+                        p.drawText(x + 4, 10, 70, 11,
+                                   Qt.AlignVCenter | Qt.AlignLeft,
+                                   self._time_text(t))
+                        f.setPixelSize(11)
+                        p.setFont(f)
+                    p.setClipping(False)
+                last_x = x
+                if dt > 0.0 and m + 1 < known:
+                    nm = bisect.bisect_left(bars, t + dt, m + 1, known)
+                    if nm > m:
+                        m = nm
+                        continue
+            m += 1
 
     def _draw_cmd_row(self, p, kind, y, rh, t0, t1, right=None):
         """BPM / 拍子 / スクロールの行。その種類の命令だけを時間順に並べる。
@@ -2153,6 +2206,13 @@ class ChartEditWaveform(WaveformWidget):
         if right is None:
             right = self.width()
         lo = max(0, bisect.bisect_left(times, t0) - 1)
+        # ペンは1本だけ作って使い回す。命令が 1px 間隔で並ぶ譜面(幸福な死を:
+        # #SCROLL が 14395 行)では、ここで QPen を作り直すのが行の値段の大半
+        # だった(1本あたり約 5μs × 数千本)。色は札の文字と同じなので、
+        # 外で1回立てればそのまま両方に効く。
+        pen = QPen(col, 1)
+        p.setPen(pen)
+        last_x = None
         for i in range(lo, len(items)):
             t, txt = items[i]
             if t > t1:
@@ -2164,7 +2224,11 @@ class ChartEditWaveform(WaveformWidget):
             xr = self._sec_to_x(nxt) if nxt is not None else x + 200
             if xr <= x + 2:
                 xr = x + 2
-            p.setPen(QPen(col, 1))
+            # 同じ画素に重なる線は1本でよい(間引きではない — 2本目を引いても
+            # 1画素も変わらないので、そのぶんだけ省いている)。
+            if x == last_x and xr - x <= 5:
+                continue
+            last_x = x
             p.drawLine(x, y + 1, x, y + rh - 1)
             if xr - x > 5:
                 p.setClipRect(x + 2, y, max(1, xr - x - 3), rh)
@@ -2244,6 +2308,36 @@ class ChartEditWaveform(WaveformWidget):
             return (BEAT_COLOR, BEAT_FRAC)
         return (GRID_COLORS.get(self._grid, GRID_COLORS[64]), SUB_FRAC)
 
+    def _grid_measures(self):
+        """グリッドの目盛りを引く小節の番号。
+
+        「いま編集している小節」と「次の小節」だけに引く(利用者の指定)。
+        画面いっぱいに引くと、どこを編集しているのかがかえって読みにくい。
+        再生中は1つ前の小節にも引く(利用者の指定 2026-09-25)。流れていく
+        譜面の後ろ側が無地だと、いまどの位置を通ったのかが読めない。"""
+        m = self._cur_measure
+        if self._playing:
+            return (m - 1, m, m + 1, m + 2)
+        return (m, m + 1, m + 2)
+
+    _grid_pen_cache = None
+
+    def _grid_pens(self):
+        """グリッドの線のペン。{拍かどうか: (ペン, 長さの割合)}。
+
+        分割ごとに2本しか要らないので、分割が変わるまで使い回す。"""
+        got = self._grid_pen_cache
+        if got is not None and got[0] == self._grid:
+            return got[1]
+        pens = {}
+        for beat in (False, True):
+            (r, g, b), frac = (self._slot_style(0) if beat
+                               else (GRID_COLORS.get(self._grid,
+                                                     GRID_COLORS[64]), SUB_FRAC))
+            pens[beat] = (QPen(QColor(r, g, b, 110), 1), frac)
+        self._grid_pen_cache = (self._grid, pens)
+        return pens
+
     def _draw_edit_grid(self, p, top, strip, t0=None, t1=None):
         """小節をグリッド分割で割る線。小節線そのものは親が描く。
 
@@ -2263,17 +2357,14 @@ class ChartEditWaveform(WaveformWidget):
         # (どこまでが既存の譜面かが分かるように色と線種を変える)。
         pen_virtual = QPen(QColor(255, 210, 60, 110), 1, Qt.DashLine)
         bottom = top + strip
-        # グリッドの目盛りは「いま編集している小節」と「次の小節」だけに引く
-        # (利用者の指定)。画面いっぱいに引くと、どこを編集しているのかが
-        # かえって読みにくい。末尾より先の小節線(破線)は範囲外でも引く。
-        # 再生中は1つ前の小節にも引く(利用者の指定 2026-09-25)。流れていく
-        # 譜面の後ろ側が無地だと、いまどの位置を通ったのかが読めない。
-        grid_measures = ((self._cur_measure - 1, self._cur_measure,
-                          self._cur_measure + 1, self._cur_measure + 2)
-                         if self._playing
-                         else (self._cur_measure, self._cur_measure + 1,
-                               self._cur_measure + 2))
-        for m in range(*self._measure_range(t0, t1)):
+        grid_measures = self._grid_measures()
+        # 見るのは「目盛りを引く数小節」と「末尾より先の小節」だけ。範囲の
+        # 小節を1つずつ見に行くと、1小節が 1px しかない譜面(幸福な死を:
+        # 1秒に781小節)では毎回数千回まわることになるが、実際に線を引くのは
+        # せいぜい数小節ぶんなので、初めからその番号だけを見る。
+        lo, hi = self._measure_range(t0, t1)
+        for m in sorted({m for m in grid_measures if lo <= m < hi}
+                        | set(range(max(known, lo), hi))):
             m_start = self._bar_time(m)
             m_end = self._bar_time(m + 1)
             if m_start is None or m_end is None or m_end < t0 or m_start > t1:
@@ -2292,12 +2383,16 @@ class ChartEditWaveform(WaveformWidget):
             # 画面より広いので、幅から割り出すと細かさを読み違える)。
             if span / self._grid * self._xs_val < 4:
                 continue
+            # ペンは「拍の線」と「その間の線」の2本だけ。分割が 64 だと
+            # 1小節で 63 回、3小節で 189 回まわるので、ここで QPen/QColor を
+            # 作り直すと 1コマ 1ms 前後になる(実測)。
+            pens = self._grid_pens()
             for k in range(1, self._grid):
                 t = m_start + span * (k / self._grid)
                 if t < t0 or t > t1:
                     continue
-                (r, g, b), frac = self._slot_style(k)
-                p.setPen(QPen(QColor(r, g, b, 110), 1))
+                pen, frac = pens[bool(self._grid > 0 and (k * 4) % self._grid == 0)]
+                p.setPen(pen)
                 x = self._sec_to_x(t)
                 p.drawLine(x, bottom - int(strip * frac), x, bottom)
 

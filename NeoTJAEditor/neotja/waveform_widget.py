@@ -977,13 +977,27 @@ class WaveformWidget(QWidget):
         # ラインで同じことをしている(最低 128px の間隔を保つよう間引く)。
         # こちらは音符を置く画面なので間隔はもっと詰めてよく、MEASURE_MIN_GAP
         # まで近づいたぶんだけ落とす。線を引く回数も減るので軽くもなる。
+        #
+        # 間引くと決めた線は **見ずに跳ばす**。1小節が1px しかない譜面
+        # (幸福な死を: 1秒に781本)では、画面に入っているだけで数千本あり、
+        # 「近すぎるから引かない」と1本ずつ判断するだけで数 ms 溶ける。
+        # 次に引ける時刻は「いまの時刻 + 下限px ÷ 1秒あたりのpx」なので、
+        # そこへ bisect で跳べる。落とす線を1本も見ないので、値段は
+        # 「実際に引いた本数」だけで決まる(引く線の集合は跳ばす前と同じ)。
+        self._sec_to_x(t0)                 # 1秒あたりの px を最新にする
+        dt = (self.MEASURE_MIN_GAP / self._xs_val) if self._xs_val > 0 else 0.0
         last_x = None
-        for i in range(lo, hi):
-            x = self._sec_to_x(mt[i])
-            if last_x is not None and (x - last_x) < self.MEASURE_MIN_GAP:
-                continue
-            painter.drawLine(x, y0, x, y0 + height)
-            last_x = x
+        i = lo
+        while i < hi:
+            t = mt[i]
+            x = self._sec_to_x(t)
+            if last_x is None or (x - last_x) >= self.MEASURE_MIN_GAP:
+                painter.drawLine(x, y0, x, y0 + height)
+                last_x = x
+                if dt > 0.0:
+                    i = bisect.bisect_left(mt, t + dt, i + 1, hi)
+                    continue
+            i += 1
 
     # 命令ラベル用の使い回し。作譜モードは120fpsで描き直すので、ここで作る物を
     # 毎フレーム作り直すと命令の多い譜面では効いてくる(QFont は毎 paintEvent、
