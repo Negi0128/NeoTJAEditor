@@ -19,6 +19,7 @@ from neotja import measure_edit
 from neotja import note_edit
 from neotja import settings as settings_mod
 from neotja.analysis_worker import AnalysisWorker
+from neotja.child_env import child_env
 from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
 from neotja.find_replace import FindReplaceBar
 from neotja.editor_widget import TJAEditor
@@ -1705,10 +1706,14 @@ class MainWindow(QMainWindow):
         return ok
 
     def open_new_window(self):
+        # env=child_env() が要る。**同じパスの exe** を起動するので、渡さないと
+        # 2つ目の窓が1つ目の展開先に相乗りし、1つ目を閉じた時点で足元が消える
+        # (neotja/child_env.py)。
         if getattr(sys, "frozen", False):
-            subprocess.Popen([sys.executable])
+            subprocess.Popen([sys.executable], env=child_env())
         else:
-            subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
+            subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])],
+                             env=child_env())
 
     # ------------------------------------------------------------------
     # ドラッグ&ドロップで開く
@@ -1864,7 +1869,7 @@ class MainWindow(QMainWindow):
         if at > 0.5:
             args += ["--at", "%.3f" % at]
         try:
-            subprocess.Popen(args)
+            subprocess.Popen(args, env=child_env())
         except OSError as exc:
             QMessageBox.warning(self, "NeoTJAPlayer",
                                 "起動できませんでした:\n%s" % exc)
@@ -1971,7 +1976,7 @@ class MainWindow(QMainWindow):
     def run_simulator(self, key):
         path = self.config_data["run_config"][key]["path"]
         if path and os.path.exists(path):
-            subprocess.Popen([path])
+            subprocess.Popen([path], env=child_env())
         else:
             QMessageBox.warning(
                 self, "警告",

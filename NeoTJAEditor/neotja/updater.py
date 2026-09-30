@@ -10,6 +10,7 @@ import urllib.request
 
 from PySide6.QtCore import QThread, Signal
 
+from neotja.child_env import child_env
 from neotja.constants import VERSION
 
 RELEASES_API_URL = "https://api.github.com/repos/Negi0128/NeoTJAEditor/releases/latest"
@@ -532,4 +533,9 @@ def apply_update(new_exe_path: str, new_player_path: str = ""):
     )
     with open(bat_path, "w", encoding="cp932") as f:
         f.write(bat_contents)
-    subprocess.Popen(["cmd", "/c", bat_path], creationflags=subprocess.CREATE_NO_WINDOW)
+    # 環境から PyInstaller のブートローダ変数を落として渡す。落とさずに渡すと、
+    # この bat が起動し直す **同じパスの** exe が「自分は展開済みの2段目だ」と
+    # 思い込み、更新前のプロセスが消したあとの展開先を見に行って
+    # "Security validation failure" だけを出して止まる(neotja/child_env.py)。
+    subprocess.Popen(["cmd", "/c", bat_path], env=child_env(),
+                     creationflags=subprocess.CREATE_NO_WINDOW)
