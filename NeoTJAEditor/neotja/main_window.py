@@ -67,6 +67,7 @@ class CourseCard(QFrame):
     def __init__(self, course, parent=None):
         super().__init__(parent)
         self.details_visible = False
+        self._label = course["label"]
 
         self.setFrameShape(QFrame.Box)
         self.setStyleSheet(f"CourseCard {{ border: 1px solid {course['color']}; }}")
@@ -75,10 +76,22 @@ class CourseCard(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        header = QLabel(f"  {course['label']}")
-        header.setStyleSheet(f"background-color: {course['color']}; color: {COLORS['bg']}; font-weight: bold; padding: 3px 0;")
+        # 見出しは押すと中身を畳む。コースが何枚も並ぶと縦に長くなるので、
+        # 見ないコースは畳んでおけるようにする(利用者の指定 2026-10-01)。
+        # 既定は開いたまま — 畳んだ状態を既定にすると、何も出ていない帯だけが
+        # 並んでいるように見える。
+        header = QPushButton(f"  {course['label']}")
+        header.setFlat(True)
+        header.setCursor(Qt.PointingHandCursor)
+        header.setFocusPolicy(Qt.NoFocus)
+        header.setStyleSheet(
+            f"text-align: left; border: none;"
+            f" background-color: {course['color']}; color: {COLORS['bg']};"
+            f" font-weight: bold; padding: 3px 0;")
+        header.clicked.connect(self.toggle_body)
         outer.addWidget(header)
         self.header = header
+        self.body_visible = True
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -107,7 +120,21 @@ class CourseCard(QFrame):
         self.lbl_balloon = QLabel()
         body_layout.addWidget(self.lbl_balloon)
 
+        self.body = body
+        self._refresh_header()
         self.update_course(course)
+
+    def toggle_body(self, on=None):
+        """カードの中身を開閉する。on を渡せばその状態にする。"""
+        self.body_visible = (not self.body_visible) if on is None else bool(on)
+        self.body.setVisible(self.body_visible)
+        self._refresh_header()
+
+    def _refresh_header(self):
+        # 畳んでいるときだけ三角を向きで示す(開いているときは何も足さない —
+        # 今までの見た目をできるだけ変えないため)。
+        mark = "" if self.body_visible else "  ▸"
+        self.header.setText("  %s%s" % (self._label, mark))
 
     def _toggle_details(self):
         self.details_visible = not self.details_visible
@@ -428,6 +455,10 @@ class MainWindow(QMainWindow):
             checkpoint_lines_cb=self._set_checkpoint_lines,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
+        # 作譜ペインの右クリックから、ツールバーと同じ道具を呼べるようにする。
+        _ce = getattr(self.preview_dock, "chart_edit", None)
+        if _ce is not None:
+            _ce.set_tool_cb(self.run_chart_tool)
         # マスターが先。曲/SE はマスターに対する「比率」なので、マスターを
         # 決めてから比率を入れたほうが途中の一瞬だけ音量が飛ぶことがない。
         self.preview_dock.set_master_volume(self.config_data.get("master_volume", 1.0))
@@ -2170,6 +2201,103 @@ class MainWindow(QMainWindow):
             self._force_update()
         return res
 
+    # ------------------------------------------------------------------
+    # 作譜ペインの右クリックから、エディタの道具を呼ぶ
+    # ------------------------------------------------------------------
+    #: 鍵 → 実際に呼ぶもの。道具そのものは今までどおりエディタの選択を見る。
+    _CHART_TOOL_FUNCS = ("highspeed", "resize", "reverse", "strobe")
+
+    def run_chart_tool(self, name):
+        """作譜ペインの範囲(無ければカーソルの小節)をエディタの選択へ移してから、
+        ツールバーと同じ道具を呼ぶ。
+
+        道具の中身は1行も変えていない — ハイスピ変換もリサイズも反転も、
+        もともと「エディタで選んだ範囲」に働くので、選び直すだけで作譜モード
+        からも使える。ストロボ生成はカーソルの位置に作るので、選ばずに
+        カーソルだけ動かす。"""
+        funcs = {"highspeed": self.open_scroll_splitter,
+                 "resize": self.open_measure_converter,
+                 "reverse": self.reverse_don_ka,
+                 "strobe": self.open_strobe_tool}
+        fn = funcs.get(name)
+        if fn is None:
+            return
+        got = self._select_pane_measures(whole=(name != "strobe"))
+        if got is None:
+            return
+        if name == "highspeed":
+            # ハイスピ変換だけは「選んだ音符だけ」にかける(利用者の指定
+            # 2026-10-01)。小節まるごとの本文を渡したうえで、その中のどこから
+            # どこまでが対象かを割合で添える。
+            fn(span=self._pane_span(got))
+        else:
+            fn()
+
+    def _pane_span(self, measures):
+        """作譜ペインの範囲 → ハイスピ変換へ渡す ((小節, 割合), (小節, 割合))。
+
+        小節の番号は**渡した本文の中での** 0 始まり。割合にしているのは、
+        画面のグリッドと小節の分割数が違っても同じ所を指せるようにするため。"""
+        ce = getattr(self.preview_dock, "chart_edit", None)
+        addrs = ce._range_addresses() if ce is not None else None
+        if ce is None or addrs is None:
+            return None
+        m0 = measures[0]
+        (a_m, a_s), (b_m, b_s) = addrs
+        if (b_m, b_s) < (a_m, a_s):
+            (a_m, a_s), (b_m, b_s) = (b_m, b_s), (a_m, a_s)
+        ga = max(1, ce._measure_grid(a_m))
+        gb = max(1, ce._measure_grid(b_m))
+        return ((a_m - m0, a_s / ga), (b_m - m0, b_s / gb))
+
+    def _select_pane_measures(self, whole=True):
+        """作譜ペインの範囲 → エディタの選択。選んだ小節の (最初, 最後) を返す。
+        できなければ None。
+
+        選ぶのは**小節まるごと**。ハイスピ変換もリサイズも「小節の切れ目で
+        区切られた本文」を受け取る作りなので、小節の途中で切ると読めない。"""
+        ce = getattr(self.preview_dock, "chart_edit", None)
+        if ce is None:
+            return None
+        text = self.editor.toPlainText()
+        course_key = (self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = self.analyzer.course_line_range(text, course_key) if course_key else None
+        if rng is None:
+            self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
+            return None
+        addrs = ce._range_addresses()
+        if addrs is not None:
+            m0, m1 = int(addrs[0][0]), int(addrs[1][0])
+        else:
+            m0 = m1 = int(ce._cursor_addr()[0])
+        if m1 < m0:
+            m0, m1 = m1, m0
+        with note_edit.editing_branch(self._preview_branch_level,
+                                      self._preview_branch_path):
+            body = note_edit.course_body_span(text, rng)
+            spans = note_edit.measure_spans(text, body)
+        if not spans:
+            self.statusBar().showMessage("作譜: 小節が見つかりません", 4000)
+            return None
+        m0 = max(0, min(m0, len(spans) - 1))
+        m1 = max(0, min(m1, len(spans) - 1))
+        start = spans[m0][0]
+        tc = self.editor.textCursor()
+        if whole:
+            end = spans[m1][1]
+            # 末尾の改行は選ばない。道具のほうが書き戻すときに改行を足すので、
+            # 一緒に選ぶと空行が1つずつ増えていく。
+            while end > start and text[end - 1] in ("\n", "\r"):
+                end -= 1
+            tc.setPosition(start)
+            tc.setPosition(end, QTextCursor.KeepAnchor)
+        else:
+            tc.setPosition(start)
+        self.editor.setTextCursor(tc)
+        self.editor.ensureCursorVisible()
+        return (m0, m1)
+
     def _course_key_at_cursor(self, text):
         """カーソル行が属するコース。プレビューが見ているコースと同じ規則。"""
         hit = self._cursor_index.get(self.editor.textCursor().blockNumber() + 1)
@@ -2576,7 +2704,11 @@ class MainWindow(QMainWindow):
         if dlg is not None:
             dlg.deleteLater()
 
-    def open_scroll_splitter(self):
+    def open_scroll_splitter(self, span=None):
+        # ツールバーのボタンとメニューからは clicked(bool) / triggered(bool) が
+        # 第1引数に来る。範囲の指定と取り違えないよう、形で弾く。
+        if not isinstance(span, (tuple, list)):
+            span = None
         cursor, txt = self._get_selection()
         if txt is None:
             return
@@ -2589,7 +2721,7 @@ class MainWindow(QMainWindow):
             self.editor.mark_edited(start, cursor.position())
             self.setWindowModified(True)
             self._force_update()
-        HighSpeedDialog(self, txt, apply).exec()
+        HighSpeedDialog(self, txt, apply, span=span).exec()
 
     def open_measure_converter(self):
         cursor, txt = self._get_selection()

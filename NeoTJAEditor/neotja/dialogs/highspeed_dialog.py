@@ -10,9 +10,18 @@ CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease
 
 
 class HighSpeedDialog(QDialog):
-    def __init__(self, main_window, initial_text, apply_cb, parent=None):
+    def __init__(self, main_window, initial_text, apply_cb, parent=None,
+                 span=None):
+        """span を渡すと、その範囲に入っている音符だけに #SCROLL を入れる。
+
+        形は ((小節の番号, 小節内の割合), (小節の番号, 割合))。小節の番号は
+        **渡した本文の中での** 0 始まり、割合は 0.0〜1.0。作譜ペインで選んだ
+        音符をそのまま渡せるよう、文字数ではなく割合で受ける(小節の分割数と
+        画面のグリッドが違っても、同じ所を指せる)。
+        """
         super().__init__(parent or main_window)
         self.apply_cb = apply_cb
+        self._span = span
         self.setWindowTitle("ハイスピ変換")
         self.resize(580, 780)
 
@@ -40,6 +49,14 @@ class HighSpeedDialog(QDialog):
         self.sp_prec.setRange(1, 5)
         self.sp_prec.setValue(2)
         form.addRow("小数点以下", self.sp_prec)
+
+        # 終わりの値(例 2.00)をどこに置くか。既定は今までどおり最後の音符に
+        # 付ける。「後ろに置く」にすると、最後の音符は1つ前の値のままで、
+        # 終わりの値はその音符の**次**から効く — 目当ての音符と #SCROLL が
+        # 同じ位置に重ならない(利用者の指定 2026-10-01)。
+        self.cb_tail = QComboBox()
+        self.cb_tail.addItems(["最後の音符に付ける", "最後の音符の後ろに置く"])
+        form.addRow("終わりの値", self.cb_tail)
 
         self.row_interval = QWidget()
         interval_layout = QFormLayout(self.row_interval)
@@ -72,6 +89,7 @@ class HighSpeedDialog(QDialog):
             (self.cb_curve, self.cb_curve.currentTextChanged),
             (self.sp_prec, self.sp_prec.valueChanged),
             (self.ed_interval, self.ed_interval.textChanged),
+            (self.cb_tail, self.cb_tail.currentTextChanged),
         ):
             sig.connect(self._preview)
 
@@ -103,46 +121,90 @@ class HighSpeedDialog(QDialog):
         if not any(m["type"] == "measure" and m["notes"] for m in parsed):
             return
 
-        if "特定間隔" in mode:
-            try:
-                interval = int(self.ed_interval.text())
-            except ValueError:
-                return
-            try:
-                self.txt_after.setPlainText(
-                    self._render_interval(parsed, interval, s, e, curve, p))
-            except Exception as ex:  # noqa: BLE001
-                self.txt_after.setPlainText(f"エラー: {str(ex)}")
+        try:
+            marks = self._marks_for(parsed, mode)
+        except ValueError as ex:
+            self.txt_after.setPlainText(f"エラー: {str(ex)}")
             return
-
-        if "なめらか" in mode:
-            def want(_ch):
-                return True
-        else:   # ノーツ毎
-            def want(ch):
-                return ch in self._ACTIVE
-
-        # 数字が1つも無い小節(「,」だけの行)も1スロットぶんとして数える。
-        # 文字が無いと下の _render で #SCROLL を挿す場所が無く、その小節が
-        # 丸ごと飛ばされていた("0," と書かないと効かない、という症状)。
-        # 仮想の1文字を "0" と見なすので、「なめらか」では効き、「ノーツ毎」
-        # では(0 は音符ではないので)従来どおり効かない。
-        total = sum(1 for m in parsed if m["type"] == "measure"
-                    for ch in (m["notes"] or "0") if want(ch))
-        if total == 0:
+        if not marks:
             self.txt_after.setPlainText(raw)
             return
+        total = len(marks)
 
         def scroll_at(i):
             t = i / (total - 1) if total > 1 else 0.0
             return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
 
-        self.txt_after.setPlainText("\n".join(self._render(parsed, want, scroll_at)))
+        tail_after = "後ろ" in self.cb_tail.currentText()
+        self.txt_after.setPlainText(
+            "\n".join(self._render_marks(parsed, marks, scroll_at, tail_after)))
+
+    def _in_span(self, mi, i, length):
+        """(小節の番号, 小節内の何文字目) が span の中か。span が無ければ常に真。"""
+        sp = self._span
+        if not sp:
+            return True
+        (m0, f0), (m1, f1) = sp
+        pos = (mi, (i / length) if length else 0.0)
+        eps = 1e-9
+        if pos[0] < m0 or (pos[0] == m0 and pos[1] < f0 - eps):
+            return False
+        if pos[0] > m1 or (pos[0] == m1 and pos[1] > f1 + eps):
+            return False
+        return True
+
+    def _marks_for(self, parsed, mode):
+        """#SCROLL を入れる所 [(小節の番号, 小節内の何文字目)] を順に。
+
+        3つのモードの違いはここだけ。描き出しは _render_marks に一本化した。
+        """
+        marks = []
+        mi = -1
+        if "特定間隔" in mode:
+            try:
+                interval = int(self.ed_interval.text())
+            except ValueError:
+                raise ValueError("分割間隔は数字で指定してください。")
+            if interval <= 0:
+                raise ValueError("分割間隔は1以上を指定してください。")
+            if not any(m["type"] == "measure" and m["has_comma"] for m in parsed):
+                raise ValueError(
+                    "小節の終端（カンマ）が含まれていません。1小節以上を選択してください。")
+        for item in parsed:
+            if item["type"] != "measure":
+                continue
+            mi += 1
+            notes = item["notes"]
+            if not notes:
+                # 数字が1つも無い小節(「,」だけの行)も1スロットぶんとして
+                # 数える。文字が無いと挿す場所が無く、その小節が丸ごと
+                # 飛ばされていた("0," と書かないと効かない、という症状)。
+                # 「ノーツ毎」では 0 は音符ではないので従来どおり効かない。
+                if "なめらか" in mode and self._in_span(mi, 0, 1):
+                    marks.append((mi, 0))
+                continue
+            if "特定間隔" in mode:
+                size = max(1, len(notes) // interval)
+                idxs = range(0, len(notes), size)
+            elif "なめらか" in mode:
+                idxs = range(len(notes))
+            else:                                  # ノーツ毎
+                idxs = [i for i, ch in enumerate(notes) if ch in self._ACTIVE]
+            for i in idxs:
+                if self._in_span(mi, i, len(notes)):
+                    marks.append((mi, i))
+        return marks
 
     @staticmethod
-    def _render(parsed, want, scroll_at):
-        """want(ch) が真のスロットの直前に #SCROLL を入れて組み立てる。
-        小節の途中にあった命令行は元の位置のまま残す。"""
+    def _render_marks(parsed, marks, scroll_at, tail_after=False):
+        """marks の所へ #SCROLL を入れて組み立て直す。
+
+        tail_after のときは、**最後の1本だけ**その音符の後ろへ回す。目当ての
+        音符と #SCROLL が同じ位置に重なるのを避けるため(値そのものは変えない
+        ので、手前の音符の速さは「付ける」ときと同じ)。
+        """
+        order = {pos: k for k, pos in enumerate(marks)}
+        last = marks[-1] if marks else None
         out = []
         buf = ""
 
@@ -165,35 +227,36 @@ class HighSpeedDialog(QDialog):
                     return
             out.append(tail)
 
-        ni = 0
+        mi = -1
         for item in parsed:
             if item["type"] == "keep":
                 flush()
                 out.append(item["text"])
                 continue
+            mi += 1
             breaks = {}
             for idx, line in item["breaks"]:
                 breaks.setdefault(idx, []).append(line)
             notes = item["notes"]
-            # 数字ゼロの小節は「仮想の1スロット」として扱う。文字は出さず、
-            # #SCROLL とカンマだけを自分の行に置く(前の小節の行にカンマを
-            # 足すと "0,," になって小節が1つ消えてしまう)。
             empty_measure = not notes
-            if empty_measure and want("0"):
+            if empty_measure and (mi, 0) in order:
                 flush()
-                out.append(scroll_at(ni))
-                ni += 1
+                out.append(scroll_at(order[(mi, 0)]))
             for i, ch in enumerate(notes):
                 for line in breaks.get(i, ()):
                     flush()
                     out.append(line)
-                if want(ch):
+                k = order.get((mi, i))
+                if k is not None and not (tail_after and (mi, i) == last):
                     flush()
-                    out.append(scroll_at(ni))
-                    ni += 1
+                    out.append(scroll_at(k))
                     buf = ch
                 else:
                     buf += ch
+                if tail_after and (mi, i) == last:
+                    # 最後の1本はこの音符の**次**から効かせる。
+                    flush()
+                    out.append(scroll_at(order[(mi, i)]))
             for idx, line in item["breaks"]:
                 if idx >= len(notes):
                     flush()
@@ -209,82 +272,6 @@ class HighSpeedDialog(QDialog):
                     append_tail(tail)
             flush()
         return out
-
-    @staticmethod
-    def _render_interval(parsed, interval, s, e, curve, p):
-        """小節を interval 個の塊に割り、塊ごとに #SCROLL を入れる。"""
-        if interval <= 0:
-            raise ValueError("分割間隔は1以上を指定してください。")
-        if not any(m["type"] == "measure" and m["has_comma"] for m in parsed):
-            raise ValueError("小節の終端（カンマ）が含まれていません。1小節以上を選択してください。")
-        # 塊の境目だけ #SCROLL を入れたいので、want は「塊の先頭かどうか」。
-        # 小節ごとに塊の大きさが変わるので、対象スロットを先に集めておく。
-        marks = set()
-        total = 0
-        for mi, item in enumerate(parsed):
-            if item["type"] != "measure" or not item["notes"]:
-                continue
-            length = len(item["notes"])
-            size = max(1, length // interval)
-            for i in range(0, length, size):
-                marks.add((mi, i))
-                total += 1
-
-        def scroll_at(i):
-            t = i / (total - 1) if total > 1 else 0.0
-            return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
-
-        # _render は want(ch) しか見ないので、位置で判定できるよう包み直す。
-        out = []
-        buf = ""
-        ni = 0
-        for mi, item in enumerate(parsed):
-            if item["type"] == "keep":
-                if buf:
-                    out.append(buf)
-                    buf = ""
-                out.append(item["text"])
-                continue
-            breaks = {}
-            for idx, line in item["breaks"]:
-                breaks.setdefault(idx, []).append(line)
-            for i, ch in enumerate(item["notes"]):
-                for line in breaks.get(i, ()):
-                    if buf:
-                        out.append(buf)
-                        buf = ""
-                    out.append(line)
-                if (mi, i) in marks:
-                    if buf:
-                        out.append(buf)
-                        buf = ""
-                    out.append(scroll_at(ni))
-                    ni += 1
-                buf += ch
-            for idx, line in item["breaks"]:
-                if idx >= len(item["notes"]):
-                    if buf:
-                        out.append(buf)
-                        buf = ""
-                    out.append(line)
-            tail = ("," if item["has_comma"] else "")
-            if item["comment"]:
-                tail += (" " if tail else "") + item["comment"]
-            if tail:
-                if buf:
-                    buf += tail
-                else:
-                    for j in range(len(out) - 1, -1, -1):
-                        sj = out[j].strip()
-                        if sj and not sj.startswith("#") and not sj.startswith("//"):
-                            out[j] += tail
-                            break
-                    else:
-                        out.append(tail)
-            if buf:
-                out.append(buf)
-                buf = ""
-        return "\n".join(out)
 
     def _apply(self):
         t = self.txt_after.toPlainText().strip()

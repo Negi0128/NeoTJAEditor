@@ -17,16 +17,19 @@ import os
 import time
 from fractions import Fraction
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QSlider, QVBoxLayout,
                                QWidget)  # noqa: F401  (QWidget は型注釈用)
 
 from neotja import note_edit
 from neotja.waveform_widget import WaveformWidget
 
-# 分割数の候補。TJA でよく使う値(constants.VALID_MEASURE_COUNTS の部分集合)。
-GRID_CHOICES = [4, 8, 12, 16, 24, 32, 48, 64]
+# 分割数の候補。1/1 から 1/192 まで(利用者の指定 2026-10-01。PeepoDrumKit の
+# グリッドと同じ範囲)。TJA に書ける分割(constants.VALID_MEASURE_COUNTS)と、
+# 3連・6連で使う値を並べてある。↑↓ キーとホイールはこの並びを1段ずつ動く。
+GRID_CHOICES = [1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192]
 
 # 定規のような目盛りにする。4分(拍)の位置だけ白い長い線を引き、その間は
 # 今の分割の色で短い線を等間隔に並べる。長さで拍が読めて、色で今どの分割で
@@ -114,6 +117,61 @@ class _CommandInput(QFrame):
         else:
             self.edit.selectAll()
             self.edit.setFocus()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+
+class _GridPicker(QFrame):
+    """分割(1/1〜1/192)を選ぶ小さな窓。左上の「1/16」を押すと出る。
+
+    横のつまみを引くと、その場で分割が変わって譜面の目盛りも付いてくる
+    (PeepoDrumKit と同じ手触り。利用者の指定 2026-10-01)。決定も取り消しも
+    いらない — 引いた先がそのまま今の分割で、外を押せば閉じる。"""
+
+    def __init__(self, parent, choices, current, on_change):
+        super().__init__(parent, Qt.Popup)
+        self.setObjectName("chartEditGridPicker")
+        self.setStyleSheet(
+            "#chartEditGridPicker { background: #20232b; border: 1px solid #ffd23c; }"
+            "QLabel { color: #e8e8e8; }"
+            "QLabel#value { color: #ffd23c; font-weight: bold; }"
+            "QLabel#hint { color: #9aa0aa; }")
+        self._choices = list(choices)
+        self._on_change = on_change
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 7, 10, 7)
+        lay.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        top.addWidget(QLabel("グリッド"))
+        self.value = QLabel("1/%d" % current)
+        self.value.setObjectName("value")
+        self.value.setFixedWidth(52)
+        top.addWidget(self.value)
+        hint = QLabel("← → でも動かせます")
+        hint.setObjectName("hint")
+        top.addWidget(hint)
+        lay.addLayout(top)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, len(self._choices) - 1)
+        self.slider.setPageStep(1)
+        self.slider.setFixedWidth(240)
+        try:
+            self.slider.setValue(self._choices.index(current))
+        except ValueError:
+            self.slider.setValue(self._choices.index(16))
+        self.slider.valueChanged.connect(self._changed)
+        lay.addWidget(self.slider)
+        self.slider.setFocus()
+
+    def _changed(self, i):
+        g = self._choices[max(0, min(len(self._choices) - 1, i))]
+        self.value.setText("1/%d" % g)
+        self._on_change(g)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
@@ -337,10 +395,49 @@ class ChartEditWaveform(WaveformWidget):
         self._cmd_kind_times = ({k: [t for t, _x in v] for k, v in by.items()}
                                 if by else None)
 
-    def set_commands(self, *args, **kwargs):
+    def set_commands(self, bpm_changes, scroll_changes, measure_changes,
+                     gogo_regions, *args, **kwargs):
         # ゴーゴーの薄い色と小節線は帯に焼いてある(_static_strip を参照)。
-        super().set_commands(*args, **kwargs)
+        # 拍子の変化点は**全部**覚えておく(親は先頭の基準値を落として
+        # 「変わった所」だけを札にする)。グリッドを拍の長さで割るのに、
+        # 小節ごとの拍子が要るため — _measure_beats を参照。
+        self._meter_changes = sorted(
+            (float(t), int(n), int(d)) for t, n, d in (measure_changes or []))
+        super().set_commands(bpm_changes, scroll_changes, measure_changes,
+                             gogo_regions, *args, **kwargs)
         self._bump_strip()
+
+    #: 拍子の変化点 [(譜面時刻, 分子, 分母)]。既定は 4/4。
+    _meter_changes = ((0.0, 4, 4),)
+
+    def _measure_beats(self, m):
+        """m 小節目の長さ(4分音符いくつぶん)。4/4 なら 4、1/4 なら 1。
+
+        グリッドは拍(BPM)が基準なので、1小節をいくつに割るかは小節の長さで
+        変わる(利用者の指定 2026-10-01)。"""
+        mc = self._meter_changes or ((0.0, 4, 4),)
+        raw = self._bar_times_raw or []
+        if not raw:
+            return Fraction(4)
+        t = raw[m] if 0 <= m < len(raw) else raw[-1]
+        i = bisect.bisect_right([c[0] for c in mc], t + 1e-9) - 1
+        if i < 0:
+            i = 0
+        _t, num, den = mc[i]
+        if num <= 0 or den <= 0:
+            return Fraction(4)
+        return Fraction(4 * num, den)
+
+    def _measure_grid(self, m):
+        """m 小節目をいくつに割るか。
+
+        画面の分割 1/G は「G分音符」なので、1小節に入る数は
+        その小節の拍数 × G ÷ 4。4/4 なら今までどおり G そのもの。"""
+        g = self._grid
+        if g <= 0:
+            return 1
+        n = self._measure_beats(m) * g / 4
+        return max(1, int(round(float(n))))
 
     def _rebuild_bar_times(self):
         self._bump_strip()             # 小節線・目盛りは帯に焼いてある
@@ -578,7 +675,9 @@ class ChartEditWaveform(WaveformWidget):
         return self._grid
 
     def cursor_address(self):
-        return (self._cur_measure, self._cur_slot, self._grid)
+        # 3つめは「この小節をいくつに割っているか」(画面の 1/G ではない)。
+        return (self._cur_measure, self._cur_slot,
+                self._measure_grid(self._cur_measure))
 
     # ------------------------------------------------------------------
     # カーソル
@@ -592,13 +691,28 @@ class ChartEditWaveform(WaveformWidget):
         末尾より先へも EXTEND_MEASURES ぶん出られるようにする。"""
         return max(1, self._known_measures()) + self.EXTEND_MEASURES
 
+    #: 外挿の1小節として認める短さの下限(ふつうの1小節に対する割合)。
+    #: これより短い小節が末尾に来ていたら、外挿には使わない。
+    EXTEND_MIN_FRAC = 0.25
+
     def _measure_len(self):
-        """外挿に使う1小節の長さ。既知の小節があればその最後の間隔を使う。"""
+        """譜面の末尾より先へ伸ばすときの、1小節の長さ。
+
+        ふつうは「最後の小節の長さ」をそのまま使う(変拍子で終わる譜面でも、
+        その続きとして自然な位置に線が出る)。
+
+        **ただし、極端に短い小節で終わっているときは使わない。** `#MEASURE
+        1/96` のような小節を末尾の近くへ入れると、最後の間隔が 0.02 秒に
+        なり、その長さで 64 小節ぶん伸ばすので、譜面の終わりのすぐ右に
+        黄色い破線の壁ができていた(利用者の報告 2026-10-01)。音符も波形も
+        その下に隠れる。ふつうの1小節(BPM から出した 4/4)の 1/4 より短い
+        ときは、そのふつうの長さのほうを使う。"""
+        normal = max(1e-3, self._default_measure_len)
         if len(self._bar_times) >= 2:
             span = self._bar_times[-1] - self._bar_times[-2]
-            if span > 0:
+            if span >= normal * self.EXTEND_MIN_FRAC:
                 return span
-        return max(1e-3, self._default_measure_len)
+        return normal
 
     def _bar_time(self, m):
         """m 小節目の開始時刻。既知の範囲より先は等間隔で外挿する。"""
@@ -646,22 +760,39 @@ class ChartEditWaveform(WaveformWidget):
     def _clamp_cursor(self):
         n = self._measure_count()
         self._cur_measure = max(0, min(self._cur_measure, n - 1))
-        self._cur_slot = max(0, min(self._cur_slot, self._grid - 1))
+        self._cur_slot = max(
+            0, min(self._cur_slot, self._measure_grid(self._cur_measure) - 1))
 
     def cursor_time(self):
-        t = self._address_time(self._cur_measure, self._cur_slot, self._grid)
+        t = self._address_time(self._cur_measure, self._cur_slot,
+                               self._measure_grid(self._cur_measure))
         return 0.0 if t is None else t
 
     def move_cursor(self, delta):
-        """カーソルを delta グリッド動かす。小節をまたぐ。"""
-        if self._measure_count() <= 0:
+        """カーソルを delta グリッド動かす。小節をまたぐ。
+
+        1小節に入るグリッドの数は小節ごとに違う(拍子で変わる)ので、
+        通し番号では数えられない。1つずつ繰り上げ/繰り下げる。"""
+        count = self._measure_count()
+        if count <= 0:
             return
-        total = self._cur_measure * self._grid + self._cur_slot + delta
-        if total < 0:
-            total = 0
-        max_total = self._measure_count() * self._grid - 1
-        total = min(total, max_total)
-        self._cur_measure, self._cur_slot = divmod(total, self._grid)
+        m, slot = self._cur_measure, self._cur_slot
+        step = 1 if delta > 0 else -1
+        for _ in range(abs(int(delta))):
+            slot += step
+            if slot >= self._measure_grid(m):
+                if m + 1 >= count:
+                    slot = self._measure_grid(m) - 1
+                    break
+                m += 1
+                slot = 0
+            elif slot < 0:
+                if m <= 0:
+                    slot = 0
+                    break
+                m -= 1
+                slot = self._measure_grid(m) - 1
+        self._cur_measure, self._cur_slot = m, slot
         self._clamp_cursor()
         self._cursor_changed()
 
@@ -688,14 +819,15 @@ class ChartEditWaveform(WaveformWidget):
         # PeepoDrumKit と同じく **切り捨て**(FloorBeatToCurrentGrid)。
         # 浮動小数でちょうどグリッド上が 2.9999 になって1つ手前へ落ちないよう、
         # わずかに足してから切る。nearest のときは最寄りのグリッド。
-        pos = (t - t0) / span * self._grid
+        grid = self._measure_grid(i)
+        pos = (t - t0) / span * grid
         slot = int(round(pos)) if nearest else int(math.floor(pos + 1e-6))
         if slot < 0:
             slot = 0
-        elif slot >= self._grid:
+        elif slot >= grid:
             if i + 1 < total:
                 return (i + 1, 0)
-            slot = self._grid - 1
+            slot = grid - 1
         return (i, slot)
 
     def mousePressEvent(self, event):
@@ -706,6 +838,11 @@ class ChartEditWaveform(WaveformWidget):
         左の行名の列(x < LANE_X0)は時間軸の外なので、何も起きない。"""
         if event.position().x() < self.LANE_X0 and not self.offset_mode:
             self.setFocus(Qt.MouseFocusReason)
+            # 左上の「1/16」だけは押せる。分割を選ぶつまみが出る
+            # (利用者の指定 2026-10-01)。
+            if (event.button() == Qt.LeftButton
+                    and self.grid_label_rect().contains(event.position().toPoint())):
+                self.open_grid_picker()
             return
         if event.button() == Qt.RightButton and not self.offset_mode:
             # 囲って選ぶのは右ドラッグだけ(利用者の指定 2026-09-26)。四角は
@@ -785,6 +922,13 @@ class ChartEditWaveform(WaveformWidget):
             bd, self._band = self._band, None
             if abs(bd["x1"] - bd["x0"]) >= 4 or abs(bd["y1"] - bd["y0"]) >= 4:
                 self._select_band(bd)
+            else:
+                # 引かずに離した = ただの右クリック。作譜メニューを出す
+                # (利用者の指定 2026-10-01)。囲って選ぶほうは今までどおり。
+                self.update()
+                self._exec_menu(self._build_command_menu(),
+                                event.globalPosition().toPoint())
+                return
             self.update()
             return
         super().mouseReleaseEvent(event)
@@ -803,7 +947,9 @@ class ChartEditWaveform(WaveformWidget):
 
     def set_cursor_from_time(self, t):
         """再生位置などからカーソルを合わせる。"""
-        addr = note_edit.time_to_address(self._bar_times, t, self._grid)
+        addr = note_edit.time_to_address(
+            self._bar_times, t, self._measure_grid(
+                max(0, bisect.bisect_right(self._bar_times, t) - 1)))
         if addr is None:
             return
         self._cur_measure, self._cur_slot = addr
@@ -970,8 +1116,10 @@ class ChartEditWaveform(WaveformWidget):
         a0 = self._address_from_time(max(0.0, self._x_to_sec(lo_x)))
         a1 = self._address_from_time(max(0.0, self._x_to_sec(hi_x)))
         if a0 is not None and a1 is not None:
-            self._range_start = self._range_key(a0[0], a0[1], self._grid)
-            self._range_end = self._range_key(a1[0], a1[1], self._grid)
+            self._range_start = self._range_key(a0[0], a0[1],
+                                                self._measure_grid(a0[0]))
+            self._range_end = self._range_key(a1[0], a1[1],
+                                              self._measure_grid(a1[0]))
 
     #: 帯(ゴーゴー)の端の名前。つかんだときは「同じ側の端」だけを動かす。
     SPAN_EDGE_NAMES = ("GOGOSTART", "GOGOEND")
@@ -1024,8 +1172,9 @@ class ChartEditWaveform(WaveformWidget):
     def _key_to_slot(self, key):
         """範囲の端(小節, 割合)を今のグリッドの (小節, スロット) へ丸める。"""
         m, frac = key
-        slot = int(round(frac * self._grid))
-        if slot >= self._grid:
+        grid = self._measure_grid(m)
+        slot = int(round(frac * grid))
+        if slot >= grid:
             return (m + 1, 0)
         return (m, max(0, slot))
 
@@ -1044,7 +1193,8 @@ class ChartEditWaveform(WaveformWidget):
 
         帯は「空いているグリッドも含む時間の範囲」で、敷き詰め(Shift+F/J/D/K)
         や W/Q が効く相手。選んだオブジェクト(_sel)とは別もの。"""
-        here = self._range_key(self._cur_measure, self._cur_slot, self._grid)
+        here = self._range_key(self._cur_measure, self._cur_slot,
+                               self._measure_grid(self._cur_measure))
         if self._range_start is None or self._range_end is not None:
             self._range_start = here
             self._range_end = None
@@ -1067,7 +1217,11 @@ class ChartEditWaveform(WaveformWidget):
         """操作を実行し、返ってきた暫定表示を反映する。"""
         if self._op_cb is None:
             return None
-        op.setdefault("grid", self._grid)
+        # note_edit へは「その小節をいくつに割るか」を渡す(画面の 1/G では
+        # ない)。拍子が 4/4 でない小節では数が変わる。
+        a = op.get("a")
+        op.setdefault("grid", self._measure_grid(
+            int(a[0]) if a is not None else self._cur_measure))
         res = self._op_cb(op)
         if res:
             for m, slot, grid, char in res.get("visual") or []:
@@ -1141,7 +1295,8 @@ class ChartEditWaveform(WaveformWidget):
         B/S/G/L のキーも受けていて、項目の右に "\\t B" のようにキーを出して
         いたが、覚えるキーを増やさない方針にしたのでキーは外した。"""
         m, s = self._cursor_addr()
-        head = menu.addAction("%d小節目  %d/%d" % (m + 1, s, self._grid))
+        head = menu.addAction("%d小節目  %d/%d"
+                              % (m + 1, s, self._measure_grid(m)))
         head.setEnabled(False)
         menu.addSeparator()
         for name in ("BPMCHANGE", "SCROLL"):
@@ -1165,9 +1320,62 @@ class ChartEditWaveform(WaveformWidget):
                     self._run_op({"kind": "marker", "a": self._cursor_addr(),
                                   "region": k, "which": wh, "present": pr}))
             menu.addSeparator()
+        ins = menu.addAction("小節を挿入…")
+        ins.triggered.connect(self.open_measure_insert)
+        menu.addSeparator()
+        # エディタのツールバーにある道具。範囲があればその範囲、無ければ
+        # カーソルの小節に効く(利用者の指定 2026-10-01)。中身は今までと
+        # 同じ道具で、効かせる範囲を作譜ペインから渡すだけ。
+        if self._tool_cb is not None:
+            has = self.has_range()
+            for key, text, needs_range in self.CHART_TOOLS:
+                act = menu.addAction(text)
+                act.setData(key)
+                act.setEnabled(has or not needs_range)
+                act.triggered.connect(lambda _c=False, k=key: self._tool_cb(k))
+            menu.addSeparator()
         clr = menu.addAction("範囲を解除")
         clr.setEnabled(self.has_range())
         clr.triggered.connect(self.clear_range)
+
+    #: 右クリックから呼べる、エディタの道具。(鍵, 見出し, 範囲が要るか)。
+    #: ストロボ生成はカーソルの位置に作るので範囲は要らない。
+    CHART_TOOLS = (("highspeed", "ハイスピ変換…", True),
+                   ("resize", "ノーツ間隔リサイズ…", True),
+                   ("reverse", "あべこべ反転", True),
+                   ("strobe", "ストロボ生成…", False))
+    _tool_cb = None
+
+    def set_tool_cb(self, cb):
+        """エディタの道具を呼ぶ出口。cb(鍵) を呼ぶ。"""
+        self._tool_cb = cb
+
+    def open_measure_insert(self):
+        """カーソルの小節の手前に、長さを指定した空の小節を1つ入れる。
+
+        長さは拍子記号と同じ「分子/分母」で打ち込む(利用者の指定 2026-10-01)。
+        入れた小節の後ろで元の拍子へ戻すので、2小節目以降は動かない。"""
+        m, _s = self._cursor_addr()
+
+
+        def accept(txt):
+            if not note_edit._parse_meter(txt):
+                return False               # 「3/4」の形でないときは入れ直し
+            self._run_op({"kind": "measure_insert", "a": (m, 0), "value": txt})
+            return True
+
+        if self._cmd_popup is not None:
+            self._cmd_popup.close()
+        popup = _CommandInput(self, "%d小節目の手前へ" % (m + 1), "4/4", accept)
+        x = self._sec_to_x(self.cursor_time())
+        _wh, top, _strip, _b, _c = self._strip_rects()
+        popup.adjustSize()
+        popup.move(self.mapToGlobal(QPoint(max(0, x - popup.width() // 2),
+                                           max(0, top - popup.height() - 4))))
+        popup.show()
+        popup.edit.setFocus(Qt.PopupFocusReason)
+        self._cmd_popup = popup
+        return popup
 
     #: 開始・終了の命令の見出し。
     _MARKER_LABELS = {
@@ -1180,7 +1388,8 @@ class ChartEditWaveform(WaveformWidget):
         if self._op_cb is None:
             return None
         return self._op_cb({"kind": "peek_marker", "a": self._cursor_addr(),
-                            "grid": self._grid, "region": kind})
+                            "grid": self._measure_grid(self._cur_measure),
+                            "region": kind})
 
     def _exec_menu(self, menu, global_pos):
         """メニューを出す(テストではここを差し替えて、出したメニューを調べる)。"""
@@ -1194,7 +1403,8 @@ class ChartEditWaveform(WaveformWidget):
         if self._op_cb is None or name not in self._COMMAND_LABELS:
             return None
         m, s = self._cursor_addr()
-        peek = self._op_cb({"kind": "peek_command", "a": (m, s), "grid": self._grid,
+        peek = self._op_cb({"kind": "peek_command", "a": (m, s),
+                            "grid": self._measure_grid(m),
                             "name": name, "time": self.cursor_time()}) or {}
         cur = peek.get("value")
         default = peek.get("default")
@@ -1253,11 +1463,11 @@ class ChartEditWaveform(WaveformWidget):
         j = max(0, min(len(GRID_CHOICES) - 1, i + direction))
         if j == i:
             return
-        frac = self._cur_slot / self._grid if self._grid else 0.0
+        g0 = self._measure_grid(self._cur_measure)
+        frac = self._cur_slot / g0 if g0 else 0.0
         self._grid = GRID_CHOICES[j]
-        self._cur_slot = int(round(frac * self._grid))
-        if self._cur_slot >= self._grid:
-            self._cur_slot = self._grid - 1
+        g1 = self._measure_grid(self._cur_measure)
+        self._cur_slot = min(int(round(frac * g1)), g1 - 1)
         self._clamp_cursor()
         self.update()
 
@@ -1343,13 +1553,20 @@ class ChartEditWaveform(WaveformWidget):
         if addr is None:
             self.move_cursor(direction)
             return
-        total = addr[0] * self._grid + addr[1] + int(direction)
-        total = max(0, total)
         count = self._measure_count()
-        if count > 0:
-            total = min(total, count * self._grid - 1)
-        m, s = divmod(total, self._grid)
-        t = self._address_time(m, s, self._grid)
+        m, s = addr[0], addr[1] + int(direction)
+        if s >= self._measure_grid(m):
+            if m + 1 < count:
+                m, s = m + 1, 0
+            else:
+                s = self._measure_grid(m) - 1
+        elif s < 0:
+            if m > 0:
+                m -= 1
+                s = self._measure_grid(m) - 1
+            else:
+                s = 0
+        t = self._address_time(m, s, self._measure_grid(m))
         if t is None:
             return
         # カーソルはレーンのクロックに付いてくる(_follow_playhead)。ここで
@@ -1449,11 +1666,13 @@ class ChartEditWaveform(WaveformWidget):
         暫定表示(_pending)だけで、再解析が届いて暫定表示が消えると同じキーが
         配置になったり削除になったりして安定しなかった。消すのは 0 /
         Delete / BackSpace に一本化してある。"""
-        addr = (self._cur_measure, self._cur_slot, self._grid)
+        addr = (self._cur_measure, self._cur_slot,
+                self._measure_grid(self._cur_measure))
         self._pending[addr] = char
         if char == "0":
             self._hide_note_at(*addr)
-        self.noteEdited.emit(self._cur_measure, self._cur_slot, self._grid, char)
+        self.noteEdited.emit(self._cur_measure, self._cur_slot,
+                             self._measure_grid(self._cur_measure), char)
         # 置いてもカーソルは進めない(利用者の指定。F/J などと同じ)。
         self.update()
 
@@ -1577,7 +1796,8 @@ class ChartEditWaveform(WaveformWidget):
             return {kind: (sel[0][2], self._time_of_pos(sel[0][2]))}
         if self._sel:
             return {}               # 複数選んでいるときは触らせない
-        cur = Fraction(self._cur_measure) + Fraction(self._cur_slot, self._grid)
+        cur = (Fraction(self._cur_measure)
+               + Fraction(self._cur_slot, self._measure_grid(self._cur_measure)))
         out = {}
         for item in (self._cmd_audio or []):
             if len(item) < 4 or item[3] not in self._CMD_NAMES:
@@ -1615,20 +1835,23 @@ class ChartEditWaveform(WaveformWidget):
         先頭を基準にする。"""
         if anchor is not None:
             t = self._time_of_pos(anchor)
-            m0, s0 = int(anchor), int(round(float(anchor - int(anchor)) * self._grid))
+            m0 = int(anchor)
+            s0 = int(round(float(anchor - m0) * self._measure_grid(m0)))
         else:
             a = self._range_addresses()
             if a is None:
                 return 0
             (m0, s0), _b = a
-            t = self._address_time(m0, s0, self._grid)
+            t = self._address_time(m0, s0, self._measure_grid(m0))
         if t is None:
             return 0
         addr = self._address_from_time(max(0.0, t + dx * self._seconds_per_pixel()),
                                        nearest=True)
         if addr is None:
             return 0
-        return (addr[0] * self._grid + addr[1]) - (m0 * self._grid + s0)
+        # 「何グリッドぶん動いたか」。小節ごとに割る数が違うので、
+        # 住所の差ではなく 1 ずつ数える。
+        return self._slots_between((m0, s0), addr)
 
     def _finish_note_drag(self):
         """離したところの一番近いグリッドへ、選んだものを置き直す。"""
@@ -1644,7 +1867,7 @@ class ChartEditWaveform(WaveformWidget):
             return
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
         if steps:
-            d = Fraction(int(steps), int(self._grid))
+            d = Fraction(int(steps), int(self._measure_grid(self._cur_measure)))
             # 帯の端をつかんだときは、同じ側の端だけを動かす(_drag_edge_name)。
             self._note_drag = dr          # _drag_keys が見るので戻しておく
             move_keys = self._drag_keys()
@@ -1664,11 +1887,35 @@ class ChartEditWaveform(WaveformWidget):
                     for k in self._sel})
         self.update()
 
+    def _slots_between(self, a, b):
+        """住所 a から b まで、グリッドいくつぶんか(符号つき)。
+
+        小節ごとに割る数が違うので引き算では出せない。小節の境目で
+        その小節の数を足しながら数える。"""
+        (m0, s0), (m1, s1) = a, b
+        if (m0, s0) == (m1, s1):
+            return 0
+        sign = 1
+        if (m1, s1) < (m0, s0):
+            (m0, s0), (m1, s1) = (m1, s1), (m0, s0)
+            sign = -1
+        n = -s0
+        for m in range(m0, m1):
+            n += self._measure_grid(m)
+        return sign * (n + s1)
+
     def _shift_addr(self, addr, delta):
         """(小節, スロット) を delta グリッドぶんずらす。"""
-        k = addr[0] * self._grid + addr[1] + int(delta)
-        k = max(0, k)
-        return (k // self._grid, k % self._grid)
+        m, s = addr[0], addr[1]
+        step = 1 if delta > 0 else -1
+        for _ in range(abs(int(delta))):
+            s += step
+            if s >= self._measure_grid(m):
+                m, s = m + 1, 0
+            elif s < 0:
+                m = max(0, m - 1)
+                s = self._measure_grid(m) - 1
+        return (m, s)
 
     def _draw_selection(self, p, note_cy):
         """選んだオブジェクトを1つずつ枠で囲む(エクスプローラーの選択と同じ
@@ -1762,16 +2009,27 @@ class ChartEditWaveform(WaveformWidget):
                 return c
         return "1"
 
+    _row_rects_cache = None
+
     def _row_rects(self):
-        """{種類: (上端 y, 高さ)}。音符の行が残りを全部取る。"""
+        """{種類: (上端 y, 高さ)}。音符の行が残りを全部取る。
+
+        高さが変わるまで同じものを返す(**中身を書き換えないこと**)。1コマの
+        あいだに、描画・当たり判定・ボタンの位置決めから十数回呼ばれるので、
+        そのたびに辞書を組み立て直すのはもったいない。"""
+        h_now = self.height()
+        got = self._row_rects_cache
+        if got is not None and got[0] == h_now:
+            return got[1]
         fixed = sum(h for _k, _n, h in self.ROWS)
-        note_h = max(40, self.height() - self.RULER_H - fixed)
+        note_h = max(40, h_now - self.RULER_H - fixed)
         out = {}
         y = self.RULER_H
         for kind, _name, h in self.ROWS:
             hh = note_h if kind == "note" else h
             out[kind] = (y, hh)
             y += hh
+        self._row_rects_cache = (h_now, out)
         return out
 
     def _strip_rects(self):
@@ -1946,6 +2204,10 @@ class ChartEditWaveform(WaveformWidget):
             self._x_shift = strip_off
             t0 = base + strip_off / self._xs_val
             t1 = t0 + self._visible_span()
+        # ここから下は目盛りの帯(上の RULER_H px)へは描かない。以前は描いて
+        # しまってから帯をもう一度貼って消していたが、そのために幅 3000px の
+        # 帯を1コマに2回貼ることになっていた。先に切っておけば1回で済む。
+        p.setClipRect(0, self.RULER_H, w, h - self.RULER_H)
         # 編集グリッドと音符は帯に焼かず、毎コマここで引く(_paint_static の
         # 説明を参照)。重なりの順番は帯に焼いていたころと同じ
         # 「小節線 → グリッド → 音符」。
@@ -1982,14 +2244,10 @@ class ChartEditWaveform(WaveformWidget):
         # 黄色いカーソルは出さない(利用者の指定 2026-09-25)。停止中は赤い線が
         # カーソルの位置に貼り付いているので、それで足りる。
 
-        # --- 目盛りと左の列は最後(譜面がはみ出しても上から隠す) ---
+        p.setClipping(False)
+        # --- 目盛りと左の列は最後(左の列は目盛りの帯にも掛かる) ---
         if strip_off is None:
             self._draw_ruler(p, t0, t1)
-        else:
-            # 目盛りは帯に焼いてあるので、その帯を上の高さぶんだけ貼り直す。
-            p.setClipRect(0, 0, w, self.RULER_H)
-            p.drawPixmap(-strip_off, 0, self._strip_pm)
-            p.setClipping(False)
         self._draw_row_labels(p, rows)
         self._draw_offset_mode(p, w, h)
 
@@ -2048,6 +2306,41 @@ class ChartEditWaveform(WaveformWidget):
     _legend_pm = None
     _legend_key = None
     _legend_at = 0.0
+
+    #: 左上の「1/16」の当たり判定(凡例の描き位置に合わせてある)。
+    GRID_LABEL_X = 80
+    GRID_LABEL_W = 46
+
+    def grid_label_rect(self):
+        """「1/16」の当たり判定。凡例を出していないときは無効(空)。"""
+        if not self._show_legend:
+            return QRect()
+        return QRect(self.GRID_LABEL_X, 0, self.GRID_LABEL_W, self.RULER_H)
+
+    def set_grid(self, grid):
+        """分割を変える。カーソルの時刻上の位置はできるだけ保つ。"""
+        grid = int(grid)
+        if grid <= 0 or grid == self._grid:
+            return
+        g0 = self._measure_grid(self._cur_measure)
+        frac = self._cur_slot / g0 if g0 else 0.0
+        self._grid = grid
+        g1 = self._measure_grid(self._cur_measure)
+        self._cur_slot = min(int(round(frac * g1)), g1 - 1)
+        self._clamp_cursor()
+        self.update()
+
+    def open_grid_picker(self):
+        """左上の「1/16」を押したときに出す、分割のつまみ。"""
+        picker = _GridPicker(self, GRID_CHOICES, self._grid, self.set_grid)
+        r = self.grid_label_rect()
+        picker.adjustSize()
+        picker.move(self.mapToGlobal(QPoint(max(0, r.left() - 6), r.bottom() + 2)))
+        picker.show()
+        self._grid_picker = picker
+        return picker
+
+    _grid_picker = None
 
     def _draw_legend(self, p):
         pal = self._pal
@@ -2254,7 +2547,8 @@ class ChartEditWaveform(WaveformWidget):
         if not snap:
             return int(dr["dx"])
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
-        gt = self._time_of_pos(pos + Fraction(int(steps), int(self._grid)))
+        gt = self._time_of_pos(
+            pos + Fraction(int(steps), int(self._measure_grid(int(pos)))))
         if gt is None:
             return int(dr["dx"])
         return self._sec_to_x(gt) - self._sec_to_x(t)
@@ -2277,24 +2571,50 @@ class ChartEditWaveform(WaveformWidget):
             p.setPen(QPen(col, 1))
             p.drawRect(lo, y + 3, max(2, hi - lo), rh - 6)
 
+    _row_font_cache = None
+    _row_width_cache = None
+
+    def _row_font(self):
+        """行の札に使う 11px のフォント。族が変わるまで使い回す。"""
+        key = self.font().family()
+        got = self._row_font_cache
+        if got is None or got[0] != key:
+            f = self.font()
+            f.setPixelSize(11)
+            self._row_font_cache = (key, f)
+            self._row_width_cache = {}     # 族が変われば幅も変わる
+        return self._row_font_cache[1]
+
+    def _row_text_widths(self, fm):
+        if self._row_width_cache is None:
+            self._row_width_cache = {}
+        return self._row_width_cache
+
     def _draw_marker_row(self, p, rect, spans, names, labels, t0, t1):
-        """小節線のような「ここから / ここまで」の印。札で出す。"""
+        """小節線のような「ここから / ここまで」の印。札で出す。
+
+        この行は毎コマ描く(帯に焼いていない — つかんで動かせるため)。
+        フォントと文字幅は作り直さずに使い回す。字は "OFF"/"ON" の2種類しか
+        無いのに、QFont の組み立てと horizontalAdvance を毎コマ払うと、
+        印が数個しか無くてもこの行だけで 0.2ms かかっていた(実測)。"""
         y, rh = rect
         if not spans:
             return
-        f = self.font()
-        f.setPixelSize(11)
-        p.setFont(f)
+        p.setFont(self._row_font())
         col = QColor(self.ROW_CONTENT_COLOR)
+        pen = QPen(col, 1)
+        p.setPen(pen)
         fm = p.fontMetrics()
+        widths = self._row_text_widths(fm)
         for s_t, e_t in spans:
             for t, name, text in ((s_t, names[0], labels[0]),
                                   (e_t, names[1], labels[1])):
                 if t < t0 or t > t1:
                     continue
                 x = self._sec_to_x(t) + self._drag_dx_for(name, t)
-                tw = fm.horizontalAdvance(text)
-                p.setPen(QPen(col, 1))
+                tw = widths.get(text)
+                if tw is None:
+                    tw = widths[text] = fm.horizontalAdvance(text)
                 p.drawLine(x, y + 1, x, y + rh - 1)
                 p.drawText(x + 3, y, tw + 6, rh,
                            Qt.AlignVCenter | Qt.AlignLeft, text)
@@ -2381,20 +2701,32 @@ class ChartEditWaveform(WaveformWidget):
             # 線が潰れるほど細かいときは引かない(見づらいだけなので)。
             # 1秒あたりの px は _xs_val を使う(帯へ焼くときは t1-t0 が
             # 画面より広いので、幅から割り出すと細かさを読み違える)。
-            if span / self._grid * self._xs_val < 4:
+            mg = self._measure_grid(m)
+            if span / mg * self._xs_val < 4:
                 continue
-            # ペンは「拍の線」と「その間の線」の2本だけ。分割が 64 だと
-            # 1小節で 63 回、3小節で 189 回まわるので、ここで QPen/QColor を
-            # 作り直すと 1コマ 1ms 前後になる(実測)。
+            # ペンは「拍の線」と「その間の線」の2本だけ。**種類ごとにまとめて
+            # 引く**(1本ごとに setPen を呼ばない)。分割が 64 だと1小節で
+            # 63 回、3小節で 189 回まわるので、1本ごとにペンを立て直すと
+            # それだけで1コマ 0.4〜0.6ms になっていた(実測)。
+            # 拍の線とその間の線は同じ位置には来ないので、まとめて引いても
+            # 重なりの順番は変わらない。
             pens = self._grid_pens()
-            for k in range(1, self._grid):
-                t = m_start + span * (k / self._grid)
+            beats, subs = [], []
+            grid = mg
+            for k in range(1, grid):
+                t = m_start + span * (k / grid)
                 if t < t0 or t > t1:
                     continue
-                pen, frac = pens[bool(self._grid > 0 and (k * 4) % self._grid == 0)]
+                ((beats if (k * self._grid) % (grid * 4) == 0 else subs)
+                 .append(self._sec_to_x(t)))
+            for xs, is_beat in ((subs, False), (beats, True)):
+                if not xs:
+                    continue
+                pen, frac = pens[is_beat]
                 p.setPen(pen)
-                x = self._sec_to_x(t)
-                p.drawLine(x, bottom - int(strip * frac), x, bottom)
+                y0 = bottom - int(strip * frac)
+                for x in xs:
+                    p.drawLine(x, y0, x, bottom)
 
     def _draw_pending(self, p, top, strip):
         """再解析が届くまでのあいだ、置いたばかりの音符を描く。"""
@@ -2433,7 +2765,7 @@ class ChartEditWaveform(WaveformWidget):
         if lg is None:
             return
         m, slot = lg["head"]
-        th = self._address_time(m, slot, self._grid)
+        th = self._address_time(m, slot, self._measure_grid(m))
         tt = self.cursor_time()
         if th is None:
             return

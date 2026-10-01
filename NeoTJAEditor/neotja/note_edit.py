@@ -1073,6 +1073,8 @@ def run_op(text, course_range, op):
         return op_move(text, course_range, a, b, g, int(op.get("delta", 0)))
     if kind == "command":
         return op_command(text, course_range, a[0], a[1], g, op.get("name", ""), op.get("value"))
+    if kind == "measure_insert":
+        return op_measure_insert(text, course_range, a[0], op.get("value"))
     if kind == "marker":
         return op_marker(text, course_range, a[0], a[1], g, str(op.get("region", "")).upper(),
                          str(op.get("which", "on")), bool(op.get("present", True)))
@@ -1533,6 +1535,49 @@ def _emit_measures(elements, total_beats, meter, dens=()):
             out.append("".join(chars) + ",")
         beat = end
     return "\n".join(out) + "\n"
+
+
+def op_measure_insert(text, course_range, m, value):
+    """m 小節目の**手前**に、長さ value(例 "3/4")の空の小節を1つ入れる。
+
+    後ろの小節は1つも動かさない。入れた小節のあとで元の拍子へ戻す #MEASURE を
+    書くので、2小節目以降の長さも、そこに置いてある音符の位置もそのまま
+    (元の拍子と同じ長さを入れるときは #MEASURE そのものを書かない)。
+
+    右クリックの「小節を挿入…」から呼ぶ(利用者の指定 2026-10-01)。
+    """
+    body = course_body_span(text, course_range)
+    if body is None:
+        return None
+    meter = _parse_meter(value)
+    if meter is None:
+        return None
+    spans = measure_spans(text, body)
+    m = max(0, int(m))
+    if spans:
+        at = spans[m][0] if m < len(spans) else spans[-1][1]
+    else:
+        at = body[0]
+    meters = _meters_by_measure(text, spans)
+    if m < len(meters):
+        prev = meters[m]
+    elif meters:
+        prev = meters[-1]
+    else:
+        prev = _DEFAULT_METER
+    lines = []
+    if meter != prev:
+        lines.append("#MEASURE %d/%d" % meter)
+    lines.append("0,")
+    if meter != prev:
+        lines.append("#MEASURE %d/%d" % prev)
+    # 直前の行とくっつけない。くっつくと命令が本文の一部として読まれて、
+    # 拍子が効かないまま先へ進む(12.4.0 で踏んだのと同じ落とし穴)。
+    head = text[:at]
+    if head and not head.endswith(("\n", "\r")):
+        head += "\n"
+    new = head + "\n".join(lines) + "\n" + text[at:]
+    return _result(text, new, reparse=True)
 
 
 def op_measure_remove(text, course_range, m, frac=0):

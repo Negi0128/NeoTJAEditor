@@ -17,8 +17,9 @@ LANE_Y=196、枠はその 56px 上から)。窓は広げない・レーンには
 """
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QPushButton, QSpinBox, QVBoxLayout)
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QPushButton, QSpinBox,
+                               QVBoxLayout)
 
 
 class CommandPanel(QFrame):
@@ -48,7 +49,8 @@ class CommandPanel(QFrame):
         # いま「変更」になっている種類。
         self._editing = set()
         # 譜面分岐の入れ物(_branch_box で作る)。
-        self._branch_buttons = {}
+        self._branch_auto = None
+        self._branch_combo = None
         self._branch_title = None
         self._branch_level = None
         self.setObjectName("commandPanel")
@@ -188,29 +190,67 @@ class CommandPanel(QFrame):
         選ぶと、条件を見ずにその系統だけを通して流す。"""
         box, row = self._new_box("譜面分岐")
         self._branch_title = box.findChild(QLabel, "boxTitle")
-        self._branch_buttons = {}
-        row.setSpacing(3)
+        row.setSpacing(4)
+        # ボタンは2つだけ(利用者の指定 2026-10-01)。「自動」と、系統を選ぶ
+        # プルダウン。4つ並べていたころは枠がいっぱいで、どれが効いているかも
+        # 読みにくかった。
+        self._branch_auto = QPushButton("自動")
+        self._branch_auto.setFixedWidth(46)
+        self._branch_auto.clicked.connect(
+            lambda _c=False: self.selectBranch.emit("auto"))
+        row.addWidget(self._branch_auto)
+        self._branch_combo = QComboBox()
         for key, text, _col in self.BRANCHES:
-            btn = QPushButton(text)
-            btn.setFixedWidth(46)
-            btn.clicked.connect(lambda _c=False, k=key: self.selectBranch.emit(k))
-            row.addWidget(btn)
-            self._branch_buttons[key] = btn
+            if key != "auto":
+                self._branch_combo.addItem(text, key)
+        self._branch_combo.setCurrentIndex(self._branch_combo.count() - 1)  # 達人
+        self._branch_combo.activated.connect(self._on_branch_combo)
+        row.addWidget(self._branch_combo, 1)
         self._branch_box_w = box
         self.set_branch(None, False)
         return box
 
+    def _on_branch_combo(self, _idx):
+        key = self._branch_combo.currentData()
+        if key:
+            self.selectBranch.emit(key)
+
+    def choose_branch(self, key):
+        """系統を選ぶ(プルダウンを操作したのと同じ)。試験からも使う。"""
+        if key == "auto":
+            self._branch_auto.click()
+            return
+        i = self._branch_combo.findData(key)
+        if i >= 0:
+            self._branch_combo.setCurrentIndex(i)
+            self._on_branch_combo(i)
+
+    #: 選ばれている側だけ色を付ける。
+    _BRANCH_ON_CSS = ("color: #ffffff; background: %s; border: 1px solid #cdd6f4;"
+                      " border-radius: 3px; padding: 2px 4px; min-height: 24px;"
+                      " font-size: 13px;")
+
     def set_branch(self, level, has_branches):
         """いまの系統を反映する。分岐の無い譜面では押せなくする。"""
-        self._branch_level = level if level in self._branch_buttons else None
-        for key, _text, col in self.BRANCHES:
-            btn = self._branch_buttons[key]
-            btn.setEnabled(bool(has_branches))
-            on = bool(has_branches) and key == self._branch_level
-            btn.setStyleSheet(
-                ("color: #ffffff; background: %s; border: 1px solid #cdd6f4;"
-                 " border-radius: 3px; padding: 2px 4px; min-height: 24px;"
-                 " font-size: 13px;" % col) if on else "")
+        keys = {k for k, _t, _c in self.BRANCHES}
+        self._branch_level = level if level in keys else None
+        cols = {k: c for k, _t, c in self.BRANCHES}
+        on = bool(has_branches)
+        self._branch_auto.setEnabled(on)
+        self._branch_combo.setEnabled(on)
+        auto_on = on and self._branch_level == "auto"
+        self._branch_auto.setStyleSheet(
+            (self._BRANCH_ON_CSS % cols["auto"]) if auto_on else "")
+        if self._branch_level in ("N", "E", "M"):
+            i = self._branch_combo.findData(self._branch_level)
+            if i >= 0 and i != self._branch_combo.currentIndex():
+                self._branch_combo.blockSignals(True)
+                self._branch_combo.setCurrentIndex(i)
+                self._branch_combo.blockSignals(False)
+        combo_on = on and self._branch_level in ("N", "E", "M")
+        self._branch_combo.setStyleSheet(
+            (self._BRANCH_ON_CSS % cols.get(self._branch_level, "#5b6470"))
+            if combo_on else "")
         if self._branch_title is not None:
             self._branch_title.setText("譜面分岐" if has_branches
                                        else "譜面分岐（この譜面には無い）")

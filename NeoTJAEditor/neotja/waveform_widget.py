@@ -873,18 +873,25 @@ class WaveformWidget(QWidget):
             self._note_pix_cache[key] = pix
         return pix
 
+    #: 音符の輪とスパンの色。作譜ペインは毎コマここを通るので、QColor を
+    #: 1個ずつ作り直さない(色は固定なので作り直す意味もない)。
+    _NOTE_RING = QColor("#fbf3e0")
+    _SPAN_COLORS = {"roll": QColor("#fcdb38"), "roll_big": QColor("#fcdb38"),
+                    "balloon": QColor("#ff9f43"), "kusudama": QColor("#ff9f43")}
+    #: 音符の絵の使い回し。鍵は (ドンの色, カッの色, 半径, 大きい半径)。
+    _note_spr_cache = None
+
     def _draw_notes(self, painter, w: int, t0: float, t1: float, cy: int):
         """作譜モード: 波形の下の帯に譜面を描く。連打/風船/くす玉のスパン(バー)
         を先に、その上に音符(ドン=赤 / カ=青、大音符は大きめ)を円で描く。
         cy は帯の中心 y。"""
-        ring = QColor("#fbf3e0")
+        ring = self._NOTE_RING
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         # --- 連打/風船/くす玉のスパン(バー + 頭) ---
         sa = self._span_audio
         if sa:
-            span_col = {"roll": QColor("#fcdb38"), "roll_big": QColor("#fcdb38"),
-                        "balloon": QColor("#ff9f43"), "kusudama": QColor("#ff9f43")}
+            span_col = self._SPAN_COLORS
             for s, e, kind in sa:
                 if e < t0 or s > t1:
                     continue
@@ -911,17 +918,25 @@ class WaveformWidget(QWidget):
             times = self._note_time_list or []
             lo = max(0, bisect.bisect_left(times, t0) - 1)
             hi = bisect.bisect_right(times, t1) + 1
-            don = QColor(self._pal["don"])
-            ka = QColor(self._pal["ka"])
+            don = self._pal["don"]
+            ka = self._pal["ka"]
             # 事前描画したピクスマップを貼るだけ(アンチエイリアスの
             # drawEllipse+ペンを毎フレーム音符数ぶん実行しない)。
+            # 4枚の組もそのまま使い回す — 色か半径が変わるまで同じもの。
             r, rb = self.NOTE_R, self.NOTE_R_BIG
-            spr = {
-                (False, True): self._note_pixmap(don, r),
-                (False, False): self._note_pixmap(ka, r),
-                (True, True): self._note_pixmap(don, rb),
-                (True, False): self._note_pixmap(ka, rb),
-            }
+            key = (don, ka, r, rb)
+            got = self._note_spr_cache
+            if got is None or got[0] != key:
+                dc, kc = QColor(don), QColor(ka)
+                spr = {
+                    (False, True): self._note_pixmap(dc, r),
+                    (False, False): self._note_pixmap(kc, r),
+                    (True, True): self._note_pixmap(dc, rb),
+                    (True, False): self._note_pixmap(kc, rb),
+                }
+                self._note_spr_cache = (key, spr)
+            else:
+                spr = got[1]
             for t, c in na[lo:hi]:
                 x = self._sec_to_x(t)
                 big, is_don = c in ("3", "4"), c in ("1", "3")
@@ -932,7 +947,7 @@ class WaveformWidget(QWidget):
                     # 叩かれた瞬間だけ大きくする。半径は整数へ丸めるので、
                     # 増える絵は数種類だけ(ピクスマップのキャッシュが効く)。
                     rr = max(2, int(round((rb if big else r) * sc)))
-                    pix = self._note_pixmap(don if is_don else ka, rr)
+                    pix = self._note_pixmap(QColor(don if is_don else ka), rr)
                 painter.drawPixmap(x - pix.width() // 2, cy - pix.height() // 2, pix)
         painter.setBrush(Qt.NoBrush)
 
