@@ -610,6 +610,33 @@ def skin_sound_paths():
     return don, ka
 
 
+#: System の打音の置き場所。番号は TNDE-R/Sounds/Taiko/NeiroList.txt の
+#: 並びで、0 が先頭(既定の音色「太鼓」)。
+SYSTEM_HIT_SOUND_DIR = "TNDE-R/Sounds/Taiko"
+SYSTEM_HIT_SOUND_SET = "0"
+
+
+def system_hit_sound_paths(cfg=None):
+    """System の中の打音 (dong, ka)。見つからなければ ("", "")。
+
+    TNDE-R/Sounds/Taiko/<音色>/dong.ogg・ka.ogg。ogg のまま返す — 読む側
+    (mixer_engine._load_sfx_or_none)が ffmpeg でデコードして読む。"""
+    try:
+        from neotja import skin_cache
+        sysdir, _s, _u = skin_cache.find_system_dir(cfg or {})
+    except Exception:  # noqa: BLE001
+        return "", ""
+    if not sysdir:
+        return "", ""
+    base = os.path.join(str(sysdir), *SYSTEM_HIT_SOUND_DIR.split("/"),
+                        SYSTEM_HIT_SOUND_SET)
+    don = os.path.join(base, "dong.ogg")
+    ka = os.path.join(base, "ka.ogg")
+    if os.path.exists(don) and os.path.exists(ka):
+        return don, ka
+    return "", ""
+
+
 def effective_hit_sound_paths(cfg):
     """実際に鳴らす打音 (don, ka)。選ぶ順は:
 
@@ -636,4 +663,7 @@ def effective_hit_sound_paths(cfg):
     skin_don, skin_ka = skin_sound_paths()
     if skin_don and skin_ka:
         return skin_don, skin_ka
-    return "", ""
+    # 展開キャッシュに wav が無くても、System の ogg を直に指す。
+    # System をスキンとして読んでいるなら、打音だけ別に用意する必要は無い
+    # (利用者の指摘 2026-10-02)。読む側は ogg も扱える。
+    return system_hit_sound_paths(cfg)

@@ -86,6 +86,22 @@ def _no_window():
     return {}
 
 
+def _as_wav(path: str) -> str:
+    """wav ならそのまま、ogg 等なら wav へ直して返す。だめなら ""。
+
+    QSoundEffect(レガシー経路)が wav しか鳴らせないため。デコード結果は
+    skin_cache のキャッシュに残るので、2回目以降はファイルを見るだけ。"""
+    if not path or not os.path.exists(path):
+        return ""
+    if os.path.splitext(path)[1].lower() == ".wav":
+        return path
+    try:
+        from neotja import skin_cache
+        return skin_cache.decoded_wav_for(path) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def decode_stereo_ffmpeg(path: str, timeout_sec: float = 120.0):
     """曲を (frames, 2) float32 + サンプリングレートへデコードする。
     読めない/ffmpeg が居ない場合は None を返し、呼び出し側は QAudioDecoder へ
@@ -883,8 +899,10 @@ class HitSoundEngine(QObject):
         click otherwise. Referenced by absolute path rather than bundled into
         the app, since a real simulator's sound assets aren't ours to
         redistribute."""
-        don = don_path if don_path and os.path.exists(don_path) else ensure_don_wav()
-        ka = ka_path if ka_path and os.path.exists(ka_path) else ensure_ka_wav()
+        # QSoundEffect は wav しか鳴らせない。ogg を渡されたら wav へ直してから
+        # 読む(ミキサー経路と同じキャッシュを使う)。
+        don = _as_wav(don_path) or ensure_don_wav()
+        ka = _as_wav(ka_path) or ensure_ka_wav()
         self.sound_don.setSource(QUrl.fromLocalFile(don))
         self.sound_ka.setSource(QUrl.fromLocalFile(ka))
         self._apply_volume()

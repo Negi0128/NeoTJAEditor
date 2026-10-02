@@ -247,10 +247,28 @@ def _resample_linear(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
 def _load_sfx_or_none(path: str, device_sr: int):
     """読めれば device_sr の (M, 2) float32、壊れていて解釈できなければ None。
     「読めなかった」ことを呼び出し側が区別できるようにするための版
-    (存在しないファイルと同じく合成音へフォールバックさせたい)。"""
+    (存在しないファイルと同じく合成音へフォールバックさせたい)。
+
+    **WAV 以外もそのまま読める。** System の打音は ogg(TNDE-R/Sounds/Taiko/
+    <音色>/dong.ogg, ka.ogg)なので、wave で読めなかったら曲と同じ ffmpeg の
+    デコードへ回す。以前は wav しか読めず、System をスキンとして読んでいるのに
+    打音だけ別途 wav を用意する格好になっていた(利用者の指摘 2026-10-02)。"""
     st, sr = _load_wav_stereo(path)
     if st is None:
-        return None
+        # wav で読めないものは ffmpeg で wav へ直してから読む(ogg 等)。
+        # **曲用の decode_stereo_ffmpeg は使わない** — あちらは -ac 2 なので、
+        # モノラルの打音をステレオへ広げるときに ffmpeg が -3dB かけてしまい、
+        # 音が小さくなる(skin_cache.decoded_wav_for の説明を参照)。
+        try:
+            from neotja import skin_cache
+            got = skin_cache.decoded_wav_for(path)
+        except Exception:  # noqa: BLE001
+            got = ""
+        if not got:
+            return None
+        st, sr = _load_wav_stereo(got)
+        if st is None:
+            return None
     return _resample_linear(st, sr, device_sr)
 
 

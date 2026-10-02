@@ -496,6 +496,41 @@ def _extract_decode(system_dir: Path, entry, out: Path) -> bool:
     return True
 
 
+def decoded_wav_for(src) -> str:
+    """ogg などを wav へデコードして、そのパスを返す。失敗したら ""。
+
+    結果はキャッシュの中の decoded/ へ置いて使い回す(元のファイル名と更新
+    時刻で名前を作るので、System を差し替えれば作り直される)。デコードの
+    やり方は _extract_decode と同じ — チャンネル数もサンプリングレートも
+    そのままにして、ステレオへ広げるのは読み出し側に任せる。ffmpeg の
+    `-ac 2` はモノラルを広げるときに -3dB かけるので、ここでは使わない。
+    """
+    try:
+        src = Path(src)
+        if not src.is_file():
+            return ""
+        if src.suffix.lower() == ".wav":
+            return str(src)
+        st = src.stat()
+        out_dir = cache_dir() / "decoded"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        key = "%s_%d_%d.wav" % (src.stem, int(st.st_mtime), st.st_size)
+        out = out_dir / key
+        if out.is_file():
+            return str(out)
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        subprocess.run([exe, "-y", "-loglevel", "error", "-i", str(src),
+                        "-acodec", "pcm_s16le", str(out)],
+                       check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return str(out) if out.is_file() else ""
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("打音のデコードに失敗: %s (%s)", src, exc)
+        return ""
+
+
 def _extract_unresolved(system_dir: Path, entry, out: Path) -> bool:
     """System からの作り方が特定できなかったもの。skin_map は「扱いは
     呼び出し側で決めること」としているので、ここでは**近い候補で代用する**。
