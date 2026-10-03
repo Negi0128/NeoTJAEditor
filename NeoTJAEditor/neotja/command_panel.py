@@ -53,29 +53,20 @@ class CommandPanel(QFrame):
         self._branch_combo = None
         self._branch_title = None
         self._branch_level = None
+        self._has_branches = False
         self.setObjectName("commandPanel")
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         # ゲーム画面の上に置くので、窓の QSS 任せにせず自前で色を決める
         # (暗い背景に暗い文字だと読めない)。
-        self.setStyleSheet(
-            "#commandPanel { background: rgba(10,12,18,215);"
-            " border: 1px solid #222a3a; }"
-            "QFrame#cmdBox { background: rgba(20,24,34,220);"
-            " border: 1px solid #33405c; border-radius: 4px; }"
-            "#commandPanel QLabel { color: #cdd6f4; background: transparent; }"
-            "#commandPanel QLabel#boxTitle { color: #8fa3c0; }"
-            "#commandPanel QAbstractSpinBox { color: #ffffff; background: #10141d;"
-            " border: 1px solid #2e3a50; border-radius: 3px; padding: 1px 3px;"
-            " min-height: 24px; font-size: 14px; }"
-            "#commandPanel QPushButton { color: #cdd6f4; background: #232b3b;"
-            " border: 1px solid #3a4763; border-radius: 3px;"
-            " padding: 2px 6px; min-height: 24px; font-size: 13px; }"
-            "#commandPanel QPushButton:hover { background: #2d3750; }")
+        self.setStyleSheet(self._style_for(1.0))
 
         grid = QGridLayout(self)
         grid.setContentsMargins(6, 5, 6, 5)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(5)
+        self._grid = grid
+        #: いま当てている表示倍率(1.0 = 原寸)。
+        self._ui_scale = 1.0
 
         # --- BPM ---
         self.sp_bpm = QDoubleSpinBox()
@@ -128,6 +119,72 @@ class CommandPanel(QFrame):
 
         # --- 譜面分岐: どの系統を見て(編集して)いるか ---
         grid.addWidget(self._branch_box(), 1, 2)
+
+        # 縮めるときに戻れるよう、原寸の寸法をここで覚えておく。
+        self._capture_base()
+
+    # ------------------------------------------------------------------
+    # 表示倍率にあわせて縮める
+    #
+    # ゲーム画面は ScaledHost が倍率をかけて描くが、このパネルは画面の上に
+    # 重ねた**ふつうのウィジェット**なので倍率がかからない。小さい画面
+    # (ノートPC)ではパネルだけが原寸のまま残り、右や下が切れていた。
+    # 窓の大きさは変えない・並びも変えない・文字が小さくなるのは構わない、
+    # という指定(利用者 2026-10-02)なので、寸法と文字を原寸から掛け直す。
+    # ------------------------------------------------------------------
+    #: QSS の px は倍率をかけて作る。min-height と font-size だけが効く。
+    _QSS = (
+        "#commandPanel { background: rgba(10,12,18,215);"
+        " border: 1px solid #222a3a; }"
+        "QFrame#cmdBox { background: rgba(20,24,34,220);"
+        " border: 1px solid #33405c; border-radius: 4px; }"
+        "#commandPanel QLabel { color: #cdd6f4; background: transparent; }"
+        "#commandPanel QLabel#boxTitle { color: #8fa3c0; }"
+        "#commandPanel QAbstractSpinBox { color: #ffffff; background: #10141d;"
+        " border: 1px solid #2e3a50; border-radius: 3px; padding: 1px 3px;"
+        " min-height: %(h)dpx; font-size: %(sp)dpx; }"
+        "#commandPanel QPushButton { color: #cdd6f4; background: #232b3b;"
+        " border: 1px solid #3a4763; border-radius: 3px;"
+        " padding: 2px 6px; min-height: %(h)dpx; font-size: %(bt)dpx; }"
+        "#commandPanel QPushButton:hover { background: #2d3750; }")
+
+    #: 縮めたときだけ足す。数字の欄の矢印は OS が原寸で描くので、拍子記号の
+    #: ような狭い欄(48px)では 50% にすると矢印が欄を食い尽くし、**数字が
+    #: 見えなくなる**(実機で確認)。矢印も倍率ぶん細くする。
+    _QSS_ARROW = ("#commandPanel QAbstractSpinBox::up-button,"
+                  "#commandPanel QAbstractSpinBox::down-button"
+                  " { width: %(ar)dpx; }"
+                  "#commandPanel QComboBox::drop-down { width: %(ar)dpx; }")
+
+    def _style_for(self, s):
+        def px(v):
+            return max(1, int(round(v * s)))
+        qss = self._QSS
+        if s < 0.999:
+            qss += self._QSS_ARROW
+        return qss % {"h": px(24), "sp": px(14), "bt": px(13), "ar": px(16)}
+
+    def _capture_base(self):
+        """原寸の寸法・余白・文字の大きさを覚える(ui_scale.UiScaler に任せる)。"""
+        from neotja.ui_scale import UiScaler
+        self._base_size = (self.width(), self.height())
+        self._scaler = UiScaler(self)
+
+    def ui_scale(self):
+        return self._ui_scale
+
+    def set_ui_scale(self, s):
+        """表示倍率ぶんパネルごと縮める(1.0 で原寸)。"""
+        from neotja.ui_scale import px
+        s = max(0.25, min(1.0, float(s)))
+        if abs(s - self._ui_scale) < 1e-6:
+            return
+        self._ui_scale = s
+        self.setStyleSheet(self._style_for(s))
+        self._scaler.apply(s)
+        # 分岐の枠は板ごとの CSS を持っているので、当て直す。
+        self.set_branch(self._branch_level, self._has_branches)
+        self.setFixedSize(px(self._base_size[0], s), px(self._base_size[1], s))
 
     # ------------------------------------------------------------------
     def _new_box(self, title):
@@ -225,13 +282,42 @@ class CommandPanel(QFrame):
             self._branch_combo.setCurrentIndex(i)
             self._on_branch_combo(i)
 
-    #: 選ばれている側だけ色を付ける。
-    _BRANCH_ON_CSS = ("color: #ffffff; background: %s; border: 1px solid #cdd6f4;"
-                      " border-radius: 3px; padding: 2px 4px; min-height: 24px;"
-                      " font-size: 13px;")
+    #: 選ばれている側だけ色を付ける。板ごとに当てるので、選び手は自分自身。
+    _BRANCH_ON_CSS = ("QComboBox, QPushButton { color: #ffffff; background: %s;"
+                      " border: 1px solid #cdd6f4; border-radius: 3px;"
+                      " padding: 2px 4px; min-height: %dpx; font-size: %dpx; }")
+
+    def _branch_css(self, color):
+        """分岐の枠に当てる CSS。色が None なら「選ばれていない」。
+
+        板ごとの CSS は板の QSS より強いので、倍率ぶんの大きさもここで
+        入れ直さないと、縮めたときにここだけ原寸で残る。"""
+        s = self._ui_scale
+
+        def px(v):
+            return max(1, int(round(v * s)))
+        css = ""
+        if color:
+            css = self._BRANCH_ON_CSS % (color, px(24), px(13))
+        if s < 0.999:
+            # プルダウンの▼は OS が原寸で描く。縮めると枠を食い尽くして
+            # 文字が見えなくなるので、ここも細くする(実機で確認)。
+            # 中身を自分で描いていない相手には ::drop-down だけ指定しても
+            # 効かない(Qt は本体が素のままなら OS の描き方を通す)ので、
+            # 色が付いていないときは本体の見た目もここで決める。
+            if not color:
+                css += ("QComboBox { color: #cdd6f4; background: #232b3b;"
+                        " border: 1px solid #3a4763; border-radius: 3px;"
+                        " padding: 1px 3px; min-height: %dpx;"
+                        " font-size: %dpx; }" % (px(24), px(13)))
+            css += ("QComboBox::drop-down { width: %dpx; border: 0; }"
+                    "QComboBox::down-arrow { width: %dpx; height: %dpx; }"
+                    % (px(16), px(10), px(7)))
+        return css
 
     def set_branch(self, level, has_branches):
         """いまの系統を反映する。分岐の無い譜面では押せなくする。"""
+        self._has_branches = bool(has_branches)
         keys = {k for k, _t, _c in self.BRANCHES}
         self._branch_level = level if level in keys else None
         cols = {k: c for k, _t, c in self.BRANCHES}
@@ -240,7 +326,7 @@ class CommandPanel(QFrame):
         self._branch_combo.setEnabled(on)
         auto_on = on and self._branch_level == "auto"
         self._branch_auto.setStyleSheet(
-            (self._BRANCH_ON_CSS % cols["auto"]) if auto_on else "")
+            self._branch_css(cols["auto"] if auto_on else None))
         if self._branch_level in ("N", "E", "M"):
             i = self._branch_combo.findData(self._branch_level)
             if i >= 0 and i != self._branch_combo.currentIndex():
@@ -248,9 +334,8 @@ class CommandPanel(QFrame):
                 self._branch_combo.setCurrentIndex(i)
                 self._branch_combo.blockSignals(False)
         combo_on = on and self._branch_level in ("N", "E", "M")
-        self._branch_combo.setStyleSheet(
-            (self._BRANCH_ON_CSS % cols.get(self._branch_level, "#5b6470"))
-            if combo_on else "")
+        self._branch_combo.setStyleSheet(self._branch_css(
+            cols.get(self._branch_level, "#5b6470") if combo_on else None))
         if self._branch_title is not None:
             self._branch_title.setText("譜面分岐" if has_branches
                                        else "譜面分岐（この譜面には無い）")

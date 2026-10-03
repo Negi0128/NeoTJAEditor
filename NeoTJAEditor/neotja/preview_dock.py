@@ -1328,6 +1328,14 @@ class PreviewDock(QDockWidget):
         self.sim_fps_combo.setFont(_f)
         self.sim_fps_combo.move(left, 6)
         self.sim_fps_combo.raise_()
+        #: レーンの上に重ねる小物。(ウィジェット, 原寸の幅, 右の隙間)。
+        #: 表示倍率を下げたときは、これも一緒に縮める
+        #: (_scale_lane_overlays。利用者の指定 2026-10-03: 窓の形は
+        #:  そのままで、中身をまるごと小さくする)。
+        self._lane_overlays = [
+            (self.mode_button, 96, 6), (self.course_button, 150, 6),
+            (self.record_button, 84, 6), (self.zoom_button, 96, 6),
+            (self.fps_label, 74, 2), (self.sim_fps_combo, 62, 6)]
         self._load_sim_fps_choice()
         self.sim_fps_combo.currentIndexChanged.connect(self._on_sim_fps_changed)
 
@@ -1559,6 +1567,68 @@ class PreviewDock(QDockWidget):
         self._speed_row.setVisible(visible)
         self._apply_bottom_height()
 
+    #: いま下部パネルに当てている倍率(1.0 = 原寸)。
+    _bottom_scale = 1.0
+    _bottom_scaler = None
+
+    def _apply_bottom_scale(self, s: float):
+        """下部パネルもゲーム画面と同じ倍率で縮める。
+
+        画面だけ縮めると、下の板は原寸のまま残って窓の形が崩れる(画面が
+        小さいのに下だけ大きい)。窓は 1280x720 の形のままで、中身を
+        そっくり縮めたい、という指定(利用者 2026-10-03)。
+
+        自分で絵を描くペイン(作譜・波形)は中の px まではここでは分からない
+        ので、本人の set_ui_scale に任せる(ui_scale.UiScaler 参照)。"""
+        s = max(0.25, min(1.0, float(s)))
+        if self._bottom_scaler is None:
+            from neotja.ui_scale import UiScaler
+            self._bottom_scaler = UiScaler(
+                self._bottom_panel,
+                custom=[w for w in (self.chart_edit,
+                                    getattr(self, "game_waveform", None))
+                        if w is not None])
+        if not self._bottom_scaler.apply(s):
+            return
+        self._bottom_scale = self._bottom_scaler.scale
+        self._apply_bottom_height()
+
+    def _bh(self, v):
+        """原寸で持っている高さを、いまの倍率に直す。"""
+        from neotja.ui_scale import px
+        return px(int(v), self._bottom_scale)
+
+    #: レーンの上の小物を並べ始める左端(原寸)。
+    LANE_OVERLAY_X0 = 8
+
+    def _scale_lane_overlays(self, s: float):
+        """レーンの上に重ねている小物も倍率ぶん縮めて並べ直す。
+
+        ここだけ原寸で残すと、画面を半分にしたときにボタンが絵の上で
+        でかでかと居座る。幅は原寸から掛け直すので、行ったり来たりしても
+        隙間がずれない。"""
+        from neotja.ui_scale import px
+        items = getattr(self, "_lane_overlays", None)
+        if not items:
+            return
+        x = px(self.LANE_OVERLAY_X0, s)
+        y = px(6, s)
+        h = px(LANE_BUTTON_H, s)
+        fs = max(7, int(round(LANE_BUTTON_FONT_PX * s)))
+        for w, bw, gap in items:
+            bw = px(bw, s)
+            w.setFixedSize(bw, h)
+            f = w.font()
+            f.setPixelSize(fs)
+            w.setFont(f)
+            if isinstance(w, QPushButton):
+                # ボタンの中の余白は OS が原寸で入れる。背を低くすると
+                # 字の場所が無くなって**文字が消える**(実機で確認)。
+                w.setStyleSheet("" if s >= 0.999
+                                else "QPushButton { padding: 0px; }")
+            w.move(x, y)
+            x += bw + px(gap, s)
+
     def _apply_bottom_height(self):
         """下部パネルの高さを、いまのモードとボタンの表示から決め直す。
 
@@ -1568,9 +1638,13 @@ class PreviewDock(QDockWidget):
         しまい、あとで窓を開いても作譜ペインが数ピクセルの帯になっていた
         (利用者の報告 2026-09-26)。"""
         show_page = getattr(self, "_bottom_page_shown", self.bottom_stack.isVisible())
-        h = self._bottom_h_full if show_page else self._bottom_h_speed_only
-        if not getattr(self, "_overlay_visible", True):
-            h -= self._bottom_h_speed_only     # 速度行のぶんを詰める
+        # 速度行は**いま要る高さ**を聞く。倍率をかけた値をそのまま使うと、
+        # スライダーのように OS 由来の下限を持つ部品がそこまで縮まず、
+        # はみ出したぶんが上(作譜ペインの最後の行)から削られる
+        # (実測: 50% で必要 184 に対して 174 しか与えておらず GOGO が切れた)。
+        speed_h = (self._speed_row.sizeHint().height()
+                   if getattr(self, "_overlay_visible", True) else 0)
+        h = (self._bh(self._bottom_h_stack) if show_page else 0) + speed_h
         # ペインをゲーム画面の中へ移しているぶんは、こちらから詰める
         # (画面がそのぶん高くなっているので、窓ぜんたいの高さは変わらない)。
         band = 0
@@ -1580,9 +1654,10 @@ class PreviewDock(QDockWidget):
         if band:
             h -= band
             # 中身の無くなったページぶんも詰める(帯だけが残らないように)。
-            self.bottom_stack.setFixedHeight(max(0, self._bottom_h_stack - band))
+            self.bottom_stack.setFixedHeight(
+                max(0, self._bh(self._bottom_h_stack) - band))
         else:
-            self.bottom_stack.setFixedHeight(self._bottom_h_stack)
+            self.bottom_stack.setFixedHeight(self._bh(self._bottom_h_stack))
         self._bottom_panel.setFixedHeight(max(0, h))
 
     # ------------------------------------------------------------------
@@ -2094,6 +2169,8 @@ class PreviewDock(QDockWidget):
         """表示倍率(%)を適用する。ボタンの表示と窓の大きさも取り直す。"""
         percent = int(percent) if int(percent) in self.ZOOM_STEPS else 100
         self.game_preview_window.scaled_host.set_scale(percent / 100.0)
+        self._apply_bottom_scale(percent / 100.0)
+        self._scale_lane_overlays(percent / 100.0)
         self.game_preview_window.refit()
         self.zoom_button.setText(f"表示: {percent}%")
         if save and self.config_data.get("preview_zoom") != percent:
@@ -2112,15 +2189,21 @@ class PreviewDock(QDockWidget):
         # ゲーム画面の右上は、譜面も絵も出ていない空き。窓を広げず、
         # レーンにも触らずに、そこへ置く(利用者の指定 2026-09-25)。
         # 置き場所はレーンの枠(game_screen の LANE_Y - 56)より上の空き。
-        # 倍率はかけずに、右上へ寄せる。
         from neotja import game_screen as _gs
         host = self.game_preview_window.scaled_host
         scale = host.scale() if hasattr(host, "scale") else 1.0
+        # パネルは画面の縮小(ScaledHost)の倍率がかからないふつうのウィジェット
+        # なので、小さい画面(ノートPC)では原寸のまま残って右や下が切れていた。
+        # 窓の大きさは変えず・並びも変えず、パネルごと倍率ぶん縮める
+        # (利用者の指定 2026-10-02: すべてのモードで 1280x720 を保つ。
+        #  文字が小さくなるのは構わない)。縮める倍率は画面と同じ。
+        if hasattr(panel, "set_ui_scale"):
+            panel.set_ui_scale(min(1.0, scale))
         lane_top = int((_gs.LANE_Y - 56) * scale)
-        # 上の端(6px)からレーンの枠の手前までが使える場所。パネルが入り
-        # きらないときは上端から出す(倍率を下げたとき)。
-        y = max(6, lane_top - panel.height() - 4)
-        panel.move(max(0, host.width() - panel.width() - 10), y)
+        # 上の端(6px)からレーンの枠の手前までが使える場所。
+        y = max(6, lane_top - panel.height() - int(round(4 * scale)))
+        y = max(0, min(y, max(0, host.height() - panel.height())))
+        panel.move(max(0, host.width() - panel.width() - int(round(10 * scale))), y)
         panel.show()
         panel.raise_()
         # ゲーム画面が native な窓のときは、OS 側の前後も並べ直す。

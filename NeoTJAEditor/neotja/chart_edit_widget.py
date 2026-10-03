@@ -1743,6 +1743,28 @@ class ChartEditWaveform(WaveformWidget):
     #: (利用者の指定 2026-09-25: 色が増えると認識しにくい)。
     ROW_CONTENT_COLOR = "#c8c8c8"
 
+    #: 表示倍率で掛け直す px の定数(WaveformWidget.set_ui_scale 参照)。
+    SCALED_PX = WaveformWidget.SCALED_PX + (
+        "RULER_H", "LEGEND_H", "GRID_LABEL_X", "GRID_LABEL_W",
+        "RULER_NUM_MIN_ROOM")
+
+    def on_ui_scale_changed(self):
+        """倍率が変わったら、行の高さを作り直して焼いた帯を捨てる。"""
+        super().on_ui_scale_changed()
+        s = self._ui_scale
+        if s >= 0.999:
+            self.__dict__.pop("ROWS", None)            # 原寸に戻す
+        else:
+            # 音符の行(高さ 0)は「余ったぶん全部」なので触らない。
+            self.ROWS = tuple(
+                (k, n, max(1, int(round(h * s))) if h > 0 else h)
+                for k, n, h in type(self).ROWS)
+        self._row_rects_cache = None
+        self._row_font_cache = None
+        self._row_width_cache = None
+        self._grid_pen_cache = None
+        self._bump_strip()
+
     def _note_scale(self, t):
         """再生中、再生位置が通り過ぎた直後の音符を少しだけ大きく描く。"""
         if not self._playing:
@@ -2022,7 +2044,7 @@ class ChartEditWaveform(WaveformWidget):
         if got is not None and got[0] == h_now:
             return got[1]
         fixed = sum(h for _k, _n, h in self.ROWS)
-        note_h = max(40, h_now - self.RULER_H - fixed)
+        note_h = max(self.spx(40), h_now - self.RULER_H - fixed)
         out = {}
         y = self.RULER_H
         for kind, _name, h in self.ROWS:
@@ -2359,7 +2381,7 @@ class ChartEditWaveform(WaveformWidget):
             q = QPainter(pm)
             try:
                 f = self.font()
-                f.setPixelSize(11)
+                f.setPixelSize(self.fpx(11))
                 q.setFont(f)
                 q.setPen(QColor(pal["fg_dim"]))
                 q.drawText(10, 0, 70, h, Qt.AlignVCenter | Qt.AlignLeft, key[0])
@@ -2396,7 +2418,7 @@ class ChartEditWaveform(WaveformWidget):
         """行名の列の、動かない部分(名前・区切り線)。焼き付け用。"""
         pal = self._pal
         f = self.font()
-        f.setPixelSize(12)
+        f.setPixelSize(self.fpx(12))
         p.setFont(f)
         for kind, name, _h in self.ROWS:
             y, rh = rows[kind]
@@ -2431,7 +2453,7 @@ class ChartEditWaveform(WaveformWidget):
         pal = self._pal
         p.fillRect(0, 0, self.width(), self.RULER_H, QColor(pal["bg2"]))
         f = self.font()
-        f.setPixelSize(11)
+        f.setPixelSize(self.fpx(11))
         p.setFont(f)
         lo, hi = self._measure_range(t0, t1)
         self._sec_to_x(t0)                 # 1秒あたりの px を最新にする
@@ -2462,16 +2484,17 @@ class ChartEditWaveform(WaveformWidget):
                 if room >= self.RULER_NUM_MIN_ROOM:
                     p.setPen(col_fg)
                     p.setClipRect(x + 2, 0, max(1, room - 3), self.RULER_H)
-                    p.drawText(x + 4, 0, 60, 12,
+                    p.drawText(x + self.spx(4), 0, self.spx(60), self.spx(12),
                                Qt.AlignVCenter | Qt.AlignLeft, str(m + 1))
-                    if room >= 64:
+                    if room >= self.spx(64):
                         p.setPen(col_dim)
-                        f.setPixelSize(9)
+                        f.setPixelSize(self.fpx(9))
                         p.setFont(f)
-                        p.drawText(x + 4, 10, 70, 11,
+                        p.drawText(x + self.spx(4), self.spx(10),
+                                   self.spx(70), self.spx(11),
                                    Qt.AlignVCenter | Qt.AlignLeft,
                                    self._time_text(t))
-                        f.setPixelSize(11)
+                        f.setPixelSize(self.fpx(11))
                         p.setFont(f)
                     p.setClipping(False)
                 last_x = x
@@ -2493,7 +2516,7 @@ class ChartEditWaveform(WaveformWidget):
             return
         times = (self._cmd_kind_times or {}).get(kind) or []
         f = self.font()
-        f.setPixelSize(11)
+        f.setPixelSize(self.fpx(11))
         p.setFont(f)
         col = QColor(self.ROW_CONTENT_COLOR)
         if right is None:
@@ -2580,7 +2603,7 @@ class ChartEditWaveform(WaveformWidget):
         got = self._row_font_cache
         if got is None or got[0] != key:
             f = self.font()
-            f.setPixelSize(11)
+            f.setPixelSize(self.fpx(11))
             self._row_font_cache = (key, f)
             self._row_width_cache = {}     # 族が変われば幅も変わる
         return self._row_font_cache[1]

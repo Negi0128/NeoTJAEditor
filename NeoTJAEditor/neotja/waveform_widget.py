@@ -453,11 +453,24 @@ class WaveformWidget(QWidget):
         # clips the text on some fonts/DPI settings.
         for btn in (self.btn_stereo, self.btn_offset):
             hint = btn.sizeHint()
-            btn.resize(hint.width() + 8, max(22, hint.height()))
+            w = hint.width() + 8
+            h = max(22, hint.height())
+            if self._ui_scale < 0.999:
+                # QPushButton の sizeHint には OS 由来の下限(幅 80px ほど)が
+                # 入っていて、縮めても小さくならない。縮めるときだけ、字の
+                # 幅から直に出した寸法と小さいほうを採る(等倍は従来どおり)。
+                fm = btn.fontMetrics()
+                w = min(w, fm.horizontalAdvance(btn.text()) + self.spx(18))
+                h = min(h, max(self.spx(22), fm.height() + self.spx(6)))
+                btn.setStyleSheet("QPushButton { padding: 0px; }")
+            else:
+                btn.setStyleSheet("")
+            btn.resize(w, h)
         w = self.width()
         y = self._buttons_y()
-        self.btn_offset.move(w - self.btn_offset.width() - 6, y)
-        self.btn_stereo.move(w - self.btn_offset.width() - self.btn_stereo.width() - 12, y)
+        self.btn_offset.move(w - self.btn_offset.width() - self.spx(6), y)
+        self.btn_stereo.move(
+            w - self.btn_offset.width() - self.btn_stereo.width() - self.spx(12), y)
 
     def _buttons_y(self):
         """ボタンを置く y。既定は左上(従来どおり)。"""
@@ -691,6 +704,80 @@ class WaveformWidget(QWidget):
     # 最大3段に積むうえ、最下段に CHECK POINT ラベルも出すので、それらが
     # 見切れないだけの高さを確保する。
     CMD_STRIP_H = 56
+
+    # ------------------------------------------------------------------
+    # 表示倍率(ui_scale 参照)
+    #
+    # 自分で絵を描くので、px の定数は自分で掛け直す。**クラスの値を原寸と
+    # して読み、結果はインスタンスへ置く** — こうすると倍率を往復しても
+    # 丸めの誤差がたまらず、派生クラスが上書きした値もそのまま生きる。
+    # ------------------------------------------------------------------
+    #: 倍率で掛け直す px の定数。派生クラスは足すだけでよい。
+    SCALED_PX = ("NOTE_R", "NOTE_R_BIG", "SPAN_TH", "SPAN_TH_BIG",
+                 "NOTE_STRIP_H", "CMD_STRIP_H", "LANE_X0")
+    _ui_scale = 1.0
+    #: 外から setFixedHeight されている高さの原寸(初回に覚える)。
+    _base_fixed_h = None
+    #: 板の文字の原寸。ボタンは文字から寸法を決めるので、ここを縮めれば従う。
+    _base_font = None
+
+    def ui_scale(self) -> float:
+        return self._ui_scale
+
+    def fpx(self, n) -> int:
+        """文字の px を倍率ぶん縮める(小さすぎると読めないので下限 7px)。"""
+        if self._ui_scale >= 0.999:
+            return int(n)
+        return max(7, int(round(n * self._ui_scale)))
+
+    def spx(self, n) -> int:
+        """描くときの px(余白・字を置く枠など)を倍率ぶん縮める。"""
+        if self._ui_scale >= 0.999 or n <= 0:
+            return int(n)
+        return max(1, int(round(n * self._ui_scale)))
+
+    def set_ui_scale(self, s: float):
+        """倍率ぶん中身ごと縮める(1.0 で原寸)。"""
+        s = max(0.25, min(1.0, float(s)))
+        if abs(s - self._ui_scale) < 1e-6:
+            return
+        if self._base_fixed_h is None:
+            # 高さを外から固定されている(作譜ペインの 300px など)なら、
+            # それも掛け直す。親が入れ替わることがあるので自分で持つ。
+            self._base_fixed_h = (self.minimumHeight()
+                                  if self.minimumHeight() == self.maximumHeight()
+                                  else 0)
+        if self._base_font is None:
+            f0 = self.font()
+            self._base_font = (f0.pointSizeF(), f0.pixelSize())
+        self._ui_scale = s
+        # 板の文字。乗っているボタン(合成 / OFFSET調整)は sizeHint から
+        # 寸法を決めているので、ここを縮めればボタンも一緒に小さくなる。
+        pt, fpx = self._base_font
+        f = self.font()
+        if fpx > 0:
+            f.setPixelSize(max(7, int(round(fpx * s))))
+        elif pt > 0:
+            f.setPointSizeF(max(5.0, pt * s))
+        self.setFont(f)
+        if self._base_fixed_h:
+            self.setFixedHeight(max(1, int(round(self._base_fixed_h * s))))
+        cls = type(self)
+        for name in self.SCALED_PX:
+            base = getattr(cls, name)
+            if s >= 0.999:
+                self.__dict__.pop(name, None)       # 原寸に戻す
+            else:
+                setattr(self, name, max(1, int(round(base * s)))
+                        if base > 0 else base)
+        self.on_ui_scale_changed()
+        self._place_buttons()
+        self.update()
+
+    def on_ui_scale_changed(self):
+        """倍率が変わったときに、焼いてある絵や文字の幅を捨てる。"""
+        self._note_spr_cache = None
+        self._label_font_cache = None
 
     def _strip_rects(self):
         """上から順に「波形 / 譜面(音符) / 命令」の3段の縦位置。
@@ -1026,10 +1113,14 @@ class WaveformWidget(QWidget):
     _label_box_brush_v = None
 
     def _label_font(self):
-        key = (self.font().family(), 7)
+        # 文字も倍率ぶん小さくする。下限 5pt(これ以下は読めない)。鍵に
+        # 入れてあるので、倍率が変われば文字幅の表も自動で作り直される。
+        pt = (7 if self._ui_scale >= 0.999
+              else max(5, int(round(7 * self._ui_scale))))
+        key = (self.font().family(), pt)
         got = self._label_font_cache
         if got is None or got[0] != key:
-            f = QFont(key[0], 7, QFont.Bold)
+            f = QFont(key[0], pt, QFont.Bold)
             self._label_font_cache = (key, f)
             self._label_tw = {}          # フォントが変われば文字幅も変わる
         return self._label_font_cache[1]
