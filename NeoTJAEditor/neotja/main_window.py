@@ -676,14 +676,17 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
         tm.addSeparator()
+        tm.addAction("同時再生（難易度を並べて見る）", self.open_multi_preview)
+        tm.addSeparator()
         tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
         tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
         # 作譜(Peepo式)の命令を置くメニュー。本家 PeepoDrumKit と同じく、
         # キーを覚えていなくてもメニューから置ける。中身はカーソルの位置で
-        # 変わるので、出す直前にペインから作り直す。実験的機能がオフのときは
-        # 下部パネルに作譜ページ自体が無いので、メニューも出さない。
-        if self.config_data.get("peepo_chart_edit", False):
+        # 変わるので、出す直前にペインから作り直す。
+        # 13.0.0 から作譜は標準のモード。以前のモードへ戻しているときだけ、
+        # 下部パネルに作譜ページが無いのでメニューも出さない。
+        if not self.config_data.get("preview_modes_legacy", False):
             cm = mb.addMenu("作譜")
             cm.aboutToShow.connect(lambda m=cm: self._fill_chart_menu(m))
             self._chart_menu = cm
@@ -2126,7 +2129,7 @@ class MainWindow(QMainWindow):
                 hit_sounds.play_once(kind)
 
     def _apply_chart_op(self, op):
-        """作譜モードの PeepoDrumKit 式の操作(置く/消す/敷き詰め/連打/反転)。
+        """作譜モードの PeepoDrumKit 式の操作(置く/消す/連打/反転)。
 
         計算は note_edit.run_op(テキストだけを見る純ロジック)。ここでは
         結果のテキストを **変わった範囲だけ** 1回で置き換える。風船を足すと
@@ -2689,9 +2692,16 @@ class MainWindow(QMainWindow):
         # 画面と同じ「上=ゲーム画面 / 下=波形・譜面・命令」で録る。
         pd = self.preview_dock
         layout = "wave" if pd.bottom_stack.currentIndex() == pd.MODE_WAVE else "game"
+        # 同時再生モードのときは、その並びのまま書き出す(利用者の指定
+        # 2026-10-03)。画面に出ている帯は使い回さず、同じ難易度の譜面から
+        # 録画用の写しを作る(RecordDialog の説明を参照)。
+        multi_previews = pd.multi_previews()
+        if multi_previews:
+            layout = "multi"
         dlg = RecordDialog(
             self, preview_data, pd.spin_offset.value(), wave,
             pd.duration_seconds(), out_dir, layout=layout,
+            multi_previews=multi_previews,
         )
         # 閉じられたら参照を手放す。持ったままだと画面外の描画用ウィジェット
         # (スキンのピクスマップ一式)が居座る。
@@ -2762,6 +2772,32 @@ class MainWindow(QMainWindow):
             target_label = self.courses_info[0]["label"]
         from neotja.dialogs.image_preview_dialog import TJAImagePreviewDialog
         TJAImagePreviewDialog(self, content, target_label).exec()
+
+    # ------------------------------------------------------------------
+    # 同時再生(難易度を縦に並べて見る)
+    # ------------------------------------------------------------------
+    def open_multi_preview(self):
+        """同時再生: 難易度を2〜4つ選んで縦に並べる(鑑賞用)。
+
+        中身は再生ウィンドウの**モード**(通常再生/軽量/同時再生/…)なので、
+        ここは「難易度を選んで、そのモードへ入る」だけ。プレイヤーでも同じ
+        モードが使える(利用者の指定 2026-10-03)。"""
+        from neotja.dialogs.multi_course_dialog import MultiCourseDialog
+        from neotja.multi_screen import MIN_BANDS
+        pd = self.preview_dock
+        courses = pd.available_courses() or list(self.courses_info or [])
+        if len(courses) < MIN_BANDS:
+            QMessageBox.information(
+                self, "同時再生",
+                "コースが%d つ以上ある譜面で使えます。" % MIN_BANDS)
+            return
+        keys = MultiCourseDialog.ask(self, courses,
+                                     pd.multi_keys() or pd._default_multi_keys())
+        if not keys:
+            return
+        pd.set_multi_keys(keys)
+        self.preview_dock.set_game_preview_visible(True)
+        pd.set_bottom_mode(pd.MODE_MULTI)
 
     def open_strobe_tool(self):
         cursor = self.editor.textCursor()

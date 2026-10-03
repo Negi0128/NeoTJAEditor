@@ -1098,7 +1098,7 @@ class ChartEditWaveform(WaveformWidget):
     def set_selection(self, keys):
         """選んだものを入れ替える。
 
-        時間の帯(_range_start/_range_end)は別もの。敷き詰め(Shift+F/J/D/K)や
+        時間の帯(_range_start/_range_end)は別もの。範囲の Delete や
         W/Q は「空いているグリッドも含む帯」に効かせたいので、選んだものとは
         分けて持つ。囲って選んだときは、呼ぶ側が両方を立てる。"""
         self._sel = set(keys)
@@ -1191,7 +1191,7 @@ class ChartEditWaveform(WaveformWidget):
     def toggle_range_at_cursor(self):
         """Tab: 1回目でカーソルの位置を帯の始まり、2回目で終わりにする。
 
-        帯は「空いているグリッドも含む時間の範囲」で、敷き詰め(Shift+F/J/D/K)
+        帯は「空いているグリッドも含む時間の範囲」で、範囲の Delete
         や W/Q が効く相手。選んだオブジェクト(_sel)とは別もの。"""
         here = self._range_key(self._cur_measure, self._cur_slot,
                                self._measure_grid(self._cur_measure))
@@ -1220,8 +1220,12 @@ class ChartEditWaveform(WaveformWidget):
         # note_edit へは「その小節をいくつに割るか」を渡す(画面の 1/G では
         # ない)。拍子が 4/4 でない小節では数が変わる。
         a = op.get("a")
-        op.setdefault("grid", self._measure_grid(
-            int(a[0]) if a is not None else self._cur_measure))
+        m0 = int(a[0]) if a is not None else self._cur_measure
+        op.setdefault("grid", self._measure_grid(m0))
+        # 範囲が拍子の変わる所をまたぐと、小節ごとに入る数が違う。ひとつの
+        # 数で通すと連打の終端が別の小節へ飛び、風船の打数もずれていた
+        # (利用者の報告 2026-10-03)。関わる小節の数をまとめて渡す。
+        op.setdefault("grids", self._grids_for(op))
         res = self._op_cb(op)
         if res:
             for m, slot, grid, char in res.get("visual") or []:
@@ -1235,16 +1239,31 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
         return res
 
+    def _grids_for(self, op):
+        """操作が関わる小節の「いくつに割るか」を {小節: 数} で。
+
+        住所(a/b)が無い操作(選んだものを動かす/消す)もあるので、そのときは
+        譜面ぜんたいぶん渡す。小節数は数百なので辞書1つぶんで足りる。"""
+        ms = []
+        for key in ("a", "b"):
+            v = op.get(key)
+            if v is not None:
+                ms.append(int(v[0]))
+        count = self._measure_count()
+        if ms:
+            lo, hi = max(0, min(ms) - 1), min(count, max(ms) + 2)
+        else:
+            lo, hi = 0, count
+        return {m: self._measure_grid(m) for m in range(lo, hi)}
+
     def _cursor_addr(self):
         return (self._cur_measure, self._cur_slot)
 
     def _peepo_note_key(self, char, mods):
+        # Shift + 音符キーの「敷き詰め」は廃止した(利用者の指定 2026-10-03)。
+        # 範囲に効くのは Delete / W / Q と、つかんで動かすほう。
         if mods & Qt.AltModifier:
             char = _BIG[char]
-        rng = self._range_addresses()
-        if (mods & Qt.ShiftModifier) and rng is not None:
-            self._run_op({"kind": "fill", "a": rng[0], "b": rng[1], "char": char})
-            return
         self._run_op({"kind": "key", "a": self._cursor_addr(), "char": char})
 
     def _begin_long(self, key, char):
@@ -1645,7 +1664,8 @@ class ChartEditWaveform(WaveformWidget):
         if key == Qt.Key_Down:
             self.change_grid(-1)
             return
-        if key == Qt.Key_H:
+        if key == Qt.Key_H and not (mods & (Qt.ControlModifier | Qt.AltModifier
+                                            | Qt.MetaModifier)):
             self.set_legend_visible(not self._show_legend)
             self.legendToggled.emit(self._show_legend)
             return
@@ -1899,7 +1919,10 @@ class ChartEditWaveform(WaveformWidget):
             return
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
         if steps:
-            d = Fraction(int(steps), int(self._measure_grid(self._cur_measure)))
+            # 「何グリッドぶん」の長さは小節ごとに違う(拍子で変わる)ので、
+            # 小節単位の分数ではなくグリッドの数のまま渡す。以前はカーソルの
+            # いる小節の分割数で割っていたので、別の拍子の音符を掴むと
+            # ずれた位置へ落ちた(利用者の報告 2026-10-03)。
             # 帯の端をつかんだときは、同じ側の端だけを動かす(_drag_edge_name)。
             self._note_drag = dr          # _drag_keys が見るので戻しておく
             move_keys = self._drag_keys()
@@ -1909,15 +1932,39 @@ class ChartEditWaveform(WaveformWidget):
                       "pos": (k[-1].numerator, k[-1].denominator)}
                      for k in move_keys]
             res = items and self._run_op(
-                {"kind": "move_items", "items": items,
-                 "delta_num": d.numerator, "delta_den": d.denominator})
+                {"kind": "move_items", "items": items, "steps": int(steps)})
             if res:
                 # 動かしたものは選んだまま付いていく(続けて動かせるように)。
+                def shifted(k):
+                    p = self._shift_pos(k[-1], steps)
+                    return (k[0], k[1], p) if k[0] == "cmd" else (k[0], p)
                 self.set_selection({
-                    ((k[0], k[1], k[2] + d) if k[0] == "cmd" else (k[0], k[1] + d))
-                    if k in move_keys else k
-                    for k in self._sel})
+                    shifted(k) if k in move_keys else k for k in self._sel})
         self.update()
+
+    def _shift_pos(self, pos, steps):
+        """位置(小節 + 小節の中の割合)を steps グリッドぶんずらす。
+
+        note_edit._Grids.shift と同じ歩き方。選んだものの行き先を、画面側でも
+        同じに出すために持つ(小節ごとに割る数が違うので引き算では出せない)。"""
+        steps = int(steps)
+        pos = Fraction(pos)
+        if steps == 0:
+            return pos
+        m = int(pos)
+        g = self._measure_grid(m)
+        s = (pos - m) * g + steps
+        while s >= g:
+            s -= g
+            m += 1
+            g = self._measure_grid(m)
+        while s < 0:
+            if m <= 0:
+                return Fraction(0)      # 画面の表示用なので頭で止める
+            m -= 1
+            g = self._measure_grid(m)
+            s += g
+        return m + s / g
 
     def _slots_between(self, a, b):
         """住所 a から b まで、グリッドいくつぶんか(符号つき)。

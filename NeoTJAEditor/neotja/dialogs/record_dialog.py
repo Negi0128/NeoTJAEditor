@@ -207,7 +207,8 @@ class RecordDialog(QDialog):
     出来上がりは変わらない。"""
 
     def __init__(self, main_window, preview_data, offset, song_path,
-                 song_seconds, default_dir, parent=None, layout="game"):
+                 song_seconds, default_dir, parent=None, layout="game",
+                 multi_previews=None):
         super().__init__(parent or main_window)
         # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
         # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
@@ -221,7 +222,12 @@ class RecordDialog(QDialog):
         # 何を録るか。"game" は本家レイアウトの 1280x720、"wave" は音声波形
         # モードの見た目(上=ゲーム画面 / 下=波形・譜面・命令)。録画を始めた
         # ときのモードで決まる。
-        self._layout = layout if layout in ("game", "wave") else "game"
+        self._layout = layout if layout in ("game", "wave", "multi") else "game"
+        #: 同時再生("multi")のときの、難易度ごとの preview_data(並べ順)。
+        #: 2本に満たなければ同時再生として成立しないので、ふつうの録画に戻す。
+        self._multi_previews = list(multi_previews or [])
+        if self._layout == "multi" and len(self._multi_previews) < 2:
+            self._layout = "game"
         self._rec = None            # 進行中の VideoRecording
         self._widget = None         # 画面外の描画用ウィジェット
         self._cancel = False
@@ -417,6 +423,9 @@ class RecordDialog(QDialog):
         捨て描きはこの時点で始まるので、待たせないためにこうしてある。"""
         cfg = self._mw.config_data
         se = cfg.get("se_text_enabled", True)
+        if self._layout == "multi":
+            return recorder.make_offline_multi_widget(
+                self._multi_previews, self._offset, se)
         if self._layout == "wave":
             return recorder.make_offline_wave_widget(
                 self._preview, self._offset, mips=None, se_text_enabled=se)

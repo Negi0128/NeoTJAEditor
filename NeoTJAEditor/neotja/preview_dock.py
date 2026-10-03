@@ -290,6 +290,36 @@ class ScaledHost(QWidget):
                     and child.isVisible()):
                 child.raise_()
 
+    def content(self):
+        return self._content
+
+    def set_content(self, widget):
+        """中身を差し替える(ふつうのゲーム画面 ↔ 同時再生の帯)。
+
+        重ねているもの(ボタン・fps・命令パネル)はこの入れ物の子なので、
+        中身だけ替えればそのまま残る。古い中身は捨てずに隠しておく —
+        作り直すとスキンのピクスマップ一式を読み直すことになる。"""
+        old = self._content
+        if widget is old:
+            return
+        if old is not None:
+            old.hide()
+            old.setParent(None)
+        self._content = widget
+        widget.setParent(self)
+        widget.move(0, 0)
+        widget.setVisible(self._passthrough())
+        # **あとから付けた子がいちばん手前に来る。** 中身を入れ直すと、重ねて
+        # あるボタン(モード切替・コース・録画・表示・fps・命令パネル)が中身の
+        # 下に沈む(利用者の報告 2026-10-03: 波形モードでボタンが消えた)。
+        # ここで必ず出し直す。
+        for child in self.children():
+            if isinstance(child, QWidget) and child is not widget:
+                child.raise_()
+        self._buf = None
+        self.refit()
+        self.raise_overlays()
+
     def scale(self) -> float:
         return self._scale
 
@@ -828,6 +858,26 @@ class GamePreviewWindow(QWidget):
             self._pause_cb()
 
 
+def hit_notes_from_preview(preview_data):
+    """打音を鳴らす時刻の一覧 [(譜面時刻, 文字, BPM)] を譜面から作る。
+
+    音符そのものに加えて、連打の刻みと風船/くす玉の刻みも入れる。風船は
+    **割れる時刻まで**しか鳴らさない(表示と同じ切り詰めを通さないと、数字が
+    0 なのに音だけ続く)。
+
+    同時再生では難易度ごとにこれを作って合流させるので、1コースぶんの
+    組み立てをここへ出してある。"""
+    data = preview_data or {}
+    out = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
+    out += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
+    spd = data.get("roll_hit_speed", 45)
+    out += _roll_tick_notes(balloon_pop_spans(data.get("balloons", []), spd),
+                            bpm_index=2, speed=spd)
+    out += _roll_tick_notes(balloon_pop_spans(data.get("kusudamas", []), spd),
+                            bpm_index=2, speed=spd)
+    return out
+
+
 def _roll_tick_notes(spans, bpm_index, speed=None):
     """Expands roll/balloon/kusudama spans - (start, end, ..., hits) tuples,
     as returned in build_preview_timeline()'s "rolls"/"balloons"/"kusudamas"
@@ -930,7 +980,7 @@ class PreviewDock(QDockWidget):
         self.apply_offset_cb = apply_offset_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
         self.note_edit_cb = note_edit_cb
-        # 作譜モードの PeepoDrumKit 式の操作(置く/消す/敷き詰め/連打など)。
+        # 作譜モードの PeepoDrumKit 式の操作(置く/消す/連打など)。
         # 結果を返してもらう必要があるので、シグナルではなく直接呼ぶ。
         self.chart_op_cb = chart_op_cb
         self.config_data = config_data if config_data is not None else {}
@@ -1086,7 +1136,10 @@ class PreviewDock(QDockWidget):
         # self.chart_edit を None のままにすると、_waveforms()/_on_preview_frame/
         # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ
         # ならなくなり事故りやすいので、ページに載せないだけに留める方が安全。
-        self._peepo_enabled = bool(self.config_data.get("peepo_chart_edit", False))
+        # 作譜は 13.0.0 から標準のモード(実験的機能の設定は廃止。利用者の
+        # 指定 2026-10-03)。参照している所を一斉に直さずに済むよう、名前は
+        # 残して常に True にしてある。
+        self._peepo_enabled = True
         #: ペイン → それが元々入っていたページの入れ物。ゲーム画面の中へ
         #: 移したペインを戻すときに使う(_update_pane_host)。
         self._pane_layouts = {}
@@ -1164,22 +1217,45 @@ class PreviewDock(QDockWidget):
         # という前提を崩さないため — ここを崩すと cycle_bottom_mode の
         # % count() も _mode_names の並びも一斉にずれる。
         self._lite_page = QWidget()
+        #: 同時再生のページ。軽量と同じく中身は空(画面だけのモード)。
+        self._multi_page = QWidget()
+
+        # --- モードの並び(13.0.0) -------------------------------------
+        # 既定は「通常再生 / 軽量 / 同時再生 / 作譜」の4つ。音声波形と情報は
+        # 既定から外し、環境設定の実験的機能で**以前の4つ**へ戻せるようにして
+        # ある(利用者の指定 2026-10-03)。ページは両方とも作っておく —
+        # self.game_waveform や self.chart_edit を見ている所が各所にあるので、
+        # 「積まないだけ」にして参照はそのまま生かす。
+        pages = {"通常再生": self._title_page, "軽量": self._lite_page,
+                 "同時再生": self._multi_page, "音声波形": self._wave_page,
+                 "作譜": self._edit_page, "情報": self.info_bar}
+        if bool(self.config_data.get("preview_modes_legacy", False)):
+            self._mode_names = ["通常再生", "軽量", "音声波形", "情報"]
+        else:
+            self._mode_names = ["通常再生", "軽量", "同時再生", "作譜"]
         self.bottom_stack = QStackedWidget()
-        self.bottom_stack.addWidget(self._title_page)   # 0 非表示(曲名のみ)
-        self.bottom_stack.addWidget(self._lite_page)    # 1 軽量(画面だけ・ページ無し)
-        self.bottom_stack.addWidget(self._wave_page)    # 2 音声波形(見るだけ)
-        if self._peepo_enabled:
-            self.bottom_stack.addWidget(self._edit_page)  # 3 作譜(音符を置ける、実験的機能)
-        self.bottom_stack.addWidget(self.info_bar)      # 情報(有効時4、無効時3)
+        for name in self._mode_names:
+            self.bottom_stack.addWidget(pages[name])
+        # 番号は並びから引く。無いモードは None(比べても一致しない)。
+        def _mode_idx(name):
+            return (self._mode_names.index(name)
+                    if name in self._mode_names else None)
+        self.MODE_TITLE = _mode_idx("通常再生")
+        self.MODE_LITE = _mode_idx("軽量")
+        self.MODE_MULTI = _mode_idx("同時再生")
+        self.MODE_WAVE = _mode_idx("音声波形")
+        self.MODE_EDIT = _mode_idx("作譜")
+        self.MODE_INFO = _mode_idx("情報")
 
         # 下部パネル = モード別スタック + 速度行(モードに関係なく常時表示)。
         # ページ高さが異なるとモード切替のたびに窓がガタつくので、最も高い
-        # ページに合わせてスタックの高さを固定する。作譜ページを積んでいない
-        # ときはその高さを候補から外す(でないと使わないページの高さに
-        # 引きずられて下部パネルが無駄に高くなる)。
-        heights = [self.info_bar.minimumHeight(), self._wave_page.sizeHint().height()]
-        if self._peepo_enabled:
-            heights.append(self._edit_page.sizeHint().height())
+        # ページに合わせてスタックの高さを固定する。積んでいないページの
+        # 高さは候補から外す(使わないページに引きずられて無駄に高くなる)。
+        heights = [16]
+        for name in self._mode_names:
+            pg = pages[name]
+            heights.append(pg.minimumHeight() if pg is self.info_bar
+                           else pg.sizeHint().height())
         bottom_h = max(heights)
         #: ページを出すときのスタックの高さ。ペインをゲーム画面の中へ移した
         #: ときは、そのぶん縮める(_apply_bottom_height)。
@@ -1229,15 +1305,7 @@ class PreviewDock(QDockWidget):
         # レーン右上に並べる3つのボタン。右から「モード切替」「コース」「録画」。
         # どれもフォーカスは奪わない(Space/Tab/PgUp/PgDn の操作対象はレーンの
         # ままにする)。録画を出すモードは set_bottom_mode 側で決めている。
-        # ページ番号は上のスタック組み立てと連動させる(作譜が無効なら3つで
-        # 循環)。増減したらここだけ見ればよいように名前を付ける。
-        self.MODE_TITLE, self.MODE_LITE, self.MODE_WAVE = 0, 1, 2
-        if self._peepo_enabled:
-            self._mode_names = ["通常再生", "軽量", "音声波形", "作譜", "情報"]
-            self.MODE_EDIT, self.MODE_INFO = 3, 4
-        else:
-            self._mode_names = ["通常再生", "軽量", "音声波形", "情報"]
-            self.MODE_EDIT, self.MODE_INFO = None, 3
+        # モードの並びと番号は、上のスタック組み立てで決めてある。
         # 画面の左上に「モード切替 / コース / 録画」の順で並べる。以前は
         # 右上だったが、右上は曲名が出る場所なので左へ移した。
         left = 8
@@ -1252,7 +1320,7 @@ class PreviewDock(QDockWidget):
                                                "クリックでコース切替(シミュ・録画の両方に反映)")
         self.course_button.move(left, 6)
         left += 150 + 6
-        self.course_button.clicked.connect(self.chart_preview.cycle_course)
+        self.course_button.clicked.connect(self._on_course_button)
 
         self.record_button = self._lane_button("● 録画", 84,
                                                "いま選んでいるコースを動画に書き出す")
@@ -1798,6 +1866,177 @@ class PreviewDock(QDockWidget):
         v.addStretch()
         return page
 
+
+    # ------------------------------------------------------------------
+    # 同時再生(難易度を縦に並べて見るモード)
+    # ------------------------------------------------------------------
+    #: 帯を積んだ画面(作ってあれば)。モードを出ても捨てない。
+    _multi_screen = None
+    #: いま並べている難易度の key。
+    _multi_keys = None
+    #: 同時再生で鳴らす打音(難易度ぶんを合流させたもの)。None なら今までどおり。
+    _multi_notes = None
+    #: 同時再生で並べている本数。打音の音量をこれで割る。
+    _multi_count = 1
+    #: refresh_from_content が受け取った譜面のテキスト。難易度ごとの譜面を
+    #: ここから組み立てる(エディタでもプレイヤーでも同じ道を通る)。
+    _tja_content = ""
+    _multi_analyzer = None
+    #: この譜面にあるコース(preview_data の available_courses)。
+    _multi_courses = None
+
+    def available_courses(self):
+        """この譜面にあるコース [{"key","label",...}]。"""
+        return list(self._multi_courses or [])
+
+    def multi_keys(self):
+        return list(self._multi_keys or [])
+
+    #: 並べる既定の順。難しいほうから上に積む。
+    _MULTI_ORDER = ("Edit", "Oni", "Hard", "Normal", "Easy")
+
+    def _default_multi_keys(self):
+        from neotja.multi_screen import MAX_BANDS
+        keys = [c.get("key") for c in self.available_courses() if c.get("key")]
+        rank = {k: i for i, k in enumerate(self._MULTI_ORDER)}
+        keys.sort(key=lambda k: rank.get(k, len(rank)))
+        return keys[:MAX_BANDS]
+
+    def set_multi_keys(self, keys):
+        """並べる難易度を決め直す。同時再生モード中なら作り直す。"""
+        self._multi_keys = list(keys or [])
+        if self.bottom_stack.currentIndex() == self.MODE_MULTI:
+            self._apply_multi_mode(True)
+
+    def _build_multi_previews(self):
+        """並べる難易度ぶんの譜面を組み立てる。"""
+        from neotja.tja_analyzer import TJACourseAnalyzer
+        if self._multi_analyzer is None:
+            self._multi_analyzer = TJACourseAnalyzer(self.config_data)
+        out = []
+        for key in (self._multi_keys or []):
+            try:
+                out.append(self._multi_analyzer.build_preview_timeline(
+                    self._tja_content, None, key))
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    def _apply_multi_mode(self, on: bool):
+        """同時再生へ入る/出る。
+
+        画面(ScaledHost の中身)を帯の束と差し替え、打音を難易度ぶん合流
+        させる。出るときは元のゲーム画面へ戻し、打音も元へ戻す。"""
+        from neotja.multi_screen import (MIN_BANDS, MultiBandScreen,
+                                         make_band_screen)
+        host = self.game_preview_window.scaled_host
+        if not on:
+            if self._multi_screen is not None:
+                self._multi_screen.set_time_source(None)
+            if host.content() is not self.game_screen:
+                host.set_content(self.game_screen)
+            if self._multi_notes is not None:
+                self._multi_notes = None
+                self._multi_count = 1
+                self._apply_hit_schedule(self.spin_offset.value())
+                self._apply_sfx_volume()
+                # コースのボタンを元の表示へ戻す。
+                lab, col = self._course_label_last
+                self._set_lane_course_label(lab, col)
+            return
+        if not self._multi_keys:
+            self._multi_keys = self._default_multi_keys()
+        previews = self._build_multi_previews()
+        if len(previews) < MIN_BANDS:
+            # コースが足りない譜面では成立しない。通常再生へ戻す。
+            self.set_bottom_mode(self.MODE_TITLE)
+            return
+        offset = self.spin_offset.value()
+        screens = [make_band_screen(d, offset, self._se_text_enabled)
+                   for d in previews]
+        if self._multi_screen is None:
+            self._multi_screen = MultiBandScreen()
+        self._multi_screen.set_screens(screens)
+        self._multi_screen.begin_offline_render()
+        # 時刻は帯の画面が自分のタイマーで取りに来る。レーンは見えていなくても
+        # 時計を持っているので、そこから直に引く(multi_screen の説明を参照)。
+        self._multi_screen.set_time_source(
+            lambda: self.chart_preview._current_audio_time())
+        # スペース・小節移動などは本体のレーンへ渡す(ゲーム画面と同じ)。
+        self._multi_screen.set_key_target(self.chart_preview)
+        host.set_content(self._multi_screen)
+        self._multi_screen.setFocus(Qt.OtherFocusReason)
+        # 中身を替えると新しい子が最前面に来るので、重ねたボタン類を出し直す。
+        for w, _bw, _g in getattr(self, "_lane_overlays", []):
+            w.raise_()
+        host.raise_overlays()
+        # コースのボタンは「並べる難易度を選ぶ」に変わる(_on_course_button)。
+        self.course_button.setText("難易度: %d本" % len(previews))
+        self.course_button.setStyleSheet("")
+        # 打音は**並べた難易度を全部鳴らす**(利用者の指定 2026-10-03)。同じ
+        # 時刻に重なるぶん大きくなるので、本数で割って小さくする。ミキサーは
+        # 打音をサンプル単位で先に並べているので、合流した一覧を渡すだけでよい。
+        merged = []
+        for data in previews:
+            merged += hit_notes_from_preview(data)
+        merged.sort(key=lambda n: n[0])
+        self._multi_notes = merged
+        self._multi_count = len(previews)
+        self._apply_hit_schedule(offset)
+        self._apply_sfx_volume()
+
+    def _on_course_button(self):
+        """レーン左上の「コース」ボタン。
+
+        同時再生のあいだは**並べる難易度を選ぶ**(利用者の指定 2026-10-03)。
+        あのモードでは「いま映しているコース」が1つに決まらないので、
+        コースを順送りしても意味がない。"""
+        if self.bottom_stack.currentIndex() == self.MODE_MULTI:
+            self.open_multi_picker()
+            return
+        self.chart_preview.cycle_course()
+
+    def open_multi_picker(self):
+        """同時再生で並べる難易度を選び直す。"""
+        from neotja.dialogs.multi_course_dialog import MultiCourseDialog
+        courses = self.available_courses()
+        if not courses:
+            return
+        keys = MultiCourseDialog.ask(
+            self.game_preview_window, courses,
+            self.multi_keys() or self._default_multi_keys())
+        if keys:
+            self.set_multi_keys(keys)
+
+    def multi_previews(self):
+        """録画用に、いま並べている難易度ぶんの譜面を作り直して返す。"""
+        if self.bottom_stack.currentIndex() != self.MODE_MULTI:
+            return []
+        return self._build_multi_previews()
+
+    def _hit_notes(self):
+        """いま鳴らすべき打音の一覧。同時再生中は難易度ぶんの合流。"""
+        return self._multi_notes if self._multi_notes is not None else self._editor_notes
+
+    def _apply_hit_schedule(self, offset):
+        """打音の予定を入れ直す。鳴らす中身の選び方はここ1か所に集める。"""
+        self.hit_sounds.set_schedule(self._hit_notes(), offset)
+
+    def _sfx_effective(self):
+        """実際に出す効果音の比率。
+
+        同時再生のあいだは**並べた本数で割る**(利用者の指定 2026-10-03)。
+        同じ時刻に本数ぶん重なるので、割らないとそのぶん大きくなる。
+        利用者が決めた音量(_sfx_ratio)はそのまま持っておき、窓を閉じれば
+        元の音量に戻る。"""
+        return self._sfx_ratio / max(1, self._multi_count)
+
+    def _apply_sfx_volume(self):
+        """効果音の音量を音の出口へ当てる。"""
+        if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
+            self.audio.set_sfx_volume(self._sfx_effective())
+        self._apply_legacy_sfx_volume()
+
     def _on_preview_frame(self, t):
         """レーンの 120fps クロック。音声波形と作譜、両方の波形へ同じ時刻を配る。
 
@@ -2108,9 +2347,15 @@ class PreviewDock(QDockWidget):
         if self.record_cb:
             self.record_cb()
 
+    #: 最後に出したコースの表示(同時再生から戻るときに書き戻す)。
+    _course_label_last = (None, None)
+
     def _set_lane_course_label(self, label, color):
         """レーン上のコースボタンの表示を、いま映しているコースに合わせる。
         情報バーのコースボタンと同じ内容(あちらは情報モードでしか見えない)。"""
+        self._course_label_last = (label, color)
+        if self.bottom_stack.currentIndex() == self.MODE_MULTI:
+            return          # 同時再生中は「難易度を選ぶ」のまま
         self.course_button.setText(f"コース: {label or '-'}")
         if color:
             self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
@@ -2362,6 +2607,10 @@ class PreviewDock(QDockWidget):
         魂の飛翔・スコア加算も落とす(set_lite)。下にペインは置かない。"""
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
+        # 同時再生は画面そのものを差し替える。入る/出るをここで決めてから、
+        # 下の「ふつうのゲーム画面向けの支度」へ進む(入っているあいだは
+        # ゲーム画面は隠れているだけなので、支度はそのまま通してよい)。
+        self._apply_multi_mode(idx == self.MODE_MULTI)
         # 録画ボタンを出すモード。書き出しの中身はモードに一切左右されない
         # (recorder は画面外に専用の GameScreenWidget(1280x720)を作って描く)
         # ので、これは純粋に「どこから始められるか」の話。音声波形は譜面を
@@ -2369,7 +2618,7 @@ class PreviewDock(QDockWidget):
         # ときは出さない — 画面下が別物なので、そこから始めると何が録れるのか
         # 紛らわしい。
         self.record_button.setVisible(
-            idx == self.MODE_TITLE or idx == self.MODE_WAVE)
+            idx in (self.MODE_TITLE, self.MODE_WAVE, self.MODE_MULTI))
         # 軽量は下にペインを置かないので 1280x720 のまま(縦横比を通常再生と
         # 揃えたいという要望)。縮めるのはペインを置くモードだけ。
         self.game_screen.set_compact(
@@ -2392,7 +2641,10 @@ class PreviewDock(QDockWidget):
             self.MODE_EDIT is not None and idx == self.MODE_EDIT)
         # 曲名はゲーム画面の中に描かれるので、曲名だけのページは出さない。
         # 軽量も同じ扱い(ページを持たない = 窓をできるだけ小さくする)。
-        show_page = (idx != self.MODE_TITLE and idx != self.MODE_LITE)
+        # 同時再生も画面だけのモード。下にページは置かない(帯で 720px を
+        # 使い切っているので、ここでページを出すと窓が縦に伸びる)。
+        show_page = idx not in (self.MODE_TITLE, self.MODE_LITE,
+                                self.MODE_MULTI)
         self._bottom_page_shown = show_page
         self.bottom_stack.setVisible(show_page)
         self._apply_bottom_height()
@@ -2518,12 +2770,16 @@ class PreviewDock(QDockWidget):
             if state is not None:
                 self.hit_sounds.set_schedule([], self.spin_offset.value())
             else:
-                self.hit_sounds.set_schedule(self._editor_notes,
-                                             self.spin_offset.value())
+                self._apply_hit_schedule(self.spin_offset.value())
         except Exception:  # noqa: BLE001
             pass
 
     def refresh_from_content(self, content: str, current_file, metronome_clicks=None, preview_data=None, course_stats=None):
+        # 同時再生は「ほかの難易度の譜面」も要るので、元のテキストを控える。
+        # 作り直しはモードへ入ったときだけなので、ここでは持つだけ。
+        self._tja_content = content or ""
+        if preview_data is not None:
+            self._multi_courses = list(preview_data.get("available_courses") or [])
         headers = parse_preview_headers(content)
         self._editor_bpm = headers["bpm"]
         self._editor_offset = headers["offset"]
@@ -2537,17 +2793,7 @@ class PreviewDock(QDockWidget):
             self.chart_edit.set_default_measure_len(240.0 / float(headers["bpm"]))
 
         if preview_data is not None:
-            self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in preview_data.get("notes", [])]
-            self._editor_notes += _roll_tick_notes(preview_data.get("rolls", []), bpm_index=3)
-            # 風船は「割れる時刻」まででしか鳴らさない。表示(レーン)と
-            # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
-            _spd = preview_data.get("roll_hit_speed", 45)
-            self._editor_notes += _roll_tick_notes(
-                balloon_pop_spans(preview_data.get("balloons", []), _spd),
-                bpm_index=2, speed=_spd)
-            self._editor_notes += _roll_tick_notes(
-                balloon_pop_spans(preview_data.get("kusudamas", []), _spd),
-                bpm_index=2, speed=_spd)
+            self._editor_notes = hit_notes_from_preview(preview_data)
             self._preview_notes = list(preview_data.get("notes", []))
             self._preview_spans = (list(preview_data.get("rolls", [])),
                                    list(preview_data.get("balloons", [])),
@@ -2578,7 +2824,7 @@ class PreviewDock(QDockWidget):
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
         self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
-        self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
+        self._apply_hit_schedule(self.spin_offset.value())
         self.chart_preview.set_offset(self.spin_offset.value())
         self._take_bar_lines(preview_data)
         if preview_data is not None:
@@ -2617,7 +2863,7 @@ class PreviewDock(QDockWidget):
         self.waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
         self._set_game_grid(headers["bpm"], headers["offset"])
         self.metronome.set_schedule(self._editor_metronome_clicks, headers["offset"])
-        self.hit_sounds.set_schedule(self._editor_notes, headers["offset"])
+        self._apply_hit_schedule(headers["offset"])
         self.chart_preview.set_offset(headers["offset"])
 
         if not os.path.exists(wave_path):
@@ -2960,7 +3206,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
-        self.hit_sounds.set_schedule(self._editor_notes, self.spin_offset.value())
+        self._apply_hit_schedule(self.spin_offset.value())
         self._take_bar_lines(data)
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
@@ -3047,13 +3293,15 @@ class PreviewDock(QDockWidget):
         レガシーのときだけ。**風船の破裂音は両方の経路でミキサーを通らない**
         (QSoundEffect で直に鳴らしている)ので、必ずここで渡す。
         """
-        v = self._master_volume * self._sfx_ratio
+        # 風船の破裂音は1本ぶんしか鳴らないので、同時再生でも割らない。
         try:
-            self.chart_preview.set_pop_volume(v)
+            self.chart_preview.set_pop_volume(
+                self._master_volume * self._sfx_ratio)
         except Exception:  # noqa: BLE001
             pass
         if self._mixer_active:
             return
+        v = self._master_volume * self._sfx_effective()
         for engine in (self.hit_sounds, self.metronome):
             setter = getattr(engine, "set_volume", None)
             if setter is not None:
@@ -3137,9 +3385,7 @@ class PreviewDock(QDockWidget):
         """効果音の音量比率(0.0-1.0)を保存コールバックを呼ばずに設定
         (settings.json の sfx_volume 復元用)。実際に出る音量はマスター × この比率。"""
         self._sfx_ratio = max(0.0, min(1.0, float(volume)))
-        if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
-            self.audio.set_sfx_volume(volume)
-        self._apply_legacy_sfx_volume()
+        self._apply_sfx_volume()
         self.sfx_volume_slider.blockSignals(True)
         self.sfx_volume_slider.setValue(round(volume * 100))
         self.sfx_volume_slider.blockSignals(False)
@@ -3148,9 +3394,7 @@ class PreviewDock(QDockWidget):
     def _on_sfx_volume_changed(self, value):
         volume = value / 100.0
         self._sfx_ratio = volume
-        if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
-            self.audio.set_sfx_volume(volume)
-        self._apply_legacy_sfx_volume()
+        self._apply_sfx_volume()
         self.lbl_sfx_volume.setText(f"{value}%")
         if self.sfx_volume_cb:
             self.sfx_volume_cb(volume)
@@ -3253,7 +3497,7 @@ class PreviewDock(QDockWidget):
         self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
         self._set_game_grid(self._editor_bpm, value)
         self.metronome.set_schedule(self._editor_metronome_clicks, value)
-        self.hit_sounds.set_schedule(self._editor_notes, value)
+        self._apply_hit_schedule(value)
         self.chart_preview.set_offset(value)
         # Auto-synced into the TJA's own OFFSET: line as the user adjusts it
         # (not just on button click) - this only fires for user-driven

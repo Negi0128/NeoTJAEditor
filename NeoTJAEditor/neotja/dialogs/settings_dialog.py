@@ -46,7 +46,7 @@ class SettingsDialog(QDialog):
         "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
         "player_select_bgm", "player_select_bgm_volume", "player_play_mode",
-        "peepo_chart_edit", "gpu_render", "gpu_vsync",
+        "preview_modes_legacy", "gpu_render", "gpu_vsync",
         "preview_max_fps",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
         "nameplate_title_image", "nameplate_dan", "nameplate_dan_type",
@@ -896,11 +896,15 @@ class SettingsDialog(QDialog):
         cfg = self.main_window.config_data
 
         form = self._group(outer, "譜面プレビュー")
-        self.peepo_chart_edit_check = QCheckBox("Peepo式作譜（実験的）")
-        self.peepo_chart_edit_check.setChecked(cfg.get("peepo_chart_edit", False))
-        form.addRow(self.peepo_chart_edit_check)
-        form.addRow(self._hint("譜面プレビューの下部パネルに、音符を直接置ける「作譜」モードを"
-                               "追加します。※反映にはアプリの再起動が必要です。"))
+        self.legacy_modes_check = QCheckBox("以前のモードに戻す")
+        self.legacy_modes_check.setChecked(
+            bool(cfg.get("preview_modes_legacy", False)))
+        form.addRow(self.legacy_modes_check)
+        form.addRow(self._hint(
+            "再生ウィンドウのモードを、12.x までの「通常再生 / 軽量 / 音声波形 / "
+            "情報」に戻します。オフ（既定）は 13.0.0 からの"
+            "「通常再生 / 軽量 / 同時再生 / 作譜」です。\n"
+            "※戻すと同時再生と作譜は使えません。反映にはアプリの再起動が必要です。"))
 
         self.command_panel_follow_check = QCheckBox(
             "命令パネルの数値を、カーソルの位置に合わせる")
@@ -1022,7 +1026,7 @@ class SettingsDialog(QDialog):
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["hit_sound_use_custom"] = self.hit_custom_check.isChecked()
-        cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
+        cfg["preview_modes_legacy"] = self.legacy_modes_check.isChecked()
         cfg["command_panel_follow"] = self.command_panel_follow_check.isChecked()
         cfg["player_play_mode"] = self.player_play_mode_check.isChecked()
         cfg["gpu_render"] = self.gpu_render_check.isChecked()

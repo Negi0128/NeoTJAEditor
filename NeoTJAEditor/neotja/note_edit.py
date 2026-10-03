@@ -454,6 +454,77 @@ def _key(m, slot, grid):
     return (int(m), Fraction(int(slot), int(grid)))
 
 
+class _Grids:
+    """小節ごとの「いくつに割るか」。
+
+    画面の分割 1/G は**4分音符を基準にした数**なので、1小節に入るグリッドの
+    数は拍子で変わる(4/4 なら G、2/4 なら G/2)。範囲の操作をひとつの G で
+    通すと、拍子の変わる譜面で位置も打数もずれる — 連打の終端が1小節先へ
+    飛び、風船の打数が 1.5倍になっていた(利用者の報告 2026-10-03)。
+
+    呼ぶ側(作譜ペイン)が小節ごとの数を map で渡す。渡っていない小節は
+    既定の G を使うので、4/4 だけの譜面では今までと1ビットも変わらない。"""
+
+    __slots__ = ("g", "map")
+
+    def __init__(self, grid, per_measure=None):
+        self.g = max(1, int(grid))
+        self.map = {}
+        for k, v in (per_measure or {}).items():
+            if int(v) > 0:
+                self.map[int(k)] = int(v)
+
+    def at(self, m):
+        return self.map.get(int(m), self.g)
+
+    def key(self, m, slot):
+        return _key(m, slot, self.at(m))
+
+    def steps(self, a, b):
+        """住所 a から b までグリッドいくつぶんか(符号つき)。
+
+        小節ごとに割る数が違うので引き算では出せない。境目でその小節の数を
+        足しながら数える(作譜ペインの _slots_between と同じ考え方)。"""
+        (m0, s0), (m1, s1) = a, b
+        sign = 1
+        if (m1, s1) < (m0, s0):
+            (m0, s0), (m1, s1) = (m1, s1), (m0, s0)
+            sign = -1
+        n = -int(s0)
+        for m in range(int(m0), int(m1)):
+            n += self.at(m)
+        return sign * (n + int(s1))
+
+    def shift(self, pos, steps):
+        """位置 pos(小節 + 小節の中の割合)を steps グリッドぶんずらす。
+
+        グリッドに乗っていない位置(命令行など)でも、小節の中の端数は割合の
+        まま持ち越す。譜面の頭より前へ出てしまうときは None(行き先が無い)。
+        ちょうど頭(0)に乗るのは行き先として正しいので None にしない。"""
+        steps = int(steps)
+        if steps == 0:
+            return Fraction(pos)
+        m = int(pos)
+        g = self.at(m)
+        s = (Fraction(pos) - m) * g + steps
+        while s >= g:
+            s -= g
+            m += 1
+            g = self.at(m)
+        while s < 0:
+            if m <= 0:
+                return None
+            m -= 1
+            g = self.at(m)
+            s += g
+        return m + s / g
+
+
+def _as_grids(grid):
+    """int でも _Grids でも受けられるようにする。"""
+    return grid if isinstance(grid, _Grids) else _Grids(grid)
+
+
 def _measure_notes(text, span):
     a, b = span
     for p in parse_measure_lines(text[a:b]):
@@ -629,34 +700,14 @@ def op_key(text, course_range, m, slot, grid, char):
 
 
 def _range_keys(a, b, grid):
-    """(小節, スロット) 2つを小さい順に並べ替えて返す。"""
-    ta = a[0] * grid + a[1]
-    tb = b[0] * grid + b[1]
-    if ta > tb:
-        ta, tb = tb, ta
-    return divmod(ta, grid), divmod(tb, grid)
+    """(小節, スロット) 2つを小さい順に並べ替えて返す。
 
-
-def op_fill(text, course_range, a, b, grid, char):
-    """範囲の中の空いているグリッドをすべて char で埋める(Shift + 音符キー)。"""
-    body = course_body_span(text, course_range)
-    if body is None or char not in _SMALL:
-        return None
-    (m0, s0), (m1, s1) = _range_keys(a, b, grid)
-    items = chart_items(text, body)
-    writes = []
-    total = m0 * grid + s0
-    last = m1 * grid + s1
-    while total <= last:
-        m, s = divmod(total, grid)
-        k = _key(m, s, grid)
-        if not any(it["k0"] <= k <= it["k1"] for it in items):
-            writes.append((m, s, grid, char))
-        total += 1
-    if not writes:
-        return None
-    new = _apply_writes(text, body, writes)
-    return _result(text, new, sound=char, reparse=True)
+    小節ごとに割る数が違うので、通し番号ではなく**位置**で比べる
+    (_Grids 参照)。"""
+    G = _as_grids(grid)
+    a = (int(a[0]), int(a[1]))
+    b = (int(b[0]), int(b[1]))
+    return (a, b) if G.key(*a) <= G.key(*b) else (b, a)
 
 
 def op_long(text, course_range, a, b, grid, char):
@@ -664,8 +715,9 @@ def op_long(text, course_range, a, b, grid, char):
     body = course_body_span(text, course_range)
     if body is None or char not in LONG_HEADS:
         return None
-    (m0, s0), (m1, s1) = _range_keys(a, b, grid)
-    k0, k1 = _key(m0, s0, grid), _key(m1, s1, grid)
+    G = _as_grids(grid)
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    k0, k1 = G.key(m0, s0), G.key(m1, s1)
     if k0 == k1:
         return None
     items = chart_items(text, body)
@@ -676,8 +728,8 @@ def op_long(text, course_range, a, b, grid, char):
             writes.extend(_removal_writes(it))
             if it["ord"] is not None:
                 removed.append(it["ord"])
-    writes.append((m0, s0, grid, char))
-    writes.append((m1, s1, grid, "8"))
+    writes.append((m0, s0, G.at(m0), char))
+    writes.append((m1, s1, G.at(m1), "8"))
     new = _apply_writes(text, body, writes)
     insert = None
     if char in BALLOON_HEADS:
@@ -685,15 +737,17 @@ def op_long(text, course_range, a, b, grid, char):
         before = sum(1 for it in items
                      if it["ord"] is not None and it["ord"] not in removed
                      and it["k0"] < k0)
-        steps = (m1 * grid + s1) - (m0 * grid + s0)
-        insert = (before, steps)
+        # 打数は「グリッドいくつぶんか」。拍子が変わる所をまたぐと小節あたりの
+        # 数が違うので、1小節ずつ数える(通し番号で引くと多すぎた)。
+        insert = (before, G.steps((m0, s0), (m1, s1)))
     new = _update_balloons(new, course_range, removed, insert)
     return _result(text, new, sound=char, reparse=True)
 
 
 def _items_in(items, a, b, grid, single):
+    G = _as_grids(grid)
     if single:
-        k = _key(a[0], a[1], grid)
+        k = G.key(a[0], a[1])
         out = []
         for it in items:
             if it["k0"] == k:
@@ -706,8 +760,8 @@ def _items_in(items, a, b, grid, single):
                 # 音符を消したつもりで連打が巻き添えになる。
                 out.append(it)
         return out
-    (m0, s0), (m1, s1) = _range_keys(a, b, grid)
-    k0, k1 = _key(m0, s0, grid), _key(m1, s1, grid)
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    k0, k1 = G.key(m0, s0), G.key(m1, s1)
     out = []
     for it in items:
         if k0 <= it["k0"] <= k1:
@@ -735,7 +789,7 @@ def op_delete(text, course_range, a, b, grid):
     new = _apply_writes(text, body, writes)
     new = _update_balloons(new, course_range, removed)
     simple = single and not any(_is_long(it) for it in hits)
-    visual = [(a[0], a[1], grid, "0")] if simple else []
+    visual = [(a[0], a[1], _as_grids(grid).at(a[0]), "0")] if simple else []
     return _result(text, new, visual=visual, reparse=not simple)
 
 
@@ -766,15 +820,20 @@ def command_items(text, body):
     return out
 
 
-def _move_one_command(text, course_range, pos, name, value, d):
-    """命令1つを pos から pos+d へ動かす。戻り値は新しい text(だめなら None)。"""
+def _move_one_command(text, course_range, pos, name, value, dest):
+    """命令1つを pos から dest へ動かす。戻り値は新しい text(だめなら None)。
+
+    行き先を**位置そのもの**で受けるのは、「何グリッドぶん」の長さが小節に
+    よって違うため(拍子が変わる譜面。_Grids.shift 参照)。"""
     def addr(p):
         m = int(p)
         frac = p - m
         return m, frac.numerator, frac.denominator
 
+    if dest is None:
+        return None                     # 行き先が譜面の外
     m0, s0, g0 = addr(pos)
-    m1, s1, g1 = addr(pos + d)
+    m1, s1, g1 = addr(Fraction(dest))
     if m1 < 0:
         return None
     if name in _MARKER_BY_NAME:
@@ -800,19 +859,23 @@ def op_move(text, course_range, a, b, grid, delta):
     並び順で書き直す。行き先にあった音符は上書きされる(本家と同じ)。"""
     body = course_body_span(text, course_range)
     delta = int(delta)
-    if body is None or delta == 0 or grid <= 0:
+    G = _as_grids(grid)
+    if body is None or delta == 0:
         return None
     items = chart_items(text, body)
-    sel = _items_in(items, a, b, grid, False)
+    sel = _items_in(items, a, b, G, False)
     if not sel:
         return None
-    d = Fraction(delta, int(grid))
 
     def pos_of(addr):
         return Fraction(addr[0]) + Fraction(addr[1], addr[2])
 
+    def moved(addr):
+        # 「delta グリッドぶん」の長さは小節ごとに違うので、歩いて出す。
+        return G.shift(pos_of(addr), delta)
+
     for it in sel:
-        if pos_of(it["head"]) + d < 0:
+        if moved(it["head"]) is None:
             return None                 # 譜面の頭より前へは出せない
 
     vals = balloon_values(text, course_range)
@@ -824,7 +887,7 @@ def op_move(text, course_range, a, b, grid, delta):
         if it["tail"] is not None:
             moves.append((it["tail"], "8"))
         for addr, ch in moves:
-            p = pos_of(addr) + d
+            p = moved(addr)
             m = int(p)
             frac = p - m
             writes.append((m, frac.numerator, frac.denominator, ch))
@@ -848,19 +911,20 @@ def op_move(text, course_range, a, b, grid, delta):
         if it["ord"] is None:
             continue
         o = it["ord"]
-        by_pos[pos_of(it["head"]) + d] = vals[o] if o < len(vals) else "5"
+        by_pos[moved(it["head"])] = vals[o] if o < len(vals) else "5"
     # --- 範囲に入っている命令も一緒に動かす ---
-    (mm0, ss0), (mm1, ss1) = _range_keys(a, b, grid)
-    lo_pos = mm0 + Fraction(ss0, grid)
-    hi_pos = mm1 + Fraction(ss1, grid)
+    (mm0, ss0), (mm1, ss1) = _range_keys(a, b, G)
+    lo_pos = mm0 + Fraction(ss0, G.at(mm0))
+    hi_pos = mm1 + Fraction(ss1, G.at(mm1))
     body_c = course_body_span(new, course_range)
     cmds = [c for c in (command_items(new, body_c) if body_c else [])
             if lo_pos <= c[0] <= hi_pos and (c[1] in COMMAND_NAMES
                                              or c[1] in _MARKER_BY_NAME)]
     # 右へ動かすときは後ろから、左へ動かすときは前から(自分どうしがぶつからない)。
-    for pos, name, value in sorted(cmds, key=lambda c: c[0], reverse=d > 0):
+    for pos, name, value in sorted(cmds, key=lambda c: c[0], reverse=delta > 0):
         rng_c = (course_range[0], course_range[1] + new.count(chr(10)) - text.count(chr(10)))
-        moved_txt = _move_one_command(new, rng_c, pos, name, value, d)
+        moved_txt = _move_one_command(new, rng_c, pos, name, value,
+                                      G.shift(pos, delta))
         if moved_txt is not None:
             new = moved_txt
 
@@ -890,19 +954,27 @@ def _head_pos(it):
     return Fraction(it["head"][0]) + Fraction(it["head"][1], it["head"][2])
 
 
-def op_move_items(text, course_range, items, delta):
-    """選んだオブジェクトを delta(分数・小節単位)ぶん動かす。"""
+def op_move_items(text, course_range, items, steps, grid=16):
+    """選んだオブジェクトを steps グリッドぶん動かす。
+
+    「何グリッドぶん」は小節によって長さが違う(拍子が変わると1小節に入る数が
+    変わる)ので、小節単位の分数ではなく**グリッドの数**で受けて、位置ごとに
+    歩いて行き先を出す(_Grids.shift)。"""
     body = course_body_span(text, course_range)
-    d = Fraction(delta)
-    if body is None or not items or d == 0:
+    G = _as_grids(grid)
+    steps = int(steps)
+    if body is None or not items or steps == 0:
         return None
+
+    def dest(p):
+        return G.shift(Fraction(p), steps)
     want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
     all_items = chart_items(text, body)
     sel = [it for it in all_items if _head_pos(it) in want_notes]
-    if any(_head_pos(it) + d < 0 for it in sel):
-        return None
+    if any(dest(_head_pos(it)) is None for it in sel):
+        return None                     # 譜面の頭より前へは出せない
     vals = balloon_values(text, course_range)
     new = text
     if sel:
@@ -914,7 +986,7 @@ def op_move_items(text, course_range, items, delta):
             if it["tail"] is not None:
                 moves.append((it["tail"], "8"))
             for addr, ch in moves:
-                p = Fraction(addr[0]) + Fraction(addr[1], addr[2]) + d
+                p = dest(Fraction(addr[0]) + Fraction(addr[1], addr[2]))
                 m = int(p)
                 frac = p - m
                 writes.append((m, frac.numerator, frac.denominator, ch))
@@ -925,10 +997,10 @@ def op_move_items(text, course_range, items, delta):
         found = [c for c in (command_items(new, body_c) if body_c else [])
                  if (c[1], c[0]) in want_cmds
                  and (c[1] in COMMAND_NAMES or c[1] in _MARKER_BY_NAME)]
-        for pos, name, value in sorted(found, key=lambda c: c[0], reverse=d > 0):
+        for pos, name, value in sorted(found, key=lambda c: c[0], reverse=steps > 0):
             rng_c = (course_range[0],
                      course_range[1] + new.count(chr(10)) - text.count(chr(10)))
-            moved_txt = _move_one_command(new, rng_c, pos, name, value, d)
+            moved_txt = _move_one_command(new, rng_c, pos, name, value, dest(pos))
             if moved_txt is not None:
                 new = moved_txt
     if new == text:
@@ -945,7 +1017,7 @@ def op_move_items(text, course_range, items, delta):
         o = it["ord"]
         if o is None:
             continue
-        by_pos[_head_pos(it) + d] = vals[o] if o < len(vals) else "5"
+        by_pos[dest(_head_pos(it))] = vals[o] if o < len(vals) else "5"
     body2 = course_body_span(new, course_range)
     out = [by_pos.get(_head_pos(it), "5")
            for it in (chart_items(new, body2) if body2 else [])
@@ -1028,7 +1100,7 @@ def op_transform(text, course_range, a, b, grid, mode):
     new = _apply_writes(text, body, writes)
     visual = []
     if single and len(writes) == 1 and writes[0][3] in _SMALL:
-        visual = [(a[0], a[1], grid, writes[0][3])]
+        visual = [(a[0], a[1], _as_grids(grid).at(a[0]), writes[0][3])]
     return _result(text, new, sound=sound, visual=visual, reparse=not visual)
 
 
@@ -1037,18 +1109,21 @@ def run_op(text, course_range, op):
 
     op の形:
       {"kind": "key",    "a": (小節, スロット), "grid": G, "char": "1"〜"4"}
-      {"kind": "fill",   "a": ..., "b": ..., "grid": G, "char": "1"〜"4"}
       {"kind": "long",   "a": ..., "b": ..., "grid": G, "char": "5"/"6"/"7"/"9"}
       {"kind": "delete", "a": ..., "b": None か住所, "grid": G}
       {"kind": "flip" / "size", "a": ..., "b": None か住所, "grid": G}
+
+    "grids" を {小節: いくつに割るか} で添えられる。拍子が変わる譜面では
+    1小節に入るグリッドの数が小節ごとに違うので、範囲の操作はこちらを見る
+    (添えなければ全小節 G。4/4 だけの譜面では結果は変わらない)。
     """
     kind = op.get("kind")
-    g = int(op.get("grid", 16))
+    g = _Grids(int(op.get("grid", 16)), op.get("grids"))
     # 選んだオブジェクトへの操作は住所(a/b)を使わない。下の「a が無ければ
     # 何もしない」より前で受ける。
     if kind == "move_items":
         return op_move_items(text, course_range, op.get("items") or [],
-                             Fraction(op.get("delta_num", 0), op.get("delta_den", 1)))
+                             int(op.get("steps", 0)), g)
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
     if kind == "command_value":
@@ -1059,10 +1134,11 @@ def run_op(text, course_range, op):
     b = tuple(op["b"]) if op.get("b") is not None else None
     if a is None:
         return None
+    # 1点だけを指す操作には、その小節の分割数(int)を渡す。範囲の操作には
+    # _Grids をそのまま渡して、小節ごとの数を見てもらう。
+    ga = g.at(a[0])
     if kind == "key":
-        return op_key(text, course_range, a[0], a[1], g, op["char"])
-    if kind == "fill" and b is not None:
-        return op_fill(text, course_range, a, b, g, op["char"])
+        return op_key(text, course_range, a[0], a[1], ga, op["char"])
     if kind == "long" and b is not None:
         return op_long(text, course_range, a, b, g, op["char"])
     if kind == "delete":
@@ -1072,11 +1148,13 @@ def run_op(text, course_range, op):
     if kind == "move" and b is not None:
         return op_move(text, course_range, a, b, g, int(op.get("delta", 0)))
     if kind == "command":
-        return op_command(text, course_range, a[0], a[1], g, op.get("name", ""), op.get("value"))
+        return op_command(text, course_range, a[0], a[1], ga, op.get("name", ""),
+                          op.get("value"))
     if kind == "measure_insert":
         return op_measure_insert(text, course_range, a[0], op.get("value"))
     if kind == "marker":
-        return op_marker(text, course_range, a[0], a[1], g, str(op.get("region", "")).upper(),
+        return op_marker(text, course_range, a[0], a[1], ga,
+                         str(op.get("region", "")).upper(),
                          str(op.get("which", "on")), bool(op.get("present", True)))
     if kind == "marker_move" and b is not None:
         return op_marker_move(text, course_range, a, b, g,
@@ -1764,8 +1842,9 @@ def region_state(text, course_range, a, b, grid, kind):
     body = course_body_span(text, course_range)
     if body is None or kind not in REGION_COMMANDS:
         return None
-    (m0, s0), (m1, s1) = _range_keys(a, b, grid)
-    k0, k1 = _key(m0, s0, grid), _key(m1, s1, grid)
+    G = _as_grids(grid)
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    k0, k1 = G.key(m0, s0), G.key(m1, s1)
     if k0 == k1:
         return None
     lines = _region_lines(text, body, kind)
@@ -1779,8 +1858,9 @@ def set_region(text, course_range, a, b, grid, kind, on):
     body = course_body_span(text, course_range)
     if body is None or kind not in REGION_COMMANDS:
         return None
-    (m0, s0), (m1, s1) = _range_keys(a, b, grid)
-    k0, k1 = _key(m0, s0, grid), _key(m1, s1, grid)
+    G = _as_grids(grid)
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    k0, k1 = G.key(m0, s0), G.key(m1, s1)
     if k0 == k1:
         return None
     on_name, off_name = REGION_COMMANDS[kind]
@@ -1803,7 +1883,7 @@ def set_region(text, course_range, a, b, grid, kind, on):
     if bool(after) != bool(on) and m1 < n_measures:
         spans = measure_spans(new, body2)
         line = "#" + (on_name if after else off_name)
-        r = _insert_line_at(new, body2, spans, m1, s1, grid, line)
+        r = _insert_line_at(new, body2, spans, m1, s1, G.at(m1), line)
         if r is None:
             return None
         body2 = (body2[0], body2[1] + len(r) - len(new))
@@ -1813,7 +1893,7 @@ def set_region(text, course_range, a, b, grid, kind, on):
         if m0 >= len(spans):
             return None
         line = "#" + (on_name if on else off_name)
-        r = _insert_line_at(new, body2, spans, m0, s0, grid, line)
+        r = _insert_line_at(new, body2, spans, m0, s0, G.at(m0), line)
         if r is None:
             return None
         new = r
@@ -1902,14 +1982,15 @@ def op_marker_move(text, course_range, a, b, grid, kind, which):
     Undo も1回で済む(呼び出し側が最小の差し替えにするため)。"""
     if a == b:
         return None
-    t1 = set_marker(text, course_range, a[0], a[1], grid, kind, which, False)
+    G = _as_grids(grid)
+    t1 = set_marker(text, course_range, a[0], a[1], G.at(a[0]), kind, which, False)
     if t1 is None:
         return None
     # 行が1つ減ったので、コースの行範囲もその分ずらす(ずらさないと本文の
     # 終わりが1行手前になり、最後の小節が見えなくなる)。
     delta = t1.count(chr(10)) - text.count(chr(10))
     rng = (course_range[0], course_range[1] + delta)
-    t2 = set_marker(t1, rng, b[0], b[1], grid, kind, which, True)
+    t2 = set_marker(t1, rng, b[0], b[1], G.at(b[0]), kind, which, True)
     if t2 is None:
         return None
     return _result(text, t2, reparse=True)

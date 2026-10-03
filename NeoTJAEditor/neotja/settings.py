@@ -14,7 +14,7 @@ _SETTINGS_KEYS = (
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
-    "preview_show_fps", "peepo_chart_edit", "command_panel_follow",
+    "preview_show_fps", "preview_modes_legacy", "command_panel_follow",
     "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -265,7 +265,12 @@ def default_settings() -> dict:
         # 既定はオフ。環境設定ダイアログ「実験的機能」タブのチェックボックスで
         # 変更でき、反映はアプリの再起動後(preview_dock.py がここを見て
         # 「作譜」ページを最初から作るかどうかを決めるため)。
-        "peepo_chart_edit": False,
+        # 再生ウィンドウのモードの並び。既定(False)は 13.0.0 からの
+        #   通常再生 / 軽量 / 同時再生 / 作譜
+        # True にすると 12.x までの
+        #   通常再生 / 軽量 / 音声波形 / 情報
+        # に戻る(実験的機能)。※反映にはアプリの再起動が要る。
+        "preview_modes_legacy": False,
         # 作譜モードの命令パネルの数値を、カーソル(再生位置)で効いている値へ
         # 合わせ続けるか。既定はオン。オフにすると、自分で入れた数字が
         # 動かないまま残る(利用者の指定 2026-10-03)。

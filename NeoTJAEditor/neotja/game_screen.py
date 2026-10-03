@@ -1684,6 +1684,17 @@ class _GameScreenBase:
         # 判定枠の風船も、どんちゃんより手前に出すためこちらで描く。
         chart_preview._hide_balloon_sprite = True
 
+        # --- 演出の入り切り(既定は全部あり) ----------------------------
+        # 同時再生(難易度を縦に並べて見る)では、帯の中で動くものを減らす。
+        # 4本ぶん「良」が点滅し、音符が上の帯へ飛んでいくと、どの譜面を
+        # 読んでいるのか分からなくなる(利用者の指定 2026-10-03)。
+        #: 判定文字「良」を出すか。
+        self.show_judge_pop = True
+        #: 叩いた音符が魂ゲージへ飛ぶ演出を出すか。
+        self.show_hit_flights = True
+        #: スコアの加算文字(+300 など)を出すか。合計の数字はこれとは別。
+        self.show_score_gain = SHOW_SCORE_GAIN
+
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
         # キー操作はレーンが持っている(再生・シーク・速度・演奏モードの打面)。
         # レーンを子ウィジェットでなくしたので、フォーカスはこちらが受けて
@@ -2764,7 +2775,7 @@ class _GameScreenBase:
         # 軽量でも出す。スコアの見え方はモードで変わらないほうがよい、という
         # 要望。左パネルの中だけで完結する演出なので、下の背景や魂ゲージを
         # 落とすのとは事情が違う。
-        if SHOW_SCORE_GAIN and self._score_timeline is not None:
+        if self.show_score_gain and self._score_timeline is not None:
             # **重なるぶんは重ねる。** 古い順に描くので、新しいものほど手前。
             # ふつうの密度の譜面は音符が 0.1 秒おきに来るし、連打を叩いて
             # いる間はもっと詰まるので、1枚しか出さないと点滅して見える。
@@ -4069,8 +4080,10 @@ class _GameScreenBase:
         self.draw_soul_front(p, ox, oy)
         self.draw_rainbow_sparks(p, ox, oy)
         self.draw_rainbow_head_front(p, ox, oy)
-        self.draw_soul_flights(p, ox, oy)
-        self.draw_judge_pop(p, ox, oy)
+        if self.show_hit_flights:
+            self.draw_soul_flights(p, ox, oy)
+        if self.show_judge_pop:
+            self.draw_judge_pop(p, ox, oy)
         self.draw_chara_front(p, ox, oy)
         self.draw_balloon_front(p, ox, oy)
 
