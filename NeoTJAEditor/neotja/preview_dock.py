@@ -2172,6 +2172,13 @@ class PreviewDock(QDockWidget):
         self._apply_bottom_scale(percent / 100.0)
         self._scale_lane_overlays(percent / 100.0)
         self.game_preview_window.refit()
+        # 命令パネルも置き直す。ここを呼ばないと、モードを切り替えるまで
+        # 前の倍率の大きさのまま残って画面からはみ出す(利用者の報告
+        # 2026-10-03: 75% にしたら右が切れたまま)。
+        # 窓を開いていないと isVisible() は False なので、モードで見る。
+        if (self.command_panel is not None and self.MODE_EDIT is not None
+                and self.bottom_stack.currentIndex() == self.MODE_EDIT):
+            self._place_command_panel(True)
         self.zoom_button.setText(f"表示: {percent}%")
         if save and self.config_data.get("preview_zoom") != percent:
             self.config_data["preview_zoom"] = percent
