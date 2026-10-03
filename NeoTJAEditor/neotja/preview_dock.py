@@ -2259,7 +2259,11 @@ class PreviewDock(QDockWidget):
                 scroll = val
             elif kind == "measure":
                 measure = val
-        panel.set_values(bpm=bpm, scroll=scroll, measure=measure)
+        # 「いまの数値を映す」は環境設定で切れる(利用者の指定 2026-10-03)。
+        # 切ってあるときでも「追加/変更」の切り替えは今までどおり効かせる —
+        # そこが止まると、置いてある命令を書き換えられなくなる。
+        if self.config_data.get("command_panel_follow", True):
+            panel.set_values(bpm=bpm, scroll=scroll, measure=measure)
         panel.set_editing(self._panel_targets.keys())
 
     #: 命令の行の種類 → (_preview_commands の何番目か, 値の作り方)。
@@ -2773,6 +2777,14 @@ class PreviewDock(QDockWidget):
             if ce is not None:
                 ce.set_position(ms / 1000.0)
         self.chart_preview.set_playback(ms / 1000.0, playing)
+        # 命令パネルの数値を、いまカーソルが居る場所の値に合わせ続ける
+        # (利用者の指定 2026-10-03: 移動したとき・再生したときに、その位置の
+        #  数値が出ていてほしい)。触っている欄は書き換えない(set_values)。
+        if playing:
+            now2 = _time.monotonic()
+            if now2 - getattr(self, "_last_panel_sync", 0.0) >= 0.12:
+                self._last_panel_sync = now2
+                self._sync_command_panel()
         self.time_label.setText(f"{_fmt_time(ms)} / {_fmt_time(self._duration_ms)}")
         if not self.seek_slider.isSliderDown():
             self.seek_slider.blockSignals(True)

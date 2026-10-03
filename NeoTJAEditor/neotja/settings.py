@@ -14,7 +14,8 @@ _SETTINGS_KEYS = (
     "waveform_stereo", "se_text_enabled", "note_input_sound",
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
-    "preview_show_fps", "peepo_chart_edit", "preview_bottom_mode",
+    "preview_show_fps", "peepo_chart_edit", "command_panel_follow",
+    "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
     "player_select_bgm", "player_select_bgm_volume",
@@ -265,6 +266,10 @@ def default_settings() -> dict:
         # 変更でき、反映はアプリの再起動後(preview_dock.py がここを見て
         # 「作譜」ページを最初から作るかどうかを決めるため)。
         "peepo_chart_edit": False,
+        # 作譜モードの命令パネルの数値を、カーソル(再生位置)で効いている値へ
+        # 合わせ続けるか。既定はオン。オフにすると、自分で入れた数字が
+        # 動かないまま残る(利用者の指定 2026-10-03)。
+        "command_panel_follow": True,
         # 作譜モードで、再生中にペインを塗り直す回数の上限。
         #   -1 … おまかせ(既定)。ゲーム画面が別の窓(gpu_screen_window)なら
         #        上限なし、同じ窓に組み込まれているなら 60。

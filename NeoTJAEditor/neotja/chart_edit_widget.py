@@ -1509,20 +1509,30 @@ class ChartEditWaveform(WaveformWidget):
             return True
         return super().event(e)
 
-    def wheelEvent(self, event):
-        """ホイールはカーソルを1グリッドずつ動かす(利用者の指定 2026-09-25)。
+    #: Shift + ホイールで一度に動く小節の数。
+    WHEEL_JUMP_MEASURES = 4
 
-        以前はレーンと同じ「小節ごとの移動」だった。作譜では打つ位置を細かく
-        合わせたいので、グリッドに乗ったまま動くほうが合う。拡大縮小
-        (修飾キー + ホイール)は今までどおり親へ渡す。
+    def wheelEvent(self, event):
+        """ホイールは**小節ごとの移動**。上画面(レーン)と同じにそろえる。
+
+        2026-10-03 の指定で、グリッド1つずつから小節ごとへ戻した。グリッド
+        1つずつ動かしたいときは十字キー、まとめて飛びたいときは
+        Shift + ホイールで 4小節ずつ。拡大縮小(修飾キー + ホイール)は
+        今までどおり親へ渡す。
 
         **動き方はレーンの上で回したときと同じ**(滑らせる。利用者の指定
-        2026-09-28)。以前はその場へ飛んでいて、1グリッドでも景色が飛ぶので
-        どこへ動いたのか目で追えなかった。"""
+        2026-09-28)。その場へ飛ぶと、どこへ動いたのか目で追えない。"""
         if self.offset_mode or (event.modifiers() & self.ZOOM_MODIFIERS):
             super().wheelEvent(event)
             return
-        self.grid_step(1 if event.angleDelta().y() > 0 else -1)
+        d = 1 if event.angleDelta().y() > 0 else -1
+        if event.modifiers() & Qt.ShiftModifier:
+            d *= self.WHEEL_JUMP_MEASURES
+        if self._measure_step_cb is not None:
+            self._measure_step_cb(d)
+        else:
+            # レーンに繋がっていないとき(ペイン単体)はグリッドで代用する。
+            self.grid_step(d)
         event.accept()
 
     # ホイールでの移動を「レーンと同じ速さで滑らせる」ための口。

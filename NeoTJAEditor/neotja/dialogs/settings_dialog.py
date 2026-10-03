@@ -82,8 +82,18 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
         tabs.addTab(self._scrollable(self._build_display_tab()), "表示")
         tabs.addTab(self._scrollable(self._build_nameplate_tab()), "ネームプレート")
-        tabs.addTab(self._scrollable(self._build_developer_tab()), "開発者用")
-        tabs.addTab(self._scrollable(self._build_experimental_tab()), "実験的機能")
+        # 「開発者用」と「実験的機能」は1枚にまとめてある。タブが8枚あると
+        # 右端が見切れて、最後のタブに手が届かなかった(利用者の報告
+        # 2026-10-03)。どちらも「作る側だけが触るもの」で中身も近い。
+        tabs.addTab(self._scrollable(self._build_dev_experimental_tab()),
+                    "開発・実験的機能")
+        # タブが1枚でも入りきらないと、右端が隠れて「▶」を押さないと辿り
+        # 着けない。画面に余裕があるぶんだけ横を広げて、全部のタブを
+        # 出しておく(文字の大きさや表示スケールで要る幅は変わるので、
+        # 決め打ちにせず聞く)。
+        need = tabs.tabBar().sizeHint().width() + 24
+        if need > self.width():
+            self.resize(min(need, max(480, avail.width() - 80)), self.height())
 
         # 数値入力と選択肢は、ホイールで値が変わらないようにする。
         # 全タブを作り終えてからまとめて掛ける(作る順に依存しない)。
@@ -783,6 +793,21 @@ class SettingsDialog(QDialog):
                 self.np_name_dx, self.np_name_dy, self.np_name_size,
                 self.np_dan_dx, self.np_dan_dy, self.np_dan_size)
 
+    def _build_dev_experimental_tab(self):
+        """実験的機能と開発者用を1枚に積む。
+
+        中身はこれまでの2枚そのまま。先に実験的機能(使う人が触るのはこちら)、
+        あとに開発者用を置く。"""
+        w, outer = self._tab_body()
+        for build in (self._build_experimental_tab, self._build_developer_tab):
+            inner = build()
+            lay = inner.layout()
+            if lay is not None:
+                lay.setContentsMargins(0, 0, 0, 0)
+            outer.addWidget(inner)
+        outer.addStretch()
+        return w
+
     def _build_developer_tab(self):
         """作る側だけが使う道具。遊ぶ人には要らないものを分けてある。"""
         w, outer = self._tab_body()
@@ -876,6 +901,17 @@ class SettingsDialog(QDialog):
         form.addRow(self.peepo_chart_edit_check)
         form.addRow(self._hint("譜面プレビューの下部パネルに、音符を直接置ける「作譜」モードを"
                                "追加します。※反映にはアプリの再起動が必要です。"))
+
+        self.command_panel_follow_check = QCheckBox(
+            "命令パネルの数値を、カーソルの位置に合わせる")
+        self.command_panel_follow_check.setChecked(
+            bool(cfg.get("command_panel_follow", True)))
+        form.addRow(self.command_panel_follow_check)
+        form.addRow(self._hint(
+            "作譜モードの命令パネル（BPM・拍子記号・スクロール）の数値を、"
+            "カーソルを動かしたときと再生中に、その位置で効いている値へ"
+            "合わせ続けます。自分で打ち込んでいる欄（カーソルが入っている欄）は"
+            "書き換えません。オフにすると、入れた数字がそのまま残ります。"))
 
         form2 = self._group(outer, "NeoTJAPlayer")
         self.arrange_ref_check = QCheckBox("アレンジ譜面")
@@ -987,6 +1023,7 @@ class SettingsDialog(QDialog):
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["hit_sound_use_custom"] = self.hit_custom_check.isChecked()
         cfg["peepo_chart_edit"] = self.peepo_chart_edit_check.isChecked()
+        cfg["command_panel_follow"] = self.command_panel_follow_check.isChecked()
         cfg["player_play_mode"] = self.player_play_mode_check.isChecked()
         cfg["gpu_render"] = self.gpu_render_check.isChecked()
         cfg["gpu_vsync"] = self.gpu_vsync_check.isChecked()
