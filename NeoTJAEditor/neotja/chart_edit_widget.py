@@ -1036,6 +1036,13 @@ class ChartEditWaveform(WaveformWidget):
         for key, orow, t, half in self._objects():
             if orow != row:
                 continue
+            # **そのものが実際に描かれている高さ**で見る。行で見ていたころは、
+            # 音符の行の下半分(波形の場所)を押しても一番近い音符が選ばれていた
+            # (利用者の報告 2026-10-03)。囲んで選ぶほう(_objects_in_rect)は
+            # 元からここを見ている。
+            v = self._object_vrange(orow, half)
+            if v is not None and not (v[0] <= y <= v[1]):
+                continue
             x0, x1 = self._object_hrange(orow, t, half)
             if not (x0 <= x <= x1):
                 continue
@@ -1249,11 +1256,19 @@ class ChartEditWaveform(WaveformWidget):
             v = op.get(key)
             if v is not None:
                 ms.append(int(v[0]))
+        # 住所を持たない操作(選んだものを動かす/消す)は、選んだものの位置から
+        # 小節を割り出す。譜面ぜんたいぶん作っていたころは、小節が1万4千ある
+        # 譜面で1操作あたり 140ms かかっていた(実測 2026-10-03)。
+        for it in (op.get("items") or []):
+            pos = it.get("pos")
+            if pos and pos[1]:
+                ms.append(int(Fraction(int(pos[0]), int(pos[1]))))
         count = self._measure_count()
-        if ms:
-            lo, hi = max(0, min(ms) - 1), min(count, max(ms) + 2)
-        else:
-            lo, hi = 0, count
+        if not ms:
+            # それでも分からないときだけ、カーソルのまわりを渡す。
+            ms = [self._cur_measure]
+        # 動かす先は数グリッド先なので、少し広めに取っておく。
+        lo, hi = max(0, min(ms) - 2), min(count, max(ms) + 3)
         return {m: self._measure_grid(m) for m in range(lo, hi)}
 
     def _cursor_addr(self):
@@ -1851,19 +1866,42 @@ class ChartEditWaveform(WaveformWidget):
         cur = (Fraction(self._cur_measure)
                + Fraction(self._cur_slot, self._measure_grid(self._cur_measure)))
         out = {}
-        for item in (self._cmd_audio or []):
-            if len(item) < 4 or item[3] not in self._CMD_NAMES:
+        # **近くの命令だけを見る。** 種類ごとの時刻は時間順に並んでいるので
+        # (_rebuild_cmd_kinds。_draw_cmd_row も並び順を前提にしている)、
+        # 二分探索でカーソルのまわりだけ切り出す。全部を舐めていたころは、
+        # 命令が1万4千個ある譜面でカーソルを1つ動かすたびに 280ms かかって
+        # いた(実測。利用者の報告 2026-10-03「操作するとめっちゃ重い」)。
+        times = self._cmd_kind_times or {}
+        m = self._cur_measure
+        mt0 = self._bar_time(m)
+        mt1 = self._bar_time(m + 1)
+        t_cur = self.cursor_time()
+        # 位置は 1/POS_DEN に丸めて比べるので、その丸め幅ぶんは拾っておく
+        # (丸めたあとの Fraction の一致が本当の判定)。
+        span = (mt1 - mt0) if (mt0 is not None and mt1 is not None
+                               and mt1 > mt0) else self._measure_len()
+        eps = max(1e-6, span / self.POS_DEN)
+        for kind in self._CMD_NAMES:
+            ts = times.get(kind)
+            if not ts:
                 continue
-            p = self._pos_of_time(item[0])
-            if p is None:
-                continue
-            # 拍子だけは「その小節のもの」。小節の頭にしか置けない(音符の
-            # 間隔を保って組み直す都合。note_edit.op_measure を参照)ので、
-            # 小節のどこにカーソルがあってもその拍子を指す。
-            hit = (int(p) == self._cur_measure if item[3] == "measure"
-                   else p == cur)
-            if hit:
-                out[item[3]] = (p, item[0])
+            if kind == "measure":
+                # 拍子だけは「その小節のもの」。小節の頭にしか置けない(音符の
+                # 間隔を保って組み直す都合。note_edit.op_measure を参照)ので、
+                # 小節のどこにカーソルがあってもその拍子を指す。
+                lo = bisect.bisect_left(ts, (mt0 if mt0 is not None else 0.0) - eps)
+                hi = (bisect.bisect_right(ts, mt1 - eps) if mt1 is not None
+                      else len(ts))
+            else:
+                lo = bisect.bisect_left(ts, t_cur - eps)
+                hi = bisect.bisect_right(ts, t_cur + eps)
+            for i in range(lo, hi):
+                t = ts[i]
+                p = self._pos_of_time(t)
+                if p is None:
+                    continue
+                if (int(p) == m) if kind == "measure" else (p == cur):
+                    out[kind] = (p, t)      # 同じ位置に複数あれば後ろを採る
         return out
 
     def set_command_value(self, name, pos, value):

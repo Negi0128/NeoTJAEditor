@@ -33,11 +33,16 @@ MAX_DIVISION = 256
 
 
 def _line_starts(text):
-    """各行の開始オフセット。"""
+    """各行の開始オフセット。
+
+    改行は find で跳ぶ。1文字ずつ回していたころは、1MB の譜面で 1操作あたり
+    20ms をここで使っていた(実測 2026-10-03)。"""
     starts = [0]
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            starts.append(i + 1)
+    app = starts.append
+    i = text.find("\n")
+    while i >= 0:
+        app(i + 1)
+        i = text.find("\n", i + 1)
     return starts
 
 
@@ -130,6 +135,12 @@ def _branch_of_line(line):
     return False
 
 
+#: 直前の measure_spans の結果(本文は1操作のあいだ同じものが何度も渡る)。
+#: (text, 引数, 結果)。**text を持っておく**のが肝で、手放すと id が別の
+#: 文字列に再利用されて、違う本文の結果を返しかねない。
+_spans_memo = (None, None, None)
+
+
 def measure_spans(text, body, level=_INHERIT, path=None):
     """本文 (body_start, body_end) 内の小節の文字範囲を順に返す。
 
@@ -152,6 +163,14 @@ def measure_spans(text, body, level=_INHERIT, path=None):
         level = _edit_branch
         if path is None:
             path = _edit_branch_path
+    # 1操作のあいだ、同じ本文に対して何度も呼ばれる(chart_items と set_slot
+    # の両方から)。3万行の譜面では1回 40ms かかるので、直前の結果を1つだけ
+    # 覚えておく(実測 2026-10-03)。
+    global _spans_memo
+    key = (len(text), body, level, tuple(path) if path else None)
+    memo_text, memo_key, memo_val = _spans_memo
+    if memo_text is text and memo_key == key:
+        return memo_val
     auto = (level == BRANCH_AUTO)
     bstart, bend = body
     spans = []
@@ -165,7 +184,8 @@ def measure_spans(text, body, level=_INHERIT, path=None):
         line_end = bend if nl < 0 else nl
         line = text[i:line_end]
         stripped = line.strip()
-        if stripped.startswith("#") or stripped.startswith("//"):
+        head = stripped[:1]
+        if head == "#" or stripped[:2] == "//":
             if level is not None:
                 br = _branch_of_line(line)
                 if br == "":                 # #BRANCHSTART
@@ -182,18 +202,22 @@ def measure_spans(text, body, level=_INHERIT, path=None):
         code_end = line.find("//")
         if code_end < 0:
             code_end = len(line)
-        for j in range(code_end):
-            if line[j] != ",":
-                continue
+        # カンマは find で跳ぶ。1文字ずつ回していたころは、行の文字数ぶん
+        # Python の比較が走っていて、3万行の譜面では 1操作あたり 40ms を
+        # ここで使っていた(実測 2026-10-03)。
+        j = line.find(",")
+        while 0 <= j < code_end:
             b = i + j + 1
             if b < bend and text[b] == "\n":
                 b += 1
             if active:
                 spans.append((a, b))
             a = b
+            j = line.find(",", j + 1)
         i = line_end + 1
     if active and a < bend and text[a:bend].strip():
         spans.append((a, bend))
+    _spans_memo = (text, key, spans)
     return spans
 
 
