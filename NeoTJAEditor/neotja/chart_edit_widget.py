@@ -439,6 +439,26 @@ class ChartEditWaveform(WaveformWidget):
         n = self._measure_beats(m) * g / 4
         return max(1, int(round(float(n))))
 
+    def _beat_period(self, m, mg):
+        """何本ごとが「拍(4分音符)」の線か。乗る線が無ければ 0。
+
+        以前は 4本ごとと決め打ちしていた。1/16 のときだけ正しく、三連
+        (1/3・1/6・1/12・1/24)はもちろん 1/8・1/20・1/32 でも拍に乗って
+        いなかった(利用者の報告 2026-10-05)。
+
+        線 k は小節の頭から k/mg、拍の数にすると k * 拍数 / mg。これが
+        整数になる k が拍の上。拍数は分数(7/8 拍子なら 7/2)なので、
+        約分して「何本ごと」の整数にして返す — 1本ずつ分数を割ると
+        塗り直しのたびに効いてくる(ここは1コマで数百回まわる)。
+        1/12 なら 3本ごと、1/24 なら 6本ごと。"""
+        beats = self._measure_beats(m)
+        mg = int(mg)
+        if mg <= 0 or beats <= 0:
+            return 0
+        bn, bd = beats.numerator, beats.denominator
+        period = (mg * bd) // math.gcd(bn, mg * bd)
+        return period if 0 < period < mg else 0
+
     def _rebuild_bar_times(self):
         self._bump_strip()             # 小節線・目盛りは帯に焼いてある
         self._bar_times = [max(0.0, t - self.offset)
@@ -3036,11 +3056,12 @@ class ChartEditWaveform(WaveformWidget):
             pens = self._grid_pens()
             beats, subs = [], []
             grid = mg
+            period = self._beat_period(m, mg)
             for k in range(1, grid):
                 t = m_start + span * (k / grid)
                 if t < t0 or t > t1:
                     continue
-                ((beats if (k * self._grid) % (grid * 4) == 0 else subs)
+                ((beats if (period and k % period == 0) else subs)
                  .append(self._sec_to_x(t)))
             for xs, is_beat in ((subs, False), (beats, True)):
                 if not xs:
