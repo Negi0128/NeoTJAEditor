@@ -50,12 +50,23 @@ class HighSpeedDialog(QDialog):
         self.sp_prec.setValue(2)
         form.addRow("小数点以下", self.sp_prec)
 
-        # 終わりの値(例 2.00)をどこに置くか。既定は今までどおり最後の音符に
-        # 付ける。「後ろに置く」にすると、最後の音符は1つ前の値のままで、
-        # 終わりの値はその音符の**次**から効く — 目当ての音符と #SCROLL が
-        # 同じ位置に重ならない(利用者の指定 2026-10-01)。
+        # 終わりの値(例 2.00)を**どこに届かせるか**。
+        #
+        #   最後の音符に合わせる … 選んだ範囲の最後の音符が終わりの値になる。
+        #                         1111, を 1→2 なら 1 / 1.33 / 1.67 / 2.00
+        #   範囲の次に合わせる   … 範囲の**直後**が終わりの値になる。つまり
+        #                         1 / 1.25 / 1.50 / 1.75 と刻んで、次の小節の
+        #                         頭から 2.00 が効く。
+        #
+        # 「2小節目の頭から 2 にしたい」が多いので後者を足した(利用者の指定
+        # 2026-10-04)。以前ここに置いていた「最後の音符の後ろに置く」は
+        # **値はそのままで行の位置だけ**動かすもので、狙いが違っていた。
         self.cb_tail = QComboBox()
-        self.cb_tail.addItems(["最後の音符に付ける", "最後の音符の後ろに置く"])
+        self.cb_tail.addItems(["最後の音符に合わせる", "範囲の次に合わせる"])
+        self.cb_tail.setToolTip(
+            "1111, を 1 → 2 にしたとき\n"
+            "  最後の音符に合わせる: 1 / 1.33 / 1.67 / 2.00\n"
+            "  範囲の次に合わせる:   1 / 1.25 / 1.50 / 1.75 → 次から 2.00")
         form.addRow("終わりの値", self.cb_tail)
 
         self.row_interval = QWidget()
@@ -130,14 +141,21 @@ class HighSpeedDialog(QDialog):
             self.txt_after.setPlainText(raw)
             return
         total = len(marks)
+        # 終わりの値をどこへ届かせるか(cb_tail の説明を参照)。
+        #   最後の音符に合わせる … 刻みは total-1 等分。最後の音符が e。
+        #   範囲の次に合わせる   … 刻みは total 等分。**範囲の次**が e。
+        tail_next = "次" in self.cb_tail.currentText()
+        div = total if tail_next else max(1, total - 1)
 
         def scroll_at(i):
-            t = i / (total - 1) if total > 1 else 0.0
+            t = (i / div) if div > 0 else 0.0
             return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
 
-        tail_after = "後ろ" in self.cb_tail.currentText()
+        # 範囲の次に合わせるときは、最後の音符の後ろへ終わりの値を1本置く。
+        # そこが次の小節の頭なので、そこから e が効く。
+        tail_line = scroll_at(total) if tail_next else None
         self.txt_after.setPlainText(
-            "\n".join(self._render_marks(parsed, marks, scroll_at, tail_after)))
+            "\n".join(self._render_marks(parsed, marks, scroll_at, tail_line)))
 
     def _in_span(self, mi, i, length):
         """(小節の番号, 小節内の何文字目) が span の中か。span が無ければ常に真。"""
@@ -196,12 +214,11 @@ class HighSpeedDialog(QDialog):
         return marks
 
     @staticmethod
-    def _render_marks(parsed, marks, scroll_at, tail_after=False):
+    def _render_marks(parsed, marks, scroll_at, tail_line=None):
         """marks の所へ #SCROLL を入れて組み立て直す。
 
-        tail_after のときは、**最後の1本だけ**その音符の後ろへ回す。目当ての
-        音符と #SCROLL が同じ位置に重なるのを避けるため(値そのものは変えない
-        ので、手前の音符の速さは「付ける」ときと同じ)。
+        tail_line を渡すと、**範囲の最後の音符の後ろ**にその1行を足す。
+        「範囲の次に合わせる」で、次の小節の頭から終わりの値を効かせるため。
         """
         order = {pos: k for k, pos in enumerate(marks)}
         last = marks[-1] if marks else None
@@ -247,16 +264,16 @@ class HighSpeedDialog(QDialog):
                     flush()
                     out.append(line)
                 k = order.get((mi, i))
-                if k is not None and not (tail_after and (mi, i) == last):
+                if k is not None:
                     flush()
                     out.append(scroll_at(k))
                     buf = ch
                 else:
                     buf += ch
-                if tail_after and (mi, i) == last:
-                    # 最後の1本はこの音符の**次**から効かせる。
+                if tail_line is not None and (mi, i) == last:
+                    # 範囲の最後の音符の**次**から終わりの値を効かせる。
                     flush()
-                    out.append(scroll_at(order[(mi, i)]))
+                    out.append(tail_line)
             for idx, line in item["breaks"]:
                 if idx >= len(notes):
                     flush()

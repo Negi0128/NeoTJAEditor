@@ -719,16 +719,14 @@ class MainWindow(QMainWindow):
         """窓の「作譜」メニュー。作譜ペインの右クリックと同じ項目を並べる。
 
         作譜ページを出していないときは、どこへ入るのか見えないまま命令が
-        入ってしまうので、項目は並べず「作譜にする」だけ出す。"""
+        入ってしまうので、項目は並べない。13.0.0 から作譜は既定のモードで、
+        モード切替ボタンからも入れるので「作譜にする」の項目は置かない
+        (利用者の指定 2026-10-04)。"""
         menu.clear()
         ce = getattr(self.preview_dock, "chart_edit", None)
-        if ce is None:
-            act = menu.addAction("作譜モードが無効です")
+        if ce is None or not self.preview_dock.is_chart_edit_visible():
+            act = menu.addAction("作譜モードのときに使えます")
             act.setEnabled(False)
-            return
-        if not self.preview_dock.is_chart_edit_visible():
-            menu.addAction("下のパネルを「作譜」にする",
-                           self.preview_dock.show_chart_edit)
             return
         ce.populate_command_menu(menu)
 

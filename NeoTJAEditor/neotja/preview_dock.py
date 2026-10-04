@@ -1884,10 +1884,23 @@ class PreviewDock(QDockWidget):
     _multi_analyzer = None
     #: この譜面にあるコース(preview_data の available_courses)。
     _multi_courses = None
+    #: 同時再生へ入りたかったが、譜面がまだ届いていなかった。
+    _multi_pending = False
+    #: いま並べている帯を、どの本文から作ったか(譜面が変わったら作り直す)。
+    _multi_built_for = None
 
     def available_courses(self):
         """この譜面にあるコース [{"key","label",...}]。"""
         return list(self._multi_courses or [])
+
+    def can_multi(self):
+        """同時再生へ入れるか。
+
+        譜面がまだ届いていない(開いた直後)・コースが1つしかない譜面では
+        帯を並べられない。"""
+        from neotja.multi_screen import MIN_BANDS
+        return (bool(self._tja_content)
+                and len(self.available_courses()) >= MIN_BANDS)
 
     def multi_keys(self):
         return list(self._multi_keys or [])
@@ -1948,14 +1961,15 @@ class PreviewDock(QDockWidget):
             self._multi_keys = self._default_multi_keys()
         previews = self._build_multi_previews()
         if len(previews) < MIN_BANDS:
-            # コースが足りない譜面では成立しない。通常再生へ戻す。
-            self.set_bottom_mode(self.MODE_TITLE)
+            # ここへは来ない(set_bottom_mode が can_multi で先に弾く)。
+            # 来てしまったときは、画面だけ差し替えずに何もしない。
             return
         offset = self.spin_offset.value()
         screens = [make_band_screen(d, offset, self._se_text_enabled)
                    for d in previews]
         if self._multi_screen is None:
             self._multi_screen = MultiBandScreen()
+        self._multi_built_for = self._tja_content
         self._multi_screen.set_screens(screens)
         self._multi_screen.begin_offline_render()
         # 時刻は帯の画面が自分のタイマーで取りに来る。レーンは見えていなくても
@@ -2605,6 +2619,20 @@ class PreviewDock(QDockWidget):
         軽量モードは通常再生と同じ 1280x720(縦横比を揃えたいという要望)。
         ただし背景の絵は上下とも出さず黒で埋め、どんちゃん・魂ゲージ・
         魂の飛翔・スコア加算も落とす(set_lite)。下にペインは置かない。"""
+        # 同時再生は、並べられる難易度が2つ無いと成立しない。**入れるか
+        # どうかは支度を始める前に決める。** 途中で気づいて通常再生へ呼び
+        # 直していたころは、内側の呼び出しが終わったあと外側が同時再生の
+        # 支度を上から被せてしまい、ボタンは「通常再生」なのに画面だけ
+        # 同時再生の形(上半分・下のページ無し)という壊れ方をしていた
+        # (利用者の報告 2026-10-04: 開いた直後だとこうなる)。
+        if idx == self.MODE_MULTI and not self.can_multi():
+            # 譜面が届く前(開いた直後)は帯を作れない。**入りたかったことは
+            # 覚えておき**、譜面が届いたら入り直す。黙って通常再生のままだと
+            # 「同時再生が出ないことがある」になる(利用者の報告 2026-10-04)。
+            self._multi_pending = bool(self._mode_names[idx] == "同時再生")
+            idx = self.MODE_TITLE
+        elif idx == self.MODE_MULTI:
+            self._multi_pending = False
         self.bottom_stack.setCurrentIndex(idx)
         self.mode_button.setText(self._mode_names[idx])
         # 同時再生は画面そのものを差し替える。入る/出るをここで決めてから、
@@ -2780,6 +2808,15 @@ class PreviewDock(QDockWidget):
         self._tja_content = content or ""
         if preview_data is not None:
             self._multi_courses = list(preview_data.get("available_courses") or [])
+        in_multi = (self.MODE_MULTI is not None
+                    and self.bottom_stack.currentIndex() == self.MODE_MULTI)
+        if self._multi_pending and self.can_multi():
+            # 譜面が届いた。入りたかった同時再生へ入り直す。
+            self._multi_pending = False
+            self.set_bottom_mode(self.MODE_MULTI)
+        elif in_multi and self._multi_built_for != self._tja_content:
+            # 譜面が変わったら帯も作り直す(でないと開いた時点の内容のまま)。
+            self._apply_multi_mode(True)
         headers = parse_preview_headers(content)
         self._editor_bpm = headers["bpm"]
         self._editor_offset = headers["offset"]
