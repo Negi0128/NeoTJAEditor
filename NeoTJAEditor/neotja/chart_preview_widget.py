@@ -454,7 +454,7 @@ class ChartPreviewWidget(QWidget):
     def __init__(self, parent=None, course_select_cb=None, toggle_play_cb=None,
                  seek_cursor_cb=None, seek_seconds_cb=None, info_update_cb=None,
                  hit_sound_engine=None, branch_select_cb=None, play_cb=None, pause_cb=None,
-                 cycle_bottom_mode_cb=None, set_speed_cb=None):
+                 cycle_bottom_mode_cb=None):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -581,7 +581,6 @@ class ChartPreviewWidget(QWidget):
         # 下部パネルのモード循環(Tab / トグルボタン)と速度変更([ ] キー)を
         # ゲーム窓側へ通知するコールバック(フェーズ3)。
         self._cycle_bottom_mode_cb = cycle_bottom_mode_cb
-        self._set_speed_cb = set_speed_cb
         self._offset = 0.0
         self._pos_sec = 0.0
         self._pos_wall = _time.monotonic()
@@ -2591,14 +2590,8 @@ class ChartPreviewWidget(QWidget):
         if key == Qt.Key_End:
             self.seek_to_last_measure()
             return
-        # 再生速度(z/↓ で 1 段階遅く、c/↑ で 1 段階速く)。段階は
-        # SPEED_STEPS の 4 つだけで、両端では止まる。
-        if key in (Qt.Key_Z, Qt.Key_Down):
-            self._step_speed(-1)
-            return
-        if key in (Qt.Key_C, Qt.Key_Up):
-            self._step_speed(+1)
-            return
+        # 再生速度のキー(z/↓ と c/↑)は 13.0.4 で外した。速さは下の
+        # スライダーを**押して**決めるものにする(利用者の指定 2026-10-04)。
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -2696,28 +2689,6 @@ class ChartPreviewWidget(QWidget):
     #: 再生速度の下限/上限。SPEED_STEPS の両端と必ず一致させること
     #: (外から範囲だけを見たい箇所のための別名)。
     SPEED_MIN, SPEED_MAX = SPEED_STEPS[0], SPEED_STEPS[-1]
-
-    def _apply_speed(self, rate: float) -> float:
-        """目標倍率を SPEED_STEPS の段階へ丸めて適用し、実際に適用された値を返す。
-        スライダー配線済みなら set_speed_cb 経由(→スライダー値変更→
-        valueChanged で audio/chart_preview 双方に同期反映)、未配線(単体使用)
-        なら自分の _playback_rate を直接更新するフォールバック。"""
-        rate = snap_speed(rate)
-        if self._set_speed_cb:
-            self._set_speed_cb(rate)
-        else:
-            self.set_playback_rate(rate)
-        return rate
-
-    def _step_speed(self, direction: int, toast: bool = False):
-        """再生速度を 1 段階ぶん動かす。段階が 4 つしかないので、以前のように
-        0.05 ずつ足すのではなく段階の番号で動かす。両端では動かず、そこで止まる
-        (端でもトーストは出す。押しても変わらない理由が分かるように)。"""
-        idx = snap_speed_index(self._playback_rate) + direction
-        idx = max(0, min(len(SPEED_STEPS) - 1, idx))
-        rate = self._apply_speed(SPEED_STEPS[idx])
-        if toast:
-            self.show_toast(f"再生速度 : ×{rate:.2f}")
 
     def set_playback_rate(self, rate: float):
         """再生速度倍率(SPEED_STEPS のいずれか)を設定。再生中の時間外挿に使う。

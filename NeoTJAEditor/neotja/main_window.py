@@ -2143,6 +2143,15 @@ class MainWindow(QMainWindow):
             return note_edit.marker_info(
                 text, rng, int(a[0]), int(a[1]), int(op.get("grid", 16)),
                 str(op.get("region", "")).upper())
+        if op.get("kind") == "peek_copy":
+            # 選んだもの(または範囲)の中身を控えるだけ。テキストは変えない。
+            a = op.get("a")
+            b = op.get("b")
+            return {"clip": note_edit.copy_items(
+                text, rng, op.get("items"),
+                tuple(a) if a is not None else None,
+                tuple(b) if b is not None else None,
+                int(op.get("grid", 16)), op.get("grids"))}
         if op.get("kind") == "peek_region":
             # 範囲が全部ゴーゴー中 / 小節線を隠しているかを読むだけ。
             if op.get("a") is None or op.get("b") is None:
@@ -2154,6 +2163,16 @@ class MainWindow(QMainWindow):
         if res is None:
             return None
         new = res["text"]
+        # 末尾には空の小節を常に1つ置いておく(利用者の指定 2026-10-04)。
+        # 打つ場所が見えていないと、譜面の続きを書き始められない。
+        if self.config_data.get("chart_edit_tail_measure", True):
+            rng2 = (rng[0], rng[1] + new.count(chr(10)) - text.count(chr(10)))
+            tail = note_edit.ensure_trailing_measure(new, rng2)
+            if tail is not None:
+                new = tail
+                res = dict(res)
+                res["text"] = new
+                res["reparse"] = True
         # 先頭と末尾の一致を削って、変わった範囲だけを置き換える。
         p = 0
         limit = min(len(text), len(new))

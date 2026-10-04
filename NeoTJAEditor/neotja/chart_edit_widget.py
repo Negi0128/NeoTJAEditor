@@ -1271,6 +1271,62 @@ class ChartEditWaveform(WaveformWidget):
         lo, hi = max(0, min(ms) - 2), min(count, max(ms) + 3)
         return {m: self._measure_grid(m) for m in range(lo, hi)}
 
+    # ------------------------------------------------------------------
+    # コピー / 切り取り / 貼り付け (Ctrl+C / Ctrl+X / Ctrl+V)
+    # ------------------------------------------------------------------
+    #: コピーしたもの。窓ごとに1つ(OS のクリップボードは使わない — 中身が
+    #: 音符と命令の組なので、ほかのアプリへ渡す形が無い)。
+    _clip = None
+
+    def _clip_source(self):
+        """コピーする相手。選んだものがあればそれ、無ければ範囲。"""
+        if self._sel:
+            return {"items": self.selected_items()}
+        rng = self._range_addresses()
+        if rng is not None:
+            return {"a": rng[0], "b": rng[1]}
+        return None
+
+    def copy_selection(self, cut=False):
+        """選んだもの(または範囲)の中身をコピーする。cut なら消す。"""
+        src = self._clip_source()
+        if src is None:
+            return False
+        op = {"kind": "peek_copy"}
+        op.update(src)
+        res = self._run_op(op)
+        clip = (res or {}).get("clip")
+        if not clip:
+            return False
+        ChartEditWaveform._clip = clip
+        if cut:
+            if self._sel:
+                self._run_op({"kind": "delete_items",
+                              "items": self.selected_items()})
+                self.clear_selection()
+            else:
+                a, b = src["a"], src["b"]
+                self._run_op({"kind": "delete", "a": a, "b": b})
+        self.update()
+        return True
+
+    def paste_at_cursor(self):
+        """コピーしたものをカーソルの位置から貼る。
+
+        位置は**いちばん早いものからの隔たり**で覚えてあるので、コピーした形の
+        まま、カーソルを先頭にして並ぶ。"""
+        clip = ChartEditWaveform._clip
+        if not clip:
+            return False
+        m, slot, grid = self.cursor_address()
+        dest = Fraction(m) + Fraction(int(slot), int(grid))
+        res = self._run_op({"kind": "paste_items", "clip": clip, "dest": dest})
+        self.update()
+        return bool(res)
+
+    def can_paste(self):
+        return bool(ChartEditWaveform._clip)
+
     def _cursor_addr(self):
         return (self._cur_measure, self._cur_slot)
 
@@ -1333,6 +1389,20 @@ class ChartEditWaveform(WaveformWidget):
                               % (m + 1, s, self._measure_grid(m)))
         head.setEnabled(False)
         menu.addSeparator()
+        # コピー / 切り取り / 貼り付け。キー(Ctrl+C / X / V)と同じもの。
+        has_src = self._clip_source() is not None
+        for text, key, fn, enabled in (
+                ("コピー", "Ctrl+C", lambda: self.copy_selection(False), has_src),
+                ("切り取り", "Ctrl+X", lambda: self.copy_selection(True), has_src),
+                ("貼り付け", "Ctrl+V", self.paste_at_cursor, self.can_paste())):
+            act = menu.addAction("%s	%s" % (text, key))
+            act.setEnabled(enabled)
+            act.triggered.connect(lambda _c=False, f=fn: f())
+        menu.addSeparator()
+        # 選んだ音符にまとめて付ける(選んでいるときだけ出る)。
+        self._selection_menu(menu)
+        if self._sel:
+            menu.addSeparator()
         for name in ("BPMCHANGE", "SCROLL"):
             act = menu.addAction("%sを変える…" % self._COMMAND_LABELS[name])
             act.setData(name)
@@ -1429,6 +1499,119 @@ class ChartEditWaveform(WaveformWidget):
         """メニューを出す(テストではここを差し替えて、出したメニューを調べる)。"""
         menu.exec(global_pos)
 
+    # ------------------------------------------------------------------
+    # 選んだ音符にまとめて付ける
+    # ------------------------------------------------------------------
+    def _selection_menu(self, menu):
+        """「選んだ音符に」の小メニュー。選んでいなければ出さない。
+
+        隙間があればそこで切れる — 10001000 の両方を選んでゴーゴーにすると、
+        音符ごとに ON/OFF が切り替わる(利用者の指定 2026-10-04)。"""
+        if not self._sel:
+            return
+        items = self.selected_items()
+        if not any(i.get("kind") == "note" for i in items):
+            return
+        sub = menu.addMenu("選んだ音符に")
+        for name in ("SCROLL", "BPMCHANGE"):
+            act = sub.addAction("%sを付ける…" % self._COMMAND_LABELS[name])
+            act.setData(("sel_cmd", name))
+            act.triggered.connect(
+                lambda _c=False, n=name: self.open_selection_command(n))
+        sub.addSeparator()
+        for kind, on, label in self._SELECTION_REGION_LABELS:
+            act = sub.addAction(label)
+            act.setData(("sel_region", kind, on))
+            act.triggered.connect(
+                lambda _c=False, k=kind, o=on:
+                self.apply_selection_region(k, o))
+
+    #: 「選んだ音符に」の帯の項目。(種類, 付ける/外す, 見出し)。
+    _SELECTION_REGION_LABELS = (
+        ("GOGO", True, "ゴーゴーにする"),
+        ("GOGO", False, "ゴーゴーを外す"),
+        ("BARLINE", True, "小節線を隠す"),
+        ("BARLINE", False, "小節線を出す"),
+    )
+
+    def has_note_selection(self):
+        """音符を選んでいるか(命令パネルの「!」を押せるかどうか)。"""
+        return any(k[0] == "note" for k in self._sel)
+
+    def apply_selection_command(self, name, value):
+        """選んだ音符すべてに命令を付ける(命令パネルの欄ごとの「!」から)。
+
+        値は欄に出ているものをそのまま使う — 入力欄を出さずに1押しで入る
+        (利用者の指定 2026-10-04)。"""
+        if not self.has_note_selection():
+            return False
+        res = self._run_op({"kind": "command_items",
+                            "items": self.selected_items(),
+                            "name": str(name).upper(), "value": value})
+        self.update()
+        return bool(res)
+
+    def open_selection_region_menu(self, kind, global_pos):
+        """ゴーゴー / 小節線の「!」。付ける・外すをその場所で選ぶ。"""
+        if not self.has_note_selection():
+            return None
+        kind = str(kind).upper()
+        menu = QMenu(self)
+        for k, on, label in self._SELECTION_REGION_LABELS:
+            if k != kind:
+                continue
+            act = menu.addAction(label)
+            act.setData(("sel_region", k, on))
+            act.triggered.connect(
+                lambda _c=False, kk=k, o=on: self.apply_selection_region(kk, o))
+        if not menu.actions():
+            return None
+        self._exec_menu(menu, global_pos)
+        return menu
+
+    def apply_selection_region(self, kind, on):
+        """選んだ音符をゴーゴー / 小節線の帯で囲む(外すなら on=False)。"""
+        if not self._sel:
+            return False
+        res = self._run_op({"kind": "region_items",
+                            "items": self.selected_items(),
+                            "region": str(kind).upper(), "on": bool(on)})
+        self.update()
+        return bool(res)
+
+    def open_selection_command(self, name):
+        """選んだ音符に命令(スクロール / BPM)を付ける入力欄を出す。
+
+        入れた値はそこから先ずっと効く。戻す行は入れない
+        (利用者の指定 2026-10-04)。"""
+        if self._op_cb is None or name not in self._COMMAND_LABELS:
+            return None
+        if not self._sel:
+            return None
+        m, s0 = self._cursor_addr()
+        peek = self._op_cb({"kind": "peek_command", "a": (m, s0),
+                            "grid": self._measure_grid(m),
+                            "name": name, "time": self.cursor_time()}) or {}
+        default = peek.get("default")
+        text = note_edit._fmt_number(default) if default is not None else ""
+
+        def accept(txt):
+            if txt == "":
+                return True
+            try:
+                value = float(txt)
+            except ValueError:
+                return False
+            if name == "BPMCHANGE" and value <= 0:
+                return False
+            self._run_op({"kind": "command_items",
+                          "items": self.selected_items(),
+                          "name": name, "value": value})
+            return True
+
+        self._show_command_popup(self._COMMAND_LABELS[name][0], text, accept)
+        return True
+
     def open_command_input(self, name):
         """カーソルの位置に命令 name(BPMCHANGE / SCROLL)を置く入力欄を出す。
 
@@ -1466,9 +1649,14 @@ class ChartEditWaveform(WaveformWidget):
             self._run_op({"kind": "command", "a": (m, s), "name": name, "value": value})
             return True
 
+        return self._show_command_popup(self._COMMAND_LABELS[name][0],
+                                        text, accept)
+
+    def _show_command_popup(self, label, text, accept):
+        """数を入れる小さな入力欄を、カーソルの上に出す。"""
         if self._cmd_popup is not None:
             self._cmd_popup.close()
-        popup = _CommandInput(self, self._COMMAND_LABELS[name][0], text, accept)
+        popup = _CommandInput(self, label, text, accept)
         x = self._sec_to_x(self.cursor_time())
         _wh, top, _strip, _b, _c = self._strip_rects()
         popup.adjustSize()
@@ -1520,7 +1708,12 @@ class ChartEditWaveform(WaveformWidget):
         if e.type() == QEvent.ShortcutOverride:
             mods = e.modifiers()
             key = e.key()
-            # Ctrl 付き(Ctrl+Z など)はアプリのショートカットのまま通す。
+            # Ctrl+C / X / V はこのペインのもの(選んだ音符のコピー)。
+            if ((mods & (Qt.ControlModifier | Qt.MetaModifier))
+                    and key in (Qt.Key_C, Qt.Key_X, Qt.Key_V)):
+                e.accept()
+                return True
+            # ほかの Ctrl 付き(Ctrl+Z など)はアプリのショートカットのまま。
             if not (mods & (Qt.ControlModifier | Qt.MetaModifier)):
                 # Esc は「範囲や連打の途中を取り消す」ときだけこちらで使う。
                 # それ以外は今までどおり窓の全画面解除へ。
@@ -1644,6 +1837,18 @@ class ChartEditWaveform(WaveformWidget):
             self.clear_selection()
             self.clear_range()
             return
+
+        # コピー / 切り取り / 貼り付け。音符のキーより先に見る。
+        if mods & (Qt.ControlModifier | Qt.MetaModifier):
+            if key == Qt.Key_C:
+                self.copy_selection(cut=False)
+                return
+            if key == Qt.Key_X:
+                self.copy_selection(cut=True)
+                return
+            if key == Qt.Key_V:
+                self.paste_at_cursor()
+                return
         if key in _PEEPO_NOTE_KEYS and not (mods & (Qt.ControlModifier | Qt.MetaModifier)):
             if not event.isAutoRepeat():
                 self._peepo_note_key(_PEEPO_NOTE_KEYS[key], mods)

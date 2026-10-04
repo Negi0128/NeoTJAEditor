@@ -1102,6 +1102,137 @@ def op_delete_items(text, course_range, items):
     return _result(text, new, reparse=True)
 
 
+def _addr_of(p):
+    """位置(小節単位の分数) → (小節, スロット, 分割数)。"""
+    p = Fraction(p)
+    m = int(p)
+    frac = p - m
+    return m, frac.numerator, frac.denominator
+
+
+def copy_items(text, course_range, items=None, a=None, b=None, grid=16,
+               grids=None):
+    """選んだもの(または範囲)の**中身**をコピーする。テキストは変えない。
+
+    覚えるのは文字と値、そして**いちばん早いものからの隔たり**。位置を
+    そのまま覚えると、貼る先が変わったときに使えない。隔たりは小節単位の
+    分数で持つ — 「何グリッドぶん」は拍子が変わると長さが変わるので、
+    小節の中の割合で覚えたほうが見た目どおりに貼れる。
+    """
+    body = course_body_span(text, course_range)
+    if body is None:
+        return None
+    all_items = chart_items(text, body)
+    cmds = command_items(text, body)
+    vals = balloon_values(text, course_range)
+    if items:
+        want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
+        want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
+                     for i in items if i.get("kind") == "cmd"}
+        notes = [it for it in all_items if _head_pos(it) in want_notes]
+        picked_cmds = [c for c in cmds if (c[1], c[0]) in want_cmds]
+    elif a is not None and b is not None:
+        # 拍子が変わる譜面では小節ごとに割る数が違う。
+        G = (grid if isinstance(grid, _Grids)
+             else _Grids(int(grid), grids))
+        notes = _items_in(all_items, a, b, G, False)
+        p0 = Fraction(a[0]) + Fraction(a[1], G.at(a[0]))
+        p1 = Fraction(b[0]) + Fraction(b[1], G.at(b[0]))
+        if p1 < p0:
+            p0, p1 = p1, p0
+        picked_cmds = [c for c in cmds if p0 <= c[0] <= p1]
+    else:
+        return None
+    out = []
+    for it in notes:
+        m, i, L = it["head"]
+        d = {"kind": "note", "char": it["char"],
+             "pos": Fraction(m) + Fraction(i, L), "tail": None,
+             "balloon": None}
+        if it["tail"] is not None:
+            tm, ti, tL = it["tail"]
+            d["tail"] = Fraction(tm) + Fraction(ti, tL)
+        o = it["ord"]
+        if o is not None:
+            d["balloon"] = vals[o] if o < len(vals) else "5"
+        out.append(d)
+    for pos, name, value in picked_cmds:
+        out.append({"kind": "cmd", "name": name, "value": value,
+                    "pos": Fraction(pos)})
+    if not out:
+        return None
+    base = min(d["pos"] for d in out)
+    for d in out:
+        d["rel"] = d["pos"] - base
+        if d.get("tail") is not None:
+            d["tail_rel"] = d["tail"] - base
+    return {"base": base, "items": out}
+
+
+def op_paste_items(text, course_range, clip, dest):
+    """コピーしたものを dest(小節単位の分数)から貼る。元のものは残る。
+
+    貼り先が譜面の末尾より後ろでも、足りない小節は set_slot が足してくれる
+    (_extend_and_set)。"""
+    body = course_body_span(text, course_range)
+    if body is None or not clip:
+        return None
+    items = clip.get("items") or []
+    if not items:
+        return None
+    dest = Fraction(dest)
+    if dest < 0:
+        return None
+    writes = []
+    pasted_balloons = {}
+    for d in items:
+        if d.get("kind") != "note":
+            continue
+        p = dest + Fraction(d["rel"])
+        writes.append(_addr_of(p) + (d["char"],))
+        if d.get("tail_rel") is not None:
+            writes.append(_addr_of(dest + Fraction(d["tail_rel"])) + ("8",))
+        if d.get("balloon") is not None:
+            pasted_balloons[p] = d["balloon"]
+    # --- 風船の打数は、貼る前の並びを覚えてから書く ---------------------
+    vals = balloon_values(text, course_range)
+    keep = {}
+    for it in chart_items(text, body):
+        o = it["ord"]
+        if o is None:
+            continue
+        keep[_head_pos(it)] = vals[o] if o < len(vals) else "5"
+    new = _apply_writes(text, body, writes) if writes else text
+    # --- 命令 -----------------------------------------------------------
+    for d in items:
+        if d.get("kind") != "cmd":
+            continue
+        name = str(d.get("name", "")).upper()
+        m, s0, g0 = _addr_of(dest + Fraction(d["rel"]))
+        rng_c = (course_range[0],
+                 course_range[1] + new.count(chr(10)) - text.count(chr(10)))
+        if name in _MARKER_BY_NAME:
+            kind, which = _MARKER_BY_NAME[name]
+            t2 = set_marker(new, rng_c, m, s0, g0, kind, which, True)
+        elif name in COMMAND_NAMES:
+            t2 = set_command(new, rng_c, m, s0, g0, name, d.get("value"))
+        else:
+            t2 = None               # 知らない命令は貼らない(#DELAY など)
+        if t2 is not None:
+            new = t2
+    if new == text:
+        return None
+    # --- BALLOON: を並べ直す(貼った風船のぶんを挟む) --------------------
+    if keep or pasted_balloons:
+        keep.update(pasted_balloons)
+        body2 = course_body_span(new, course_range)
+        out = [keep.get(_head_pos(it), "5")
+               for it in (chart_items(new, body2) if body2 else [])
+               if it["ord"] is not None]
+        new = set_balloon_values(new, course_range, out)
+    return _result(text, new, reparse=True)
+
+
 def op_transform(text, course_range, a, b, grid, mode):
     """範囲(b が None ならカーソルの1点)の音符を W=flip / Q=size で入れ替える。"""
     body = course_body_span(text, course_range)
@@ -1128,6 +1259,147 @@ def op_transform(text, course_range, a, b, grid, mode):
     return _result(text, new, sound=sound, visual=visual, reparse=not visual)
 
 
+def ensure_trailing_measure(text, course_range, grid=16):
+    """譜面の末尾に、空の小節を**常に1つ**用意しておく(利用者の指定
+    2026-10-04)。
+
+    最後の小節がもう空なら何もしない — 書くたびに1つずつ増えてしまう。
+    末尾より先へ打てること自体は前からできる(set_slot が足りない小節を
+    足す)が、打つ場所が見えていないと狙えない。
+    """
+    body = course_body_span(text, course_range)
+    if body is None:
+        return None
+    spans = measure_spans(text, body)
+    if not spans:
+        return None
+    notes = _measure_notes(text, spans[-1])
+    if not notes or set(notes) == {"0"}:
+        return None                 # もう空の小節が末尾にある
+    new, _n = _append_empty_measures(text, body, spans, 1, int(grid))
+    return new if new != text else None
+
+
+# ---------------------------------------------------------------------------
+# 選んだ音符にまとめて付ける(スクロール / BPM / ゴーゴー / 小節線)
+# ---------------------------------------------------------------------------
+# 「選んだ音符すべてに」という指定(利用者 2026-10-04)。間に選んでいない音符を
+# 挟まないものを**ひとかたまり**として扱い、かたまりごとに1回だけ書く。
+#   10001000 の両方を選んでゴーゴー → 10/00/10/00 と ON/OFF が切り替わる
+
+def _runs_of_items(text, body, items):
+    """選んだ音符のかたまり [(頭の住所, 終わりの住所)]。住所は (小節, 位置, 分割数)。
+
+    **隙間があればそこで切れる。** 10001000 の両方を選んだら、ひとつながりでは
+    なく2つのかたまりになる — 利用者の指定どおり 10/00/10/00 と ON/OFF が
+    切り替わる(2026-10-04)。連打・風船は終端(8)までをひとつと見る。"""
+    want = {_item_pos(i) for i in items if i.get("kind") == "note"}
+    if not want:
+        return []
+    runs = []
+    cur = None
+    for it in chart_items(text, body):
+        if _head_pos(it) not in want:
+            continue
+        tail = it["tail"] or it["head"]
+        if cur is not None and it["head"] == _next_addr(text, body, cur[1]):
+            cur[1] = tail           # 隙間なく続いている
+        else:
+            if cur is not None:
+                runs.append((cur[0], cur[1]))
+            cur = [it["head"], tail]
+    if cur is not None:
+        runs.append((cur[0], cur[1]))
+    return runs
+
+
+def _next_addr(text, body, addr):
+    """住所の「次の位置」。小節の終わりなら次の小節の頭。"""
+    m, i, L = addr
+    if i + 1 < L:
+        return (m, i + 1, L)
+    spans = measure_spans(text, body)
+    if m + 1 >= len(spans):
+        return (m + 1, 0, L)        # 譜面の外。set_region 側で落ちる
+    nL = len(_measure_notes(text, spans[m + 1])) or L
+    return (m + 1, 0, nL)
+
+
+def _shift_range(course_range, old, new):
+    return (course_range[0],
+            course_range[1] + new.count(chr(10)) - old.count(chr(10)))
+
+
+def op_command_items(text, course_range, items, name, value):
+    """選んだ音符のかたまりの**頭**に命令を置く(#SCROLL / #BPMCHANGE)。
+
+    そこから先はずっとその値。戻す行は入れない(利用者の指定 2026-10-04)。"""
+    body = course_body_span(text, course_range)
+    name = str(name or "").upper()
+    if body is None or not items or name not in COMMAND_NAMES:
+        return None
+    runs = _runs_of_items(text, body, items)
+    if not runs:
+        return None
+    # もうその値で効いているかたまりには書かない。同じ値の行が並ぶだけで
+    # 譜面が読みにくくなる(10001000 を両方選んでも #SCROLL は1行)。
+    have = [(pos, val) for pos, nm, val in command_items(text, body)
+            if nm == name]
+    want_txt = _fmt_value(name, value)
+    targets = []
+    cur_val = None
+    seen = 0
+    for head, _tail in runs:
+        p = Fraction(head[0]) + Fraction(head[1], head[2])
+        while seen < len(have) and have[seen][0] <= p:
+            cur_val = have[seen][1]
+            seen += 1
+        if (cur_val or "").strip() == (want_txt or "").strip():
+            continue            # もうその値。増やさない
+        targets.append(head)
+        cur_val = want_txt
+    if not targets:
+        return None
+    new = text
+    # 後ろのかたまりから書く(前へ入れると後ろの行がずれる)
+    for head in sorted(targets, reverse=True):
+        r = set_command(new, _shift_range(course_range, text, new),
+                        head[0], head[1], head[2], name, value)
+        if r is not None:
+            new = r
+    if new == text:
+        return None
+    return _result(text, new, reparse=True)
+
+
+def op_region_items(text, course_range, items, kind, on):
+    """選んだ音符のかたまりを帯で囲む(ゴーゴー / 小節線)。
+
+    囲うのは [頭, 終わりの次) — 音符そのものだけが帯に入り、後ろの空きは
+    入らない。"""
+    body = course_body_span(text, course_range)
+    kind = str(kind or "").upper()
+    if body is None or not items or kind not in REGION_COMMANDS:
+        return None
+    runs = _runs_of_items(text, body, items)
+    if not runs:
+        return None
+    new = text
+    for head, tail in sorted(runs, key=lambda r: r[0], reverse=True):
+        body_n = course_body_span(new, _shift_range(course_range, text, new))
+        if body_n is None:
+            break
+        nxt = _next_addr(new, body_n, tail)
+        G = _Grids(16, {head[0]: head[2], nxt[0]: nxt[2]})
+        r = set_region(new, _shift_range(course_range, text, new),
+                       (head[0], head[1]), (nxt[0], nxt[1]), G, kind, bool(on))
+        if r is not None:
+            new = r
+    if new == text:
+        return None
+    return _result(text, new, reparse=True)
+
+
 def run_op(text, course_range, op):
     """画面から来た操作 dict を実行する。変化が無ければ None。
 
@@ -1150,6 +1422,15 @@ def run_op(text, course_range, op):
                              int(op.get("steps", 0)), g)
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
+    if kind == "paste_items":
+        return op_paste_items(text, course_range, op.get("clip"),
+                              op.get("dest"))
+    if kind == "command_items":
+        return op_command_items(text, course_range, op.get("items") or [],
+                                op.get("name"), op.get("value"))
+    if kind == "region_items":
+        return op_region_items(text, course_range, op.get("items") or [],
+                               op.get("region"), op.get("on", True))
     if kind == "command_value":
         p = op.get("pos") or (0, 1)
         return op_command_value(text, course_range, Fraction(int(p[0]), int(p[1])),

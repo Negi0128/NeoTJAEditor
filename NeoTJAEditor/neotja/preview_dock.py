@@ -45,6 +45,17 @@ SPEED_STEPS = _SPEED_STEPS
 SPEED_DEFAULT = 1.00
 
 
+class _ClickOnlySlider(QSlider):
+    """ホイールを受け取らないスライダー。
+
+    作譜ではホイールが小節送りなので、つまみの上を通りかかっただけで
+    再生速度が変わってしまっていた。速さは押して決めるものにする
+    (利用者の指定 2026-10-04)。"""
+
+    def wheelEvent(self, e):
+        e.ignore()
+
+
 class ChartInfoBar(QWidget):
     """Panel shown under the game-preview lane: transport buttons (mouse
     equivalents of the lane's Space/Q/PgUp/PgDn shortcuts), song title/
@@ -1174,10 +1185,9 @@ class PreviewDock(QDockWidget):
             # tick を完全に黙らせる(レガシー経路のみ従来通りエンジンを渡す)。
             hit_sound_engine=None if self._mixer_active else self.hit_sounds,
             branch_select_cb=self.branch_select_cb,
-            # フェーズ3: Tab で下部パネルのモード循環、Z / C で再生速度を
-            # 1 段階ずつ移動(段階は chart_preview_widget.SPEED_STEPS の 4 つ)。
+            # Tab で下部パネルのモード循環。再生速度のキー(Z / C)は 13.0.4 で
+            # 外した — 速さはスライダーを押して決める(利用者の指定)。
             cycle_bottom_mode_cb=self.cycle_bottom_mode,
-            set_speed_cb=self._on_speed_from_key,
         )
         # Info-bar transport buttons mirror the lane's Space/Q shortcuts, so
         # route them through the widget's player model rather than the raw
@@ -1425,6 +1435,10 @@ class PreviewDock(QDockWidget):
             self._panel_targets = {}
             self.command_panel.placeMarker.connect(self._on_panel_marker)
             self.command_panel.selectBranch.connect(self._on_panel_branch)
+            self.command_panel.selectionCommand.connect(
+                self._on_panel_selection_command)
+            self.command_panel.selectionRegion.connect(
+                self._on_panel_selection_region)
             self.command_panel.hide()
         self._fps_timer.timeout.connect(self._update_fps_label)
         self._fps_timer.start(500)
@@ -2245,7 +2259,7 @@ class PreviewDock(QDockWidget):
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
         h.addWidget(QLabel("再生速度:"))
-        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider = _ClickOnlySlider(Qt.Horizontal)
         # スライダーの値 = SPEED_STEPS の番号。倍率(%)を直に持たせると
         # つまみが段階の間で止まってしまうので、段階そのものをレンジにする。
         # ミキサーは read_pos の増分が変わるだけでピッチも変化する(仕様)。
@@ -2486,6 +2500,9 @@ class PreviewDock(QDockWidget):
         ce = getattr(self, "chart_edit", None)
         if panel is None or ce is None or not panel.isVisible():
             return
+        # 「!」は音符を選んでいるあいだだけ押せる。
+        if hasattr(panel, "set_selection_enabled"):
+            panel.set_selection_enabled(ce.has_note_selection())
         offset = float(getattr(ce, "offset", 0.0) or 0.0)
         t = ce.cursor_time() + offset
         bpm = scroll = measure = None
@@ -2580,6 +2597,20 @@ class PreviewDock(QDockWidget):
         その系統で組み直され、作譜ペインもその系統の譜面になる。"""
         if self.branch_select_cb is not None:
             self.branch_select_cb(str(level))
+
+    def _on_panel_selection_command(self, name, value):
+        """命令パネルの欄ごとの「!」。その欄の値を選んだ音符すべてに付ける。"""
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.apply_selection_command(name, value)
+
+    def _on_panel_selection_region(self, kind, button):
+        """ゴーゴー / 小節線の「!」。付けるか外すかをボタンの下で選ぶ。"""
+        ce = getattr(self, "chart_edit", None)
+        if ce is None or button is None:
+            return
+        ce.open_selection_region_menu(
+            str(kind), button.mapToGlobal(QPoint(0, button.height())))
 
     def _on_panel_marker(self, kind, which):
         ce = getattr(self, "chart_edit", None)
@@ -2750,12 +2781,6 @@ class PreviewDock(QDockWidget):
         # 組まれたスケジュールを新しい倍率で組み直す必要がある。
         self.hit_sounds.set_playback_rate(rate)
         self.metronome.set_playback_rate(rate)
-
-    def _on_speed_from_key(self, rate: float):
-        # chart_preview の Z / C キーから来る目標倍率。スライダー値を動かすと
-        # valueChanged 経由で audio/chart_preview に反映される(スライダーと同期)。
-        # 段階外の値が来ても snap_speed_index が丸めるので、ここでは弾かない。
-        self.speed_slider.setValue(snap_speed_index(rate))
 
     # ------------------------------------------------------------------
     # 再生速度の保存/復元(settings.json の preview_speed)

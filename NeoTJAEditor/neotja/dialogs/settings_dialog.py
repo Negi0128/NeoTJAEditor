@@ -906,6 +906,15 @@ class SettingsDialog(QDialog):
             "「通常再生 / 軽量 / 同時再生 / 作譜」です。\n"
             "※戻すと同時再生と作譜は使えません。反映にはアプリの再起動が必要です。"))
 
+        self.tail_measure_check = QCheckBox(
+            "作譜: 譜面の末尾に空の小節を用意しておく")
+        self.tail_measure_check.setChecked(
+            bool(cfg.get("chart_edit_tail_measure", True)))
+        form.addRow(self.tail_measure_check)
+        form.addRow(self._hint(
+            "譜面を書いたあと、いちばん後ろに空の小節を1つ足しておきます。"
+            "続きを打つ場所が見えるようになります。"))
+
         self.command_panel_follow_check = QCheckBox(
             "命令パネルの数値を、カーソルの位置に合わせる")
         self.command_panel_follow_check.setChecked(
@@ -1028,6 +1037,7 @@ class SettingsDialog(QDialog):
         cfg["hit_sound_use_custom"] = self.hit_custom_check.isChecked()
         cfg["preview_modes_legacy"] = self.legacy_modes_check.isChecked()
         cfg["command_panel_follow"] = self.command_panel_follow_check.isChecked()
+        cfg["chart_edit_tail_measure"] = self.tail_measure_check.isChecked()
         cfg["player_play_mode"] = self.player_play_mode_check.isChecked()
         cfg["gpu_render"] = self.gpu_render_check.isChecked()
         cfg["gpu_vsync"] = self.gpu_vsync_check.isChecked()

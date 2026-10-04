@@ -15,6 +15,7 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
     "preview_show_fps", "preview_modes_legacy", "command_panel_follow",
+    "chart_edit_tail_measure",
     "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -276,6 +277,10 @@ def default_settings() -> dict:
         # 合わせ続けるか。既定はオン。オフにすると、自分で入れた数字が
         # 動かないまま残る(利用者の指定 2026-10-03)。
         "command_panel_follow": True,
+        # 作譜で譜面を書いたあと、末尾に空の小節を1つ用意しておくか。
+        # 既定はオン。打つ場所が見えていないと続きを書き始められない
+        # (利用者の指定 2026-10-04)。
+        "chart_edit_tail_measure": True,
         # 作譜モードで、再生中にペインを塗り直す回数の上限。
         #   -1 … おまかせ(既定)。ゲーム画面が別の窓(gpu_screen_window)なら
         #        上限なし、同じ窓に組み込まれているなら 60。

@@ -32,10 +32,17 @@ class CommandPanel(QFrame):
     placeMarker = Signal(str, str)
     #: 譜面分岐の系統を選ぶ。("N"/"E"/"M")
     selectBranch = Signal(str)
+    #: 欄ごとの「!」。その欄の値を**選んだ音符すべて**に付ける。(名前, 値)
+    selectionCommand = Signal(str, object)
+    #: 値の無い欄(ゴーゴー / 小節線)の「!」。付けるか外すかを選ぶ小メニューを
+    #: 出してもらう。(種類, 押されたボタン)
+    selectionRegion = Signal(str, object)
 
     #: 命令の行の種類 → その枠を持っている欄の名前(set_values の editing 用)。
     KINDS = ("bpm", "measure", "hs")
 
+    #: 欄ごとの「!」ボタンの幅。
+    MARK_W = 26
     WIDTH = 672
     HEIGHT = 132
     #: 命令1つぶんの枠の大きさ。
@@ -46,6 +53,8 @@ class CommandPanel(QFrame):
         super().__init__(parent)
         # 種類 → (枠, ボタン)。「追加」と「変更」を切り替えるために持つ。
         self._boxes = {}
+        # 欄ごとの「!」(選んだ音符へまとめて効かせる)。
+        self._marks = []
         # いま「変更」になっている種類。
         self._editing = set()
         # 譜面分岐の入れ物(_branch_box で作る)。
@@ -110,15 +119,18 @@ class CommandPanel(QFrame):
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
         grid.addWidget(self._pair_box("小節線の表示", "表示", "非表示",
                                       lambda: self.placeMarker.emit("BARLINE", "off"),
-                                      lambda: self.placeMarker.emit("BARLINE", "on")),
+                                      lambda: self.placeMarker.emit("BARLINE", "on"),
+                                      "BARLINE"),
                        1, 0)
         grid.addWidget(self._pair_box("ゴーゴータイム", "開始", "終了",
                                       lambda: self.placeMarker.emit("GOGO", "on"),
-                                      lambda: self.placeMarker.emit("GOGO", "off")),
+                                      lambda: self.placeMarker.emit("GOGO", "off"),
+                                      "GOGO"),
                        1, 1)
 
         # --- 譜面分岐: どの系統を見て(編集して)いるか ---
         grid.addWidget(self._branch_box(), 1, 2)
+
 
         # 縮めるときに戻れるよう、原寸の寸法をここで覚えておく。
         self._capture_base()
@@ -146,7 +158,11 @@ class CommandPanel(QFrame):
         "#commandPanel QPushButton { color: #cdd6f4; background: #232b3b;"
         " border: 1px solid #3a4763; border-radius: 3px;"
         " padding: 2px 6px; min-height: %(h)dpx; font-size: %(bt)dpx; }"
-        "#commandPanel QPushButton:hover { background: #2d3750; }")
+        "#commandPanel QPushButton:hover { background: #2d3750; }"
+        "#commandPanel QPushButton#cmdMark { font-size: %(mk)dpx;"
+        " font-weight: bold; padding: 0px; }"
+        "#commandPanel QPushButton#cmdMark:disabled { color: #4b5569;"
+        " background: #1a2030; border-color: #2a3346; }")
 
     #: 縮めたときだけ足す。数字の欄の矢印は OS が原寸で描くので、拍子記号の
     #: ような狭い欄(48px)では 50% にすると矢印が欄を食い尽くし、**数字が
@@ -162,13 +178,19 @@ class CommandPanel(QFrame):
         qss = self._QSS
         if s < 0.999:
             qss += self._QSS_ARROW
-        return qss % {"h": px(24), "sp": px(14), "bt": px(13), "ar": px(16)}
+        return qss % {"h": px(24), "sp": px(14), "bt": px(13),
+                      "ar": px(16), "mk": px(20)}
 
     def _capture_base(self):
         """原寸の寸法・余白・文字の大きさを覚える(ui_scale.UiScaler に任せる)。"""
         from neotja.ui_scale import UiScaler
         self._base_size = (self.width(), self.height())
         self._scaler = UiScaler(self)
+
+    def set_selection_enabled(self, on):
+        """音符を選んでいるあいだだけ「!」を押せるようにする。"""
+        for b in self._marks:
+            b.setEnabled(bool(on))
 
     def ui_scale(self):
         return self._ui_scale
@@ -226,8 +248,24 @@ class CommandPanel(QFrame):
                 self.placeCommand.emit(_n, _v())
         btn.clicked.connect(pressed)
         row.addWidget(btn)
+        row.addWidget(self._mark_button(
+            "この値を、選んだ音符すべてに付けます",
+            lambda _n=name, _v=get_value: self.selectionCommand.emit(_n, _v())))
         self._boxes[kind] = (box, btn)
         return box
+
+    def _mark_button(self, tip, fn):
+        """欄ごとの「!」。選んだ音符へまとめて効かせる
+        (利用者の指定 2026-10-04)。音符を選んでいないあいだは押せない。"""
+        b = QPushButton("！")
+        b.setObjectName("cmdMark")
+        b.setFixedWidth(self.MARK_W)
+        b.setFocusPolicy(Qt.NoFocus)
+        b.setToolTip(tip)
+        b.setEnabled(False)
+        b.clicked.connect(lambda _c=False, f=fn: f())
+        self._marks.append(b)
+        return b
 
     #: 系統 → (ボタンの文字, 選ばれているときの色)。色は TNDE-R のレーンの
     #: 地の色に合わせた(普通=灰、玄人=青緑、達人=紫)。先頭の「自動」は
@@ -340,13 +378,20 @@ class CommandPanel(QFrame):
             self._branch_title.setText("譜面分岐" if has_branches
                                        else "譜面分岐（この譜面には無い）")
 
-    def _pair_box(self, title, a_text, b_text, on_a, on_b):
-        """[見出し / ボタン2つ] の枠(値が無い命令)。"""
+    def _pair_box(self, title, a_text, b_text, on_a, on_b, kind=None):
+        """[見出し / ボタン2つ (+ 「!」)] の枠(値が無い命令)。"""
         box, row = self._new_box(title)
         for text, fn in ((a_text, on_a), (b_text, on_b)):
             btn = QPushButton(text)
             btn.clicked.connect(lambda _c=False, f=fn: f())
             row.addWidget(btn)
+        if kind is not None:
+            mark = self._mark_button(
+                "選んだ音符すべてに付けます(外すのもここから)", lambda: None)
+            mark.clicked.disconnect()
+            mark.clicked.connect(
+                lambda _c=False, k=kind, b=mark: self.selectionRegion.emit(k, b))
+            row.addWidget(mark)
         return box
 
     # ------------------------------------------------------------------
