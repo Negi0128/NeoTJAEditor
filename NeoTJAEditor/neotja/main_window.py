@@ -676,21 +676,14 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
         tm.addSeparator()
-        tm.addAction("同時再生（難易度を並べて見る）", self.open_multi_preview)
-        tm.addSeparator()
+        # 「同時再生」はここには置かない。再生ウィンドウの**モード**なので、
+        # 入り口はモード切替ボタン1つに寄せる(利用者の指定 2026-10-04)。
         tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
         tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
 
-        # 作譜(Peepo式)の命令を置くメニュー。本家 PeepoDrumKit と同じく、
-        # キーを覚えていなくてもメニューから置ける。中身はカーソルの位置で
-        # 変わるので、出す直前にペインから作り直す。
-        # 13.0.0 から作譜は標準のモード。以前のモードへ戻しているときだけ、
-        # 下部パネルに作譜ページが無いのでメニューも出さない。
-        if not self.config_data.get("preview_modes_legacy", False):
-            cm = mb.addMenu("作譜")
-            cm.aboutToShow.connect(lambda m=cm: self._fill_chart_menu(m))
-            self._chart_menu = cm
-
+        # 窓の「作譜」メニューは置かない(利用者の指定 2026-10-04)。同じ中身は
+        # 作譜ペインの右クリックから出る(populate_command_menu)ので、
+        # メニューバーに常駐させる必要がない。
         rm = mb.addMenu("起動")
         self._run_actions = {}
         # F1 is reserved for the built-in preview (see _bind_shortcuts /
@@ -714,21 +707,6 @@ class MainWindow(QMainWindow):
         hm.addAction("ヘルプを表示", self.open_help)
         hm.addAction("更新を確認", lambda: self.check_for_updates(manual=True))
         hm.addAction("バージョン情報", self._show_about)
-
-    def _fill_chart_menu(self, menu):
-        """窓の「作譜」メニュー。作譜ペインの右クリックと同じ項目を並べる。
-
-        作譜ページを出していないときは、どこへ入るのか見えないまま命令が
-        入ってしまうので、項目は並べない。13.0.0 から作譜は既定のモードで、
-        モード切替ボタンからも入れるので「作譜にする」の項目は置かない
-        (利用者の指定 2026-10-04)。"""
-        menu.clear()
-        ce = getattr(self.preview_dock, "chart_edit", None)
-        if ce is None or not self.preview_dock.is_chart_edit_visible():
-            act = menu.addAction("作譜モードのときに使えます")
-            act.setEnabled(False)
-            return
-        ce.populate_command_menu(menu)
 
     def _bind_shortcuts(self):
         def ins_space(cmd):
@@ -2774,29 +2752,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 同時再生(難易度を縦に並べて見る)
     # ------------------------------------------------------------------
-    def open_multi_preview(self):
-        """同時再生: 難易度を2〜4つ選んで縦に並べる(鑑賞用)。
-
-        中身は再生ウィンドウの**モード**(通常再生/軽量/同時再生/…)なので、
-        ここは「難易度を選んで、そのモードへ入る」だけ。プレイヤーでも同じ
-        モードが使える(利用者の指定 2026-10-03)。"""
-        from neotja.dialogs.multi_course_dialog import MultiCourseDialog
-        from neotja.multi_screen import MIN_BANDS
-        pd = self.preview_dock
-        courses = pd.available_courses() or list(self.courses_info or [])
-        if len(courses) < MIN_BANDS:
-            QMessageBox.information(
-                self, "同時再生",
-                "コースが%d つ以上ある譜面で使えます。" % MIN_BANDS)
-            return
-        keys = MultiCourseDialog.ask(self, courses,
-                                     pd.multi_keys() or pd._default_multi_keys())
-        if not keys:
-            return
-        pd.set_multi_keys(keys)
-        self.preview_dock.set_game_preview_visible(True)
-        pd.set_bottom_mode(pd.MODE_MULTI)
-
     def open_strobe_tool(self):
         cursor = self.editor.textCursor()
         pos = cursor.position()

@@ -2600,12 +2600,22 @@ class PreviewDock(QDockWidget):
         return True
 
     def cycle_bottom_mode(self):
-        """通常再生→音声波形→(作譜→)情報→… と循環。作譜は実験的機能
-        (peepo_chart_edit)が有効なときだけ挟まる(_build_ui でページ自体を
-        積んでいないので % self.bottom_stack.count() が自然に3つで回る)。
-        Tab キー(chart_preview)とモードトグルボタンの両方から呼ばれる。"""
-        idx = (self.bottom_stack.currentIndex() + 1) % self.bottom_stack.count()
-        self.set_bottom_mode(idx)
+        """通常再生→軽量→同時再生→作譜→… と循環。並びは _mode_names
+        (以前のモードへ戻しているときは 通常再生/軽量/音声波形/情報)。
+        Tab キー(chart_preview)とモードトグルボタンの両方から呼ばれる。
+
+        **入れないモードは飛ばす。** 同時再生はコースが2つ無いと成立
+        しないが、そこで通常再生へ落としていたころは輪が
+        通常再生↔軽量 で閉じてしまい、**その先の作譜へ永久に届かなかった**
+        (利用者の報告 2026-10-04: 同時再生と作譜が出てこない)。"""
+        n = self.bottom_stack.count()
+        cur = self.bottom_stack.currentIndex()
+        for step in range(1, n + 1):
+            idx = (cur + step) % n
+            if idx == self.MODE_MULTI and not self.can_multi():
+                continue    # 並べる難易度が足りない。次のモードへ
+            self.set_bottom_mode(idx)
+            return
 
     def set_bottom_mode(self, idx: int):
         """下部パネルのモードを切り替える。
@@ -2629,7 +2639,11 @@ class PreviewDock(QDockWidget):
             # 譜面が届く前(開いた直後)は帯を作れない。**入りたかったことは
             # 覚えておき**、譜面が届いたら入り直す。黙って通常再生のままだと
             # 「同時再生が出ないことがある」になる(利用者の報告 2026-10-04)。
-            self._multi_pending = bool(self._mode_names[idx] == "同時再生")
+            # 覚えておくのは「譜面がまだ無い」ときだけ。コースが1つしかない
+            # 譜面でも覚えてしまうと、次に別の譜面を開いた拍子に勝手に
+            # 同時再生へ飛ぶ。
+            self._multi_pending = (self._mode_names[idx] == "同時再生"
+                                   and not self._tja_content)
             idx = self.MODE_TITLE
         elif idx == self.MODE_MULTI:
             self._multi_pending = False
@@ -2808,12 +2822,21 @@ class PreviewDock(QDockWidget):
         self._tja_content = content or ""
         if preview_data is not None:
             self._multi_courses = list(preview_data.get("available_courses") or [])
+            # 選んでいた難易度が無い譜面(別の曲を開いた)なら選び直す。前の曲の
+            # 難易度のまま組むと、無いコースのぶんが空の帯になる。
+            have = {c.get("key") for c in self._multi_courses}
+            if self._multi_keys and not have.issuperset(self._multi_keys):
+                self._multi_keys = self._default_multi_keys()
         in_multi = (self.MODE_MULTI is not None
                     and self.bottom_stack.currentIndex() == self.MODE_MULTI)
         if self._multi_pending and self.can_multi():
             # 譜面が届いた。入りたかった同時再生へ入り直す。
             self._multi_pending = False
             self.set_bottom_mode(self.MODE_MULTI)
+        elif in_multi and not self.can_multi():
+            # 同時再生のまま、コースが1つしかない譜面を開いた。並べられない
+            # ので通常再生へ出る(居座ると帯が足りないまま固まる)。
+            self.set_bottom_mode(self.MODE_TITLE)
         elif in_multi and self._multi_built_for != self._tja_content:
             # 譜面が変わったら帯も作り直す(でないと開いた時点の内容のまま)。
             self._apply_multi_mode(True)
