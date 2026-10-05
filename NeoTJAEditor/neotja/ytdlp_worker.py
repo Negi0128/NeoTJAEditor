@@ -1,6 +1,22 @@
 import os
+import re
 
 from PySide6.QtCore import QThread, Signal
+
+# ホスト名だけでYouTubeかどうかを見る。下のプレイヤー総当たりとBOT対策の案内は
+# YouTube限定の話なので、SoundCloudなど他サイトのときに巻き込まないための判定。
+# ダイアログ側にも似た正規表現があるが、ここから neotja.dialogs を import すると
+# 依存が逆向き(下位→上位)になるので、あえて小さい判定を手元に持つ。
+_YOUTUBE_HOST_RE = re.compile(
+    r"^(?:https?://)?(?:[\w-]+\.)*(?:youtube\.com|youtu\.be|youtube-nocookie\.com)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def is_youtube_url(url):
+    """URLがYouTubeのものなら True。判断できないときは False
+    (= 余計な総当たりも、的外れなBOT対策の案内もしない)。"""
+    return bool(_YOUTUBE_HOST_RE.match((url or "").strip()))
 
 
 def _strip_pyinstaller_env():
@@ -27,7 +43,8 @@ class DownloadCancelled(Exception):
 
 
 class YtDlpDownloadWorker(QThread):
-    """Downloads a YouTube URL's audio and converts it to OGG (via yt-dlp +
+    """Downloads a URL's audio (YouTube, SoundCloud, or anything else yt-dlp
+    supports) and converts it to OGG (via yt-dlp +
     a bundled ffmpeg from imageio-ffmpeg) in a background thread, so the
     dialog stays responsive while it runs."""
 
@@ -53,6 +70,15 @@ class YtDlpDownloadWorker(QThread):
     # challenge-solving).
     PLAYER_CLIENTS = [None, "android", "tv", "ios"]
 
+    def player_clients(self):
+        """今回のURLで試すプレイヤークライアントの並びを返す。
+        player_client はYouTubeの抽出器にしか効かないので、他サイト
+        (SoundCloudなど)で総当たりしても同じ失敗を4回繰り返すだけ。
+        そこで非YouTubeは1回で諦める(利用者の指定 2026-10-05)。"""
+        if is_youtube_url(self.url):
+            return list(self.PLAYER_CLIENTS)
+        return [None]
+
     def run(self):
         _strip_pyinstaller_env()
 
@@ -62,7 +88,7 @@ class YtDlpDownloadWorker(QThread):
         ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
         last_error = None
 
-        for client in self.PLAYER_CLIENTS:
+        for client in self.player_clients():
             if self._cancelled:
                 self.failed.emit("キャンセルされました。")
                 return
@@ -79,12 +105,16 @@ class YtDlpDownloadWorker(QThread):
 
         if self._cancelled:
             self.failed.emit("キャンセルされました。")
-        else:
+        elif is_youtube_url(self.url):
             self.failed.emit(
                 f"{last_error}\n\n"
                 "YouTube側のダウンロード制限(BOT対策)が原因の可能性があります。"
                 "時間を置くか、別の動画・別のURLで試してみてください。"
             )
+        else:
+            # 他サイトでBOT対策の話をされても的外れなので、素のエラーだけ出す
+            # (利用者の指定 2026-10-05)。
+            self.failed.emit(f"{last_error}")
 
     def _attempt_download(self, yt_dlp, ffmpeg_path, player_client):
         def hook(d):

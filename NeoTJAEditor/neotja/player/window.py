@@ -91,23 +91,23 @@ class PlayerWindow(QMainWindow):
         m.addAction("終了", self.close)
 
         v = self.menuBar().addMenu("表示")
-        a = v.addAction("再生画面のボタンを隠す / 出す")
+        a = v.addAction("再生画面を全画面にする / 戻す")
         a.setShortcut("F11")
-        a.triggered.connect(self._toggle_overlay)
+        a.triggered.connect(self._toggle_fullscreen)
 
         s = self.menuBar().addMenu("設定")
         s.addAction("環境設定...", self.open_settings)
 
-    def _toggle_overlay(self):
-        """再生画面の上に浮いているボタン(モード切替・コース・録画・倍率・
-        FPS)を隠す/出す。
+    def _toggle_fullscreen(self):
+        """再生画面を全画面にする/戻す(利用者の指定 2026-10-05)。
 
-        全画面ではなくこちらにしたのは、鑑賞会で見せたいのが「絵だけ」で
-        あって、窓の大きさそのものは変えたくないことが多いため。"""
+        以前の F11 は「レーンの上に浮いているボタンを隠す/出す」だったが、
+        F11 は全画面だという期待のほうが強いので差し替えた。隠す機能は
+        廃止 — 全画面に入れば enter_fullscreen が下部パネルもボタン類も
+        隠すので、絵だけ見せたいという目的はこれで足りる。
+        戻すのは F11 をもう一度か、Esc。"""
         self.core.show()
-        w = self.core.window
-        self._overlay_shown = not getattr(self, "_overlay_shown", True)
-        w.set_overlay_visible(self._overlay_shown)
+        self.core.window.toggle_fullscreen()
 
     # ------------------------------------------------------------------
     def pick_chart(self):

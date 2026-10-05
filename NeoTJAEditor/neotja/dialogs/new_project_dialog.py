@@ -56,6 +56,38 @@ def resolve_youtube_url(text):
         return text
     return None
 
+
+# 利用者の指定 2026-10-05: 中身の yt-dlp は SoundCloud にも対応しているので、
+# 画面の側もそう見えるようにする。URLが無い(かSoundCloudのものと判断できない)
+# ときの行き先。
+SOUNDCLOUD_HOME_URL = "https://soundcloud.com/"
+
+# YouTube と同じくホスト名だけで判定する。SoundCloud は /user/track のほかに
+# /user/sets/... や短縮の on.snd.sc があり、パスの形を数え上げると取りこぼすため。
+# サブドメインは m.(モバイル) や on.(共有リンク) が実際に出てくるので許す。
+_SOUNDCLOUD_URL_RE = re.compile(
+    r"^(?:https?://)?(?:[\w-]+\.)*(?:soundcloud\.com|snd\.sc)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def resolve_soundcloud_url(text):
+    """入力欄の文字列を、ブラウザで開けるSoundCloudのURLに正規化する。
+    SoundCloudのURLでないと判断したら None を返す(呼び出し側はそのとき
+    SoundCloudのトップを開く)。
+    YouTubeの「動画IDだけ貼る」ような救済は入れていない。SoundCloudには
+    固定長のIDが無く、何でもIDに見えてしまうため。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if _SOUNDCLOUD_URL_RE.match(text):
+        # スキーム省略時に https:// を補うのはYouTube側と同じ理由
+        # (ローカルパス扱いを避ける)。
+        if not text.lower().startswith(("http://", "https://")):
+            return "https://" + text
+        return text
+    return None
+
 # The process-level holding pen for still-running worker threads (and the
 # detach helper that moves them into it) now lives in neotja/worker_util.py,
 # since preview_dock and the AI chart dialog hit exactly the same
@@ -64,9 +96,11 @@ def resolve_youtube_url(text):
 
 
 class NewProjectDialog(QDialog):
-    """「新規」から開くダイアログ。空のファイルを作るか、YouTubeのURLから
-    音声をOGGとして取得してすぐにBPM/OFFSET調整に入れる状態を作るかを選べる。
-    YouTubeモードで成功した場合、呼び出し側は `mode`/`result_title`/
+    """「新規」から開くダイアログ。空のファイルを作るか、YouTube/SoundCloudの
+    URLから音声をOGGとして取得してすぐにBPM/OFFSET調整に入れる状態を作るかを
+    選べる(中身の yt-dlp がどちらにも対応しているため、画面もそう見せる)。
+    モード名は歴史的に "youtube" のままで、設定の鍵として使われている。
+    このモードで成功した場合、呼び出し側は `mode`/`result_title`/
     `result_wave_path`/`result_folder` を見て新規ファイルを組み立てる。"""
 
     def __init__(self, main_window, parent=None):
@@ -105,7 +139,9 @@ class NewProjectDialog(QDialog):
         mode_row = QHBoxLayout()
         self.btn_blank = QPushButton("空のファイル")
         self.btn_blank.setCheckable(True)
-        self.btn_youtube = QPushButton("YouTubeから作成")
+        # 見える文字だけ変える。モード名 "youtube" は設定や他の箇所が
+        # 参照しうるので内部の鍵は据え置き(利用者の指定 2026-10-05)。
+        self.btn_youtube = QPushButton("YouTube/SoundCloudから作成")
         self.btn_youtube.setCheckable(True)
         self.btn_youtube.setChecked(True)
         self.btn_blank.clicked.connect(lambda: self._set_mode("blank"))
@@ -154,23 +190,28 @@ class NewProjectDialog(QDialog):
         v = QVBoxLayout(w)
         v.setSpacing(10)
 
-        v.addWidget(QLabel("YouTubeのURLから音声を取得し、OGGに変換します。"))
+        v.addWidget(QLabel("YouTube / SoundCloud のURLから音声を取得し、OGGに変換します。"))
 
         url_row = QHBoxLayout()
         url_row.addWidget(QLabel("URL"))
         self.ed_url = QLineEdit()
-        self.ed_url.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self.ed_url.setPlaceholderText(
+            "https://www.youtube.com/watch?v=... / https://soundcloud.com/..."
+        )
         url_row.addWidget(self.ed_url, 1)
         # URLを手元に持っていない人がここで手が止まってしまうので、
-        # 「参照」ボタンと同じ位置(入力欄の右端)からYouTubeへ飛べるようにする。
-        # URLが入っているときはその動画を開く動作に変わり、貼ったURLが
-        # 目的の動画かどうかをダウンロード前に確認できる。
+        # 「参照」ボタンと同じ位置(入力欄の右端)から配信元へ飛べるようにする。
+        # URLが入っているときはその曲/動画を開く動作に変わり、貼ったURLが
+        # 目的のものかどうかをダウンロード前に確認できる。
         self.btn_open_youtube = QPushButton()
         self.btn_open_youtube.clicked.connect(self._open_youtube)
         url_row.addWidget(self.btn_open_youtube)
-        # 入力の変化に合わせてラベル/ツールチップを切り替える。
-        self.ed_url.textChanged.connect(self._update_open_youtube_button)
-        self._update_open_youtube_button()
+        self.btn_open_soundcloud = QPushButton()
+        self.btn_open_soundcloud.clicked.connect(self._open_soundcloud)
+        url_row.addWidget(self.btn_open_soundcloud)
+        # 入力の変化に合わせて両方のラベル/ツールチップを切り替える。
+        self.ed_url.textChanged.connect(self._update_open_buttons)
+        self._update_open_buttons()
         v.addLayout(url_row)
 
         folder_row = QHBoxLayout()
@@ -244,7 +285,7 @@ class NewProjectDialog(QDialog):
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("TITLE"))
         self.ed_title = QLineEdit()
-        self.ed_title.setPlaceholderText("ダウンロード後に動画タイトルが自動入力されます(編集可)")
+        self.ed_title.setPlaceholderText("ダウンロード後に曲/動画のタイトルが自動入力されます(編集可)")
         title_row.addWidget(self.ed_title, 1)
         v.addLayout(title_row)
 
@@ -284,14 +325,16 @@ class NewProjectDialog(QDialog):
             self.chk_auto_detect.setChecked(False)
             self.chk_ai_gen.setChecked(False)
 
-    def _update_open_youtube_button(self, _text=None):
+    def _update_open_buttons(self, _text=None):
         """入力欄の中身に応じてボタンの意味が変わるので、押す前に
-        どちらの動作になるかが分かるようラベルとツールチップを更新する。"""
-        url = resolve_youtube_url(self.ed_url.text())
-        if url:
+        どちらの動作になるかが分かるようラベルとツールチップを更新する。
+        YouTube用とSoundCloud用の2つあり、貼られたURLに該当する側だけが
+        「この動画/曲を開く」に変わる(どちらに貼ったのかが一目で分かる)。"""
+        yt_url = resolve_youtube_url(self.ed_url.text())
+        if yt_url:
             self.btn_open_youtube.setText("この動画を開く")
             self.btn_open_youtube.setToolTip(
-                "入力されたURLの動画をブラウザで開きます。\n" + url
+                "入力されたURLの動画をブラウザで開きます。\n" + yt_url
             )
         else:
             self.btn_open_youtube.setText("YouTubeを開く")
@@ -299,15 +342,35 @@ class NewProjectDialog(QDialog):
                 "YouTubeをブラウザで開きます。動画のURLをここにコピーしてください。"
             )
 
-    def _open_youtube(self):
-        # URLが未入力/YouTubeのものと判断できないときはトップページへ。
-        url = resolve_youtube_url(self.ed_url.text()) or YOUTUBE_HOME_URL
+        sc_url = resolve_soundcloud_url(self.ed_url.text())
+        if sc_url:
+            self.btn_open_soundcloud.setText("この曲を開く")
+            self.btn_open_soundcloud.setToolTip(
+                "入力されたURLの曲をブラウザで開きます。\n" + sc_url
+            )
+        else:
+            self.btn_open_soundcloud.setText("SoundCloudを開く")
+            self.btn_open_soundcloud.setToolTip(
+                "SoundCloudをブラウザで開きます。曲のURLをここにコピーしてください。"
+            )
+
+    def _open_browser(self, url):
         try:
             webbrowser.open(url)
         except Exception as e:
             # ブラウザが見つからない環境などで落とす必要はないので、
             # 状態表示だけに留めてダイアログの操作は続行できるようにする。
             self.status_label.setText(f"ブラウザを開けませんでした: {e}")
+
+    def _open_youtube(self):
+        # URLが未入力/YouTubeのものと判断できないときはトップページへ。
+        self._open_browser(resolve_youtube_url(self.ed_url.text()) or YOUTUBE_HOME_URL)
+
+    def _open_soundcloud(self):
+        # URLが未入力/SoundCloudのものと判断できないときはトップページへ。
+        self._open_browser(
+            resolve_soundcloud_url(self.ed_url.text()) or SOUNDCLOUD_HOME_URL
+        )
 
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.ed_folder.text())
@@ -321,7 +384,7 @@ class NewProjectDialog(QDialog):
         url = self.ed_url.text().strip()
         folder = self.ed_folder.text().strip()
         if not url:
-            QMessageBox.warning(self, "警告", "YouTubeのURLを入力してください。")
+            QMessageBox.warning(self, "警告", "YouTube または SoundCloud の URL を入力してください。")
             return
         if not folder:
             QMessageBox.warning(self, "警告", "保存先フォルダを選択してください。")
@@ -427,7 +490,9 @@ class NewProjectDialog(QDialog):
         self.status_label.setText(f"完了: {os.path.basename(ogg_path)}")
 
         self.lbl_video_title.setText(title)
-        self.lbl_channel.setText(f"チャンネル: {uploader}" if uploader else "")
+        # SoundCloudだと「チャンネル」ではなく投稿者/アーティストなので、
+        # どちらでも嘘にならない言い方にする(利用者の指定 2026-10-05)。
+        self.lbl_channel.setText(f"投稿者: {uploader}" if uploader else "")
         if thumbnail_url:
             self._thumb_worker = ThumbnailFetchWorker(thumbnail_url, self)
             self._thumb_worker.fetched.connect(self._on_thumbnail_fetched)

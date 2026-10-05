@@ -503,14 +503,15 @@ class GamePreviewWindow(QWidget):
         # 打音表記のオン/オフでレーン側の高さ(帯 26px の有無)が変わるので、
         # 窓の固定サイズも取り直す。
         self._lane.heightChanged.connect(self._on_preview_height_changed)
-        # F11 でボタン(モード切替・コース・録画・倍率・FPS)の表示を切り替える。
-        # 鑑賞会で見せたいのは絵だけなので、押せるものが写り込まないように
-        # できるとよい、という要望。全画面はここには置かない — 窓の大きさ
-        # そのものは変えたくないことが多い。
+        # F11 で全画面に入る/戻る(利用者の指定 2026-10-05)。以前はボタン類の
+        # 表示切り替えに割り当てていたが、F11 は全画面という思い込みのほうが
+        # 強く、窓によって意味が変わるのも混乱のもとなので、Player と揃えて
+        # 全画面にした(ボタンを隠す機能そのものは廃止。全画面に入れば
+        # enter_fullscreen が勝手に隠すので、単独の機能は要らなくなった)。
         # Esc は全画面から戻る道(メニュー等から全画面にしたとき用)。
         # 窓かその子にフォーカスがあれば効く(レーンがフォーカスを持っている
         # ので keyPressEvent では拾えない)。
-        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_overlay),
+        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
                         (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
             sc = QShortcut(seq, self)
             sc.setContext(Qt.WindowShortcut)
@@ -727,11 +728,9 @@ class GamePreviewWindow(QWidget):
     # ------------------------------------------------------------------
     # 全画面(鑑賞会用)
     # ------------------------------------------------------------------
-    def toggle_overlay(self):
-        """レーンの上に浮かせているボタン類を隠す/出す。"""
-        self._overlay_shown = not getattr(self, "_overlay_shown", True)
-        self.set_overlay_visible(self._overlay_shown)
-
+    # toggle_overlay(ボタン類を手で隠す/出す)は 2026-10-05 に廃止した。
+    # F11 を全画面へ回したためで、ボタンを隠したい用途は全画面が兼ねる
+    # (enter_fullscreen が set_overlay_visible(False) を呼ぶ)。
     def toggle_fullscreen(self):
         if self._fullscreen:
             self.exit_fullscreen()
@@ -1641,7 +1640,8 @@ class PreviewDock(QDockWidget):
         return self.game_preview_window.isVisible()
 
     def _on_overlay_visible(self, visible):
-        """再生画面のボタンを隠す/出すのに合わせて、下の速度行も合わせる。
+        """再生画面のボタンの出入り(いまは全画面の出入りだけ)に合わせて、
+        下の速度行も合わせる。
 
         隠すだけでは、その行の高さぶん灰色の帯が残る。パネルの高さも
         詰める。"""
