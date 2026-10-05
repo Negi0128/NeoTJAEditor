@@ -519,12 +519,19 @@ class _Grids:
             n += self.at(m)
         return sign * (n + int(s1))
 
-    def shift(self, pos, steps):
+    def shift(self, pos, steps, snap=False):
         """位置 pos(小節 + 小節の中の割合)を steps グリッドぶんずらす。
 
         グリッドに乗っていない位置(命令行など)でも、小節の中の端数は割合の
         まま持ち越す。譜面の頭より前へ出てしまうときは None(行き先が無い)。
-        ちょうど頭(0)に乗るのは行き先として正しいので None にしない。"""
+        ちょうど頭(0)に乗るのは行き先として正しいので None にしない。
+
+        snap=True のときだけ、行き先をその小節の目盛へ丸める。1/12 の音符を
+        1/16 のグリッドで1目盛ぶん動かすと 7/48 のような端数が残り、画面の
+        どの目盛にも乗らなかった — 「動かしたら今のグリッドに置いてほしい」
+        (利用者の指定 2026-10-05)。いちばん近い目盛へ寄せ、ちょうど真ん中なら
+        大きいほうへ。既定は False のまま: 命令行の位置や貼り付けなど、端数を
+        割合のまま運ぶ今までの経路の挙動を変えないため。"""
         steps = int(steps)
         if steps == 0:
             return Fraction(pos)
@@ -541,7 +548,15 @@ class _Grids:
             m -= 1
             g = self.at(m)
             s += g
-        return m + s / g
+        if snap:
+            # 行き先の小節の分割数で丸める。+1/2 して切り捨て = 真ん中は
+            # 大きいほう。丸めて小節の端まで来たら次の小節の頭へ送る。
+            s = math.floor(s + Fraction(1, 2))
+            while s >= g:
+                s -= g
+                m += 1
+                g = self.at(m)
+        return m + Fraction(s) / g
 
 
 def _as_grids(grid):
@@ -978,6 +993,43 @@ def _head_pos(it):
     return Fraction(it["head"][0]) + Fraction(it["head"][1], it["head"][2])
 
 
+#: 命令・マーカーの位置を照合するときの許容(1/192 の半分)。
+#:
+#: 画面側は位置を 1/192 に丸めた分数で持つのに、本文側(command_items)は
+#: 「その小節の音符の文字数」で割った分数で出す。文字数が 192 の約数でない
+#: 小節(音符10個・20個など。TJA では 20 分割も正当)では 3/10 と 29/96 の
+#: ように食い違い、完全一致で探すと**その印だけ黙って動かない**。音符の
+#: ほうは画面側も本文側も同じ分母の取り方なので、ここは命令・マーカー
+#: だけに使う(利用者の報告 2026-10-05)。
+_CMD_POS_TOL = Fraction(1, 384)
+
+
+def _match_cmds(cmds, want_cmds, keep=None):
+    """本文の命令行 cmds のうち、選ばれた (名前, 位置) に当たるものを拾う。
+
+    名前が同じもののうち、位置が _CMD_POS_TOL より近い**いちばん近い1つ**
+    だけを採る。完全一致で照合すると丸めの食い違いで取りこぼすため
+    (_CMD_POS_TOL)。1つの行が2つの選択に取られないよう、採ったものは
+    候補から外す。keep は名前の絞り込み(COMMAND_NAMES など)。
+    戻りは本文と同じ位置順。
+    """
+    rest = [c for c in cmds if keep is None or keep(c[1])]
+    out = []
+    for name, pos in sorted(want_cmds, key=lambda wc: (wc[1], wc[0])):
+        best, best_d = None, None
+        for c in rest:
+            if c[1] != name:
+                continue
+            d = abs(c[0] - pos)
+            if d < _CMD_POS_TOL and (best_d is None or d < best_d):
+                best, best_d = c, d
+        if best is not None:
+            rest.remove(best)
+            out.append(best)
+    out.sort(key=lambda c: c[0])
+    return out
+
+
 def op_move_items(text, course_range, items, steps, grid=16):
     """選んだオブジェクトを steps グリッドぶん動かす。
 
@@ -991,13 +1043,22 @@ def op_move_items(text, course_range, items, steps, grid=16):
         return None
 
     def dest(p):
+        """命令・マーカーの行き先。丸めない — #GOGOSTART などの境目が
+        勝手に目盛へ寄ると、ゴーゴーの範囲が意図せず動いてしまう。"""
         return G.shift(Fraction(p), steps)
+
+    def dest_note(p):
+        """音符の行き先。今のグリッドの目盛へ乗せる(利用者の指定 2026-10-05)。
+
+        1/12 の音符を 1/16 のグリッドで動かすと端数が残り、どの目盛にも
+        乗らなかったため。"""
+        return G.shift(Fraction(p), steps, snap=True)
     want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
     all_items = chart_items(text, body)
     sel = [it for it in all_items if _head_pos(it) in want_notes]
-    if any(dest(_head_pos(it)) is None for it in sel):
+    if any(dest_note(_head_pos(it)) is None for it in sel):
         return None                     # 譜面の頭より前へは出せない
     vals = balloon_values(text, course_range)
     new = text
@@ -1010,7 +1071,7 @@ def op_move_items(text, course_range, items, steps, grid=16):
             if it["tail"] is not None:
                 moves.append((it["tail"], "8"))
             for addr, ch in moves:
-                p = dest(Fraction(addr[0]) + Fraction(addr[1], addr[2]))
+                p = dest_note(Fraction(addr[0]) + Fraction(addr[1], addr[2]))
                 m = int(p)
                 frac = p - m
                 writes.append((m, frac.numerator, frac.denominator, ch))
@@ -1018,9 +1079,9 @@ def op_move_items(text, course_range, items, steps, grid=16):
     # --- 命令 ---
     if want_cmds:
         body_c = course_body_span(new, course_range)
-        found = [c for c in (command_items(new, body_c) if body_c else [])
-                 if (c[1], c[0]) in want_cmds
-                 and (c[1] in COMMAND_NAMES or c[1] in _MARKER_BY_NAME)]
+        found = _match_cmds(command_items(new, body_c) if body_c else [],
+                            want_cmds,
+                            lambda n: n in COMMAND_NAMES or n in _MARKER_BY_NAME)
         for pos, name, value in sorted(found, key=lambda c: c[0], reverse=steps > 0):
             rng_c = (course_range[0],
                      course_range[1] + new.count(chr(10)) - text.count(chr(10)))
@@ -1041,7 +1102,7 @@ def op_move_items(text, course_range, items, steps, grid=16):
         o = it["ord"]
         if o is None:
             continue
-        by_pos[dest(_head_pos(it))] = vals[o] if o < len(vals) else "5"
+        by_pos[dest_note(_head_pos(it))] = vals[o] if o < len(vals) else "5"
     body2 = course_body_span(new, course_range)
     out = [by_pos.get(_head_pos(it), "5")
            for it in (chart_items(new, body2) if body2 else [])
@@ -1072,8 +1133,8 @@ def op_delete_items(text, course_range, items):
         new = _update_balloons(new, course_range, removed)
     if want_cmds:
         body_c = course_body_span(new, course_range)
-        found = [c for c in (command_items(new, body_c) if body_c else [])
-                 if (c[1], c[0]) in want_cmds]
+        found = _match_cmds(command_items(new, body_c) if body_c else [],
+                            want_cmds)
         # 後ろから消す(前の行を消すと後ろの位置がずれるため)
         for pos, name, _value in sorted(found, key=lambda c: c[0], reverse=True):
             m = int(pos)
@@ -1130,7 +1191,7 @@ def copy_items(text, course_range, items=None, a=None, b=None, grid=16,
         want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                      for i in items if i.get("kind") == "cmd"}
         notes = [it for it in all_items if _head_pos(it) in want_notes]
-        picked_cmds = [c for c in cmds if (c[1], c[0]) in want_cmds]
+        picked_cmds = _match_cmds(cmds, want_cmds)
     elif a is not None and b is not None:
         # 拍子が変わる譜面では小節ごとに割る数が違う。
         G = (grid if isinstance(grid, _Grids)
@@ -1331,37 +1392,29 @@ def _shift_range(course_range, old, new):
 
 
 def op_command_items(text, course_range, items, name, value):
-    """選んだ音符のかたまりの**頭**に命令を置く(#SCROLL / #BPMCHANGE)。
+    """選んだ音符**すべて**の前に命令を置く(#SCROLL / #BPMCHANGE)。
 
-    そこから先はずっとその値。戻す行は入れない(利用者の指定 2026-10-04)。"""
+    かたまりの頭だけに1行、という作りだった(2026-10-04)が、利用者の指定で
+    選んだ1つ1つの前に入れる形に変えた(2026-10-05)。「もうその値で効いて
+    いるから書かない」という間引きもやめ — 選んだ所に行が見えないと、後から
+    値を変えるときにどこを触ればよいか分からない。
+    同じ位置に同じ命令が既にあるときは set_command が書き換えるので、二重に
+    は増えない。ゴーゴー / 小節線(op_region_items)は帯で囲う話なので、
+    かたまりのままにしてある(利用者が「GOGO は別」と明言)。"""
     body = course_body_span(text, course_range)
     name = str(name or "").upper()
     if body is None or not items or name not in COMMAND_NAMES:
         return None
-    runs = _runs_of_items(text, body, items)
-    if not runs:
+    # 連打・風船の終端(8)は chart_items が項目にしないので、頭だけが残る。
+    want = {_item_pos(i) for i in items if i.get("kind") == "note"}
+    if not want:
         return None
-    # もうその値で効いているかたまりには書かない。同じ値の行が並ぶだけで
-    # 譜面が読みにくくなる(10001000 を両方選んでも #SCROLL は1行)。
-    have = [(pos, val) for pos, nm, val in command_items(text, body)
-            if nm == name]
-    want_txt = _fmt_value(name, value)
-    targets = []
-    cur_val = None
-    seen = 0
-    for head, _tail in runs:
-        p = Fraction(head[0]) + Fraction(head[1], head[2])
-        while seen < len(have) and have[seen][0] <= p:
-            cur_val = have[seen][1]
-            seen += 1
-        if (cur_val or "").strip() == (want_txt or "").strip():
-            continue            # もうその値。増やさない
-        targets.append(head)
-        cur_val = want_txt
+    targets = [it["head"] for it in chart_items(text, body)
+               if _head_pos(it) in want]
     if not targets:
         return None
     new = text
-    # 後ろのかたまりから書く(前へ入れると後ろの行がずれる)
+    # 後ろの音符から書く(前へ入れると後ろの行がずれる)
     for head in sorted(targets, reverse=True):
         r = set_command(new, _shift_range(course_range, text, new),
                         head[0], head[1], head[2], name, value)

@@ -901,6 +901,21 @@ class ChartEditWaveform(WaveformWidget):
                 # 位置と食い違う)。
                 self._move_cursor_to_x(x)
                 return
+            band = self._span_keys_at(x, y)
+            if band:
+                # 帯の**本体**を押した = その帯の両端をまとめて選ぶ(本文は
+                # 変えない)。端の点だけしか選べないと、ゴーゴーを複数選んで
+                # まとめて伸縮するのに細かすぎて使えなかった(利用者の要望
+                # 2026-10-05)。つかんで動かすのは今までどおり端だけ。
+                if ctrl:
+                    # 足し引きは**帯ごと**(端ひとつずつの symmetric_difference
+                    # だと、片方だけ選ばれている帯で両端がちぐはぐになる)。
+                    sel = set(self._sel)
+                    self.set_selection(sel - band if band <= sel else sel | band)
+                else:
+                    self.set_selection(band)
+                self._move_cursor_to_x(x)
+                return
             # 何も無い所 = 選択を外してカーソルを置く(押したまま引っぱると
             # カーソルが付いてくる)。囲って選ぶのは右ドラッグだけ
             # (利用者の指定 2026-09-26)。
@@ -1070,6 +1085,40 @@ class ChartEditWaveform(WaveformWidget):
             if best_d is None or d < best_d:
                 best, best_d = key, d
         return best
+
+    #: 帯の行 → (開始の命令名, 終了の命令名)。_objects と同じ組み合わせ。
+    _SPAN_ROWS = {"gogo": ("GOGOSTART", "GOGOEND"),
+                  "barline": ("BARLINEOFF", "BARLINEON")}
+
+    def _span_rows_audio(self, row):
+        return (self._gogo_audio if row == "gogo" else self._barline_audio) or []
+
+    def _span_keys_at(self, x, y):
+        """帯(ゴーゴー・小節線)の本体を押したときの、その帯の両端の鍵。
+
+        帯の中ならその帯の開始と終了の**両方**を返す。端の点(±8px)だけが
+        選べる作りでは、ゴーゴーを複数選んでまとめて長さを変えるのに細かすぎ
+        たため(利用者の要望 2026-10-05)。端は _object_at が先に拾うので、
+        ここは「端ではない内側」を押したときにだけ出番が来る。
+        """
+        row = self._row_at(y)
+        names = self._SPAN_ROWS.get(row)
+        if names is None:
+            return None
+        v = self._object_vrange(row, 8)
+        if v is not None and not (v[0] <= y <= v[1]):
+            return None
+        for st, e in self._span_rows_audio(row):
+            x0, x1 = sorted((self._sec_to_x(st), self._sec_to_x(e)))
+            if not (x0 <= x <= x1):
+                continue
+            keys = set()
+            for t, name in ((st, names[0]), (e, names[1])):
+                p = self._pos_of_time(t)
+                if p is not None:
+                    keys.add(("cmd", name, p))
+            return keys or None
+        return None
 
     def _objects_in_rect(self, x0, y0, x1, y1):
         """四角で囲んだ中のオブジェクト(鍵の集まり)。"""
@@ -2199,17 +2248,24 @@ class ChartEditWaveform(WaveformWidget):
             if res:
                 # 動かしたものは選んだまま付いていく(続けて動かせるように)。
                 def shifted(k):
-                    p = self._shift_pos(k[-1], steps)
-                    return (k[0], k[1], p) if k[0] == "cmd" else (k[0], p)
+                    # 音符は本文側(op_move_items)が目盛へ丸めるので、枠の
+                    # 行き先も同じに丸める。命令はどちらも丸めない。
+                    cmd = k[0] == "cmd"
+                    p = self._shift_pos(k[-1], steps, snap=not cmd)
+                    return (k[0], k[1], p) if cmd else (k[0], p)
                 self.set_selection({
                     shifted(k) if k in move_keys else k for k in self._sel})
         self.update()
 
-    def _shift_pos(self, pos, steps):
+    def _shift_pos(self, pos, steps, snap=False):
         """位置(小節 + 小節の中の割合)を steps グリッドぶんずらす。
 
         note_edit._Grids.shift と同じ歩き方。選んだものの行き先を、画面側でも
-        同じに出すために持つ(小節ごとに割る数が違うので引き算では出せない)。"""
+        同じに出すために持つ(小節ごとに割る数が違うので引き算では出せない)。
+
+        snap は本文側(_Grids.shift)と揃えるためのもの。音符は今のグリッドの
+        目盛へ乗るようになった(利用者の指定 2026-10-05)ので、ここで丸めないと
+        選択の枠だけが実際の音符からずれる。命令の位置は本文側も丸めない。"""
         steps = int(steps)
         pos = Fraction(pos)
         if steps == 0:
@@ -2227,7 +2283,14 @@ class ChartEditWaveform(WaveformWidget):
             m -= 1
             g = self._measure_grid(m)
             s += g
-        return m + s / g
+        if snap:
+            # いちばん近い目盛へ(真ん中なら大きいほう)。_Grids.shift と同じ。
+            s = math.floor(s + Fraction(1, 2))
+            while s >= g:
+                s -= g
+                m += 1
+                g = self._measure_grid(m)
+        return m + Fraction(s) / g
 
     def _slots_between(self, a, b):
         """住所 a から b まで、グリッドいくつぶんか(符号つき)。
@@ -2318,7 +2381,6 @@ class ChartEditWaveform(WaveformWidget):
         r, g, b = self.RANGE_COLOR
         cy = note_cy if note_cy is not None else top + strip // 2
         steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
-        d = Fraction(int(steps), int(self._grid))
         for key, orow, t, half in self._objects():
             if key not in move_keys:
                 continue
@@ -2337,8 +2399,12 @@ class ChartEditWaveform(WaveformWidget):
                     continue
                 ry, rh = rect
                 p.fillRect(x - 2, ry + 2, half * 3, rh - 4, QColor(r, g, b, 70))
-            # 置かれる位置(グリッド)に細い線
-            gt = self._time_of_pos(key[-1] + d)
+            # 置かれる位置(グリッド)に細い線。離したときの行き先と同じ
+            # 歩き方で出す — 以前はカーソルのいる分割数で割った分数を
+            # 足していたので、4/4 以外の小節では線が実際の落ち先とずれた。
+            # 音符は目盛へ丸める(利用者の指定 2026-10-05)。
+            gt = self._time_of_pos(
+                self._shift_pos(key[-1], steps, snap=key[0] != "cmd"))
             if gt is not None:
                 p.setPen(QPen(QColor(255, 210, 60, 180), 1))
                 gx = self._sec_to_x(gt)

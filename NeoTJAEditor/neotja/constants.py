@@ -1,7 +1,7 @@
 from decimal import getcontext
 
 APP_NAME = "NeoTJAEditor"
-VERSION = "13.0.5"
+VERSION = "13.0.6"
 
 getcontext().prec = 50
 
