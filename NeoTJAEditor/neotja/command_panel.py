@@ -37,17 +37,31 @@ class CommandPanel(QFrame):
     #: 値の無い欄(ゴーゴー / 小節線)の「!」。付けるか外すかを選ぶ小メニューを
     #: 出してもらう。(種類, 押されたボタン)
     selectionRegion = Signal(str, object)
+    #: 元に戻す / やり直す(利用者の要望 2026-10-08)。キー(Ctrl+Z / Ctrl+Y)と
+    #: 同じ所へ繋ぐ。
+    undoRequested = Signal()
+    redoRequested = Signal()
 
     #: 命令の行の種類 → その枠を持っている欄の名前(set_values の editing 用)。
     KINDS = ("bpm", "measure", "hs")
 
     #: 欄ごとの「!」ボタンの幅。
     MARK_W = 26
+    #: 元に戻す / やり直すの高さ(譜面分岐の下に横長で置く)。レーンの枠まで
+    #: 残りが少ないので、ほかのボタン(24px)より薄い**細長い**形にする
+    #: (利用者の指定 2026-10-08)。枠(cmdBox)も付けない。
+    UNDO_H = 16
     WIDTH = 672
+    #: 4 + 52 + 3 + 52 + 3 + 16 + 2。ます目を詰めたので外の大きさは据え置き。
     HEIGHT = 132
     #: 命令1つぶんの枠の大きさ。
     BOX_W = 214
-    BOX_H = 58
+    #: 58 -> 52。「戻す / 進む」の行を下に足したぶん、ます目の背を詰めた
+    #: (利用者の指定 2026-10-08)。パネルの外の大きさは 672x132 のまま
+    #: — ゲージの箱(y=141 から)に掛からない高さがここまでしかない。
+    #: 中身(見出し16 + 間1 + ボタン30 + 余白2+2)でちょうど 52。50 にしたら
+    #: ボタンの下が 4px 欠けていた(利用者の報告 2026-10-08)。
+    BOX_H = 52
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,9 +84,11 @@ class CommandPanel(QFrame):
         self.setStyleSheet(self._style_for(1.0))
 
         grid = QGridLayout(self)
-        grid.setContentsMargins(6, 5, 6, 5)
+        # 上下の余白は詰める(細長い「戻す / 進む」の行をここに足したので、
+        # レーンの枠までの残りが惜しい)。
+        grid.setContentsMargins(6, 4, 6, 2)
         grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(5)
+        grid.setVerticalSpacing(3)
         self._grid = grid
         #: いま当てている表示倍率(1.0 = 原寸)。
         self._ui_scale = 1.0
@@ -131,6 +147,9 @@ class CommandPanel(QFrame):
         # --- 譜面分岐: どの系統を見て(編集して)いるか ---
         grid.addWidget(self._branch_box(), 1, 2)
 
+        # --- 元に戻す / やり直す: 譜面分岐の下に横長で ---
+        grid.addWidget(self._undo_box(), 2, 2)
+
 
         # 縮めるときに戻れるよう、原寸の寸法をここで覚えておく。
         self._capture_base()
@@ -159,6 +178,8 @@ class CommandPanel(QFrame):
         " border: 1px solid #3a4763; border-radius: 3px;"
         " padding: 2px 6px; min-height: %(h)dpx; font-size: %(bt)dpx; }"
         "#commandPanel QPushButton:hover { background: #2d3750; }"
+        "#commandPanel QPushButton#undoBtn { min-height: %(uh)dpx;"
+        " padding: 0px; font-size: %(ub)dpx; }"
         "#commandPanel QPushButton#cmdMark { font-size: %(mk)dpx;"
         " font-weight: bold; padding: 0px; }"
         "#commandPanel QPushButton#cmdMark:disabled { color: #4b5569;"
@@ -179,7 +200,8 @@ class CommandPanel(QFrame):
         if s < 0.999:
             qss += self._QSS_ARROW
         return qss % {"h": px(24), "sp": px(14), "bt": px(13),
-                      "ar": px(16), "mk": px(20)}
+                      "ar": px(16), "mk": px(20),
+                      "uh": px(self.UNDO_H - 2), "ub": px(12)}
 
     def _capture_base(self):
         """原寸の寸法・余白・文字の大きさを覚える(ui_scale.UiScaler に任せる)。"""
@@ -196,9 +218,11 @@ class CommandPanel(QFrame):
         return self._ui_scale
 
     def set_ui_scale(self, s):
-        """表示倍率ぶんパネルごと縮める(1.0 で原寸)。"""
+        """表示倍率ぶんパネルごと縮める/広げる(1.0 で原寸)。"""
         from neotja.ui_scale import px
-        s = max(0.25, min(1.0, float(s)))
+        # 上限を 1.0 から 4.0 へ。全画面では中身ぜんぶを同じ倍率で拡大する
+        # (利用者の指定 2026-10-05)。通常の窓の 100/75/50% は 1.0 以下。
+        s = max(0.25, min(4.0, float(s)))
         if abs(s - self._ui_scale) < 1e-6:
             return
         self._ui_scale = s
@@ -214,7 +238,7 @@ class CommandPanel(QFrame):
         box.setObjectName("cmdBox")
         box.setFixedSize(self.BOX_W, self.BOX_H)
         v = QVBoxLayout(box)
-        v.setContentsMargins(7, 4, 7, 5)
+        v.setContentsMargins(7, 2, 7, 2)
         v.setSpacing(2)
         lab = QLabel(title)
         lab.setObjectName("boxTitle")
@@ -303,6 +327,37 @@ class CommandPanel(QFrame):
         row.addWidget(self._branch_combo, 1)
         self._branch_box_w = box
         self.set_branch(None, False)
+        return box
+
+    def _undo_box(self):
+        """[← 戻す / 進む →] の枠(利用者の要望 2026-10-08)。
+
+        キー(Ctrl+Z / Ctrl+Y)と同じものを目に見えるボタンでも。ゲーム画面の
+        上に居るあいだはテキストのエディタが見えないので、押せる所が無いと
+        1手戻すだけで下のパネルへ切り替える必要があった。
+
+        置き場所は**譜面分岐の下に横長**(利用者の指定 2026-10-08)。見出しも
+        枠も付けず、ほかのボタンより薄い**細長い**2つを並べるだけ — 高さは
+        レーンの枠までの残りぶんしかないので、1px も惜しい。"""
+        box = QFrame(self)
+        box.setFixedSize(self.BOX_W, self.UNDO_H)
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        for attr, text, tip in (
+                ("btn_undo", "← 戻す", "元に戻す (Ctrl+Z)"),
+                ("btn_redo", "進む →", "やり直す (Ctrl+Y / Ctrl+Shift+Z)")):
+            btn = QPushButton(text)
+            btn.setObjectName("undoBtn")
+            btn.setToolTip(tip)
+            btn.setFixedHeight(self.UNDO_H)
+            setattr(self, attr, btn)
+            row.addWidget(btn, 1)
+        self.btn_undo.clicked.connect(
+            lambda _c=False: self.undoRequested.emit())
+        self.btn_redo.clicked.connect(
+            lambda _c=False: self.redoRequested.emit())
+        self._undo_box_w = box
         return box
 
     def _on_branch_combo(self, _idx):

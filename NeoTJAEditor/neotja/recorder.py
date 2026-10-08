@@ -370,19 +370,27 @@ def hit_schedule_from_preview(preview_data: dict, offset: float):
 
     アプリ本体(preview_dock.set_preview_data → hit_sounds.set_schedule)と
     まったく同じ組み立てをする。連打/風船/くす玉は等間隔の連打音へ展開し、
-    面(1/3)はドン、それ以外はカッ。音声時間 = 譜面時間 - OFFSET。"""
-    from neotja.preview_dock import _roll_tick_notes
+    面(1/3)はドン、それ以外はカッ。音声時間 = 譜面時間 - OFFSET。
+
+    **風船の割れる音("pop")もここに混ぜる。** 画面では別経路(QSoundEffect)
+    で鳴らしているので録画には一切入っておらず、「録画すると風船の音が
+    おかしい」の正体がこれだった(利用者の報告 2026-10-08)。"""
+    from neotja.preview_dock import (_roll_tick_notes, balloon_tick_notes,
+                                     balloon_pop_schedule)
 
     data = preview_data or {}
     notes = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
     notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
-    # 風船は割れる時刻まで(表示と同じ切り詰め)。
-    from neotja.tja_analyzer import balloon_pop_spans
+    # 風船は割れる時刻まで(表示と同じ切り詰め)。割れる区間の最後の1打は
+    # ドンにしない — そこは風船の音。
     spd = data.get("roll_hit_speed", 45)
-    notes += _roll_tick_notes(balloon_pop_spans(data.get("balloons", []), spd), bpm_index=2)
-    notes += _roll_tick_notes(balloon_pop_spans(data.get("kusudamas", []), spd), bpm_index=2)
+    notes += balloon_tick_notes(data.get("balloons", []), spd)
+    notes += balloon_tick_notes(data.get("kusudamas", []), spd)
 
-    pairs = sorted((t - offset, "don" if c in "13" else "ka") for t, c, _bpm in notes)
+    pairs = [(t - offset, "don" if c in "13" else "ka")
+             for t, c, _bpm in notes]
+    pairs += [(t - offset, "pop") for t in balloon_pop_schedule(data, spd)]
+    pairs.sort()
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
@@ -401,6 +409,9 @@ def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
     core.post(("song", np.ascontiguousarray(song_pcm, dtype=np.float32), sample_rate))
     core.post(("sfx", "don", _load_hit_pcm(don_path, ensure_don_wav, sample_rate)))
     core.post(("sfx", "ka", _load_hit_pcm(ka_path, ensure_ka_wav, sample_rate)))
+    pop = _load_pop_pcm(sample_rate)
+    if pop is not None:
+        core.post(("sfx", "pop", pop))
     core.post(("hit_sched", list(hit_times), list(hit_kinds)))
     core.post(("hit_enabled", bool(hit_sounds)))
     core.post(("metro_enabled", False))
@@ -420,6 +431,25 @@ def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
         out[done:done + n] = core.render(n)
         done += n
     return out
+
+
+def _load_pop_pcm(sample_rate):
+    """風船の割れる音(skin/balloon.wav)。無ければ None。
+
+    画面では QSoundEffect に ChartPreviewWidget.POP_BASE_GAIN を掛けて
+    鳴らしている(balloon.wav は振幅いっぱいで、打音より倍近く大きいため)。
+    録画は打音と同じ効果音バスを通るので、その下げ幅をあらかじめ波形へ
+    掛けておく — 同じ音量設定なら実機とまったく同じ大きさで録れる。"""
+    from neotja import settings as settings_mod
+    path = os.path.join(str(settings_mod.skin_dir()), "balloon.wav")
+    if not os.path.exists(path):
+        return None
+    pcm = _load_sfx_or_none(path, sample_rate)
+    if pcm is None:
+        return None
+    from neotja.chart_preview_widget import ChartPreviewWidget
+    gain = float(getattr(ChartPreviewWidget, "POP_BASE_GAIN", 0.55))
+    return np.ascontiguousarray(pcm * gain, dtype=np.float32)
 
 
 def _load_hit_pcm(path, synth_factory, sample_rate):

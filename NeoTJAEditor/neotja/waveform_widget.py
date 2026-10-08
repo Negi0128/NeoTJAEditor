@@ -903,6 +903,10 @@ class WaveformWidget(QWidget):
             self._lane_rows = np.arange(h, dtype=np.float32).reshape(-1, 1)
         return buf, self._lane_rows
 
+    def wave_gain(self):
+        """波形の縦の倍率(1.0 = そのまま)。作譜ペインだけ利用者が変えられる。"""
+        return 1.0
+
     def _draw_lane(self, painter, channel, y_top: int, lane_h: int,
                    t0: float, t1: float, w: int, label):
         """1レーン分の波形を描く。
@@ -924,6 +928,13 @@ class WaveformWidget(QWidget):
         # LANE_GAIN で縦に伸ばす(作譜ペインは行が高いので、素の倍率だと
         # 真ん中に細い帯が見えるだけになる)。はみ出しは行の高さで頭打ち。
         half = min(mid, mid * 0.9 * self.LANE_GAIN)
+        # 利用者が決める縦の倍率。**振幅そのもの**を伸ばして行の高さで切る
+        # (上の half は既に行いっぱいで頭打ちなので、あちらを増やしても
+        # 1px も変わらない)。音が小さい曲でアタックが見えない、という
+        # 報告への対応(2026-10-08)。
+        g = self.wave_gain()
+        if g != 1.0:
+            maxs = np.minimum(maxs * g, 1.0)
         top = mid - maxs * half
         bottom = mid + maxs * half
 

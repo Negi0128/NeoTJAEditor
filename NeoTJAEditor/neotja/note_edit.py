@@ -1111,6 +1111,57 @@ def op_move_items(text, course_range, items, steps, grid=16):
     return _result(text, new, reparse=True)
 
 
+def _tail_pos(it):
+    """連打・風船の終端(8)の位置。終端が無ければ None。"""
+    if it["tail"] is None:
+        return None
+    return Fraction(it["tail"][0]) + Fraction(it["tail"][1], it["tail"][2])
+
+
+def op_tail_items(text, course_range, items, steps, grid=16):
+    """選んだ連打・風船の**終端(8)だけ**を steps ぶん動かす = 長さを変える。
+
+    ゴーゴーの端をつかんだときと同じ考え方(利用者の要望 2026-10-08)。頭は
+    動かさないので、複数選んでまとめて伸ばす・縮めることができる。
+
+    行き過ぎは黙って諦める(そのひとつだけ動かさない):
+      ・頭に届くか追い越す … 長さ 0 の連打は書けない
+      ・次の音符に届く     … 連打の中に音符を飲み込むと譜面が壊れる
+    行き先は今のグリッドの目盛へ乗せる(音符を動かすときと同じ)。"""
+    body = course_body_span(text, course_range)
+    G = _as_grids(grid)
+    steps = int(steps)
+    if body is None or not items or steps == 0:
+        return None
+    want = {_item_pos(i) for i in items if i.get("kind") == "tail"}
+    if not want:
+        return None
+    all_items = chart_items(text, body)
+    sel = [it for it in all_items if _tail_pos(it) in want]
+    if not sel:
+        return None
+    writes = []
+    for it in sel:
+        hp, tp = _head_pos(it), _tail_pos(it)
+        d = G.shift(tp, steps, snap=True)
+        if d is None or d <= hp:
+            continue                    # 頭より前へは出せない
+        nxt = min((_head_pos(o) for o in all_items
+                   if _head_pos(o) > tp and o is not it), default=None)
+        if nxt is not None and d >= nxt:
+            continue                    # 次の音符を飲み込む
+        writes.append((it["tail"][0], it["tail"][1], it["tail"][2], "0"))
+        m = int(d)
+        frac = d - m
+        writes.append((m, frac.numerator, frac.denominator, "8"))
+    if not writes:
+        return None
+    new = _apply_writes(text, body, writes)
+    if new == text:
+        return None
+    return _result(text, new, reparse=True)
+
+
 def op_delete_items(text, course_range, items):
     """選んだオブジェクトを消す(音符は長い音符なら終端ごと、命令は行ごと)。"""
     body = course_body_span(text, course_range)
@@ -1119,8 +1170,12 @@ def op_delete_items(text, course_range, items):
     want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
+    # 終端(8)だけを選んで消したときは、その連打・風船まるごと消す。終端だけ
+    # 消えると終わらない連打になってしまう(利用者の要望 2026-10-08)。
+    want_tails = {_item_pos(i) for i in items if i.get("kind") == "tail"}
     all_items = chart_items(text, body)
-    sel = [it for it in all_items if _head_pos(it) in want_notes]
+    sel = [it for it in all_items
+           if _head_pos(it) in want_notes or _tail_pos(it) in want_tails]
     new = text
     if sel:
         writes = []
@@ -1374,6 +1429,120 @@ def _runs_of_items(text, body, items):
     return runs
 
 
+def _addr_pos(addr):
+    """住所 (小節, 位置, 分割数) → 位置(小節単位の分数)。"""
+    m, i, L = addr
+    return Fraction(int(m)) + Fraction(int(i), int(L) or 1)
+
+
+def _picked_notes(text, body, items):
+    """選んだ音符を譜面の順に [(頭の住所, 終わりの住所)]。
+
+    連打・風船は終端(8)までをひとつと見る(_runs_of_items と同じ)。"""
+    want = {_item_pos(i) for i in items if i.get("kind") == "note"}
+    if not want:
+        return []
+    out = []
+    for it in chart_items(text, body):
+        if _head_pos(it) in want:
+            out.append((it["head"], it["tail"] or it["head"]))
+    return out
+
+
+def _gap_after(text, body, picked_one):
+    """その音符から**次の音符**までの隔たり。次が無ければ 0。
+
+    1つだけ選んだときの帯の長さを決めるのに使う(選んだものの中には
+    「次」が無いため)。"""
+    head, tail = picked_one
+    here = _addr_pos(head)
+    end = _addr_pos(tail)
+    for it in chart_items(text, body):
+        p = _head_pos(it)
+        if p > end:
+            return p - here
+    return Fraction(0)
+
+
+def _off_cover(text, body, kind, nxt):
+    """外すときの終わり。そこがまだ帯の途中なら、**その帯の終わりまで**伸ばす。
+
+    「音符ごとに半分」で付けた帯は最後の音符より後ろまで続くので、選んだ
+    音符の範囲だけで外すと、後ろに短いゴーゴーが取り残されていた。"""
+    lines = _region_lines(text, body, kind)
+    # 位置キーは (小節, 小節の中の割合)。通し分数ではないので揃えて比べる。
+    k1 = _key(nxt[0], nxt[1], nxt[2])
+    if not _state_through(lines, k1):
+        return nxt
+    ends = [k for k, on, _s, _e in lines if k >= k1 and not on]
+    if not ends:
+        return nxt
+    m, frac = min(ends)
+    return (m, frac.numerator, frac.denominator)
+
+
+def _bands_cover(text, body, picked):
+    """選んだものを覆う1本の帯。終わりは**次の音符**か、その手前に小節線が
+    来るならその小節線の位置(利用者の指定 2026-10-08)。
+
+    「ゴーゴー開始」を押したときの覆い方。帯の終わりが次の音符にぴったり
+    重なるので、ゴーゴーの炎が次の音符まで続いて見える。小節をまたぐ所では
+    小節線で切る — 小節の頭からゴーゴーが始まるほうが譜面として読みやすい。"""
+    head, tail = picked[0][0], picked[-1][1]
+    end_pos = _addr_pos(tail)
+    nxt = None
+    for it in chart_items(text, body):
+        p = _head_pos(it)
+        if p > end_pos:
+            nxt = p
+            break
+    bar = Fraction(int(end_pos) + 1)        # 次の小節線
+    if nxt is None or bar <= nxt:
+        # 小節線のほうが先(または次の音符が無い)。
+        n_measures = len(measure_spans(text, body))
+        if bar > n_measures:
+            return [(head, _next_addr(text, body, tail))]
+        return [(head, (int(bar), 0, 1))]
+    return [(head, _addr_of(nxt))]
+
+
+def _bands_span(text, body, picked):
+    """選んだものの**最初から最後まで**を1本の帯に(利用者の指定 2026-10-08)。"""
+    return [(picked[0][0], _next_addr(text, body, picked[-1][1]))]
+
+
+def _bands_each(text, body, picked):
+    """音符ごとに「次の音符との隔たりの半分」の帯(利用者の指定 2026-10-08)。
+
+    10001000 を両方選べば 10/00/10/00 と ON/OFF が切り替わる。いちばん
+    後ろの音符は「次」が無いので、1つ前と同じ隔たりを使う(等間隔に選んだ
+    ときに最後だけ長さが変わらないため)。1つだけ選んだときは譜面の次の
+    音符までを見る。
+
+    連打・風船は、半分が終端(8)より手前に来ても**その音符ぶんは必ず**帯に
+    入れる — 途中でゴーゴーが切れると連打の後半だけ色が変わる。"""
+    heads = [_addr_pos(h) for h, _t in picked]
+    gaps = [heads[i + 1] - heads[i] for i in range(len(heads) - 1)]
+    if gaps:
+        gaps.append(gaps[-1])
+    else:
+        gaps = [_gap_after(text, body, picked[0])]
+    out = []
+    for (h, t), p, d in zip(picked, heads, gaps):
+        least = _next_addr(text, body, t)
+        end = _addr_of(p + d / 2) if d > 0 else least
+        if t != h:
+            # 連打・風船は終端(8)まで必ず入れる。
+            if _addr_pos(end) <= _addr_pos(least):
+                end = least
+        elif _addr_pos(end) <= p:
+            # ふつうの音符は、半分が文字1つぶんより短くてもそのまま細かく
+            # 割って置く(小節を割り直す)。長さ 0 だけは避ける。
+            end = least
+        out.append((h, end))
+    return out
+
+
 def _next_addr(text, body, addr):
     """住所の「次の位置」。小節の終わりなら次の小節の頭。"""
     m, i, L = addr
@@ -1425,27 +1594,58 @@ def op_command_items(text, course_range, items, name, value):
     return _result(text, new, reparse=True)
 
 
-def op_region_items(text, course_range, items, kind, on):
-    """選んだ音符のかたまりを帯で囲む(ゴーゴー / 小節線)。
+def op_region_items(text, course_range, items, kind, on, mode="runs"):
+    """選んだ音符を帯で囲む(ゴーゴー / 小節線)。
 
     囲うのは [頭, 終わりの次) — 音符そのものだけが帯に入り、後ろの空きは
-    入らない。"""
+    入らない。mode で帯の切り方を選ぶ:
+
+      "span"  … 選んだものの最初から最後までを1本に(ゴーゴーの既定)
+      "cover" … span と同じだが、終わりを**次の音符**(その手前に小節線が
+                来るならその小節線)まで伸ばす(「ゴーゴー開始」ボタン)
+      "each"  … 音符ごとに「次の音符との隔たりの半分」ずつ
+      "runs"  … 隙間で切る(小節線の隠す/出す。2026-10-04 の作り)
+    """
     body = course_body_span(text, course_range)
     kind = str(kind or "").upper()
     if body is None or not items or kind not in REGION_COMMANDS:
         return None
-    runs = _runs_of_items(text, body, items)
-    if not runs:
+    if mode in ("span", "each", "cover"):
+        picked = _picked_notes(text, body, items)
+        if not picked:
+            return None
+        bands = ({"span": _bands_span, "cover": _bands_cover,
+                  "each": _bands_each}[mode])(text, body, picked)
+        if not on and mode in ("span", "cover"):
+            bands = [(h, _off_cover(text, body, kind, n)) for h, n in bands]
+    else:
+        # 隙間で切ったかたまりは「終わりの音符」で返るので、終わりの**次**を
+        # 帯の切れ目にする(帯は [頭, 終わりの次))。
+        bands = [(head, _next_addr(text, body, tail))
+                 for head, tail in _runs_of_items(text, body, items)]
+    if not bands:
         return None
     new = text
-    for head, tail in sorted(runs, key=lambda r: r[0], reverse=True):
+    # 後ろの帯から入れる。前に入れた行で本文の長さが変わっても、住所は
+    # 「小節と割合」なので指す場所は動かない。
+    for head, nxt in sorted(bands, key=lambda r: _addr_pos(r[0]),
+                            reverse=True):
         body_n = course_body_span(new, _shift_range(course_range, text, new))
         if body_n is None:
             break
-        nxt = _next_addr(new, body_n, tail)
-        G = _Grids(16, {head[0]: head[2], nxt[0]: nxt[2]})
+        # 帯の両端が**同じ小節で違う分母**になることがある(「半分」の帯は
+        # 音符より細かい所で終わる)。素直に {小節: 分母} を作ると片方が
+        # 上書きで消えて、終わりが小節の外を指していた。小節ごとに最小
+        # 公倍数へそろえてから渡す。
+        divs = {}
+        for m, _i, L in (head, nxt):
+            cur = divs.get(m, 1)
+            divs[m] = cur * L // math.gcd(cur, L)
+        a = (head[0], head[1] * divs[head[0]] // head[2])
+        b = (nxt[0], nxt[1] * divs[nxt[0]] // nxt[2])
+        G = _Grids(16, divs)
         r = set_region(new, _shift_range(course_range, text, new),
-                       (head[0], head[1]), (nxt[0], nxt[1]), G, kind, bool(on))
+                       a, b, G, kind, bool(on))
         if r is not None:
             new = r
     if new == text:
@@ -1473,6 +1673,9 @@ def run_op(text, course_range, op):
     if kind == "move_items":
         return op_move_items(text, course_range, op.get("items") or [],
                              int(op.get("steps", 0)), g)
+    if kind == "tail_items":
+        return op_tail_items(text, course_range, op.get("items") or [],
+                             int(op.get("steps", 0)), g)
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
     if kind == "paste_items":
@@ -1483,7 +1686,8 @@ def run_op(text, course_range, op):
                                 op.get("name"), op.get("value"))
     if kind == "region_items":
         return op_region_items(text, course_range, op.get("items") or [],
-                               op.get("region"), op.get("on", True))
+                               op.get("region"), op.get("on", True),
+                               str(op.get("mode") or "runs"))
     if kind == "command_value":
         p = op.get("pos") or (0, 1)
         return op_command_value(text, course_range, Fraction(int(p[0]), int(p[1])),

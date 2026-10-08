@@ -708,7 +708,9 @@ class GamePreviewWindow(QWidget):
         if self._fullscreen:
             # 全画面のあいだは窓の大きさを固定しない(固定すると画面いっぱいの
             # 表示が壊れる)。モード切替で中身の高さが変わったときは、倍率を
-            # 取り直すだけでよい。
+            # 取り直すだけでよい。隠し方はモードで変わるので、そちらも
+            # ここで合わせ直す(モード切替は必ず refit を通る)。
+            self._sync_fullscreen_hiding()
             self._fit_fullscreen()
             return
         # bottom_widget はモード別スタック + 速度行。ページごとに高さが違うと
@@ -731,6 +733,29 @@ class GamePreviewWindow(QWidget):
     # toggle_overlay(ボタン類を手で隠す/出す)は 2026-10-05 に廃止した。
     # F11 を全画面へ回したためで、ボタンを隠したい用途は全画面が兼ねる
     # (enter_fullscreen が set_overlay_visible(False) を呼ぶ)。
+    #
+    # ただし隠すのは**通常再生のときだけ**(利用者の指定 2026-10-05:
+    # 「通常モード以外はフルスクリーンでボタン消さないで」「全部表示して
+    #  全画面で作譜したい」)。軽量・同時再生・作譜は全画面でも操作しながら
+    # 使うモードなので、ボタン類も下部パネルも出したままにする。
+    # どのモードかは置いた側(PreviewDock)しか知らないので、判じ役を
+    # set_fs_hide_cb で渡してもらう。
+    def set_fs_hide_cb(self, cb):
+        """全画面のとき隠すかどうかを答える先(True なら隠す)。
+
+        渡されていなければ従来どおり隠す — この窓だけで動かす試験などで、
+        いきなり「何も隠さない」に変わらないようにするため。"""
+        self._fs_hide_cb = cb
+
+    def _fs_should_hide(self) -> bool:
+        cb = getattr(self, "_fs_hide_cb", None)
+        if cb is None:
+            return True
+        try:
+            return bool(cb())
+        except Exception:  # noqa: BLE001
+            return True
+
     def toggle_fullscreen(self):
         if self._fullscreen:
             self.exit_fullscreen()
@@ -738,49 +763,232 @@ class GamePreviewWindow(QWidget):
             self.enter_fullscreen()
 
     def enter_fullscreen(self):
-        """画面いっぱいにゲーム画面だけを出す。
+        """画面いっぱいにゲーム画面を出す。
 
-        下部パネル(速度スライダー・波形・情報)とレーン上のボタン類は隠す。
-        鑑賞会で見せたいのは絵だけで、操作するものが写り込むと邪魔になる。
-        隠しても困らないのは、モード切替(Tab)・再生(Space)・コース切替が
-        すべてキーで足りるため。"""
+        通常再生のときだけ、下部パネル(速度スライダー・波形・情報)とレーン上の
+        ボタン類も隠す。鑑賞会で見せたいのは絵だけで、操作するものが写り込むと
+        邪魔になる。隠しても困らないのは、モード切替(Tab)・再生(Space)・
+        コース切替がすべてキーで足りるため。
+        ほかのモード(軽量・同時再生・作譜)では何も隠さない — 全画面のまま
+        作譜したいという指定(利用者 2026-10-05)で、ペインまで消えると
+        使い道が無くなるため。"""
         if self._fullscreen:
             return
         self._fullscreen = True
         self._fs_geometry = self.saveGeometry()
         self._fs_scale = self.scaled_host.scale()
-        self._bottom_widget.hide()
-        self.set_overlay_visible(False)
+        #: 今回の全画面で実際に隠したか。戻すときは**隠したものだけ**を
+        #: 戻す(隠していないものを「戻す」と、そのモードでは出ないはずの
+        #: ボタンまで出てしまう)。
+        self._fs_hidden = self._fs_should_hide()
+        if self._fs_hidden:
+            self._bottom_widget.hide()
+            self.set_overlay_visible(False)
         # setFixedSize で入っている上下限を外さないと全画面にならない。
         self.setMinimumSize(0, 0)
-        self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        self._cap_to_screen()
+        #: showFullScreen() を通したか(_fit_fullscreen の入り直し用)。
+        self._fs_shown = False
         self.showFullScreen()
-        # 画面の大きさが確定してから倍率を決める(showFullScreen の直後は
+        self._fs_shown = True
+        # 画面の大きさが確定してから置き場所を決める(showFullScreen の直後は
         # まだ元の大きさのことがある)。
         QTimer.singleShot(0, self._fit_fullscreen)
 
     def exit_fullscreen(self):
+        """全画面から戻す。
+
+        **順番が肝。** 固定サイズ(setFixedSize)を入れ直す前に、必ず
+        showNormal() で全画面の状態を抜ける。全画面のまま上下限を入れると、
+        Windows では窓の枠(タイトルバー)が計り直されず、**右上の × ごと
+        消えた枠無しの窓**で固まる(利用者の報告 2026-10-05「F11 を押して、
+        また押して戻したらバグった」。実測では枠の厚みが 31px → -8px に
+        なり、往復するたびに枠の有無が入れ替わっていた)。"""
         if not self._fullscreen:
             return
         self._fullscreen = False
-        self.scaled_host.set_scale(self._fs_scale)
-        self._bottom_widget.show()
-        self.set_overlay_visible(True)
+        self._fs_shown = False
+        # まず全画面の状態を抜ける。showNormal() だけでは状態ビットが
+        # 残ることがあるので、念のため落としておく。
         self.showNormal()
+        self.setWindowState(self.windowState() & ~Qt.WindowFullScreen)
+        # 全画面のあいだの中央寄せ(_center_in_fullscreen)を外す。外さないと
+        # 元の大きさに戻しても中身が真ん中へ寄ったままになる。
+        self._center_in_fullscreen(False)
+        # 入る前の表示倍率へ、中身ぜんぶを戻す。
+        self._apply_scale_all(self._fs_scale)
+        if getattr(self, "_fs_hidden", True):
+            self._bottom_widget.show()
+            self.set_overlay_visible(True)
+        self._fs_hidden = False
         self._refit()
         if self._fs_geometry is not None:
             self.restoreGeometry(self._fs_geometry)
 
-    def _fit_fullscreen(self):
-        """画面に収まる最大の倍率にして、中央へ置く。"""
-        if not self._fullscreen:
+    def _screen_size(self):
+        """いま載っている画面の大きさ。分からなければ None。"""
+        scr = self.screen()
+        return scr.geometry() if scr is not None else None
+
+    def _cap_to_screen(self):
+        """全画面のあいだ、窓の上限を画面の大きさで止める。
+
+        上限を外したままだと、並びの都合で窓が画面より大きくなることがある
+        (モードを切り替えた瞬間、下部パネルの高さが先に決まって絵の入れ物が
+         まだ縮んでいない、など)。画面に収まらなくなった窓は Windows が
+        全画面から外し、枠(タイトルバー)ごと失う — 利用者の報告の
+        「戻したらバグった」と同じ壊れ方(実測: 1920x1396、枠の厚み -8)。
+        原寸で出すようにした 2026-10-05 以降は中身が画面を超えないので
+        実際には働かないが、低い解像度の画面のための用心として残す。"""
+        geo = self._screen_size()
+        if geo is None:
+            self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        else:
+            self.setMaximumSize(max(1, geo.width()), max(1, geo.height()))
+
+    def _sync_fullscreen_hiding(self):
+        """全画面のあいだにモードが変わったら、隠し方もそのモードに合わせる。
+
+        通常再生 ↔ ほかのモードを全画面のまま行き来できるので(Tab)、
+        入ったときの判断に居座らせると「作譜へ移ったのにボタンが出ない」
+        「通常再生へ戻ったのにボタンが残る」という食い違いになる。"""
+        if not self._fullscreen or getattr(self, "_fs_sync_busy", False):
             return
-        content = self._chart_preview
-        cw, ch = max(1, content.width()), max(1, content.height())
-        avail = self.size()
-        scale = min(avail.width() / float(cw), avail.height() / float(ch))
-        self.scaled_host.set_scale(max(0.05, scale))
-        self.layout().setAlignment(self.scaled_host, Qt.AlignCenter)
+        want = self._fs_should_hide()
+        if want == getattr(self, "_fs_hidden", False):
+            return
+        self._fs_sync_busy = True       # set_overlay_visible が _refit を呼ぶ
+        try:
+            self._fs_hidden = want
+            if want:
+                self._bottom_widget.hide()
+                self.set_overlay_visible(False)
+            else:
+                self._bottom_widget.show()
+                self.set_overlay_visible(True)
+        finally:
+            self._fs_sync_busy = False
+
+    def _center_in_fullscreen(self, on: bool):
+        """全画面のあいだ、中身(ゲーム画面＋下部パネル)をひとかたまりで
+        画面の中央へ置く。
+
+        並びの上下へ伸び縮みする詰め物を足して挟む。項目ごとに中央寄せを
+        かけると**項目どうしのあいだに余白が入って**、ゲーム画面と下部パネルが
+        離れてしまう(縦の余りが項目ごとに配られるため)。両端で挟めば、
+        2つはくっついたまま真ん中に来る。"""
+        lay = self.layout()
+        if on:
+            if not getattr(self, "_fs_stretch", False):
+                lay.insertStretch(0, 1)
+                lay.addStretch(1)
+                self._fs_stretch = True
+            lay.setAlignment(self.scaled_host, Qt.AlignHCenter)
+            lay.setAlignment(self._bottom_widget, Qt.AlignHCenter)
+            # 下部パネルは「窓の幅いっぱいに広がる」作りなので、中央寄せに
+            # すると自分の最小の幅(245px)まで縮んでしまう。通常の窓では
+            # ゲーム画面と同じ幅なので、全画面でもそこへ留める。
+            self._bottom_widget.setFixedWidth(self.scaled_host.width())
+        else:
+            if getattr(self, "_fs_stretch", False):
+                lay.takeAt(lay.count() - 1)
+                lay.takeAt(0)
+                self._fs_stretch = False
+            lay.setAlignment(self.scaled_host, Qt.AlignmentFlag(0))
+            lay.setAlignment(self._bottom_widget, Qt.AlignmentFlag(0))
+            # 幅の縛りを外して、また窓いっぱいに広がる作りへ戻す。
+            self._bottom_widget.setMinimumWidth(0)
+            self._bottom_widget.setMaximumWidth(_QWIDGETSIZE_MAX)
+
+    def set_fs_zoom_cb(self, cb):
+        """倍率を**中身ぜんぶ**へ当ててもらう先(PreviewDock.apply_preview_scale)。
+
+        ゲーム画面だけを拡大すると、下部パネルやボタン類は並びの都合で
+        伸びたり伸びなかったりして、通常の窓とは別の配置になる
+        (利用者の指摘 2026-10-05「色々大きさも配置も違う」)。どれも
+        同じ倍率で当てるために、置いた側へ任せる。"""
+        self._fs_zoom_cb = cb
+
+    def _apply_scale_all(self, s: float):
+        cb = getattr(self, "_fs_zoom_cb", None)
+        if cb is None:
+            self.scaled_host.set_scale(s)        # 窓単体で動かす試験のとき
+        else:
+            cb(s)
+
+    def _fs_content_size(self):
+        """いまの倍率で、中身(ゲーム画面＋下部パネル)が占めている大きさ。"""
+        w = self.scaled_host.width()
+        h = self.scaled_host.height()
+        if not getattr(self, "_fs_hidden", True):
+            # **isVisible() では見ない** — 全画面へ移る途中は OS 側の窓を
+            # 作り直しているあいだ一時的に False を返す。隠したかどうかは
+            # 自分が決めたことなので _fs_hidden を見る。
+            h += max(self._bottom_widget.minimumHeight(),
+                     self._bottom_widget.sizeHint().height())
+            w = max(w, self._bottom_widget.minimumWidth())
+        return max(1, w), max(1, h)
+
+    def _fit_fullscreen(self):
+        """**中身ぜんぶを同じ倍率で**画面いっぱいまで広げ、中央へ置く。
+
+        欲しいのは「通常の窓の見た目をそのまま k 倍した絵」
+        (利用者の指定 2026-10-05「すべてのオブジェクトを拡大してほしい」)。
+        k は画面に収まる最大 = min(画面幅/中身の幅, 画面高さ/中身の高さ)。
+        余りは黒で、中央寄せ。
+
+        倍率は**実測して詰める**。中身の高さは倍率を当てたあとでないと
+        決まらない(文字の大きさや余白を掛け直すと、丸めのぶんだけ理屈どおりに
+        ならない)ので、当てては測り直す。数回で止まる。"""
+        if not self._fullscreen or getattr(self, "_fs_fitting", False):
+            return
+        # 画面をまたいで動かされていることもあるので、天井を張り直す。
+        self._cap_to_screen()
+        geo = self._screen_size()
+        avail_w = max(1, geo.width() if geo is not None else self.width())
+        avail_h = max(1, geo.height() if geo is not None else self.height())
+        self._fs_fitting = True          # 倍率を当てると resizeEvent が回る
+        try:
+            for _ in range(6):
+                cur = self.scaled_host.scale()
+                cw, ch = self._fs_content_size()
+                r = min(avail_w / float(cw), avail_h / float(ch))
+                # **収まっていることが先。** 1px でもはみ出すと窓が画面より
+                # 大きくなり、Windows が全画面を解いて枠(×)ごと失う。
+                # 収まっているうえで、あと 2% 以内まで詰まっていれば十分。
+                if cw <= avail_w and ch <= avail_h and r <= 1.02:
+                    break
+                # 縮める向きには気持ち多めに。掛け直したあとの丸めで
+                # 1px はみ出すことがあるため。
+                want = max(0.25, min(4.0, cur * (r * 0.998 if r < 1.0 else r)))
+                if abs(want - cur) < 1e-4:
+                    break                # これ以上は動かない(上限/下限)
+                self._apply_scale_all(want)
+                # **倍率が同じでも大きさは取り直す。** set_scale は値が
+                # 変わらないとそこで戻る(refit も呼ばれない)ので、中身の
+                # 高さだけが変わったとき(全画面のままモードを切り替えて
+                # 720 -> 360 になったとき)に入れ物が古い大きさのまま残る。
+                self.scaled_host.refit()
+            else:
+                self.scaled_host.refit()
+        finally:
+            self._fs_fitting = False
+        self._center_in_fullscreen(True)
+        # ここまでで中身は画面に収まっている。**途中で窓が画面より大きく
+        # なっていたら、Windows はすでに全画面を解いている**(並びの最小の
+        # 高さは上限より強いので、天井を張っても一瞬は広がる。モードを
+        # 切り替えた瞬間、下部パネルの高さが先に決まって絵がまだ縮んで
+        # いないときに起きる)。そのまま放っておくと枠(×)を失った大きすぎる
+        # 窓が残るので、入り直す(利用者の報告 2026-10-05)。
+        # _fs_shown は「showFullScreen を通したか」。通る前に入り直すと、
+        # 固定サイズを外す前に全画面にしてしまう。
+        if (getattr(self, "_fs_shown", False) and not self.isFullScreen()
+                and not getattr(self, "_fs_reasserting", False)):
+            self._fs_reasserting = True
+            try:
+                self.showFullScreen()
+            finally:
+                self._fs_reasserting = False
 
     def set_overlay_visible(self, visible: bool):
         """操作するものを隠す/出す。鑑賞会で絵だけ見せるためのもの。
@@ -795,13 +1003,25 @@ class GamePreviewWindow(QWidget):
 
         速度スライダーだけは別の親(下部パネル)に居るので、置いた側から
         渡してもらう(set_speed_row)。窓の高さも取り直す — 隠したぶん
-        詰めないと、下に灰色の帯が残る。"""
-        for child in self.scaled_host.children():
-            if not isinstance(child, QWidget):
-                continue
-            if child is self._chart_preview:
-                continue
-            child.setVisible(visible)
+        詰めないと、下に灰色の帯が残る。
+
+        **戻すときは「隠す前に出ていたものだけ」を出す。** 一律に出すと、
+        そのモードでは出ないはずのものまで出てしまう(実測: 作譜モードの
+        命令パネルが通常再生でも残り、軽量モードで録画ボタンが現れた。
+        利用者の報告 2026-10-05「F11 を押して、また押して戻したらバグった」)。"""
+        kids = [c for c in self.scaled_host.children()
+                if isinstance(c, QWidget) and c is not self._chart_preview]
+        if not visible:
+            #: 隠す直前に出ていたもの。戻すときはこれだけを出す。
+            self._overlay_was_visible = [c for c in kids if c.isVisible()]
+        for child in kids:
+            if visible:
+                was = getattr(self, "_overlay_was_visible", None)
+                child.setVisible(True if was is None else (child in was))
+            else:
+                child.setVisible(False)
+        if visible:
+            self._overlay_was_visible = None
         self.scaled_host.raise_overlays()
         cb = getattr(self, "_overlay_cb", None)
         if cb is not None:
@@ -923,6 +1143,40 @@ def _roll_tick_notes(spans, bpm_index, speed=None):
         for i in range(n):
             ticks.append((start + i * interval, "1", bpm))
     return ticks
+
+
+def balloon_tick_notes(spans, speed, bpm_index=2):
+    """風船・くす玉の打音。割れる区間は**最後の1打を出さない**。
+
+    その1打はドンではなく風船の割れる音を鳴らすため(利用者の指定
+    2026-10-08)。叩ききれずに終わる区間は割れないので、全部ドンのまま。
+    鳴らす時刻は tja_analyzer.balloon_pop_time。
+
+    画面(preview_dock)と録画(recorder)の両方がここを通る — 片方だけ直すと
+    「聞こえている音と録れた音が違う」になる。"""
+    from neotja.tja_analyzer import balloon_pop_spans, balloon_pops
+    out = []
+    for sp in balloon_pop_spans(spans or [], speed):
+        ticks = _roll_tick_notes([sp], bpm_index=bpm_index)
+        if ticks and balloon_pops(sp, speed):
+            ticks.pop()
+        out.extend(ticks)
+    return out
+
+
+def balloon_pop_schedule(data, speed=None):
+    """譜面データ → 風船の割れる音を鳴らす時刻(譜面時間・昇順)。"""
+    from neotja.tja_analyzer import balloon_pop_spans, balloon_pop_time
+    data = data or {}
+    if speed is None:
+        speed = data.get("roll_hit_speed", 45)
+    out = []
+    for key in ("balloons", "kusudamas"):
+        for sp in balloon_pop_spans(data.get(key) or [], speed):
+            t = balloon_pop_time(sp, speed)
+            if t is not None:
+                out.append(t)
+    return sorted(out)
 
 
 def parse_preview_headers(content: str) -> dict:
@@ -1309,6 +1563,16 @@ class PreviewDock(QDockWidget):
         self.game_preview_window.set_pane_cb(self._update_pane_host)
         self._build_undo_keys()
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
+        # 全画面でボタン類と下部パネルを隠すのは通常再生のときだけ
+        # (利用者の指定 2026-10-05: 「通常モード以外はフルスクリーンで
+        #  ボタン消さないで」「全部表示して　全画面で作譜したい」)。
+        # モードを持っているのはこちらなので、判じ役を渡す。
+        self.game_preview_window.set_fs_hide_cb(
+            lambda: self.bottom_stack.currentIndex() == self.MODE_TITLE)
+        # 全画面の拡大は**中身ぜんぶ**に同じ倍率で当てる(利用者の指定
+        # 2026-10-05: ゲーム画面だけ伸びて下部パネルの行が並びの都合で
+        # 伸びる、という食い違いをなくす)。
+        self.game_preview_window.set_fs_zoom_cb(self.apply_preview_scale)
         self.game_preview_window.closed.connect(self._on_game_preview_closed)
 
         # レーン右上に並べる3つのボタン。右から「モード切替」「コース」「録画」。
@@ -1438,6 +1702,11 @@ class PreviewDock(QDockWidget):
                 self._on_panel_selection_command)
             self.command_panel.selectionRegion.connect(
                 self._on_panel_selection_region)
+            # 「戻す / 進む」はキー(Ctrl+Z / Ctrl+Y)と同じ所へ。
+            self.command_panel.undoRequested.connect(
+                lambda: self._do_undo(False))
+            self.command_panel.redoRequested.connect(
+                lambda: self._do_undo(True))
             self.command_panel.hide()
         self._fps_timer.timeout.connect(self._update_fps_label)
         self._fps_timer.start(500)
@@ -1644,9 +1913,20 @@ class PreviewDock(QDockWidget):
         下の速度行も合わせる。
 
         隠すだけでは、その行の高さぶん灰色の帯が残る。パネルの高さも
-        詰める。"""
+        詰める。
+
+        出し直すときは、モードで決まる出入り(録画ボタン・命令パネル)を
+        もう一度当て直す。全画面のあいだにモードを切り替えると、隠れている
+        あいだに set_bottom_mode が決めた出入りが上から潰されているため
+        (利用者の指定 2026-10-05: 通常再生 ↔ 作譜 を全画面のまま行き来する)。"""
         self._overlay_visible = bool(visible)
         self._speed_row.setVisible(visible)
+        if visible:
+            idx = self.bottom_stack.currentIndex()
+            self.record_button.setVisible(
+                idx in (self.MODE_TITLE, self.MODE_WAVE, self.MODE_MULTI))
+            self._place_command_panel(
+                self.MODE_EDIT is not None and idx == self.MODE_EDIT)
         self._apply_bottom_height()
 
     #: いま下部パネルに当てている倍率(1.0 = 原寸)。
@@ -1662,7 +1942,9 @@ class PreviewDock(QDockWidget):
 
         自分で絵を描くペイン(作譜・波形)は中の px まではここでは分からない
         ので、本人の set_ui_scale に任せる(ui_scale.UiScaler 参照)。"""
-        s = max(0.25, min(1.0, float(s)))
+        # 上限を 1.0 から 4.0 へ。全画面では中身ぜんぶを同じ倍率で拡大する
+        # (利用者の指定 2026-10-05「すべてのオブジェクトを拡大してほしい」)。
+        s = max(0.25, min(4.0, float(s)))
         if self._bottom_scaler is None:
             from neotja.ui_scale import UiScaler
             self._bottom_scaler = UiScaler(
@@ -2438,13 +2720,20 @@ class PreviewDock(QDockWidget):
             i = 0
         self.set_zoom(self.ZOOM_STEPS[(i + 1) % len(self.ZOOM_STEPS)])
 
-    def set_zoom(self, percent: int, save: bool = True):
-        """表示倍率(%)を適用する。ボタンの表示と窓の大きさも取り直す。"""
-        percent = int(percent) if int(percent) in self.ZOOM_STEPS else 100
-        self.game_preview_window.scaled_host.set_scale(percent / 100.0)
-        self._apply_bottom_scale(percent / 100.0)
-        self._scale_lane_overlays(percent / 100.0)
-        self.game_preview_window.refit()
+    def apply_preview_scale(self, s: float):
+        """表示倍率 s を**窓の中身ぜんぶ**へ当てる(設定には保存しない)。
+
+        ゲーム画面(ScaledHost)・下部パネル(作譜ペイン/波形/速度バー)・
+        レーンの上のボタン類・命令パネルを、ひとつの倍率でそろえる。
+        表示倍率ボタン(100/75/50%)と全画面の拡大が同じ道を通るようにして、
+        「ものによって伸び方が違う」をなくす(利用者の指摘 2026-10-05:
+        「今の状態はウィンドウ状態から色々大きさも配置も違う」)。
+
+        窓の大きさの取り直し(refit)はここではしない — 全画面のあいだは
+        固定サイズを入れてはいけないので、呼ぶ側で決める。"""
+        self.game_preview_window.scaled_host.set_scale(s)
+        self._apply_bottom_scale(s)
+        self._scale_lane_overlays(s)
         # 命令パネルも置き直す。ここを呼ばないと、モードを切り替えるまで
         # 前の倍率の大きさのまま残って画面からはみ出す(利用者の報告
         # 2026-10-03: 75% にしたら右が切れたまま)。
@@ -2452,6 +2741,12 @@ class PreviewDock(QDockWidget):
         if (self.command_panel is not None and self.MODE_EDIT is not None
                 and self.bottom_stack.currentIndex() == self.MODE_EDIT):
             self._place_command_panel(True)
+
+    def set_zoom(self, percent: int, save: bool = True):
+        """表示倍率(%)を適用する。ボタンの表示と窓の大きさも取り直す。"""
+        percent = int(percent) if int(percent) in self.ZOOM_STEPS else 100
+        self.apply_preview_scale(percent / 100.0)
+        self.game_preview_window.refit()
         self.zoom_button.setText(f"表示: {percent}%")
         if save and self.config_data.get("preview_zoom") != percent:
             self.config_data["preview_zoom"] = percent
@@ -2478,7 +2773,10 @@ class PreviewDock(QDockWidget):
         # (利用者の指定 2026-10-02: すべてのモードで 1280x720 を保つ。
         #  文字が小さくなるのは構わない)。縮める倍率は画面と同じ。
         if hasattr(panel, "set_ui_scale"):
-            panel.set_ui_scale(min(1.0, scale))
+            # 1.0 で頭打ちにしない。全画面では中身ぜんぶを同じ倍率で拡大する
+            # ので、ここだけ原寸で残すとパネルだけ小さく浮く
+            # (利用者の指定 2026-10-05)。
+            panel.set_ui_scale(scale)
         lane_top = int((_gs.LANE_Y - 56) * scale)
         # 上の端(6px)からレーンの枠の手前までが使える場所。
         y = max(6, lane_top - panel.height() - int(round(4 * scale)))
@@ -3239,6 +3537,12 @@ class PreviewDock(QDockWidget):
 
     def _on_hit_sounds_toggled(self, checked):
         self.hit_sounds.set_enabled(checked)
+        # 風船の音も「叩いて出る音」なので一緒に消す(利用者の報告
+        # 2026-10-08: 打音を消しても風船だけ鳴っていた)。
+        try:
+            self.chart_preview.set_pop_enabled(checked)
+        except Exception:  # noqa: BLE001
+            pass
         self.btn_hit_sounds.setObjectName("accentButton" if checked else "")
         self.btn_hit_sounds.style().unpolish(self.btn_hit_sounds)
         self.btn_hit_sounds.style().polish(self.btn_hit_sounds)
@@ -3265,11 +3569,10 @@ class PreviewDock(QDockWidget):
         self._editor_notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
         # 風船は「割れる時刻」まででしか鳴らさない。表示(レーン)と
         # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
+        # 割れる風船は最後の1打を打音にしない(そこは風船の音)。
         _spd = data.get("roll_hit_speed", 45)
-        self._editor_notes += _roll_tick_notes(
-            balloon_pop_spans(data.get("balloons", []), _spd), bpm_index=2)
-        self._editor_notes += _roll_tick_notes(
-            balloon_pop_spans(data.get("kusudamas", []), _spd), bpm_index=2)
+        self._editor_notes += balloon_tick_notes(data.get("balloons", []), _spd)
+        self._editor_notes += balloon_tick_notes(data.get("kusudamas", []), _spd)
         self._preview_notes = list(data.get("notes", []))
         self._preview_spans = (list(data.get("rolls", [])),
                                list(data.get("balloons", [])),

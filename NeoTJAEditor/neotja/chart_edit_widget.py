@@ -292,6 +292,15 @@ class ChartEditWaveform(WaveformWidget):
         # ヘッダの BPM から入れてもらう(既定は BPM120 の 4/4)。
         self._default_measure_len = 2.0
         self._show_legend = True
+        # 波形の縦の倍率(設定に覚える)。音が小さい曲ではアタックが見えない、
+        # という報告への対応(利用者の要望 2026-10-08)。
+        try:
+            from neotja import settings as settings_mod
+            self._wave_gain = float(settings_mod.load_settings().get(
+                "chart_edit_wave_gain", 1.0) or 1.0)
+        except Exception:  # noqa: BLE001
+            self._wave_gain = 1.0
+        self._wave_gain = max(0.25, min(8.0, self._wave_gain))
         # 楽観的表示用。置いた直後、再解析が届くまでのあいだ描く音符。
         # {(小節, スロット, 分割数): 文字}
         self._pending = {}
@@ -560,8 +569,16 @@ class ChartEditWaveform(WaveformWidget):
         再生中は今までどおり、再生位置を窓の中の一定の場所に保って流す。
         停止中(カーソルで動かしているとき)は、真ん中の帯にいるあいだは動かさず、
         端(左右 VIEW_MARGIN_FRAC)まで寄ったときだけ真ん中へ戻すように滑らせる。
-        曲の終わりより先へもカーソルを出せるよう、duration ではクランプしない。"""
+        曲の終わりより先へもカーソルを出せるよう、duration ではクランプしない。
+
+        **オブジェクトを掴んでいるあいだは動かさない**(利用者の指定
+        2026-10-08)。掴んだまま右へ運ぶと、カーソルが端へ寄ったぶんの
+        「寄せ直し」で景色が滑り、掴んだものと指先がずれていった。掴んで
+        いるあいだに景色を動かせるのはホイールだけ(wheelEvent が自分で
+        scroll_view_to を呼ぶ)。"""
         if span <= 0:
+            return self.view_start
+        if self._note_drag is not None:
             return self.view_start
         if self._playing:
             self._stop_view_anim()
@@ -869,11 +886,14 @@ class ChartEditWaveform(WaveformWidget):
             # 縦にも効く — スクロールの行だけを払えば、その命令だけ選べる。
             self.setFocus(Qt.MouseFocusReason)
             x, y = event.position().x(), event.position().y()
+            ctrl = bool(event.modifiers() & Qt.ControlModifier)
             self._band = {"x0": x, "y0": y, "x1": x, "y1": y,
-                          "add": set(self._sel)
-                          if (event.modifiers() & Qt.ControlModifier) else set()}
-            if not (event.modifiers() & Qt.ControlModifier):
-                self.clear_selection()
+                          "add": set(self._sel) if ctrl else set(),
+                          "ctrl": ctrl, "cleared": False}
+            # 押した時点では選択を外さない。引かずに離せばただの右クリック
+            # (作譜メニュー)なので、選んだ音符をそのままメニューへ渡したい
+            # (利用者の報告 2026-10-08: 複数選んで右クリックすると外れる)。
+            # 外すのは四角が実際に動き出したとき(mouseMoveEvent)。
             self.update()
             return
         if event.button() == Qt.LeftButton and not self.offset_mode:
@@ -894,14 +914,19 @@ class ChartEditWaveform(WaveformWidget):
                     # 既に選ばれているものを押したときは、選択をそのままにして
                     # つかむ(まとめて動かせる)。動かさずに離したら、その1つ
                     # だけにする — エクスプローラーと同じ。
+                    # view0 / seek0 は「掴んでいるあいだ景色を止める」ための
+                    # 控え(_follow_view_start / _drag_dx)。滑っている途中で
+                    # 掴んだときは、その場で止める。
+                    self._stop_view_anim()
                     self._note_drag = {"x0": x, "dx": 0.0, "anchor": obj[-1],
-                                       "obj": obj, "ctrl": ctrl}
+                                       "obj": obj, "ctrl": ctrl,
+                                       "view0": self.view_start}
                     self.setCursor(Qt.SizeHorCursor)
                 # 押した所へカーソルも動かす(選ぶだけだと、そのあと打ちたい
                 # 位置と食い違う)。
                 self._move_cursor_to_x(x)
                 return
-            band = self._span_keys_at(x, y)
+            band = self._span_keys_at(x, y) or self._roll_keys_at(x, y)
             if band:
                 # 帯の**本体**を押した = その帯の両端をまとめて選ぶ(本文は
                 # 変えない)。端の点だけしか選べないと、ゴーゴーを複数選んで
@@ -933,8 +958,16 @@ class ChartEditWaveform(WaveformWidget):
             self.update()
             return
         if self._band is not None and (event.buttons() & Qt.RightButton):
-            self._band["x1"] = event.position().x()
-            self._band["y1"] = event.position().y()
+            bd = self._band
+            bd["x1"] = event.position().x()
+            bd["y1"] = event.position().y()
+            # 四角が動き出した所で、前の選択を外す(Ctrl なら足すので残す)。
+            # 離すときの「引いたかどうか」と同じ 4px で判断する。
+            if (not bd["ctrl"] and not bd["cleared"]
+                    and (abs(bd["x1"] - bd["x0"]) >= 4
+                         or abs(bd["y1"] - bd["y0"]) >= 4)):
+                bd["cleared"] = True
+                self.clear_selection()
             self.update()
             return
         # オブジェクトの上ではカーソルの形を変える(つかめることが分かる)。
@@ -1041,11 +1074,17 @@ class ChartEditWaveform(WaveformWidget):
             if p is not None:
                 r = self.NOTE_R_BIG if c in ("3", "4") else self.NOTE_R
                 out.append((("note", p), "note", t, r))
-        for st, _e, kind in (self._span_audio or []):
+        for st, e, kind in (self._span_audio or []):
+            half = (self.SPAN_TH_BIG // 2 if kind == "roll_big"
+                    else self.SPAN_TH // 2)
             p = self._pos_of_time(st)
             if p is not None:
-                out.append((("note", p), "note", st,
-                            self.SPAN_TH_BIG // 2 if kind == "roll_big" else self.SPAN_TH // 2))
+                out.append((("note", p), "note", st, half))
+            # 終端(8)もつかめる。ゴーゴーの端と同じように、引っぱって連打・
+            # 風船の長さを変えられる(利用者の要望 2026-10-08)。
+            pe = self._pos_of_time(e)
+            if pe is not None:
+                out.append((("tail", pe), "note", e, half))
         for item in (self._cmd_audio or []):
             if len(item) < 4:
                 continue
@@ -1092,6 +1131,32 @@ class ChartEditWaveform(WaveformWidget):
 
     def _span_rows_audio(self, row):
         return (self._gogo_audio if row == "gogo" else self._barline_audio) or []
+
+    def _roll_keys_at(self, x, y):
+        """連打・風船の**本体**を押したときの、頭と終端の鍵。
+
+        ゴーゴーの帯と同じ扱い(利用者の要望 2026-10-08)。両端が選ばれるので、
+        いくつも選んで終端をつかめば、まとめて長さを変えられる。頭と終端の
+        点は _object_at が先に拾うので、ここは内側を押したときだけ出番が来る。
+        """
+        if self._row_at(y) != "note":
+            return None
+        for st, e, kind in (self._span_audio or []):
+            half = (self.SPAN_TH_BIG // 2 if kind == "roll_big"
+                    else self.SPAN_TH // 2)
+            v = self._object_vrange("note", half)
+            if v is not None and not (v[0] <= y <= v[1]):
+                continue
+            x0, x1 = sorted((self._sec_to_x(st), self._sec_to_x(e)))
+            if not (x0 <= x <= x1):
+                continue
+            keys = set()
+            for t, k in ((st, "note"), (e, "tail")):
+                p = self._pos_of_time(t)
+                if p is not None:
+                    keys.add((k, p))
+            return keys or None
+        return None
 
     def _span_keys_at(self, x, y):
         """帯(ゴーゴー・小節線)の本体を押したときの、その帯の両端の鍵。
@@ -1216,11 +1281,23 @@ class ChartEditWaveform(WaveformWidget):
             return None
         return obj[1]
 
+    def _drag_tail(self):
+        """いま連打・風船の終端(8)をつかんでいるか。"""
+        dr = self._note_drag
+        obj = dr.get("obj") if dr is not None else None
+        return obj is not None and obj[0] == "tail"
+
     def _drag_keys(self):
         """いま動かしているものの鍵。ふだんは選んでいるもの全部。"""
+        if self._drag_tail():
+            # 終端をつかんだら終端だけ。選んだ連打・風船の長さがまとめて
+            # 変わる(ゴーゴーの端と同じ。利用者の要望 2026-10-08)。
+            return {k for k in self._sel if k[0] == "tail"}
         edge = self._drag_edge_name()
         if edge is None:
-            return set(self._sel)
+            # 音符そのものを動かすときは終端を外す。頭を動かせば終端も一緒に
+            # 付いてくる(op_move_items)ので、二重に動かさないため。
+            return {k for k in self._sel if k[0] != "tail"}
         return {k for k in self._sel if k[0] == "cmd" and k[1] == edge}
 
     def selected_items(self):
@@ -1228,8 +1305,9 @@ class ChartEditWaveform(WaveformWidget):
         out = []
         for k in self._sel:
             pos = k[-1]
-            if k[0] == "note":
-                out.append({"kind": "note", "name": None,
+            if k[0] in ("note", "tail"):
+                # "tail" は連打・風船の終端(8)。長さを変える操作で使う。
+                out.append({"kind": k[0], "name": None,
                             "pos": (pos.numerator, pos.denominator)})
             else:
                 out.append({"kind": "cmd", "name": k[1],
@@ -1285,6 +1363,24 @@ class ChartEditWaveform(WaveformWidget):
         if not self.has_range():
             return None
         return self._key_to_slot(self._range_start), self._key_to_slot(self._range_end)
+
+    def selection_pos_span(self):
+        """選んだ音符の、いちばん早い位置といちばん遅い位置(分数)。
+
+        音符を1つも選んでいなければ None。音符を囲まずに(Ctrl+)クリックで
+        選んだときは時間の帯(_range_start/_range_end)が張られないので、
+        道具(ハイスピ変換など)はこちらを相手にする
+        (利用者の報告 2026-10-08)。"""
+        ps = [k[-1] for k in self._sel if k[0] == "note"]
+        if not ps:
+            return None
+        return (min(ps), max(ps))
+
+    def has_tool_target(self):
+        """道具(ハイスピ変換など)を効かせる相手があるか。
+
+        時間の帯か、選んだ音符のどちらかがあればよい。"""
+        return self.has_range() or self.selection_pos_span() is not None
 
     # ------------------------------------------------------------------
     # PeepoDrumKit 式の操作
@@ -1488,19 +1584,31 @@ class ChartEditWaveform(WaveformWidget):
                 text = base + ("を消す" if present else "")
                 act = menu.addAction(text)
                 act.setData((kind, which))
-                act.triggered.connect(
-                    lambda _c=False, k=kind, wh=which, pr=not present:
-                    self._run_op({"kind": "marker", "a": self._cursor_addr(),
-                                  "region": k, "which": wh, "present": pr}))
+                if present:
+                    act.triggered.connect(
+                        lambda _c=False, k=kind, wh=which:
+                        self._run_op({"kind": "marker",
+                                      "a": self._cursor_addr(),
+                                      "region": k, "which": wh,
+                                      "present": False}))
+                else:
+                    # 置くほうは place_marker を通す — 音符を選んでいるときの
+                    # 「ゴーゴー開始」は選んだ範囲を覆う(2026-10-08)。
+                    act.triggered.connect(
+                        lambda _c=False, k=kind, wh=which:
+                        self.place_marker(k, wh))
             menu.addSeparator()
         ins = menu.addAction("小節を挿入…")
         ins.triggered.connect(self.open_measure_insert)
         menu.addSeparator()
-        # エディタのツールバーにある道具。範囲があればその範囲、無ければ
-        # カーソルの小節に効く(利用者の指定 2026-10-01)。中身は今までと
-        # 同じ道具で、効かせる範囲を作譜ペインから渡すだけ。
+        # 波形の縦の倍率(見るためのものなので、譜面は1文字も変わらない)。
+        self._wave_gain_menu(menu)
+        menu.addSeparator()
+        # エディタのツールバーにある道具。範囲(または選んだ音符)があれば
+        # そこ、無ければカーソルの小節に効く(利用者の指定 2026-10-01)。
+        # 中身は今までと同じ道具で、効かせる範囲を作譜ペインから渡すだけ。
         if self._tool_cb is not None:
-            has = self.has_range()
+            has = self.has_tool_target()
             for key, text, needs_range in self.CHART_TOOLS:
                 act = menu.addAction(text)
                 act.setData(key)
@@ -1564,6 +1672,44 @@ class ChartEditWaveform(WaveformWidget):
                             "grid": self._measure_grid(self._cur_measure),
                             "region": kind})
 
+    def wave_gain(self):
+        """波形に実際に掛ける倍率。_draw_lane がここを見る。
+
+        画面に出す「x1」は素の振幅ではなく WAVE_BASE_GAIN 倍
+        (利用者の指定 2026-10-08)。"""
+        return self._wave_gain * self.WAVE_BASE_GAIN
+
+    def set_wave_gain(self, gain):
+        """波形の縦の倍率を変える(x1 = WAVE_BASE_GAIN)。設定にも覚える。
+
+        振幅を伸ばして行の高さで切るので、倍率を上げるほど大きい所は
+        べったり潰れる代わりに、小さい音のアタックがはっきり出る。"""
+        g = max(0.25, min(8.0, float(gain)))
+        if abs(g - self._wave_gain) < 1e-9:
+            return False
+        self._wave_gain = g
+        self._bump_strip()               # 帯に焼いた波形を描き直す
+        self.update()
+        try:
+            from neotja import settings as settings_mod
+            cfg = settings_mod.load_settings()
+            cfg["chart_edit_wave_gain"] = g
+            settings_mod.save_settings(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    def _wave_gain_menu(self, menu):
+        """「波形の高さ」の小メニュー。いまの倍率に印を付ける。"""
+        sub = menu.addMenu("波形の高さ")
+        for g in self.WAVE_GAINS:
+            act = sub.addAction("x%g" % g)
+            act.setData(("wave_gain", g))
+            act.setCheckable(True)
+            act.setChecked(abs(g - self._wave_gain) < 1e-9)
+            act.triggered.connect(lambda _c=False, v=g: self.set_wave_gain(v))
+        return sub
+
     def _exec_menu(self, menu, global_pos):
         """メニューを出す(テストではここを差し替えて、出したメニューを調べる)。"""
         menu.exec(global_pos)
@@ -1574,8 +1720,10 @@ class ChartEditWaveform(WaveformWidget):
     def _selection_menu(self, menu):
         """「選んだ音符に」の小メニュー。選んでいなければ出さない。
 
-        隙間があればそこで切れる — 10001000 の両方を選んでゴーゴーにすると、
-        音符ごとに ON/OFF が切り替わる(利用者の指定 2026-10-04)。"""
+        ゴーゴーは**最初から最後まで**を1本の帯にする。音符ごとに
+        ON/OFF を切り替えたいときは「音符ごとにゴーゴー」(次の音符との
+        隔たりの半分ずつ)を選ぶ — 命令パネルの「!」はこちら
+        (利用者の指定 2026-10-08)。"""
         if not self._sel:
             return
         items = self.selected_items()
@@ -1588,20 +1736,26 @@ class ChartEditWaveform(WaveformWidget):
             act.triggered.connect(
                 lambda _c=False, n=name: self.open_selection_command(n))
         sub.addSeparator()
-        for kind, on, label in self._SELECTION_REGION_LABELS:
+        for kind, on, mode, label in self._SELECTION_REGION_LABELS:
             act = sub.addAction(label)
-            act.setData(("sel_region", kind, on))
+            act.setData(("sel_region", kind, on, mode))
             act.triggered.connect(
-                lambda _c=False, k=kind, o=on:
-                self.apply_selection_region(k, o))
+                lambda _c=False, k=kind, o=on, md=mode:
+                self.apply_selection_region(k, o, md))
 
-    #: 「選んだ音符に」の帯の項目。(種類, 付ける/外す, 見出し)。
+    #: 「選んだ音符に」の帯の項目。(種類, 付ける/外す, 帯の切り方, 見出し)。
+    #: 切り方は note_edit.op_region_items の mode。
     _SELECTION_REGION_LABELS = (
-        ("GOGO", True, "ゴーゴーにする"),
-        ("GOGO", False, "ゴーゴーを外す"),
-        ("BARLINE", True, "小節線を隠す"),
-        ("BARLINE", False, "小節線を出す"),
+        ("GOGO", True, "span", "ゴーゴーにする"),
+        ("GOGO", True, "each", "音符ごとにゴーゴー（間隔の半分）"),
+        ("GOGO", False, "span", "ゴーゴーを外す"),
+        ("BARLINE", True, "runs", "小節線を隠す"),
+        ("BARLINE", False, "runs", "小節線を出す"),
     )
+
+    #: 命令パネルの「!」を押したときの一押し。種類 → (付ける/外す, 切り方)。
+    #: ここに無い種類は、付ける・外すを選ぶ小メニューを出す。
+    _SELECTION_MARK_ONE_PUSH = {"GOGO": (True, "each")}
 
     def has_note_selection(self):
         """音符を選んでいるか(命令パネルの「!」を押せるかどうか)。"""
@@ -1621,30 +1775,47 @@ class ChartEditWaveform(WaveformWidget):
         return bool(res)
 
     def open_selection_region_menu(self, kind, global_pos):
-        """ゴーゴー / 小節線の「!」。付ける・外すをその場所で選ぶ。"""
+        """ゴーゴー / 小節線の「!」。
+
+        ゴーゴーは**一押しで**「音符ごとに次との隔たりの半分」を付ける
+        (利用者の指定 2026-10-08)。小節線は隠す・出すのどちらか決まらない
+        ので、今までどおりその場所で選んでもらう。外すのと「最初から
+        最後まで」は右クリックの「選んだ音符に」にある。"""
         if not self.has_note_selection():
             return None
         kind = str(kind).upper()
+        one = self._SELECTION_MARK_ONE_PUSH.get(kind)
+        if one is not None:
+            self.apply_selection_region(kind, one[0], one[1])
+            return None
         menu = QMenu(self)
-        for k, on, label in self._SELECTION_REGION_LABELS:
+        for k, on, mode, label in self._SELECTION_REGION_LABELS:
             if k != kind:
                 continue
             act = menu.addAction(label)
-            act.setData(("sel_region", k, on))
+            act.setData(("sel_region", k, on, mode))
             act.triggered.connect(
-                lambda _c=False, kk=k, o=on: self.apply_selection_region(kk, o))
+                lambda _c=False, kk=k, o=on, md=mode:
+                self.apply_selection_region(kk, o, md))
         if not menu.actions():
             return None
         self._exec_menu(menu, global_pos)
         return menu
 
-    def apply_selection_region(self, kind, on):
-        """選んだ音符をゴーゴー / 小節線の帯で囲む(外すなら on=False)。"""
+    def apply_selection_region(self, kind, on, mode=None):
+        """選んだ音符をゴーゴー / 小節線の帯で囲む(外すなら on=False)。
+
+        mode は帯の切り方(note_edit.op_region_items)。省略したときは
+        ゴーゴーなら「最初から最後まで」、小節線なら「隙間で切る」。"""
         if not self._sel:
             return False
+        kind = str(kind).upper()
+        if mode is None:
+            mode = "span" if kind == "GOGO" else "runs"
         res = self._run_op({"kind": "region_items",
                             "items": self.selected_items(),
-                            "region": str(kind).upper(), "on": bool(on)})
+                            "region": kind, "on": bool(on),
+                            "mode": str(mode)})
         self.update()
         return bool(res)
 
@@ -1824,6 +1995,15 @@ class ChartEditWaveform(WaveformWidget):
         d = 1 if event.angleDelta().y() > 0 else -1
         if event.modifiers() & Qt.ShiftModifier:
             d *= self.WHEEL_JUMP_MEASURES
+        if self._note_drag is not None:
+            # 掴んでいるあいだは**景色だけ**動かす(利用者の指定 2026-10-08)。
+            # カーソルも再生位置も動かさない — 掴んだものを遠くへ運ぶために
+            # 景色を送るだけ。行き先は _drag_dx が送ったぶんを足して直す。
+            self.scroll_view_to(max(0.0, self.view_target()
+                                    + d * self._wheel_view_step()),
+                                animate=False)
+            event.accept()
+            return
         if self._measure_step_cb is not None:
             self._measure_step_cb(d)
         else:
@@ -2040,9 +2220,17 @@ class ChartEditWaveform(WaveformWidget):
     SPAN_TH = 24
     SPAN_TH_BIG = 34
     #: 波形は音符に隠れないよう、さらに縦へ伸ばす(利用者の指定 2026-09-25)。
+    #: ただし _draw_lane 側で行の高さに頭打ちされるので、1.12 以上はどれも
+    #: 同じ「行いっぱい」になる。実際に効く倍率は wave_gain() のほう。
     LANE_GAIN = 3.0
     #: 音符の行のうち、下から何割を波形に使うか。
     WAVE_FRAC = 0.45
+    #: 「x1」のときに実際に掛ける倍率(利用者の指定 2026-10-08:
+    #: 「3倍を1倍にして」)。素の振幅では細い帯にしかならないので、何も
+    #: いじっていない状態をここまで持ち上げておく。
+    WAVE_BASE_GAIN = 3.0
+    #: 波形の縦の倍率。選べる値(x1 = WAVE_BASE_GAIN)。
+    WAVE_GAINS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
     #: 叩かれた瞬間だけ音符を膨らませる(どこが鳴ったかが目で分かるように)。
     HIT_POP_SEC = 0.13
     HIT_POP_MAX = 1.45
@@ -2186,11 +2374,49 @@ class ChartEditWaveform(WaveformWidget):
                              "name": str(name).upper(), "value": value})
 
     def place_marker(self, kind, which):
-        """カーソルの位置に開始/終了の印を置く(命令パネルのボタンから)。"""
+        """カーソルの位置に開始/終了の印を置く(命令パネルのボタンから)。
+
+        **音符を選んでいるときの「ゴーゴー開始」だけは別**(利用者の指定
+        2026-10-08)。選んだ範囲をゴーゴーで覆う — 開始は最初の音符、終了は
+        次の音符(その手前に小節線が来るならその小節線)に置く。"""
+        if (str(kind).upper() == "GOGO" and str(which) == "on"
+                and self.has_note_selection()):
+            return self.apply_selection_region("GOGO", True, mode="cover")
         m, s = self._cursor_addr()
         return self._run_op({"kind": "marker", "a": (m, s),
                              "region": str(kind).upper(), "which": str(which),
                              "present": True})
+
+    def _wheel_view_step(self):
+        """掴んでいるあいだのホイール1目盛で動かす秒数(1小節ぶん)。
+
+        ふだんのホイールと同じ「小節ごと」にそろえる。小節の長さが分からない
+        ときは表示幅の決まった割合で代用する。"""
+        base = self.view_target()
+        addr = self._address_from_time(max(0.0, base))
+        if addr is not None:
+            a = self._bar_time(addr[0])
+            b = self._bar_time(addr[0] + 1)
+            if a is not None and b is not None and b > a:
+                return b - a
+        return max(0.05, self._visible_span() * self.SCROLL_FRAC)
+
+    def _drag_dx(self, dr=None):
+        """掴んだ所からの px。掴んでいるあいだに景色が動いたぶんを足して直す。
+
+        ふだんは景色を止めているので 0 を足すだけだが、掴んだままホイールで
+        送ったときは景色だけが動く。dx をそのまま使うと、送ったぶん行き先が
+        手前へずれる。離したあと(_note_drag を外したあと)も呼べるよう、
+        控えを直接渡せる。"""
+        if dr is None:
+            dr = self._note_drag
+        if dr is None:
+            return 0.0
+        spp = self._seconds_per_pixel()
+        if not spp:
+            return float(dr["dx"])
+        return float(dr["dx"]) + (self.view_start - dr.get("view0",
+                                                          self.view_start)) / spp
 
     def _drag_delta_slots(self, dx, anchor=None):
         """つかんで動かした px を、グリッド何個ぶんかに直す。
@@ -2223,13 +2449,13 @@ class ChartEditWaveform(WaveformWidget):
         self.setCursor(Qt.ArrowCursor)
         if dr is None:
             return
-        if abs(dr["dx"]) < 4 or not self._sel:
+        if abs(self._drag_dx(dr)) < 4 or not self._sel:
             obj = dr.get("obj")
             if obj is not None and not dr.get("ctrl") and self._sel != {obj}:
                 self.set_selection({obj})
             self.update()
             return
-        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+        steps = self._drag_delta_slots(self._drag_dx(dr), dr.get("anchor"))
         if steps:
             # 「何グリッドぶん」の長さは小節ごとに違う(拍子で変わる)ので、
             # 小節単位の分数ではなくグリッドの数のまま渡す。以前はカーソルの
@@ -2238,13 +2464,16 @@ class ChartEditWaveform(WaveformWidget):
             # 帯の端をつかんだときは、同じ側の端だけを動かす(_drag_edge_name)。
             self._note_drag = dr          # _drag_keys が見るので戻しておく
             move_keys = self._drag_keys()
+            tails = self._drag_tail()
             self._note_drag = None
-            items = [{"kind": "cmd" if k[0] == "cmd" else "note",
+            items = [{"kind": k[0] if k[0] in ("cmd", "tail") else "note",
                       "name": k[1] if k[0] == "cmd" else None,
                       "pos": (k[-1].numerator, k[-1].denominator)}
                      for k in move_keys]
+            # 終端をつかんだときは「長さを変える」操作。頭は動かさない。
             res = items and self._run_op(
-                {"kind": "move_items", "items": items, "steps": int(steps)})
+                {"kind": "tail_items" if tails else "move_items",
+                 "items": items, "steps": int(steps)})
             if res:
                 # 動かしたものは選んだまま付いていく(続けて動かせるように)。
                 def shifted(k):
@@ -2322,6 +2551,61 @@ class ChartEditWaveform(WaveformWidget):
                 s = self._measure_grid(m) - 1
         return (m, s)
 
+    def _draw_span_selection(self, p, rows):
+        """両端がそろって選ばれている帯を、1つの枠で囲む。囲んだ鍵を返す。
+
+        ゴーゴー・小節線の帯と、連打・風船(頭と終端)が対象。端を別々に
+        囲むと、長い帯では緑の四角が離れた2つに見えて分かりにくかった
+        (利用者の指定 2026-10-08)。"""
+        done = set()
+        for row, names in self._SPAN_ROWS.items():
+            rect = rows.get(row)
+            if rect is None:
+                continue
+            for st, e in self._span_rows_audio(row):
+                ps, pe = self._pos_of_time(st), self._pos_of_time(e)
+                if ps is None or pe is None:
+                    continue
+                k0 = ("cmd", names[0], ps)
+                k1 = ("cmd", names[1], pe)
+                if k0 not in self._sel or k1 not in self._sel:
+                    continue
+                x0 = self._sec_to_x(st) + self._drag_dx_for(names[0], st,
+                                                            snap=True)
+                x1 = self._sec_to_x(e) + self._drag_dx_for(names[1], e,
+                                                           snap=True)
+                ry, rh = rect
+                p.drawRect(int(min(x0, x1)) - 4, ry + 2,
+                           int(abs(x1 - x0)) + 8, rh - 4)
+                done |= {k0, k1}
+        # 連打・風船は音符の行。帯の高さではなく音符の丸の高さで囲む。
+        for st, e, kind in (self._span_audio or []):
+            ps, pe = self._pos_of_time(st), self._pos_of_time(e)
+            if ps is None or pe is None:
+                continue
+            k0, k1 = ("note", ps), ("tail", pe)
+            if k0 not in self._sel or k1 not in self._sel:
+                continue
+            half = (self.SPAN_TH_BIG // 2 if kind == "roll_big"
+                    else self.SPAN_TH // 2)
+            v = self._object_vrange("note", half)
+            if v is None:
+                continue
+            dr = self._note_drag
+            dx0 = dx1 = 0
+            if dr is not None:
+                # 終端を掴んでいるあいだは終端側だけ伸び縮みする。
+                if self._drag_tail():
+                    dx1 = int(self._drag_dx())
+                else:
+                    dx0 = dx1 = int(self._drag_dx())
+            x0 = self._sec_to_x(st) + dx0
+            x1 = self._sec_to_x(e) + dx1
+            p.drawRect(int(min(x0, x1)) - half - 3, v[0],
+                       int(abs(x1 - x0)) + 2 * half + 6, v[1] - v[0])
+            done |= {k0, k1}
+        return done
+
     def _draw_selection(self, p, note_cy):
         """選んだオブジェクトを1つずつ枠で囲む(エクスプローラーの選択と同じ
         考え方で、範囲ではなく「選ばれているもの」を示す)。"""
@@ -2331,8 +2615,11 @@ class ChartEditWaveform(WaveformWidget):
         r, g, b = self.RANGE_COLOR
         if self._sel:
             p.setPen(QPen(QColor(r, g, b, 235), 2))
+            # 両端がそろって選ばれている帯は、端を2つ囲むのではなく**帯ぜんたい**
+            # を1つの枠で囲む(利用者の指定 2026-10-08: 端だけ緑だと見にくい)。
+            done = self._draw_span_selection(p, rows)
             for key, orow, t, half in self._objects():
-                if key not in self._sel:
+                if key not in self._sel or key in done:
                     continue
                 rect = rows.get(orow)
                 if rect is None:
@@ -2347,7 +2634,7 @@ class ChartEditWaveform(WaveformWidget):
                     elif self._drag_edge_name() is not None:
                         dx = 0      # 端をつかんでいる間は帯の端だけが動く
                     else:
-                        dx = int(dr["dx"])
+                        dx = int(self._drag_dx())
                     x0 += dx
                     x1 += dx
                 if orow == "note":
@@ -2374,13 +2661,13 @@ class ChartEditWaveform(WaveformWidget):
         dr = self._note_drag
         if dr is None or not self._sel:
             return
-        dx = int(dr["dx"])
+        dx = int(self._drag_dx())
         # 帯の端をつかんでいる間は、動くのは同じ側の端だけ(_drag_edge_name)。
         move_keys = self._drag_keys()
         rows = self._row_rects()
         r, g, b = self.RANGE_COLOR
         cy = note_cy if note_cy is not None else top + strip // 2
-        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+        steps = self._drag_delta_slots(self._drag_dx(), dr.get("anchor"))
         for key, orow, t, half in self._objects():
             if key not in move_keys:
                 continue
@@ -2488,7 +2775,7 @@ class ChartEditWaveform(WaveformWidget):
                 # 貼ったあとに直に描いている(_paint_static を参照)。入れて
                 # いたころは、1秒に781小節ある譜面(幸福な死を)で毎コマ
                 # 焼き直しになり、1コマ 340ms(3fps)まで落ちていた。
-                self._grid, self._strip_rev,
+                self._grid, self._strip_rev, self._wave_gain,
                 self._show_legend, pal.get("bg"), pal.get("bg2"),
                 pal.get("border"), pal.get("fg"),
                 # 波形そのものが差し替わったとき(曲を開き直した等)も焼き直す。
@@ -2954,12 +3241,12 @@ class ChartEditWaveform(WaveformWidget):
         if edge is not None and name != edge:
             return 0            # 端をつかんでいる間は、反対側の端は動かさない
         if not snap:
-            return int(dr["dx"])
-        steps = self._drag_delta_slots(dr["dx"], dr.get("anchor"))
+            return int(self._drag_dx())
+        steps = self._drag_delta_slots(self._drag_dx(), dr.get("anchor"))
         gt = self._time_of_pos(
             pos + Fraction(int(steps), int(self._measure_grid(int(pos)))))
         if gt is None:
-            return int(dr["dx"])
+            return int(self._drag_dx())
         return self._sec_to_x(gt) - self._sec_to_x(t)
 
     def _draw_span_row(self, p, rect, spans, color, t0, t1):

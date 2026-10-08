@@ -69,6 +69,19 @@ def balloon_pop_spans(spans, roll_hit_speed):
     return out
 
 
+def balloon_pop_time(span, roll_hit_speed):
+    """その風船・くす玉が割れる(= 最後の1打が入る)時刻。割れないなら None。
+
+    balloon_pop_spans を通した区間を渡す。打は区間の頭から 1/秒速 ごとに
+    入るので、**最後の1打は終点の1打ぶん手前**。終点そのものは「最後の打の
+    間隔が終わる所」で、音を鳴らす所ではない(利用者の指定 2026-10-08:
+    最後の1打はドンではなく風船の音)。"""
+    if not balloon_pops(span, roll_hit_speed):
+        return None
+    speed = max(1.0, float(roll_hit_speed or 45))
+    return max(float(span[0]), float(span[1]) - 1.0 / speed)
+
+
 def balloon_pops(span, roll_hit_speed):
     """その風船・くす玉を叩ききれるか(= 割れるか)。
 

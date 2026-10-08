@@ -724,6 +724,9 @@ class ChartPreviewWidget(QWidget):
         # 破裂音へ掛ける「マスター × 効果音」。preview_dock が音量を動かす
         # たびに set_pop_volume() で渡してくる。
         self._pop_volume = 1.0
+        # 風船の音を鳴らすか。打音(F1)と連動する — 打音を消したのに風船
+        # だけ鳴っていた(利用者の報告 2026-10-08)。
+        self._pop_enabled = True
         # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
         # これを跨いだ瞬間に _pop_sound を鳴らす。set_preview_data で再構築。
         self._pop_times = []
@@ -1904,7 +1907,7 @@ class ChartPreviewWidget(QWidget):
             # リード再生中は開始位置より前の風船を隠しているので、破裂音も出さない。
             if self._reveal_time is not None:
                 lo = max(lo, bisect.bisect_left(self._pop_times, self._reveal_time))
-            if hi > lo:
+            if hi > lo and self._pop_enabled:
                 self._pop_sound.play()
 
     JUDGE_SPRITE_H = 46  # on-screen height the 良 judge sprite is scaled to
@@ -2109,6 +2112,13 @@ class ChartPreviewWidget(QWidget):
     #: 入っているのに対し、打音は実測 peak 0.53 前後しかない。同じ音量設定で
     #: 鳴らすと破裂音だけ倍近く大きく聞こえるので、打音の高さへ合わせる。
     POP_BASE_GAIN = 0.55
+
+    def set_pop_enabled(self, on: bool):
+        """風船の音を鳴らすかどうか(打音の ON/OFF = F1 と連動)。
+
+        風船の音も「叩いて出る音」なので、打音を消したら一緒に消える
+        (利用者の指定 2026-10-08)。"""
+        self._pop_enabled = bool(on)
 
     def set_pop_volume(self, volume: float):
         """破裂音へ「マスター × 効果音」の音量を渡す。
@@ -2653,13 +2663,17 @@ class ChartPreviewWidget(QWidget):
         before = st.span_at(now)
         popped_before = before is not None and before.pop_t is not None
         st.press(now, kind, side)
-        # 空打ちでも鳴らす(本家と同じ)。
-        self._feedback("don" if kind == KIND_DON else "ka")
-        # 風船・くす玉を叩ききった打だけ、その場で破裂音を鳴らす。区間の
-        # 終点で鳴らす再生モードの仕掛け(_scan_balloon_pops)は演奏モードでは
-        # 止めてあるので、ここが唯一の鳴らし手。
-        if (before is not None and not popped_before
-                and before.pop_t is not None and self._pop_sound is not None):
+        # 風船・くす玉を叩ききった打かどうか。叩ききった打だけ、その場で
+        # 破裂音を鳴らす。区間の終点で鳴らす再生モードの仕掛け
+        # (_scan_balloon_pops)は演奏モードでは止めてあるので、ここが唯一の
+        # 鳴らし手。
+        popped = (before is not None and not popped_before
+                  and before.pop_t is not None)
+        # 空打ちでも鳴らす(本家と同じ)。ただし**割れた打だけはドンを鳴らさ
+        # ない** — そこは風船の音(利用者の指定 2026-10-08)。
+        if not popped:
+            self._feedback("don" if kind == KIND_DON else "ka")
+        elif self._pop_sound is not None and self._pop_enabled:
             self._pop_sound.play()
         self._request_repaint()
 
@@ -3708,13 +3722,20 @@ class ChartPreviewWidget(QWidget):
             (k[0], k[1], self._speed(k[2], k[3]), self._speed_at(k[1]), int(k[-1]))
             for k in self._kusudamas
         ]
-        # 破裂時刻(= 各風船/くす玉の終点、譜面時間・昇順)。再生中に now が
+        # 破裂時刻(= 最後の1打が入る時刻、譜面時間・昇順)。再生中に now が
         # ここを跨いだら破裂音を鳴らす。
         # 叩ききれなかったものは割れないので、鳴らす時刻に入れない。
+        # **終点ではなく1打ぶん手前。** 終点は「最後の打の間隔が終わる所」で、
+        # そこで鳴らすと最後のドンの1打あとに遅れて聞こえていた
+        # (利用者の指定 2026-10-08: 最後の1打はドンではなく風船の音)。
+        from neotja.tja_analyzer import balloon_pop_time as _pt
         self._pop_times = sorted(
-            [b[1] for b, ok in zip(self._balloons, self._balloon_pops) if ok]
-            + [k[1] for k, ok in zip(self._kusudamas, self._kusudama_pops) if ok]
-        )
+            [t for t in
+             ([_pt(b, self._roll_hit_speed)
+               for b, ok in zip(self._balloons, self._balloon_pops) if ok]
+              + [_pt(k, self._roll_hit_speed)
+                 for k, ok in zip(self._kusudamas, self._kusudama_pops) if ok])
+             if t is not None])
         self._last_pop_scan_t = None
 
     def _rebuild_min_vis_speed(self):

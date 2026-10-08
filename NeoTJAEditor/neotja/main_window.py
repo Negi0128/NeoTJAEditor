@@ -2231,16 +2231,35 @@ class MainWindow(QMainWindow):
         else:
             fn()
 
+    #: 位置を比べるときの余裕。画面の位置は 1/192 に丸めてあるのに、本文側は
+    #: 「小節の何個目 / 全部で何個」なので、小節を 10 等分したような所では
+    #: 両者が 1/192 未満だけ食い違う。端の音符が落ちないよう、その幅ぶん
+    #: 外へ広げて渡す(1/384 = 1/192 の半分。隣の目盛は拾わない)。
+    _SPAN_TOL = 1.0 / 384.0
+
     def _pane_span(self, measures):
         """作譜ペインの範囲 → ハイスピ変換へ渡す ((小節, 割合), (小節, 割合))。
 
         小節の番号は**渡した本文の中での** 0 始まり。割合にしているのは、
-        画面のグリッドと小節の分割数が違っても同じ所を指せるようにするため。"""
+        画面のグリッドと小節の分割数が違っても同じ所を指せるようにするため。
+
+        音符を選んでいればそれが相手。クリックで選んだときは時間の帯が
+        張られないので、帯だけを見ていると「選んだのに効かない」
+        (利用者の報告 2026-10-08)。"""
         ce = getattr(self.preview_dock, "chart_edit", None)
-        addrs = ce._range_addresses() if ce is not None else None
-        if ce is None or addrs is None:
+        if ce is None:
             return None
         m0 = measures[0]
+        sel = (ce.selection_pos_span()
+               if hasattr(ce, "selection_pos_span") else None)
+        if sel is not None:
+            a, b = sel
+            am, bm = int(a), int(b)
+            return ((am - m0, float(a - am) - self._SPAN_TOL),
+                    (bm - m0, float(b - bm) + self._SPAN_TOL))
+        addrs = ce._range_addresses()
+        if addrs is None:
+            return None
         (a_m, a_s), (b_m, b_s) = addrs
         if (b_m, b_s) < (a_m, a_s):
             (a_m, a_s), (b_m, b_s) = (b_m, b_s), (a_m, a_s)
@@ -2264,8 +2283,15 @@ class MainWindow(QMainWindow):
         if rng is None:
             self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
             return None
+        # 相手は「選んだ音符 → 時間の帯 → カーソルの小節」の順。音符を
+        # クリックで選んだときは帯が張られないので、帯だけを見ていると
+        # カーソルの1小節しか渡らなかった(利用者の報告 2026-10-08)。
+        sel = (ce.selection_pos_span()
+               if hasattr(ce, "selection_pos_span") else None)
         addrs = ce._range_addresses()
-        if addrs is not None:
+        if sel is not None:
+            m0, m1 = int(sel[0]), int(sel[1])
+        elif addrs is not None:
             m0, m1 = int(addrs[0][0]), int(addrs[1][0])
         else:
             m0 = m1 = int(ce._cursor_addr()[0])
