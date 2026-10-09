@@ -74,6 +74,8 @@ class CommandPanel(QFrame):
         self._auto_pending = {}
         # こちらから欄を書き換えている最中(set_values)。そのあいだは入れない。
         self._syncing = False
+        # 倍率 ⇔ 見た目BPM を写し合っている最中。行ったり来たりを止める。
+        self._linking = False
         # 欄ごとの「!」(選んだ音符へまとめて効かせる)。
         self._marks = []
         # いま「変更」になっている種類。
@@ -128,16 +130,33 @@ class CommandPanel(QFrame):
                                                     self.sp_den.value())),
                        0, 1)
 
-        # --- スクロール(HS) ---
+        # --- スクロール(HS): 倍率と「見た目BPM」。どちらを変えても連動する
+        #     (利用者の指定 2026-10-08)。本文へ書くのは倍率のほう。
         self.sp_hs = QDoubleSpinBox()
         self.sp_hs.setDecimals(3)
         self.sp_hs.setRange(-100.0, 100.0)
         self.sp_hs.setSingleStep(0.05)
         self.sp_hs.setValue(1.0)
-        self.sp_hs.setFixedWidth(108)
-        grid.addWidget(self._box("hs", "スクロール", [self.sp_hs], "SCROLL",
-                                 lambda: self.sp_hs.value(), auto=True),
+        self.sp_hs.setFixedWidth(80)
+        self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。")
+        self.sp_hs_bpm = QDoubleSpinBox()
+        self.sp_hs_bpm.setDecimals(1)
+        self.sp_hs_bpm.setRange(0.0, 99999.0)
+        self.sp_hs_bpm.setSingleStep(5.0)
+        self.sp_hs_bpm.setValue(120.0)
+        self.sp_hs_bpm.setFixedWidth(80)
+        self.sp_hs_bpm.setToolTip(
+            "見た目の速さを BPM で。いまの BPM × 倍率。\n"
+            "ここを変えると倍率もそれに合わせて変わる。")
+        grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
+                                 [self.sp_hs, self.sp_hs_bpm], "SCROLL",
+                                 lambda: self.sp_hs.value(), auto=True,
+                                 auto_on=[self.sp_hs]),
                        0, 2)
+        # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
+        self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
+        self.sp_bpm.valueChanged.connect(self._sync_hs_bpm)
+        self.sp_hs_bpm.valueChanged.connect(self._on_hs_bpm_changed)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
         grid.addWidget(self._pair_box("小節線の表示", "表示", "非表示",
@@ -265,7 +284,8 @@ class CommandPanel(QFrame):
     #: 打ち込み途中の数字は setKeyboardTracking(False) のほうで止めてある。
     AUTO_DELAY_MS = 0
 
-    def _box(self, kind, title, widgets, name, get_value, auto=False):
+    def _box(self, kind, title, widgets, name, get_value, auto=False,
+             auto_on=None):
         """[見出し / 値の欄… (+ 追加(変更))] の枠。
 
         その位置に同じ命令が居るときは editCommand(新しく足すのではなく、
@@ -298,15 +318,19 @@ class CommandPanel(QFrame):
             timer.setInterval(self.AUTO_DELAY_MS)
             timer.timeout.connect(commit)
             self._auto_timers[kind] = timer
+            # 打ち込んでいる途中の数字では飛ばさない(Enter か欄を離れた
+            # とき、矢印を押したときだけ valueChanged が来る)。
             for wdg in widgets:
-                sig = getattr(wdg, "valueChanged", None)
-                if sig is None:
-                    continue
-                # 打ち込んでいる途中の数字では飛ばさない(Enter か欄を離れた
-                # とき、矢印を押したときだけ valueChanged が来る)。
                 setter = getattr(wdg, "setKeyboardTracking", None)
                 if setter is not None:
                     setter(False)
+            # auto_on を渡したときは、その欄が動いたときだけ入れる。
+            # (スクロールの「見た目BPM」は倍率へ写してから入れるので、
+            #  こちらを直に繋ぐと写す前の倍率で入ってしまう)
+            for wdg in (widgets if auto_on is None else auto_on):
+                sig = getattr(wdg, "valueChanged", None)
+                if sig is None:
+                    continue
                 sig.connect(lambda *_a, _k=kind, _t=timer, _v=get_value:
                             self._auto_changed(_k, _t, _v))
         else:
@@ -319,6 +343,39 @@ class CommandPanel(QFrame):
             lambda _n=name, _v=get_value: self.selectionCommand.emit(_n, _v())))
         self._boxes[kind] = (box, btn)
         return box
+
+    def _sync_hs_bpm(self, *_a):
+        """倍率(または BPM)が動いた → 見た目BPM を出し直す。
+
+        こちらは**見せるだけ**なので、譜面へは何も書かない。"""
+        if self._linking:
+            return
+        self._linking = True
+        try:
+            self.sp_hs_bpm.setValue(self.sp_bpm.value() * self.sp_hs.value())
+        finally:
+            self._linking = False
+
+    def _on_hs_bpm_changed(self, *_a):
+        """見た目BPM が動いた → 倍率へ写す。
+
+        写した先(sp_hs)の valueChanged が本文への書き込みを起こすので、
+        ここでは譜面に触らない。BPM が 0 のときは割れないので何もしない。"""
+        if self._linking or self._syncing:
+            return
+        base = self.sp_bpm.value()
+        if not base:
+            return
+        self._linking = True
+        try:
+            want = self.sp_hs_bpm.value() / base
+        finally:
+            self._linking = False
+        # 倍率を動かす。_linking を解いてから入れるので、こちらの
+        # valueChanged で本文へ入る(_auto_changed)。戻りの連動は
+        # _sync_hs_bpm が同じ値を書くだけなので、行ったり来たりはしない。
+        if abs(want - self.sp_hs.value()) > 1e-9:
+            self.sp_hs.setValue(want)
 
     def _auto_changed(self, kind, timer, get_value):
         """値の欄が動いた。こちらから書き換えたぶん(_syncing)は無視する。"""
