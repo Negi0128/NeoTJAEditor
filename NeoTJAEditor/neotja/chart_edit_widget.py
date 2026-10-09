@@ -2415,8 +2415,12 @@ class ChartEditWaveform(WaveformWidget):
         spp = self._seconds_per_pixel()
         if not spp:
             return float(dr["dx"])
-        return float(dr["dx"]) + (self.view_start - dr.get("view0",
-                                                          self.view_start)) / spp
+        # 描いている最中は view_start が帯の起点へずらされている。ここで
+        # 読むのは**本当の左端**のほう(_paint_view0)。
+        now = self._paint_view0
+        if now is None:
+            now = self.view_start
+        return float(dr["dx"]) + (now - dr.get("view0", now)) / spp
 
     def _drag_delta_slots(self, dx, anchor=None):
         """つかんで動かした px を、グリッド何個ぶんかに直す。
@@ -2859,11 +2863,19 @@ class ChartEditWaveform(WaveformWidget):
             self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
         self._draw_ruler(p, t0, t1)
 
+    #: 描いているあいだの**本当の**表示の左端。帯に合わせて view_start を
+    #: ずらすので、掴んだぶんの px を出す _drag_dx がそちらを読むと、
+    #: ずらした秒数ぶん行き先が飛ぶ(利用者の報告 2026-10-09:
+    #: 「GOGOや連打を選択して長さを変えようとすると位置がおかしい」)。
+    _paint_view0 = None
+
     def _paint_rows(self, p):
         saved_view = self.view_start
+        self._paint_view0 = saved_view
         try:
             self._paint_rows_inner(p)
         finally:
+            self._paint_view0 = None
             # 帯に合わせて起点をずらしていることがある(下を参照)。描き終えたら
             # 必ず戻す — マウスの座標変換も同じ式を通るため。
             self.view_start = saved_view
