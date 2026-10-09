@@ -16,7 +16,7 @@ LANE_Y=196、枠はその 56px 上から)。窓は広げない・レーンには
 数字が飛ぶのを防ぐため。
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QVBoxLayout)
@@ -66,7 +66,14 @@ class CommandPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 種類 → (枠, ボタン)。「追加」と「変更」を切り替えるために持つ。
+        # 値をいじるだけで入る欄(BPM / スクロール)にはボタンが無く、None。
         self._boxes = {}
+        # 値をいじってから入れるまでの待ち。種類 → QTimer。
+        self._auto_timers = {}
+        # 待っているあいだ控えておく、いじった時点の値。種類 → 値。
+        self._auto_pending = {}
+        # こちらから欄を書き換えている最中(set_values)。そのあいだは入れない。
+        self._syncing = False
         # 欄ごとの「!」(選んだ音符へまとめて効かせる)。
         self._marks = []
         # いま「変更」になっている種類。
@@ -100,7 +107,7 @@ class CommandPanel(QFrame):
         self.sp_bpm.setValue(120.0)
         self.sp_bpm.setFixedWidth(108)
         grid.addWidget(self._box("bpm", "BPM", [self.sp_bpm], "BPMCHANGE",
-                                 lambda: self.sp_bpm.value()),
+                                 lambda: self.sp_bpm.value(), auto=True),
                        0, 0)
 
         # --- 拍子記号 ---
@@ -129,7 +136,7 @@ class CommandPanel(QFrame):
         self.sp_hs.setValue(1.0)
         self.sp_hs.setFixedWidth(108)
         grid.addWidget(self._box("hs", "スクロール", [self.sp_hs], "SCROLL",
-                                 lambda: self.sp_hs.value()),
+                                 lambda: self.sp_hs.value(), auto=True),
                        0, 2)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
@@ -252,31 +259,73 @@ class CommandPanel(QFrame):
         v.addLayout(row)
         return box, row
 
-    def _box(self, kind, title, widgets, name, get_value):
-        """[見出し / 値の欄… + 追加(変更)] の枠。
+    #: 欄をいじってから実際に入れるまでの待ち(ms)。0 = 次の一巡で入れる
+    #: (利用者の指定 2026-10-08「即時反映」)。信号の最中に譜面を書き換えると
+    #: 欄の更新と競るので、呼び出しは1回ぶん遅らせる。
+    #: 打ち込み途中の数字は setKeyboardTracking(False) のほうで止めてある。
+    AUTO_DELAY_MS = 0
 
-        その位置に同じ命令が居るときはボタンが「変更」になり、押すと
-        editCommand が飛ぶ(新しく足すのではなく、その行の値を書き換える)。
-        居なければ今までどおり「追加」で placeCommand。"""
+    def _box(self, kind, title, widgets, name, get_value, auto=False):
+        """[見出し / 値の欄… (+ 追加(変更))] の枠。
+
+        その位置に同じ命令が居るときは editCommand(新しく足すのではなく、
+        その行の値を書き換える)、居なければ placeCommand。
+
+        auto=True の欄は**値をいじっただけで入る**(利用者の指定 2026-10-08)。
+        ボタンは置かない。カーソルに合わせて欄を書き換えるとき(set_values)は
+        入れない — 動かすたびに命令が増えてしまうため。"""
         box, row = self._new_box(title)
         for wdg in widgets:
             row.addWidget(wdg)
         row.addStretch()
-        btn = QPushButton("追加")
-        btn.setFixedWidth(52)
 
-        def pressed(_c=False, _k=kind, _n=name, _v=get_value):
+        def commit(_c=False, _k=kind, _n=name, _v=get_value):
+            # 待っているあいだに set_values で欄が書き戻されることがあるので、
+            # **いじった時点の値**を控えてあればそちらを使う。欄を読み直すと
+            # 書き戻されたほうの値が入ってしまう。
+            val = self._auto_pending.pop(_k, None)
+            if val is None:
+                val = _v()
             if _k in self._editing:
-                self.editCommand.emit(_n, _v())
+                self.editCommand.emit(_n, val)
             else:
-                self.placeCommand.emit(_n, _v())
-        btn.clicked.connect(pressed)
-        row.addWidget(btn)
+                self.placeCommand.emit(_n, val)
+
+        btn = None
+        if auto:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self.AUTO_DELAY_MS)
+            timer.timeout.connect(commit)
+            self._auto_timers[kind] = timer
+            for wdg in widgets:
+                sig = getattr(wdg, "valueChanged", None)
+                if sig is None:
+                    continue
+                # 打ち込んでいる途中の数字では飛ばさない(Enter か欄を離れた
+                # とき、矢印を押したときだけ valueChanged が来る)。
+                setter = getattr(wdg, "setKeyboardTracking", None)
+                if setter is not None:
+                    setter(False)
+                sig.connect(lambda *_a, _k=kind, _t=timer, _v=get_value:
+                            self._auto_changed(_k, _t, _v))
+        else:
+            btn = QPushButton("追加")
+            btn.setFixedWidth(52)
+            btn.clicked.connect(commit)
+            row.addWidget(btn)
         row.addWidget(self._mark_button(
             "この値を、選んだ音符すべてに付けます",
             lambda _n=name, _v=get_value: self.selectionCommand.emit(_n, _v())))
         self._boxes[kind] = (box, btn)
         return box
+
+    def _auto_changed(self, kind, timer, get_value):
+        """値の欄が動いた。こちらから書き換えたぶん(_syncing)は無視する。"""
+        if self._syncing:
+            return
+        self._auto_pending[kind] = get_value()
+        timer.start()
 
     def _mark_button(self, tip, fn):
         """欄ごとの「!」。選んだ音符へまとめて効かせる
@@ -454,14 +503,18 @@ class CommandPanel(QFrame):
         """「変更」にする枠を決める(kinds は "bpm"/"hs"/"measure" の集まり)。
 
         その位置に同じ命令が置いてある枠だけ、ボタンが「変更」に変わり、枠の
-        線が明るくなる。欄の値は set_values でその命令自身の値になっている。"""
+        線が明るくなる。欄の値は set_values でその命令自身の値になっている。
+
+        ボタンの無い欄(BPM / スクロール)は枠の線だけで示す — そちらは値を
+        いじった時点で、置いてあればその行を書き換え、無ければ足す。"""
         kinds = set(kinds or ())
         if kinds == self._editing:
             return
         self._editing = kinds
         for kind, (box, btn) in self._boxes.items():
             on = kind in kinds
-            btn.setText("変更" if on else "追加")
+            if btn is not None:
+                btn.setText("変更" if on else "追加")
             box.setProperty("editing", "1" if on else "0")
             # 枠1つだけに当て直す(全体の QSS は触らない)。
             box.setStyleSheet(
@@ -472,17 +525,23 @@ class CommandPanel(QFrame):
     def set_values(self, bpm=None, scroll=None, measure=None):
         """カーソルの位置で効いている値へ欄を合わせる。
 
-        触っている欄(フォーカスがある欄)は書き換えない。"""
-        if bpm is not None and not self.sp_bpm.hasFocus():
-            self.sp_bpm.setValue(float(bpm))
-        if scroll is not None and not self.sp_hs.hasFocus():
-            self.sp_hs.setValue(float(scroll))
-        if measure:
-            try:
-                n, d = (int(x) for x in str(measure).split("/"))
-            except (ValueError, TypeError):
-                return
-            if not self.sp_num.hasFocus():
-                self.sp_num.setValue(n)
-            if not self.sp_den.hasFocus():
-                self.sp_den.setValue(d)
+        触っている欄(フォーカスがある欄)は書き換えない。
+        **ここで書き換えたぶんは譜面へ入れない**(_syncing)。カーソルを
+        動かすたびに命令が増えてしまうため。"""
+        self._syncing = True
+        try:
+            if bpm is not None and not self.sp_bpm.hasFocus():
+                self.sp_bpm.setValue(float(bpm))
+            if scroll is not None and not self.sp_hs.hasFocus():
+                self.sp_hs.setValue(float(scroll))
+            if measure:
+                try:
+                    n, d = (int(x) for x in str(measure).split("/"))
+                except (ValueError, TypeError):
+                    return
+                if not self.sp_num.hasFocus():
+                    self.sp_num.setValue(n)
+                if not self.sp_den.hasFocus():
+                    self.sp_den.setValue(d)
+        finally:
+            self._syncing = False
