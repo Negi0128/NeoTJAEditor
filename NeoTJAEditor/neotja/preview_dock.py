@@ -1693,7 +1693,9 @@ class PreviewDock(QDockWidget):
             self.command_panel.placeCommand.connect(self._on_panel_command)
             self.command_panel.editCommand.connect(self._on_panel_edit)
             # 選んだ命令が変わったら、パネルの「追加/変更」も切り替える。
-            self.chart_edit.selectionChanged.connect(self._sync_command_panel)
+            # 続けて来るぶんはまとめる(_queue_command_panel_sync)。
+            self.chart_edit.selectionChanged.connect(
+                self._queue_command_panel_sync)
             #: 「変更」を押したときに書き換える相手 {行の種類: 位置}。
             self._panel_targets = {}
             self.command_panel.placeMarker.connect(self._on_panel_marker)
@@ -2829,6 +2831,52 @@ class PreviewDock(QDockWidget):
         host.raise_overlays()
         self._sync_command_panel()
 
+    #: 続けて来る「パネルを合わせて」をまとめる札。
+    _panel_sync_timer = None
+    #: まとめる間合い。これだけ待ってから1回だけ合わせる。目で見て遅れは
+    #: 分からないが、送り続けている間の塗り直しは 1/30 以下になる。
+    PANEL_SYNC_MS = 30
+
+    def _queue_command_panel_sync(self):
+        """パネル合わせを1回にまとめて予約する。
+
+        **パネルを塗り直すと高い。** パネルはゲーム画面(QOpenGLWidget)の上に
+        重ねてあるので、ほんの一部でも塗り直すと窓ぜんたいの合成し直しに
+        なり、1回 10ms 掛かる(実測 2026-10-16)。カーソルを送り続けると
+        1手ごとにそれを払っていて、作譜モードが 30fps まで落ちていた
+        (利用者の報告 2026-10-16)。
+
+        合わせる中身は「いまカーソルの所で効いている値」だけなので、
+        最後の1回ぶんだけ効けばよい。"""
+        panel = self.command_panel
+        ce = getattr(self, "chart_edit", None)
+        if (panel is not None and ce is not None and panel.isVisible()
+                and hasattr(panel, "set_selection_enabled")):
+            # 「!」を押せるかどうかだけは待たずにその場で決める。遅らせると
+            # 選んだ直後に押せない間ができる。中身は変わったときしか
+            # 触らないので、ここは塗り直しにならない。
+            panel.set_selection_enabled(ce.has_note_selection())
+        t = self._panel_sync_timer
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(self.PANEL_SYNC_MS)
+            t.timeout.connect(self._sync_command_panel)
+            self._panel_sync_timer = t
+        if not t.isActive():
+            t.start()
+
+    def _flush_command_panel_sync(self):
+        """待たせてあるパネル合わせを、その場で済ませる。
+
+        パネルのボタンは「いまカーソルの所に置いてある命令」(_panel_targets)
+        を相手にする。待たせたままボタンを押されると古い相手を書き換えて
+        しまうので、押された側の入り口で必ず通す。"""
+        t = self._panel_sync_timer
+        if t is not None and t.isActive():
+            t.stop()
+            self._sync_command_panel()
+
     def _sync_command_panel(self):
         """パネルの値を、カーソルの位置で効いている値に合わせる。
 
@@ -2921,6 +2969,7 @@ class PreviewDock(QDockWidget):
 
     def _on_panel_edit(self, name, value):
         """パネルの「変更」: その位置に置いてある命令の値を書き換える。"""
+        self._flush_command_panel_sync()      # 相手を最新にしてから
         ce = getattr(self, "chart_edit", None)
         kind = self._PANEL_KIND_BY_NAME.get(str(name).upper())
         pos = (getattr(self, "_panel_targets", None) or {}).get(kind)
@@ -3555,7 +3604,8 @@ class PreviewDock(QDockWidget):
         if not self.audio.is_playing():
             self.chart_preview.set_playback(seconds, False)
         # 命令パネルの値も、その位置で効いている値に合わせる。
-        self._sync_command_panel()
+        # ここはカーソルを動かすたびに通るので、続けて来るぶんはまとめる。
+        self._queue_command_panel_sync()
 
     def seek_to_seconds(self, seconds: float):
         self.audio.seek(max(0, int(seconds * 1000)))

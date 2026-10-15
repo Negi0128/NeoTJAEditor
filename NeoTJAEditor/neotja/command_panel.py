@@ -195,6 +195,10 @@ class CommandPanel(QFrame):
         " border: 1px solid #222a3a; }"
         "QFrame#cmdBox { background: rgba(20,24,34,220);"
         " border: 1px solid #33405c; border-radius: 4px; }"
+        # 「変更」になっている枠。ここに入れておくと、切り替えのたびに
+        # setStyleSheet を呼ばずに済む(set_editing を参照)。
+        "QFrame#cmdBox[editing=\"1\"] { background: rgba(28,34,50,230);"
+        " border: 1px solid #7aa2f7; border-radius: 4px; }"
         "#commandPanel QLabel { color: #cdd6f4; background: transparent; }"
         "#commandPanel QLabel#boxTitle { color: #8fa3c0; }"
         "#commandPanel QAbstractSpinBox { color: #ffffff; background: #10141d;"
@@ -235,10 +239,20 @@ class CommandPanel(QFrame):
         self._base_size = (self.width(), self.height())
         self._scaler = UiScaler(self)
 
+    #: いま「!」を押せるか。変わっていないのに触らないための覚え。
+    _marks_on = None
+
     def set_selection_enabled(self, on):
-        """音符を選んでいるあいだだけ「!」を押せるようにする。"""
+        """音符を選んでいるあいだだけ「!」を押せるようにする。
+
+        変わっていなければ触らない。setEnabled はボタンを塗り直すので、
+        このパネル(ゲーム画面に重ねてある)では1回ぶんの合成になる。"""
+        on = bool(on)
+        if on == self._marks_on:
+            return
+        self._marks_on = on
         for b in self._marks:
-            b.setEnabled(bool(on))
+            b.setEnabled(on)
 
     def ui_scale(self):
         return self._ui_scale
@@ -570,13 +584,22 @@ class CommandPanel(QFrame):
         self._editing = kinds
         for kind, (box, btn) in self._boxes.items():
             on = kind in kinds
+            want = "1" if on else "0"
+            # **変わった枠だけ触る。** 以前は毎回3枠ぜんぶに setStyleSheet を
+            # 当て直していた。あれは QSS を読み直して枠と中の部品ぜんぶの
+            # スタイルを作り直す(polish)ので高い。見た目は本体の QSS の
+            # [editing="1"] に入れてあるので、印を変えてその枠だけ塗り直す
+            # 合図を出せばよい(利用者の報告 2026-10-16「作譜モードを触って
+            # るとfpsが30くらいまで落ちる」)。
+            if box.property("editing") == want:
+                continue
             if btn is not None:
                 btn.setText("変更" if on else "追加")
-            box.setProperty("editing", "1" if on else "0")
-            # 枠1つだけに当て直す(全体の QSS は触らない)。
-            box.setStyleSheet(
-                "QFrame#cmdBox { background: rgba(28,34,50,230);"
-                " border: 1px solid #7aa2f7; border-radius: 4px; }" if on else "")
+            box.setProperty("editing", want)
+            st = box.style()
+            st.unpolish(box)
+            st.polish(box)
+            box.update()
 
 
     def set_values(self, bpm=None, scroll=None, measure=None):
@@ -588,17 +611,40 @@ class CommandPanel(QFrame):
         self._syncing = True
         try:
             if bpm is not None and not self.sp_bpm.hasFocus():
-                self.sp_bpm.setValue(float(bpm))
+                self._put(self.sp_bpm, float(bpm))
             if scroll is not None and not self.sp_hs.hasFocus():
-                self.sp_hs.setValue(float(scroll))
+                self._put(self.sp_hs, float(scroll))
             if measure:
                 try:
                     n, d = (int(x) for x in str(measure).split("/"))
                 except (ValueError, TypeError):
                     return
                 if not self.sp_num.hasFocus():
-                    self.sp_num.setValue(n)
+                    self._put(self.sp_num, n)
                 if not self.sp_den.hasFocus():
-                    self.sp_den.setValue(d)
+                    self._put(self.sp_den, d)
         finally:
             self._syncing = False
+
+    @staticmethod
+    def _put(spin, value):
+        """値が変わるときだけ入れる。
+
+        **同じ値でも setValue は欄を塗り直す。** このパネルはゲーム画面
+        (QOpenGLWidget)の上に重ねてあるので、ほんの少しでも塗り直すと窓
+        ぜんたいの合成が走り、1回 10ms 掛かる。カーソルを動かすたびに
+        4つの欄へ入れ直していたため、同じ小節の中を動いているだけでも
+        毎回その 10ms を払っていた(利用者の報告 2026-10-16
+        「作譜モードを触ってるとfpsが30くらいまで落ちる」)。
+
+        見比べるのは**欄に出ている桁**で。表示が同じなら入れ直す意味は無い
+        (0.1 刻みの欄に 1.2000000000000002 が来ても塗り直さない)。"""
+        try:
+            if round(spin.value(), 9) == round(float(value), 9):
+                return
+            dec = spin.decimals() if hasattr(spin, "decimals") else 0
+            if round(spin.value(), dec) == round(float(value), dec):
+                return
+        except (TypeError, ValueError):
+            pass
+        spin.setValue(value)
