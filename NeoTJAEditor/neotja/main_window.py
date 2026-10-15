@@ -383,6 +383,7 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_bottom, "リサイズ", self.open_measure_converter)
         self._toolbar_button(self.toolbar_bottom, "反転", self.reverse_don_ka)
         self._toolbar_button(self.toolbar_bottom, "ストロボ生成", self.open_strobe_tool)
+        self._toolbar_button(self.toolbar_bottom, "TJA校正", self.open_tja_tidy)
 
     def _build_sidebar(self):
         self.sb_outer = QWidget()
@@ -670,6 +671,8 @@ class MainWindow(QMainWindow):
         mm.addAction("空の小節を挿入  Ctrl+Shift+N", lambda: self._measure_op("ins"))
         mm.addAction("小節を上へ移動  Ctrl+Shift+↑", lambda: self._measure_op("move", "up"))
         mm.addAction("小節を下へ移動  Ctrl+Shift+↓", lambda: self._measure_op("move", "down"))
+        tm.addSeparator()
+        tm.addAction("TJA校正", self.open_tja_tidy)
         tm.addSeparator()
         tm.addAction("ハイスピ変換", self.open_scroll_splitter)
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
@@ -2752,7 +2755,96 @@ class MainWindow(QMainWindow):
             self.editor.mark_edited(start, cursor.position())
             self.setWindowModified(True)
             self._force_update()
-        HighSpeedDialog(self, txt, apply, span=span).exec()
+        # なめらかハイスピは「範囲の中の時間」で刻むので、範囲の**手前**で
+        # 効いている BPM・拍子・スクロールが要る(選んだ本文だけでは
+        # 分からない)。利用者の指定 2026-10-15。
+        bpm, meter, scroll = self._state_before(cursor.selectionStart())
+        HighSpeedDialog(self, txt, apply, span=span, base_bpm=bpm,
+                        base_meter=meter, base_scroll=scroll).exec()
+
+    #: ヘッダの BPM を探す行。
+    _HDR_BPM = "BPM:"
+
+    def _state_before(self, pos):
+        """本文の pos 文字目の手前で効いている (BPM, 拍子, スクロール)。
+
+        #START より前のヘッダ BPM から始めて、そこまでの命令行を順に当てる。
+        見つからなければ (120.0, (4,4), None)。"""
+        import re as _re
+        text = self.editor.toPlainText()[:max(0, int(pos))]
+        bpm, meter, scroll = 120.0, (4, 4), None
+        for line in text.replace("\r\n", "\n").split("\n"):
+            s = line.strip()
+            if s.upper().startswith(self._HDR_BPM):
+                try:
+                    bpm = float(s.split(":", 1)[1])
+                except (TypeError, ValueError):
+                    pass
+                continue
+            m = _re.match(r"^#\s*([A-Za-z]+)\s*(.*)$", s)
+            if not m:
+                continue
+            name, val = m.group(1).upper(), m.group(2).strip()
+            try:
+                if name == "BPMCHANGE":
+                    bpm = float(val) or bpm
+                elif name == "SCROLL":
+                    scroll = float(val)
+                elif name == "MEASURE":
+                    n, d = (float(x) for x in val.replace(" ", "").split("/"))
+                    if n > 0 and d > 0:
+                        meter = (n, d)
+            except (TypeError, ValueError):
+                continue
+        return bpm, meter, scroll
+
+    def open_tja_tidy(self):
+        """「TJA校正」。作譜モードが残していく散らかりを片づける。
+
+        鳴る譜面は1つも変えない。整えた結果をもう一度読み直して、音符・
+        連打・風船・ゴーゴー・小節線と、各時刻で効いている速さ/BPM が
+        元と同じであることを確かめてから入れ替える(違えば入れない)。
+        Ctrl+Z 1回で戻せる(本文まるごと1回の書き換え)。"""
+        from neotja import tja_tidy
+        old = self.editor.toPlainText()
+        if "#START" not in old:
+            QMessageBox.information(self, "TJA校正",
+                                    "整えるコースが見つかりません。")
+            return
+        # 押す前の確認は出さない(利用者の指定 2026-10-15)。Ctrl+Z 1回で
+        # 戻せるうえ、鳴り方が変わる結果なら下で止める。
+        new, rep = tja_tidy.tidy_text(old)
+        if new == old:
+            QMessageBox.information(self, "TJA校正",
+                                    "片づける所はありませんでした。")
+            return
+        ok, why = tja_tidy.same_sound(old, new)
+        if not ok:
+            QMessageBox.warning(
+                self, "TJA校正",
+                "整えた結果が元と違ってしまったので、入れ替えませんでした。\n\n"
+                + why + "\n\nこの譜面の形を教えてもらえれば直します。")
+            return
+        n_old = len(old.splitlines())
+        n_new = len(new.splitlines())
+        cur = self.editor.textCursor()
+        cur.beginEditBlock()
+        cur.select(QTextCursor.Document)
+        cur.insertText(new)
+        cur.endEditBlock()
+        self.editor.mark_edited(0, len(new))
+        self.setWindowModified(True)
+        self._force_update()
+        msg = ("命令を %d 本、行を %d 行減らしました（%d → %d 行）。"
+               % (rep["commands"], rep["lines"], n_old, n_new))
+        # 目盛りへそろえるので、増える小節もある(8分 → 16分)。差し引きで出す。
+        if rep["chars"] > 0:
+            msg += "\n音符の文字も %d 減らしました。" % rep["chars"]
+        elif rep["chars"] < 0:
+            msg += "\n目盛りをそろえたぶん、音符の文字は %d 増えました。" % (
+                -rep["chars"])
+        self.statusBar().showMessage(msg.replace("\n", " "), 6000)
+        QMessageBox.information(self, "TJA校正", msg)
 
     def open_measure_converter(self):
         cursor, txt = self._get_selection()

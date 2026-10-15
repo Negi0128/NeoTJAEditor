@@ -1,3 +1,5 @@
+import re
+
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
@@ -8,10 +10,53 @@ from neotja.measure_math import parse_measure_lines
 
 CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease-Out)", "S字 (Ease-In-Out)")
 
+_CMD = re.compile(r"^\s*#\s*([A-Za-z]+)\s*(.*)$")
+
+
+def _cmd_of(line):
+    m = _CMD.match(str(line))
+    return (m.group(1).upper(), m.group(2).strip()) if m else None
+
+
+def _fmt_scroll(v):
+    """開始の初期値の字面。分からなければ 1(TJA の既定)。"""
+    if v is None:
+        v = 1.0
+    t = ("%.3f" % float(v)).rstrip("0").rstrip(".")
+    return t or "0"
+
+
+def _bpm_of(line):
+    """#BPMCHANGE の行なら BPM。ほかは None。"""
+    c = _cmd_of(line)
+    if c is None or c[0] != "BPMCHANGE":
+        return None
+    try:
+        v = float(c[1])
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _meter_of(line):
+    """#MEASURE の行なら (分子, 分母)。ほかは None。"""
+    c = _cmd_of(line)
+    if c is None or c[0] != "MEASURE":
+        return None
+    parts = str(c[1]).replace(" ", "").split("/")
+    if len(parts) != 2:
+        return None
+    try:
+        n, d = float(parts[0]), float(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return (n, d) if n > 0 and d > 0 else None
+
 
 class HighSpeedDialog(QDialog):
     def __init__(self, main_window, initial_text, apply_cb, parent=None,
-                 span=None):
+                 span=None, base_bpm=None, base_meter=None,
+                 base_scroll=None):
         """span を渡すと、その範囲に入っている音符だけに #SCROLL を入れる。
 
         形は ((小節の番号, 小節内の割合), (小節の番号, 割合))。小節の番号は
@@ -22,6 +67,13 @@ class HighSpeedDialog(QDialog):
         super().__init__(parent or main_window)
         self.apply_cb = apply_cb
         self._span = span
+        # 範囲の**手前**で効いている値。本文(選んだ小節)だけでは分からない
+        # ので、呼ぶ側が渡す。なめらかハイスピが「時間」で刻むのに要る
+        # (利用者の指定 2026-10-15)。
+        self._base_bpm = float(base_bpm) if base_bpm else 120.0
+        self._base_meter = tuple(base_meter or (4, 4))
+        self._base_scroll = (float(base_scroll)
+                             if base_scroll is not None else None)
         self.setWindowTitle("ハイスピ変換")
         self.resize(580, 780)
 
@@ -33,21 +85,25 @@ class HighSpeedDialog(QDialog):
 
         form = QFormLayout()
         self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["なめらかハイスピ", "ノーツ毎ハイスピ", "特定間隔ハイスピ"])
+        # 「ノーツ毎」は廃止(利用者の指定 2026-10-15)。なめらかが時間で刻む
+        # ようになって、役目が重なったため。
+        self.cb_mode.addItems(["なめらかハイスピ", "特定間隔ハイスピ"])
         form.addRow("変換モード", self.cb_mode)
 
-        self.ed_start = QLineEdit("1.0")
+        # 開始は**範囲の手前で効いている値**を初期値にする。そこから
+        # 動かさないなら命令を置く意味が無いので、同じ値なら置かない。
+        self.ed_start = QLineEdit(_fmt_scroll(self._base_scroll))
         form.addRow("開始 SCROLL", self.ed_start)
-        self.ed_end = QLineEdit("2.0")
+        # 終了は空欄で始める(どこまで持っていくかは毎回ちがうため)。
+        self.ed_end = QLineEdit("")
+        self.ed_end.setPlaceholderText("ここに終わりの値を入れる")
         form.addRow("終了 SCROLL", self.ed_end)
 
-        self.cb_curve = QComboBox()
-        self.cb_curve.addItems(list(CURVES))
-        form.addRow("変化カーブ", self.cb_curve)
+        # 変化カーブの欄は廃止(利用者の指定 2026-10-15)。常に直線。
 
         self.sp_prec = QSpinBox()
         self.sp_prec.setRange(1, 5)
-        self.sp_prec.setValue(2)
+        self.sp_prec.setValue(3)
         form.addRow("小数点以下", self.sp_prec)
 
         # 終わりの値(例 2.00)を**どこに届かせるか**。
@@ -63,6 +119,7 @@ class HighSpeedDialog(QDialog):
         # **値はそのままで行の位置だけ**動かすもので、狙いが違っていた。
         self.cb_tail = QComboBox()
         self.cb_tail.addItems(["最後の音符に合わせる", "範囲の次に合わせる"])
+        self.cb_tail.setCurrentIndex(1)      # 既定は「範囲の次」
         self.cb_tail.setToolTip(
             "1111, を 1 → 2 にしたとき\n"
             "  最後の音符に合わせる: 1 / 1.33 / 1.67 / 2.00\n"
@@ -97,7 +154,6 @@ class HighSpeedDialog(QDialog):
         for w, sig in (
             (self.ed_start, self.ed_start.textChanged),
             (self.ed_end, self.ed_end.textChanged),
-            (self.cb_curve, self.cb_curve.currentTextChanged),
             (self.sp_prec, self.sp_prec.valueChanged),
             (self.ed_interval, self.ed_interval.textChanged),
             (self.cb_tail, self.cb_tail.currentTextChanged),
@@ -115,6 +171,11 @@ class HighSpeedDialog(QDialog):
     _ACTIVE = "12345679"
 
     def _preview(self, *_):
+        raw0 = self.txt_before.toPlainText().strip()
+        if not self.ed_end.text().strip():
+            # 終わりの値がまだ空。何も足さずに元の本文を見せる。
+            self.txt_after.setPlainText(raw0)
+            return
         try:
             s = float(self.ed_start.text())
             e = float(self.ed_end.text())
@@ -123,8 +184,7 @@ class HighSpeedDialog(QDialog):
             return
 
         mode = self.cb_mode.currentText()
-        curve = self.cb_curve.currentText()
-        raw = self.txt_before.toPlainText().strip()
+        raw = raw0
         # 命令行(#BPMCHANGE 等)やコメントを落とさずに小節へ分ける。以前は
         # raw から数字とカンマだけを拾っていたため、`#BPMCHANGE 180` の 180 が
         # そのまま音符3個に化け、命令行自体も消えていた。
@@ -142,20 +202,162 @@ class HighSpeedDialog(QDialog):
             return
         total = len(marks)
         # 終わりの値をどこへ届かせるか(cb_tail の説明を参照)。
-        #   最後の音符に合わせる … 刻みは total-1 等分。最後の音符が e。
-        #   範囲の次に合わせる   … 刻みは total 等分。**範囲の次**が e。
+        #   最後の音符に合わせる … 最後の音符が e。
+        #   範囲の次に合わせる   … **範囲の次**が e。
         tail_next = "次" in self.cb_tail.currentText()
-        div = total if tail_next else max(1, total - 1)
+
+        if "なめらか" in mode:
+            # **時間で刻む**(利用者の指定 2026-10-15)。文字数の多い小節が
+            # 変化を余計に受け持ってしまうのを直したもの。
+            tmap = self._time_map(parsed)
+            t0, t_end = self._span_times(tmap)
+            at = []
+            for mi, i in marks:
+                times = tmap[mi][1] if mi < len(tmap) else []
+                at.append(times[i] if i < len(times) else t0)
+            # 「範囲の次に合わせる」の“次”は、**最後の音符の1つ先**。
+            # 範囲の終わり(span)は最後の音符そのものを指しているので、
+            # 最後の間隔ぶん伸ばした所を終わりとみなす。等間隔の譜面なら
+            # 今までの 1 / 1.25 / 1.5 / 1.75 → 次が 2.0 と同じになる。
+            if tail_next:
+                if len(at) >= 2:
+                    goal = at[-1] + (at[-1] - at[-2])
+                elif at and tmap:
+                    mi = marks[-1][0]
+                    n = max(1, len(tmap[mi][1])) if mi < len(tmap) else 1
+                    goal = at[-1] + (tmap[mi][2] / n if mi < len(tmap) else 1.0)
+                else:
+                    goal = t_end
+            else:
+                goal = at[-1] if at else t_end
+            width = goal - t0
+
+            def ratio(k):
+                if k >= total:
+                    return 1.0
+                if width <= 1e-9:
+                    return 0.0
+                return max(0.0, min(1.0, (at[k] - t0) / width))
+        else:
+            div = total if tail_next else max(1, total - 1)
+
+            def ratio(k):
+                return (k / div) if div > 0 else 0.0
 
         def scroll_at(i):
-            t = (i / div) if div > 0 else 0.0
-            return f"#SCROLL {s + (e - s) * curve_value(t, curve):.{p}f}"
+            # 変化は常に直線(カーブの欄は廃止。利用者の指定 2026-10-15)。
+            return "#SCROLL %.*f" % (p, s + (e - s) * ratio(i))
 
         # 範囲の次に合わせるときは、最後の音符の後ろへ終わりの値を1本置く。
         # そこが次の小節の頭なので、そこから e が効く。
         tail_line = scroll_at(total) if tail_next else None
-        self.txt_after.setPlainText(
-            "\n".join(self._render_marks(parsed, marks, scroll_at, tail_line)))
+        lines = self._render_marks(parsed, marks, scroll_at, tail_line)
+        self.txt_after.setPlainText("\n".join(self._drop_same(lines, p)))
+
+    def _drop_same(self, lines, prec):
+        """直前と同じ値になる #SCROLL は置かない。
+
+        「開始点の数字が変わらないなら、その命令は意味をなさない」
+        (利用者の指定 2026-10-15)。丸めたあとの字面で比べる。範囲の手前で
+        効いていた値が分かっていれば、1本目もそれと比べる。
+        """
+        out = []
+        cur = None
+        if self._base_scroll is not None:
+            cur = "%.*f" % (prec, self._base_scroll)
+        n = len(lines)
+        for k, line in enumerate(lines):
+            c = _cmd_of(line)
+            if c is not None and c[0] == "SCROLL":
+                # 元からあった #SCROLL のすぐ後ろに新しいものが来るなら、
+                # 元のほうは**1音符も効かずに**上書きされる。残さない。
+                nxt = _cmd_of(lines[k + 1]) if k + 1 < n else None
+                if nxt is not None and nxt[0] == "SCROLL":
+                    continue
+                if cur is not None and c[1] == cur:
+                    continue
+                cur = c[1]
+            out.append(line)
+        return out
+
+    def _time_map(self, parsed):
+        """小節ごとの [(頭の時刻, 1文字ぶんの時刻の並び)] を作る。
+
+        戻りは [(小節の頭の時刻, [その小節の各文字の頭の時刻], 小節の長さ)]。
+        拍子(#MEASURE)と BPM(#BPMCHANGE)を追いながら積む。小節の途中に
+        置かれた #BPMCHANGE は、**その文字から後ろ**だけ刻みが変わる。
+        #MEASURE は小節の頭にあるものだけその小節へ当てる(途中のものは
+        次の小節から)。単位は秒だが、使うのは比だけ。
+        """
+        bpm = self._base_bpm
+        meter = self._base_meter
+        t = 0.0
+        out = []
+        for item in parsed:
+            if item["type"] != "measure":
+                # 小節と小節のあいだに置かれた命令(#BPMCHANGE など)は
+                # ここに来る。小節の中の命令は item["breaks"]。
+                line = item.get("text", "")
+                got = _bpm_of(line)
+                if got:
+                    bpm = got
+                got = _meter_of(line)
+                if got:
+                    meter = got
+                continue
+            notes = item["notes"]
+            n = len(notes)
+            breaks = dict()
+            for idx, line in item.get("breaks") or []:
+                breaks.setdefault(idx, []).append(line)
+            # 頭に置かれた #MEASURE はこの小節から効く。
+            for line in breaks.get(0, []):
+                got = _meter_of(line)
+                if got:
+                    meter = got
+            # 小節まるごとの長さ(秒)。4/4 で 4拍。
+            def beat():
+                return 60.0 / max(1e-6, bpm)
+            full = beat() * 4.0 * meter[0] / float(meter[1])
+            start = t
+            times = []
+            if n <= 0:
+                t += full
+                out.append((start, times, full))
+                continue
+            for i in range(n):
+                for line in breaks.get(i, []):
+                    got = _bpm_of(line)
+                    if got:
+                        bpm = got
+                        full = beat() * 4.0 * meter[0] / float(meter[1])
+                times.append(t)
+                t += full / n
+            # 小節の最後に置かれた命令(位置 n)も読む。
+            for line in breaks.get(n, []):
+                got = _bpm_of(line)
+                if got:
+                    bpm = got
+                got = _meter_of(line)
+                if got:
+                    meter = got
+            out.append((start, times, t - start))
+        return out
+
+    def _span_times(self, tmap):
+        """選んだ範囲の (頭の時刻, 終わりの時刻)。範囲が無ければ全体。"""
+        if not tmap:
+            return 0.0, 0.0
+        sp = self._span
+        if not sp:
+            last = tmap[-1]
+            return tmap[0][0], last[0] + last[2]
+        (m0, f0), (m1, f1) = sp
+        m0 = max(0, min(len(tmap) - 1, int(m0)))
+        m1 = max(0, min(len(tmap) - 1, int(m1)))
+        t0 = tmap[m0][0] + tmap[m0][2] * max(0.0, min(1.0, float(f0)))
+        t1 = tmap[m1][0] + tmap[m1][2] * max(0.0, min(1.0, float(f1)))
+        return t0, t1
 
     def _in_span(self, mi, i, length):
         """(小節の番号, 小節内の何文字目) が span の中か。span が無ければ常に真。"""
@@ -198,15 +400,15 @@ class HighSpeedDialog(QDialog):
                 # 数える。文字が無いと挿す場所が無く、その小節が丸ごと
                 # 飛ばされていた("0," と書かないと効かない、という症状)。
                 # 「ノーツ毎」では 0 は音符ではないので従来どおり効かない。
-                if "なめらか" in mode and self._in_span(mi, 0, 1):
-                    marks.append((mi, 0))
+                # 音符が1つも無い小節には何も置かない(利用者の指定
+                # 2026-10-15: 小節の頭や音符以外には付けなくてよい)。
                 continue
             if "特定間隔" in mode:
                 size = max(1, len(notes) // interval)
                 idxs = range(0, len(notes), size)
-            elif "なめらか" in mode:
-                idxs = range(len(notes))
-            else:                                  # ノーツ毎
+            else:
+                # なめらか: **音符の所だけ**。小節の頭・休符・連打の
+                # 終端には置かない(利用者の指定 2026-10-15)。
                 idxs = [i for i, ch in enumerate(notes) if ch in self._ACTIVE]
             for i in idxs:
                 if self._in_span(mi, i, len(notes)):
