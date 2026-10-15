@@ -1694,6 +1694,9 @@ class _GameScreenBase:
         self.show_hit_flights = True
         #: スコアの加算文字(+300 など)を出すか。合計の数字はこれとは別。
         self.show_score_gain = SHOW_SCORE_GAIN
+        #: コース記号(おに 等)の濃さ。同時再生で打音を切った帯を薄くする
+        #: (利用者の指定 2026-10-15)。
+        self.course_sym_opacity = 1.0
 
         self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
         # キー操作はレーンが持っている(再生・シーク・速度・演奏モードの打面)。
@@ -2828,8 +2831,13 @@ class _GameScreenBase:
 
         # --- コース記号 ---
         if self._course_sym is not None:
+            op = self.course_sym_opacity
+            if op < 1.0:
+                p.setOpacity(max(0.0, op))
             blit_sprite(p, COURSE_SYM_POS[0], COURSE_SYM_POS[1],
                         self._course_sym, self._dpr)
+            if op < 1.0:
+                p.setOpacity(1.0)
 
         # --- 太鼓 ---
         drum = self._skin.get("drum")
@@ -4095,6 +4103,21 @@ class _GameScreenBase:
     def judge_center(self):
         """判定円の中心(画面座標)。実測値と突き合わせるのに使う。"""
         return (LANE_X + JUDGE_X_IN_LANE, LANE_Y + LANE_H // 2)
+
+    #: コース記号が無いときの当たり判定の大きさ(素材のだいたいの大きさ)。
+    COURSE_SYM_FALLBACK = (80, 63)
+
+    def course_sym_rect(self) -> QRect:
+        """コース記号(おに 等)の矩形。押せる場所を外へ教えるために要る。
+
+        同時再生では、ここを押して帯ごとの打音を切り替える
+        (利用者の案 2026-10-15)。記号の出ていないコース(アレンジなど)でも
+        押せるように、素材が無いときも同じ所に場所を取る。"""
+        pm = self._course_sym
+        x, y = COURSE_SYM_POS
+        if pm is None:
+            return QRect(x, y, *self.COURSE_SYM_FALLBACK)
+        return QRect(x, y, pm.width(), pm.height())
 
 
 class GameScreenWidget(_GameScreenBase, QWidget):

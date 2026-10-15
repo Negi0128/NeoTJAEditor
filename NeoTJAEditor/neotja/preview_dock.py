@@ -2184,6 +2184,11 @@ class PreviewDock(QDockWidget):
     _multi_pending = False
     #: いま並べている帯を、どの本文から作ったか(譜面が変わったら作り直す)。
     _multi_built_for = None
+    #: 打音を切ってある難易度の key(利用者の指定 2026-10-15)。帯の番号では
+    #: なく key で覚える — 並べる難易度を選び直しても覚えが付いて回る。
+    _multi_muted = None
+    #: いま並べている難易度ぶんの譜面(打音を作り直すのに要る)。
+    _multi_built = None
 
     def available_courses(self):
         """この譜面にあるコース [{"key","label",...}]。"""
@@ -2265,8 +2270,12 @@ class PreviewDock(QDockWidget):
                    for d in previews]
         if self._multi_screen is None:
             self._multi_screen = MultiBandScreen()
+            self._multi_screen.muteToggled.connect(self._on_multi_mute)
         self._multi_built_for = self._tja_content
+        self._multi_built = previews
         self._multi_screen.set_screens(screens)
+        # 切ってあった難易度のしるしを付け直す(set_screens が番号を捨てる)。
+        self._multi_screen.set_muted(self._muted_band_indices())
         self._multi_screen.begin_offline_render()
         # 時刻は帯の画面が自分のタイマーで取りに来る。レーンは見えていなくても
         # 時計を持っているので、そこから直に引く(multi_screen の説明を参照)。
@@ -2283,16 +2292,48 @@ class PreviewDock(QDockWidget):
         # コースのボタンは「並べる難易度を選ぶ」に変わる(_on_course_button)。
         self.course_button.setText("難易度: %d本" % len(previews))
         self.course_button.setStyleSheet("")
-        # 打音は**並べた難易度を全部鳴らす**(利用者の指定 2026-10-03)。同じ
-        # 時刻に重なるぶん大きくなるので、本数で割って小さくする。ミキサーは
-        # 打音をサンプル単位で先に並べているので、合流した一覧を渡すだけでよい。
+        self._rebuild_multi_notes()
+
+    def _muted_band_indices(self):
+        """打音を切ってある難易度が、いま何本目にいるか。"""
+        muted = self._multi_muted or set()
+        return [i for i, k in enumerate(self._multi_keys or [])
+                if k in muted]
+
+    def _on_multi_mute(self, index: int):
+        """帯のコース記号が押された。その難易度の打音を入り切りする。"""
+        keys = self._multi_keys or []
+        if not (0 <= index < len(keys)):
+            return
+        if self._multi_muted is None:
+            self._multi_muted = set()
+        self._multi_muted.symmetric_difference_update({keys[index]})
+        self._rebuild_multi_notes()
+
+    def _rebuild_multi_notes(self):
+        """同時再生の打音を組み立て直す。
+
+        打音は**並べた難易度を全部鳴らす**(利用者の指定 2026-10-03)。同じ
+        時刻に重なるぶん大きくなるので、本数で割って小さくする。ミキサーは
+        打音をサンプル単位で先に並べているので、合流した一覧を渡すだけでよい。
+
+        コース記号を押して切ってある難易度は混ぜない(利用者の指定
+        2026-10-15)。割る本数も**鳴らす本数**にするので、3本切って1本だけに
+        すれば、その1本はふつうの大きさで鳴る。"""
+        previews = self._multi_built or []
+        keys = self._multi_keys or []
+        muted = self._multi_muted or set()
         merged = []
-        for data in previews:
+        live = 0
+        for i, data in enumerate(previews):
+            if i < len(keys) and keys[i] in muted:
+                continue
             merged += hit_notes_from_preview(data)
+            live += 1
         merged.sort(key=lambda n: n[0])
         self._multi_notes = merged
-        self._multi_count = len(previews)
-        self._apply_hit_schedule(offset)
+        self._multi_count = max(1, live)
+        self._apply_hit_schedule(self.spin_offset.value())
         self._apply_sfx_volume()
 
     def _on_course_button(self):

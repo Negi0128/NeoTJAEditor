@@ -1565,24 +1565,29 @@ class ChartPreviewWidget(QWidget):
         if i < 0:
             return 0.0
         g0, g1 = self._gogo_regions[i]
-        is_gogo = now < g1
         peak = self.GOGO_ATT + self.GOGO_DEC
         ft = now - g0
         if ft > peak:
             ft = peak
-        if not is_gogo:
-            ft += (now - g1)
-        if ft > peak + self.GOGO_REL:
-            return 0.0
-        if ft > peak:
-            v = 1.0 - ((ft - peak) / self.GOGO_REL) ** 2
-        elif ft >= self.GOGO_ATT:
+        over = 0.0
+        if now >= g1:
+            # 区間を出たあとは炎(gogo_fire_state)と同じ時計で消す。別の時計で
+            # 測ると、長さが peak より短いゴーゴーで脈だけが炎より後まで
+            # 生き残り、地も炎も無い暗いレーンに輪だけが残ってしまう。
+            over = (now - g1) / self.GOGO_REL
+            if over >= 1.0:
+                return 0.0
+            # 区間の終わりで保っていた値から落とす。
+            ft = min(g1 - g0, peak)
+        if ft >= self.GOGO_ATT:
             # 山(2.0)から定常(1.0)へ。形は実測に当てはめた GOGO_DEC_SHAPE。
             x = (ft - self.GOGO_ATT) / self.GOGO_DEC
             v = 1.0 + max(0.0, 1.0 - x) ** self.GOGO_DEC_SHAPE
         else:
             v = 2.0 * (ft / self.GOGO_ATT)
         v *= 0.5
+        if over > 0.0:
+            v *= 1.0 - over ** 2
         return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
 
     def set_effects_lite(self, lite: bool):

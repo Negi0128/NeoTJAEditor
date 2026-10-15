@@ -15,8 +15,14 @@
   ・2〜4本。4本なら 704px で 1280x720 にちょうど収まる
   ・帯の中身はそのまま(スコア・太鼓・ネームプレート・打音表記)
   ・背景も踊り子も出さない。地は黒
-  ・「良」・叩いた音符が飛ぶ演出・スコアの加算文字は出さない
+  ・叩いた音符が飛ぶ演出・スコアの加算文字は出さない
     (4本ぶん同時に動くと、どの譜面を読んでいるか分からなくなる)
+  ・「良」は**出す**(利用者の指定 2026-10-15。はじめは出さない決まりだった)。
+    文字は帯の上辺より 61px 上に出るので、帯の切り抜きの中では頭が切れる。
+    帯を全部描いたあとに切らずに重ねて描く(_paint_judge_pops)。上下の帯に
+    かぶってよい、というのが利用者の指定。
+  ・コース記号を押すと、その帯の打音だけを切れる(利用者の案 2026-10-15)。
+    切った帯は記号を薄くして斜線を引く。
 
 音は1本。同じ曲なので OFFSET も同じで、全部の帯へ同じ時刻を配るだけで
 ズレようがない — 音源を複数まわして同期させる必要がそもそも無い。
@@ -26,10 +32,11 @@ GameScreenWidget と同じにしてあるので、書き出しは1本のとき�
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from neotja.game_screen import PANEL_H, PANEL_Y, SCREEN_H_FULL, SCREEN_W
+from neotja.game_screen import (JUDGE_BOTTOM, JUDGE_POP_DROP, JUDGE_SCALE,
+                                PANEL_H, PANEL_Y, SCREEN_H_FULL, SCREEN_W)
 
 #: 帯の上端と高さ(素材の箱。game_screen の左パネルと同じ値)。
 BAND_TOP = PANEL_Y          # 188
@@ -47,6 +54,12 @@ TOP_PAD = 40
 #: 帯の下辺(枠の縁 9px)を次の帯で隠して詰める。4本ぶんの場所を作るのに
 #: 要るのはこれだけで、レーンにも左パネルにも掛からない。
 BAND_TRIM = 9
+
+#: 打音を切った帯の、コース記号の濃さと斜線の色。左のパネルの地が赤なので、
+#: 斜線は白で引く(赤系だと地に埋もれて、ただの飾りに見えた)。
+MUTE_SYM_OPACITY = 0.3
+MUTE_SLASH_COLOR = "#ffffff"
+MUTE_SLASH_EDGE = "#201015"
 
 
 def band_pitch() -> int:
@@ -77,11 +90,19 @@ class MultiBandScreen(QWidget):
     #: 自分で時刻を取りに行く刻み(120fps 相当)。
     FRAME_MS = 8
 
+    #: コース記号を押して、その帯の打音を入り切りした(帯の番号を渡す)。
+    muteToggled = Signal(int)
+
     def __init__(self, screens=None, parent=None):
         super().__init__(parent)
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setAutoFillBackground(False)
+        # コース記号の上で指の形にするのに要る(押していなくても報せが来る)。
+        self.setMouseTracking(True)
         self._screens = []
+        #: 打音を切ってある帯の番号。音を止めるのは外(preview_dock)の仕事で、
+        #: ここは押された所を伝えて見た目を変えるだけ。
+        self._muted = set()
         self._bg = QColor(BG_COLOR)
         #: キーを渡す先(本体のレーン)。
         self._key_target = None
@@ -145,10 +166,51 @@ class MultiBandScreen(QWidget):
         self._screens = [s for s in (screens or []) if s is not None][:MAX_BANDS]
         for s in self._screens:
             # 帯の中で動くものを減らす(利用者の指定 2026-10-03)。
+            # 「良」はここでは描かせない。帯の切り抜きで頭が切れるので、
+            # 全部の帯を描いたあとに重ねる(_paint_judge_pops)。
             s.show_judge_pop = False
             s.show_hit_flights = False
             s.show_score_gain = False
+            s.course_sym_opacity = 1.0
+        # 番号と難易度の対応が変わるので、切ってあった覚えは捨てる。
+        # 入れ直すのは外(preview_dock が難易度の key で覚えている)。
+        self._muted = set()
         self.update()
+
+    # ------------------------------------------------------------------
+    # 帯ごとの打音の入り切り
+    # ------------------------------------------------------------------
+    def set_muted(self, indices):
+        """打音を切ってある帯を入れ替える(見た目だけ)。"""
+        self._muted = {int(i) for i in (indices or [])
+                       if 0 <= int(i) < len(self._screens)}
+        for i, gs in enumerate(self._screens):
+            gs.course_sym_opacity = (MUTE_SYM_OPACITY if i in self._muted
+                                     else 1.0)
+        self.update()
+
+    def muted(self):
+        return set(self._muted)
+
+    def band_at(self, pos):
+        """その点がどの帯か。帯の外なら None。"""
+        for i in range(len(self._screens)):
+            x, y, w, h = self.band_rect(i)
+            if x <= pos.x() < x + w and y <= pos.y() < y + h:
+                return i
+        return None
+
+    def course_sym_at(self, pos):
+        """その点がコース記号の上なら帯の番号。違えば None。"""
+        i = self.band_at(pos)
+        if i is None:
+            return None
+        x, y, _w, _h = self.band_rect(i)
+        # 帯の中は「画面の座標 - 帯のずらし量」で見る(paint_screen と同じ)。
+        r = self._screens[i].course_sym_rect()
+        if r.contains(int(pos.x() - x), int(pos.y() - y + BAND_TOP)):
+            return i
+        return None
 
     def screens(self):
         return list(self._screens)
@@ -185,7 +247,62 @@ class MultiBandScreen(QWidget):
             p.translate(x, y - BAND_TOP)
             p.setClipRect(0, BAND_TOP, w, h)
             gs.paint_screen(p)
+            if i in self._muted:
+                self._paint_mute_mark(p, gs)
             p.restore()
+        self._paint_judge_pops(p)
+
+    def _paint_judge_pops(self, p: QPainter):
+        """判定文字「良」を、帯の切り抜きの外へ重ねて描く。
+
+        「良」の下端は帯の上辺より下(レーンに 15px かぶる所)だが、文字の丈が
+        84px あるので上へ 61px はみ出す。帯ごとの切り抜きの中で描くと頭が
+        切れてしまうので、帯を全部描いたあとに切らずに描く。上の帯のレーンに
+        かぶってよい、というのが利用者の指定(2026-10-15)。
+
+        帯より後に描くので、どの帯の「良」も必ず手前に出る。
+
+        いちばん上の帯だけは、そのまま描くと**画面の外へ 21px 出て頭が
+        欠ける**(上に空けてあるのはボタンぶんの 40px しかない)。はみ出す
+        ぶんだけ下げる。下げるのはその帯だけで、他は素のままの位置。"""
+        for i, gs in enumerate(self._screens):
+            x, y, _w, _h = self.band_rect(i)
+            p.save()
+            p.translate(x, y - BAND_TOP)
+            try:
+                gs.draw_judge_pop(p, 0, self._judge_oy(gs, y))
+            except Exception:  # noqa: BLE001
+                pass
+            p.restore()
+
+    @staticmethod
+    def _judge_oy(gs, band_y):
+        """「良」を上へずらす量。画面から出るぶんだけ負(=下げる)にする。"""
+        try:
+            cp = gs.chart_preview
+            spr = cp.judge_sprite(cp.current_judge())
+            h = int(spr.height() * JUDGE_SCALE) if spr is not None else 26
+        except Exception:  # noqa: BLE001
+            h = 26
+        # 出た瞬間は JUDGE_POP_DROP ぶん上にいる。そこが頭。
+        top = (JUDGE_BOTTOM - h - JUDGE_POP_DROP) + (band_y - BAND_TOP)
+        return min(0.0, top)
+
+    def _paint_mute_mark(self, p: QPainter, gs):
+        """打音を切った帯のしるし。コース記号に斜線を引く。
+
+        記号そのものは薄くしてある(course_sym_opacity)。薄いだけだと
+        「スキンがそういう絵」に見えてしまうので、線を1本足して
+        切ってあることを分かるようにする。"""
+        r = gs.course_sym_rect()
+        m = 6
+        x0, y0 = r.left() + m, r.bottom() - m
+        x1, y1 = r.right() - m, r.top() + m
+        p.setOpacity(1.0)
+        p.setPen(QPen(QColor(MUTE_SLASH_EDGE), 7))
+        p.drawLine(x0, y0, x1, y1)
+        p.setPen(QPen(QColor(MUTE_SLASH_COLOR), 4))
+        p.drawLine(x0, y0, x1, y1)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -225,7 +342,26 @@ class MultiBandScreen(QWidget):
         # 返すこと — ScaledHost が「誰も受け取らなかった」と判断して親へ
         # 送り返すと、行き場のないイベントが往復して落ちる。
         self.setFocus(Qt.MouseFocusReason)
+        if event.button() == Qt.LeftButton:
+            i = self.course_sym_at(event.position())
+            if i is not None:
+                self.toggle_mute(i)
         event.accept()
+
+    def mouseMoveEvent(self, event):
+        """コース記号の上では指の形にして、押せることを知らせる。"""
+        over = self.course_sym_at(event.position()) is not None
+        self.setCursor(Qt.PointingHandCursor if over else Qt.ArrowCursor)
+        event.accept()
+
+    def toggle_mute(self, i: int):
+        """帯 i の打音を入り切りする。音を止めるのは受け取った側の仕事。"""
+        if not (0 <= i < len(self._screens)):
+            return
+        m = set(self._muted)
+        m.symmetric_difference_update({i})
+        self.set_muted(m)
+        self.muteToggled.emit(i)
 
     def wheelEvent(self, event):
         """ホイールで小節移動(ゲーム画面と同じ)。"""
