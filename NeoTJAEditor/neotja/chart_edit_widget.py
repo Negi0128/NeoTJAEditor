@@ -2944,6 +2944,9 @@ class ChartEditWaveform(WaveformWidget):
         self._draw_selection(p, note_cy)
         self._draw_note_drag(p, rows_top, rows_h, note_cy)
 
+        # --- 合作: 相手のカーソル(自分の線より下に敷く) ---
+        self._draw_peer_marks(p, h)
+
         # --- 再生位置の線は全部の行を貫く ---
         xp = self._sec_to_x(self.position_sec)
         p.setPen(QPen(QColor(pal["err"]), 2))
@@ -2957,6 +2960,59 @@ class ChartEditWaveform(WaveformWidget):
             self._draw_ruler(p, t0, t1)
         self._draw_row_labels(p, rows)
         self._draw_offset_mode(p, w, h)
+
+    # ------------------------------------------------------------------
+    # 合作: 相手のカーソル(利用者の要望 2026-10-16)
+    #
+    # 「ここ見て」が通じるようにするためだけの飾りなので、**譜面には一切
+    # 触らない**。外(main_window)が置いていった印を描くだけ。
+    # ------------------------------------------------------------------
+    #: [(名前, 譜面時刻, 色)]。合作していなければ空。
+    _peer_marks = ()
+
+    def set_peer_marks(self, marks):
+        """相手のカーソルを置き直す。中身が同じなら塗り直さない。"""
+        marks = tuple(marks or ())
+        if marks == self._peer_marks:
+            return
+        self._peer_marks = marks
+        self.update()
+
+    def _draw_peer_marks(self, p, h):
+        if not self._peer_marks:
+            return
+        f = p.font()
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.0))
+        p.setFont(f)
+        fm = p.fontMetrics()
+        for name, t, color in self._peer_marks:
+            x = self._sec_to_x(float(t))
+            col = QColor(color)
+            left, right = self.LANE_X0, self.width()
+            # **画面の外に居るときは端へ寄せて矢印を出す。** 消してしまうと
+            # 「ここ見て」と言われてもどちらへ送ればいいか分からない
+            # (利用者の要望 2026-10-16)。
+            out = "" if left <= x <= right else ("←" if x < left else "→")
+            if not out:
+                p.setPen(QPen(col, 2, Qt.DashLine))
+                p.drawLine(x, self.RULER_H, x, h)
+            label = (out + str(name)) if out else str(name)
+            tw = fm.horizontalAdvance(label) + 8
+            th = fm.height() + 2
+            if out == "←":
+                lx = left + 2
+            elif out == "→":
+                lx = right - tw - 2
+            else:
+                lx = x + 3
+                if lx + tw > right:
+                    lx = x - 3 - tw
+            ly = self.RULER_H + 2
+            if out:
+                col.setAlpha(150)       # 外に居るぶんは控えめに
+            p.fillRect(lx, ly, tw, th, col)
+            p.setPen(QColor("#10141d"))
+            p.drawText(lx + 4, ly + fm.ascent() + 1, label)
 
     def _draw_offset_mode(self, p, w, h):
         """OFFSET調整中の見た目。音声波形ペインと同じ「強調色の枠 + 読み値」。

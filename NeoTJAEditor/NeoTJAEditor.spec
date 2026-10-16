@@ -90,11 +90,19 @@ import _sounddevice_data
 _portaudio_dir = os.path.join(os.path.dirname(_sounddevice_data.__file__),
                               'portaudio-binaries')
 
+# 合作モードで離れた相手と繋ぐための入口(cloudflared)。**あれば同梱する。**
+# 無くても組み立ては通る — その exe では「同じ家の中だけの合作」になる
+# (neotja/tunnel.py の find_cloudflared を参照)。
+_tunnel_exe = os.path.join(SPECPATH, 'tools', 'cloudflared.exe')
+_tunnel_datas = [(_tunnel_exe, 'tools')] if os.path.exists(_tunnel_exe) else []
+if not _tunnel_datas:
+    print('[spec] tools/cloudflared.exe が無いので、合作はLANのみになります')
+
 a = Analysis(
     ['neotja/__main__.py'],
     pathex=[],
     binaries=[],
-    datas=[
+    datas=_tunnel_datas + [
         (_ffmpeg_bin_dir, 'imageio_ffmpeg/binaries'),
         (_portaudio_dir, '_sounddevice_data/portaudio-binaries'),
         # 素材は TNDE の System フォルダから読むので同梱しないが、この2つは

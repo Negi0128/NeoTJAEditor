@@ -687,6 +687,35 @@ class MainWindow(QMainWindow):
         # 窓の「作譜」メニューは置かない(利用者の指定 2026-10-04)。同じ中身は
         # 作譜ペインの右クリックから出る(populate_command_menu)ので、
         # メニューバーに常駐させる必要がない。
+        # 合作はメニューバーに1つ立てる(利用者の指定 2026-10-16)。ツールの
+        # 下に埋めると、相手と繋ぐという独立した話が道具の1つに見えてしまう。
+        # まだ試験的(利用者の指定 2026-10-16)。ほかの実験中の機能と
+        # 同じ付け方で、入り口の時点で分かるようにする。
+        cm = mb.addMenu("合作(実験的)")
+        cm.addAction("ルームを作成", self.collab_host)
+        cm.addAction("ルームに入室", self.collab_join)
+        cm.addSeparator()
+        # 「編集モード / プレビューモード」で言い切る(利用者の指定 2026-10-16。
+        # 「ペンを渡す」では何が起きるか分からない)。いまどちらに居るかが
+        # 分かるよう、印の付く項目にして排他で切り替える。
+        from PySide6.QtGui import QActionGroup
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        self._act_collab_edit = cm.addAction("編集モードに切り替え",
+                                             self.collab_take_edit)
+        self._act_collab_view = cm.addAction("プレビューモードに切り替え",
+                                             self.collab_leave_edit)
+        for act in (self._act_collab_edit, self._act_collab_view):
+            act.setCheckable(True)
+            grp.addAction(act)
+        cm.addSeparator()
+        self._act_collab_hand = cm.addMenu("編集を任せる")
+        self._act_collab_hand.aboutToShow.connect(self._collab_fill_hand_menu)
+        cm.addSeparator()
+        cm.addAction("退室", self.collab_stop)
+        self._menu_collab = cm
+        cm.aboutToShow.connect(self._collab_sync_menu)
+
         rm = mb.addMenu("起動")
         self._run_actions = {}
         # F1 is reserved for the built-in preview (see _bind_shortcuts /
@@ -847,6 +876,9 @@ class MainWindow(QMainWindow):
         base = f"{APP_NAME}  v{VERSION}"
         if self.current_file:
             base += f"  —  {os.path.basename(self.current_file)}"
+        # 合作しているあいだは、誰がペンを持っているかを肩書きに出す
+        # (読むだけなのに打ってしまう事故を防ぐため、常に見える所へ)。
+        base += getattr(self, "_collab_tag", "") or ""
         self.setWindowTitle(base + " [*]")
 
     def _mark_saved(self):
@@ -1540,6 +1572,7 @@ class MainWindow(QMainWindow):
             self.editor.checkpointsChanged.emit()
             self._refresh_title()
             self._mark_saved()
+            self._collab_check_file(path)
             self._push_recent(path)
             self._set_preview_content(content)
             self._force_update()
@@ -1840,6 +1873,12 @@ class MainWindow(QMainWindow):
             # 待たずに破棄すると "QThread: Destroyed while thread is still
             # running" でプロセスごと落ちる。
             self._shutdown_analysis_thread()
+            # 合作の入口(cloudflared)は子プロセスなので、置いて行くと
+            # アプリを閉じたあとも外から入れる口が開いたままになる。
+            try:
+                self.collab_stop()
+            except Exception:  # noqa: BLE001
+                pass
             event.accept()
         else:
             event.ignore()
@@ -2118,6 +2157,15 @@ class MainWindow(QMainWindow):
         戻り値は run_op の結果 dict(画面の暫定表示に使う)か None。
         長い音符・範囲の操作は見た目を先回りで作れないので、その場で解析し
         直す(1音ずつの打ち込みではないので、同期の解析でも引っかからない)。"""
+        # 合作でペンを持っていない間は書かせない。手元だけ変わって誰にも
+        # 配られないと、そこから本文が分岐する(文字の編集は setReadOnly で
+        # 止まるが、作譜ペインの打ち込みはこちらを通るので別に止める)。
+        cs = self._collab
+        if cs is not None and cs.is_on() and not cs.holds_pen():
+            self.statusBar().showMessage(
+                "合作: いまはプレビューモードです"
+                "(編集するにはメニューの「編集モードに切り替え」)", 4000)
+            return None
         text = self.editor.toPlainText()
         course_key = (self._preview_course_override
                       or self._course_key_at_cursor(text))
@@ -2797,6 +2845,575 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 continue
         return bpm, meter, scroll
+
+    # ------------------------------------------------------------------
+    # 合作モード(同じ譜面を複数の端末で一緒に書く / 利用者の案 2026-10-16)
+    #
+    # **ペンは1本しか回らない。** 書けるのは常に1人で、ほかの人は同じ譜面を
+    # 見ている。衝突が起きないので、本文の同期は「○文字目から○文字を、この
+    # 文字列へ差し替える」を順に流すだけで足りる(neotja/collab.py)。
+    #
+    # 送る側の口はここ1つ。QTextDocument の contentsChange は、**手打ちも
+    # 作譜モードの打ち込みも TJA校正も Ctrl+Z も**通るので、拾い漏らしが無い
+    # (作譜の編集も最後は QTextCursor の置換1回になっている)。
+    # ------------------------------------------------------------------
+    #: 合作の1回ぶん。使うまで作らない(窓を開くだけの人に網を持たせない)。
+    _collab = None
+    #: 受け取った差し替えを当てている最中か。**自分で送り返さないための札。**
+    _collab_applying = False
+
+    def collab(self):
+        """合作の入れ物。無ければ作って、本文の出し入れを繋ぐ。"""
+        if self._collab is not None:
+            return self._collab
+        from neotja.collab import CollabSession
+        cs = CollabSession(
+            str(self._collab_default_name() or "だれか"), self)
+        cs.read_text = self.editor.toPlainText
+        cs.fullTextReceived.connect(self._collab_take_full)
+        cs.patchReceived.connect(self._collab_take_patch)
+        cs.penChanged.connect(self._collab_pen_changed)
+        cs.penRequested.connect(self._collab_pen_requested)
+        cs.presenceReceived.connect(self._collab_take_presence)
+        cs.songProgress.connect(self._collab_song_progress)
+        cs.songReceived.connect(self._collab_song_arrived)
+        # 自分の居場所を流す。文字のカーソルと作譜ペインのカーソル、どちらが
+        # 動いても同じ所へ集める。
+        self.editor.cursorPositionChanged.connect(self._collab_queue_here)
+        try:
+            self.preview_dock.chart_edit.cursorMoved.connect(
+                lambda _t: self._collab_queue_here())
+        except Exception:  # noqa: BLE001
+            pass
+        cs.notice.connect(lambda s: self.statusBar().showMessage(s, 6000))
+        cs.stateChanged.connect(self._collab_update_title)
+        cs.stateChanged.connect(self._collab_paint_peers)
+        self.editor.document().contentsChange.connect(self._collab_on_change)
+        self._collab = cs
+        return cs
+
+    def _collab_song_tag(self):
+        """いま開いている音源の見分け(名前と大きさ)。違う曲なら知らせる。"""
+        try:
+            w = self.preview_dock.wave_path()
+        except Exception:  # noqa: BLE001
+            w = None
+        if not w or not os.path.exists(w):
+            return ""
+        return "%s/%d" % (os.path.basename(w), os.path.getsize(w))
+
+    #: 離れた相手への入口(cloudflared)。ルームを閉じたら必ず止める。
+    _collab_tunnel = None
+    _collab_room_dialog = None
+
+    def _collab_ask(self, mode):
+        """名前(と合言葉)を聞く。やめたら None。"""
+        from neotja.dialogs.collab_enter_dialog import CollabEnterDialog
+        dlg = CollabEnterDialog(mode, self._collab_default_name(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        name = dlg.name()
+        # 次からの初期値にする。
+        self.config_data["collab_name"] = name
+        settings_mod.save_settings(self.config_data)
+        return (name, dlg.code())
+
+    def _collab_default_name(self):
+        """名前の欄に最初から入れておくもの。"""
+        return (self.config_data.get("collab_name")
+                or self.config_data.get("nameplate_name")
+                or os.environ.get("USERNAME") or "")
+
+    # ---- 合作フォルダ(アプリの隣の「合作」。ここの中しか触らない) ----
+    def _collab_move_into_dir(self):
+        """いま開いている譜面を合作フォルダへ用意する。道筋を返す。
+
+        **合作はこのフォルダの中だけで行う**(利用者の指定 2026-10-16)。
+        よそのファイルのまま始めると、相手から来た書き換えが自分の本番の
+        譜面へそのまま入ってしまう。音源も隣へ写して、2人の持ち物をそろえる。
+        """
+        from neotja.collab import collab_dir, in_collab_dir, safe_file_name
+        root = collab_dir()
+        if not root:
+            QMessageBox.warning(self, "合作",
+                                "合作フォルダを作れませんでした。")
+            return None
+        cur = self.current_file
+        if cur and in_collab_dir(cur):
+            if self.isWindowModified():
+                self.save_file()
+            return cur
+        title = ""
+        for line in self.editor.toPlainText().split("\n")[:40]:
+            if line.upper().startswith("TITLE:"):
+                title = line.split(":", 1)[1].strip()
+                break
+        base = safe_file_name(title or (os.path.splitext(
+            os.path.basename(cur))[0] if cur else "合作"))
+        dst = os.path.join(root, base + ".tja")
+        n = 2
+        while os.path.exists(dst):
+            dst = os.path.join(root, "%s_%d.tja" % (base, n))
+            n += 1
+        # 音源も隣へ写す(無ければ写さない)。
+        wave_name = ""
+        try:
+            src_wave = self.preview_dock.wave_path()
+            if src_wave and os.path.exists(src_wave):
+                wave_name = os.path.basename(src_wave)
+                dst_wave = os.path.join(root, wave_name)
+                if not os.path.exists(dst_wave):
+                    shutil.copy2(src_wave, dst_wave)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with open(dst, "w", encoding="cp932", errors="replace",
+                      newline="") as f:
+                f.write(self.editor.toPlainText())
+        except OSError as e:
+            QMessageBox.warning(self, "合作",
+                                "合作フォルダへ写せませんでした:\n%s" % e)
+            return None
+        self._open_path(dst)
+        self.statusBar().showMessage(
+            "合作: 「%s」フォルダへ写しました%s"
+            % (os.path.basename(root), "(音源も)" if wave_name else ""), 8000)
+        return dst
+
+    def collab_host(self):
+        """ルームを作る。家の中の招待コードはすぐ、ネット越しは出来たら足す。"""
+        got = self._collab_ask("create")
+        if got is None:
+            return
+        if self._collab_move_into_dir() is None:
+            return
+        cs = self.collab()
+        cs.name = got[0]
+        # 合作フォルダへ写した音源を、入ってきた人へ送れるようにする。
+        cs.song_offer(self._collab_wave_in_dir())
+        code = cs.start_host()
+        if not code:
+            return
+        from neotja.dialogs.collab_room_dialog import CollabRoomDialog
+        dlg = CollabRoomDialog(cs.codes() or [code], self)
+        dlg.finished.connect(lambda _r: self._collab_forget_room_dialog())
+        self._collab_room_dialog = dlg
+        dlg.show()
+        self._collab_start_tunnel(cs)
+        self._collab_update_title()
+
+    def _collab_forget_room_dialog(self):
+        dlg, self._collab_room_dialog = self._collab_room_dialog, None
+        if dlg is not None:
+            dlg.deleteLater()
+
+    def _collab_start_tunnel(self, cs):
+        """離れた相手のための入口を立てる。
+
+        **立たなくても合作は始まっている。** 入口は「遠くからも入れる」を
+        足すだけなので、作れなければ家の中だけの合作として続ける。"""
+        from neotja.tunnel import Tunnel
+        self._collab_stop_tunnel()
+        tun = Tunnel(self)
+        tun.ready.connect(self._collab_tunnel_ready)
+        tun.failed.connect(self._collab_tunnel_failed)
+        tun.waiting.connect(self._collab_tunnel_waiting)
+        self._collab_tunnel = tun
+        tun.start(cs.port())
+
+    def _collab_stop_tunnel(self):
+        tun, self._collab_tunnel = self._collab_tunnel, None
+        if tun is not None:
+            tun.stop()
+            tun.deleteLater()
+
+    def _collab_tunnel_ready(self, url):
+        from neotja.collab import CODE_PREFIX
+        code = CODE_PREFIX + url
+        if self._collab_room_dialog is not None:
+            self._collab_room_dialog.set_net_code(code)
+        self.statusBar().showMessage(
+            "合作: 離れた相手も入れるようになりました", 6000)
+
+    def _collab_tunnel_waiting(self, _url, secs):
+        if self._collab_room_dialog is not None:
+            self._collab_room_dialog.set_net_waiting(secs)
+
+    def _collab_tunnel_failed(self, why):
+        if self._collab_room_dialog is not None:
+            self._collab_room_dialog.set_net_error(why)
+        self.statusBar().showMessage("合作: %s" % why, 8000)
+
+    def collab_join(self):
+        got = self._collab_ask("join")
+        if got is None:
+            return
+        name, code = got
+        cs = self.collab()
+        cs.name = name
+        cs.song = self._collab_song_tag()
+        cs.join(code)
+        self._collab_update_title()
+
+    def collab_take_edit(self):
+        """自分が編集モードになる。
+
+        誰も編集していなければそのまま切り替わる。ほかの人が編集中のときは
+        その人に代われるか尋ねる(断られたらプレビューのまま)。"""
+        cs = self.collab()
+        if not cs.is_on():
+            self.statusBar().showMessage(
+                "合作: ルームに入っていません", 4000)
+            self._collab_sync_menu()
+            return
+        if cs.holds_pen():
+            self.statusBar().showMessage("合作: もう編集モードです", 3000)
+            return
+        cs.request_pen()
+        if not cs.holds_pen():
+            self.statusBar().showMessage(
+                "合作: %s に代われるか聞いています" % (cs.pen or "相手"), 4000)
+        self._collab_sync_menu()
+
+    def collab_leave_edit(self):
+        """プレビューモードへ下りる。誰も編集していない状態になる。"""
+        cs = self.collab()
+        if not cs.is_on():
+            self._collab_sync_menu()
+            return
+        if not cs.holds_pen():
+            self.statusBar().showMessage("合作: もうプレビューモードです", 3000)
+            return
+        cs.release_pen()
+        self._collab_sync_menu()
+
+    def _collab_sync_menu(self):
+        """メニューの印と押せる/押せないを、いまの様子に合わせる。"""
+        cs = self._collab
+        on = cs is not None and cs.is_on()
+        editing = on and cs.holds_pen()
+        for act, want in ((self._act_collab_edit, editing),
+                          (self._act_collab_view, on and not editing)):
+            act.setEnabled(on)
+            act.setChecked(bool(want))
+        self._act_collab_hand.setEnabled(
+            on and cs.role == "host" and bool(cs.peer_names()))
+
+    def _collab_fill_hand_menu(self):
+        """「編集を任せる」の中身を、いま居る人で作り直す。"""
+        menu = self._act_collab_hand
+        menu.clear()
+        cs = self._collab
+        if cs is None or cs.role != "host":
+            return
+        for who in [cs.name] + cs.peer_names():
+            label = who + ("(自分)" if who == cs.name else "")
+            menu.addAction(label, lambda w=who: cs.grant_pen(w))
+
+    def _collab_check_file(self, path):
+        """合作中によその譜面を開いたら、巻き込まないように退室する。
+
+        合作はフォルダの中だけの約束(利用者の指定 2026-10-16)。開いたまま
+        繋がっていると、相手の書き換えがその譜面へ入ってしまう。"""
+        from neotja.collab import in_collab_dir
+        cs = self._collab
+        if cs is None or not cs.is_on() or in_collab_dir(path):
+            return
+        self.collab_stop()
+        QMessageBox.information(
+            self, "合作",
+            "合作フォルダの外の譜面を開いたので、ルームから出ました。\n"
+            "合作で触れるのはアプリの隣の「合作」フォルダの中だけです。")
+
+    def collab_stop(self):
+        """退室。**入口も必ず閉じる**(開けたままだと外から入れてしまう)。"""
+        self._collab_stop_tunnel()
+        if self._collab_room_dialog is not None:
+            self._collab_room_dialog.close()
+        if self._collab is not None:
+            self._collab.stop()
+        self._collab_update_title()
+
+    # ---- 音源の受け渡し ----
+    def _collab_wave_in_dir(self):
+        """合作フォルダにある、いまの譜面の音源。無ければ空。"""
+        from neotja.collab import collab_dir, in_collab_dir
+        try:
+            w = self.preview_dock.wave_path()
+        except Exception:  # noqa: BLE001
+            w = None
+        if w and os.path.exists(w) and in_collab_dir(w):
+            return w
+        root = collab_dir()
+        if not (root and w):
+            return ""
+        cand = os.path.join(root, os.path.basename(w))
+        return cand if os.path.exists(cand) else ""
+
+    def _collab_need_song(self):
+        """ゲスト: 譜面が指す音源が手元に無ければ、貰いに行く。"""
+        cs = self._collab
+        if cs is None or cs.role != "guest":
+            return
+        from neotja.collab import collab_dir
+        name = ""
+        for line in self.editor.toPlainText().split(chr(10))[:60]:
+            if line.upper().startswith("WAVE:"):
+                name = line.split(":", 1)[1].strip()
+                break
+        root = collab_dir()
+        if not name or not root:
+            return
+        if os.path.exists(os.path.join(root, os.path.basename(name))):
+            return                       # もう持っている
+        self.statusBar().showMessage("合作: 音源を貰っています…", 6000)
+        cs.request_song()
+
+    def _collab_song_progress(self, done, total, sending):
+        if total <= 0:
+            return
+        pct = int(100.0 * done / total)
+        self.statusBar().showMessage(
+            "合作: 音源を%s %d%%  (%.1f / %.1f MB)"
+            % ("送っています" if sending else "貰っています", pct,
+               done / 1048576.0, total / 1048576.0), 3000)
+
+    def _collab_song_arrived(self, path):
+        """音源が届いた。譜面を読み直して鳴るようにする。"""
+        self.statusBar().showMessage(
+            "合作: 音源を受け取りました → %s" % os.path.basename(path), 8000)
+        self._force_update()
+
+    # ---- 相手の居場所(「ここ見て」が通じるようにするための飾り) ----
+    #: 居場所を流す間合い(ms)。カーソルは1秒に何十回も動くので間引く。
+    COLLAB_HERE_MS = 80
+    _collab_here_timer = None
+    #: 相手ごとの色。名前から決めるので、席順が変わっても色は変わらない。
+    _COLLAB_COLORS = ("#7aa2f7", "#9ece6a", "#e0af68", "#bb9af7", "#f7768e",
+                      "#2ac3de")
+
+    def _collab_peer_color(self, name):
+        n = sum(ord(c) for c in str(name)) if name else 0
+        return self._COLLAB_COLORS[n % len(self._COLLAB_COLORS)]
+
+    def _collab_queue_here(self):
+        """自分の居場所を流す(続けて動いたぶんは1回にまとめる)。"""
+        cs = self._collab
+        if cs is None or not cs.is_on():
+            return
+        t = self._collab_here_timer
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(self.COLLAB_HERE_MS)
+            t.timeout.connect(self._collab_send_here)
+            self._collab_here_timer = t
+        if not t.isActive():
+            t.start()
+
+    def _collab_send_here(self):
+        cs = self._collab
+        if cs is None or not cs.is_on():
+            return
+        ct = None
+        try:
+            ce = self.preview_dock.chart_edit
+            if ce is not None:
+                ct = float(ce.cursor_time())
+        except Exception:  # noqa: BLE001
+            ct = None
+        cs.send_here(self.editor.textCursor().position(), ct)
+
+    def _collab_take_presence(self, who, _pos, chart_t):
+        """相手の居場所が届いた。作譜ペインと文字エディタの両方へ出す。"""
+        if not who:
+            return
+        self._collab_paint_peers()
+
+    def _collab_paint_peers(self):
+        """覚えている居場所を、画面へ置き直す。"""
+        cs = self._collab
+        try:
+            ce = self.preview_dock.chart_edit
+        except Exception:  # noqa: BLE001
+            ce = None
+        if ce is None or not hasattr(ce, "set_peer_marks"):
+            return
+        if cs is None or not cs.is_on():
+            ce.set_peer_marks(())
+            self._collab_paint_editor_peers({})
+            return
+        here = cs.peers_here()
+        marks = []
+        for who, (_pos, ct, _when) in sorted(here.items()):
+            if ct is None:
+                continue
+            marks.append((who, ct, self._collab_peer_color(who)))
+        ce.set_peer_marks(marks)
+        self._collab_paint_editor_peers(here)
+
+    def _collab_paint_editor_peers(self, here):
+        """文字エディタの側。相手の居る行に色を敷く。
+
+        ExtraSelection なので本文には一切触らない(選択の見た目だけ)。"""
+        from PySide6.QtWidgets import QTextEdit
+        from PySide6.QtGui import QColor, QTextFormat
+        sels = []
+        doc = self.editor.document()
+        last = doc.characterCount() - 1
+        for who, (pos, _ct, _when) in sorted((here or {}).items()):
+            sel = QTextEdit.ExtraSelection()
+            c = QTextCursor(doc)
+            c.setPosition(max(0, min(int(pos), last)))
+            sel.cursor = c
+            col = QColor(self._collab_peer_color(who))
+            col.setAlpha(46)
+            sel.format.setBackground(col)
+            # 行ぜんたいに敷く(文字1つぶんだけ塗っても見えない)。
+            sel.format.setProperty(QTextFormat.FullWidthSelection, True)
+            sels.append(sel)
+        self.editor.setExtraSelections(sels)
+
+    # ---- 本文の出し入れ ----
+    def _collab_on_change(self, pos, removed, added):
+        """この窓で本文が変わった。合作していれば配る。"""
+        cs = self._collab
+        if cs is None or not cs.is_on() or self._collab_applying:
+            return
+        # **書いていいのは編集モードの人だけ。** 読むだけの側でも、ファイルを
+        # 開く・貰った譜面を保存して開くといった操作で本文は入れ替わる。それを
+        # そのまま流すと、相手の譜面がこちらの都合で丸ごと書き換わってしまう
+        # (試験で実際にホストの本文が空になった 2026-10-16)。
+        if not cs.holds_pen():
+            return
+        ins = ""
+        if added:
+            c = QTextCursor(self.editor.document())
+            c.setPosition(pos)
+            c.setPosition(pos + added, QTextCursor.KeepAnchor)
+            # selectedText() は改行を U+2029 で返す。そのまま流すと相手の
+            # 本文に見えない字が混ざるので、必ず戻す。
+            ins = c.selectedText().replace(" ", "\n")
+        cs.send_patch(pos, removed, ins)
+
+    def _collab_take_patch(self, pos, removed, ins, _rev):
+        """相手の差し替えを当てる。送り返さないよう札を立てる。"""
+        doc = self.editor.document()
+        pos = max(0, min(int(pos), doc.characterCount() - 1))
+        self._collab_applying = True
+        try:
+            c = QTextCursor(doc)
+            c.beginEditBlock()
+            c.setPosition(pos)
+            c.setPosition(min(pos + int(removed), doc.characterCount() - 1),
+                          QTextCursor.KeepAnchor)
+            c.insertText(ins)
+            c.endEditBlock()
+        finally:
+            self._collab_applying = False
+        self.setWindowModified(True)
+
+    def _collab_take_full(self, text, _rev):
+        """本文を丸ごと貰った(入った直後・ずれを直すとき)。
+
+        **入った直後は、貰った譜面を合作フォルダへ保存してそれを開く。**
+        開いている譜面の上に相手の本文を貼ると、自分の作りかけを壊して
+        しまう(利用者の指定 2026-10-16: 合作はあのフォルダの中だけ)。"""
+        from neotja.collab import in_collab_dir
+        if text == self.editor.toPlainText():
+            return
+        if not in_collab_dir(self.current_file):
+            if self._collab_adopt_file(text):
+                return
+        self._collab_applying = True
+        try:
+            c = QTextCursor(self.editor.document())
+            c.beginEditBlock()
+            c.select(QTextCursor.Document)
+            c.insertText(text)
+            c.endEditBlock()
+        finally:
+            self._collab_applying = False
+        self._force_update()
+        self.statusBar().showMessage("合作: 譜面を受け取りました", 4000)
+
+    def _collab_adopt_file(self, text):
+        """貰った譜面を合作フォルダへ保存して開く。開けたら True。"""
+        from neotja.collab import collab_dir, safe_file_name
+        root = collab_dir()
+        if not root:
+            return False
+        title = ""
+        for line in text.split("\n")[:40]:
+            if line.upper().startswith("TITLE:"):
+                title = line.split(":", 1)[1].strip()
+                break
+        base = safe_file_name(title, "合作")
+        dst = os.path.join(root, base + ".tja")
+        n = 2
+        while os.path.exists(dst):
+            dst = os.path.join(root, "%s_%d.tja" % (base, n))
+            n += 1
+        try:
+            with open(dst, "w", encoding="cp932", errors="replace",
+                      newline="") as f:
+                f.write(text)
+        except OSError as e:
+            self.statusBar().showMessage("合作: 保存できません(%s)" % e, 8000)
+            return False
+        # 開く動き自体は「自分の編集」ではないので、相手へ流さない。
+        self._collab_applying = True
+        try:
+            self._open_path(dst)
+        finally:
+            self._collab_applying = False
+        self.statusBar().showMessage(
+            "合作: 譜面を受け取り、「%s」へ保存しました → %s"
+            % (os.path.basename(root), os.path.basename(dst)), 10000)
+        self._collab_need_song()
+        return True
+
+    def _collab_pen_changed(self, who):
+        """ペンの持ち主が変わった。持っていない間は書けなくする。
+
+        **読むだけにしないと分岐する。** 持っていない側が手元で打つと、
+        その変更は誰にも配られないまま自分の本文だけ変わってしまう。"""
+        cs = self._collab
+        mine = (cs is None) or cs.holds_pen()
+        self.editor.setReadOnly(not mine)
+        self._collab_update_title()
+        if cs is not None and cs.is_on():
+            self.statusBar().showMessage(
+                "合作: 編集モードは %s" % (who or "だれも居ません")
+                + ("(あなたです)" if mine else "(あなたはプレビュー)"), 6000)
+
+    def _collab_pen_requested(self, who):
+        cs = self._collab
+        if cs is None or cs.role != "host":
+            return
+        if QMessageBox.question(
+                self, "合作",
+                "%s が編集モードになりたいそうです。代わりますか?\n"
+                "(はい を選ぶと、あなたはプレビューモードになります)" % who,
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            cs.grant_pen(who)
+
+    def _collab_update_title(self):
+        """窓の肩書きに合作の様子を出す。"""
+        cs = self._collab
+        if cs is None or not cs.is_on():
+            self._collab_tag = ""
+        else:
+            if cs.holds_pen():
+                mode = "編集モード"
+            elif cs.pen:
+                mode = "プレビュー / 編集は %s" % cs.pen
+            else:
+                mode = "プレビュー / だれも編集していません"
+            self._collab_tag = "  [合作 %s / %s]" % (
+                "ルーム主" if cs.role == "host" else "参加", mode)
+        self._refresh_title()
+        self._collab_sync_menu()
 
     def open_tja_tidy(self):
         """「TJA校正」。作譜モードが残していく散らかりを片づける。

@@ -16,6 +16,7 @@ _SETTINGS_KEYS = (
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
     "preview_show_fps", "preview_modes_legacy", "command_panel_follow",
     "chart_edit_tail_measure", "chart_edit_wave_gain",
+    "collab_name",
     "preview_bottom_mode",
     "peepo_edit_redraw_fps",
     "preview_zoom", "preview_speed", "waveform_window",
@@ -286,6 +287,9 @@ def default_settings() -> dict:
         # 右クリック →「波形の高さ」で変える。音が小さい曲だと
         # アタックが見えない、という報告への対応(2026-10-08)。
         "chart_edit_wave_gain": 1.0,
+        # 合作モードで相手に見せる名前。ルームを作る/入るときに
+        # 入れたものを覚えておき、次から初期値にする。
+        "collab_name": "",
         # 作譜モードで、再生中にペインを塗り直す回数の上限。
         #   -1 … おまかせ(既定)。ゲーム画面が別の窓(gpu_screen_window)なら
         #        上限なし、同じ窓に組み込まれているなら 60。
