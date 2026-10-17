@@ -506,6 +506,9 @@ class ChartPreviewWidget(QWidget):
         self._bar_scrolls = []
         self._bar_visible = []
         self._gogo_regions = []
+        #: #LYRIC [(譜面時刻, 歌詞)]。空文字はそこで消す合図。
+        self._lyrics = []
+        self._lyric_starts = []
         self._branch_regions = []
         self._branch_starts = []
         self._branch_states = [(0.0, "N")]
@@ -1354,6 +1357,17 @@ class ChartPreviewWidget(QWidget):
     def gogo_regions(self):
         """ゴーゴー区間 [(start, end), ...]。画面側の演出用。"""
         return self._gogo_regions
+
+    def lyric_at(self, now):
+        """その時刻に出ている歌詞(#LYRIC)。無ければ空。
+
+        次の #LYRIC が来るまで出し続ける。文字列の無い #LYRIC は
+        そこで消す合図なので、空を返す(実譜面での使われ方どおり)。"""
+        starts = self._lyric_starts
+        if not starts:
+            return ""
+        i = bisect.bisect_right(starts, now) - 1
+        return self._lyrics[i][1] if i >= 0 else ""
 
     def bpm_at(self, t: float) -> float:
         """時刻 t で効いている BPM。解析済みの bpm_changes を二分探索する。"""
@@ -2416,6 +2430,9 @@ class ChartPreviewWidget(QWidget):
         )
         self._gogo_regions = sorted(data.get("gogo_regions") or [])
         self._gogo_starts = [g[0] for g in self._gogo_regions]
+        self._lyrics = sorted(data.get("lyrics") or [],
+                              key=lambda e: e[0])
+        self._lyric_starts = [e[0] for e in self._lyrics]
         # 分岐している区間 [(始まり, 終わり, その区間の系統)]。これを元に、
         # 「いつどの系統を流しているか」の並び(_branch_states)を作る。
         # 分岐の外は普通譜面(命令が来るまでの既定)。

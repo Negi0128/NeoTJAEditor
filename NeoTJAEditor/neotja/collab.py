@@ -90,6 +90,18 @@ def in_collab_dir(path):
         return False
 
 
+def collab_file_name(base, fallback="合作"):
+    """合作で作るファイルの名前。
+
+    **元の名前を残して、いつのものか分かるようにする**
+    (利用者の指定 2026-10-17: 「ファイル名_合作_YYYYMMDD_HHMM.tja」)。
+    曲名だけだと、同じ曲で何度も合作したときに見分けが付かない。"""
+    import datetime
+    stem = safe_file_name(base, fallback)
+    return "%s_合作_%s" % (stem,
+                           datetime.datetime.now().strftime("%Y%m%d_%H%M"))
+
+
 def safe_file_name(title, fallback="合作"):
     """曲名からファイル名を作る。Windows で使えない字は落とす。"""
     name = "".join(c for c in str(title or "").strip()
@@ -201,6 +213,8 @@ class CollabSession(QObject):
     songProgress = Signal(int, int, bool)
     #: 音源を受け取り終えた。(保存した道筋)
     songReceived = Signal(str)
+    #: 編集者が再生/一時停止した。(譜面時刻, 再生中か)
+    playbackReceived = Signal(float, bool)
 
     def __init__(self, name="", parent=None):
         super().__init__(parent)
@@ -236,6 +250,8 @@ class CollabSession(QObject):
         self._send_jobs = {}
         #: ゲスト: 受け取っている途中 [開いたファイル, 済, 全部, 名前]。
         self._recv = None
+        #: ゲスト: 譜面が欲しがっている音源の名前。
+        self._want_song = ""
 
     # ------------------------------------------------------------------
     # 出入り
@@ -361,11 +377,12 @@ class CollabSession(QObject):
         self._send_jobs.clear()
         self._join_left = 0
         self._join_url = ""
-        #: ホスト: 送れる音源の道筋 / 送っている途中の仕事。
+        # **送れる音源の覚え(_song_path)はここで消す。** 部屋ごとの持ち物
+        # なので、出たら忘れるのが正しい。ただし start_host() は中で stop()
+        # を呼ぶので、**登録は start_host() のあと**でないと消される
+        # (2026-10-17: 先に登録していたため、ゲストが「ください」と言っても
+        #  ホストに送るものが無かった)。
         self._song_path = ""
-        self._send_jobs = {}
-        #: ゲスト: 受け取っている途中 [開いたファイル, 済, 全部, 名前]。
-        self._recv = None
         was = self.role
         self.role = "off"
         self.pen = ""
@@ -413,6 +430,16 @@ class CollabSession(QObject):
         """相手の居場所 {名前: (文字の位置, 譜面時刻 or None, 届いた時刻)}。"""
         return dict(self._here)
 
+    def send_playback(self, seconds, playing):
+        """編集者が再生/一時停止した。みんなへ配る。
+
+        **編集者だけが配る。** 全員が配ると、受けた側がまた配り返して
+        永遠に止まらなくなる(利用者の指定 2026-10-17: 編集者の
+        再生/一時停止に合わせたい)。"""
+        if self.is_on() and self.holds_pen():
+            self._send({"t": "play", "at": float(seconds),
+                        "on": bool(playing)})
+
     def request_pen(self):
         """「自分が編集モードになりたい」と言う。
 
@@ -429,6 +456,23 @@ class CollabSession(QObject):
                 self.penRequested.emit(self.name)
         else:
             self._send({"t": "pen_req", "who": self.name})
+
+    def give_pen_to(self, who):
+        """**いまの編集者が**、誰かへ編集を渡す。
+
+        ホストなら自分で決める。ゲストならホストへ頼む(決めるのは
+        いつもホスト1人という形は崩さない)。"""
+        if not self.is_on() or not self.holds_pen():
+            return
+        who = str(who or "")
+        if self.role == "host":
+            self.grant_pen(who)
+        else:
+            self._send({"t": "pen_give", "from": self.name, "to": who})
+
+    def everyone(self):
+        """いま部屋に居る人の名前(自分を含む)。"""
+        return [self.name] + self.peer_names()
 
     def release_pen(self):
         """編集をやめてプレビューへ下りる。誰も編集していない状態になる。"""
@@ -478,9 +522,14 @@ class CollabSession(QObject):
             return None
         return {"name": os.path.basename(p), "size": os.path.getsize(p)}
 
-    def request_song(self):
-        """ゲスト: 音源をくださいと言う。"""
+    def request_song(self, want_name=""):
+        """ゲスト: 音源をくださいと言う。
+
+        want_name は譜面の WAVE: が指している名前。**その名前で置く。**
+        送り主の手元の名前で置くと、譜面が指す先と食い違って鳴らない
+        (2026-10-17 の実測で実際に食い違った)。"""
         if self.role == "guest" and self._sock is not None:
+            self._want_song = str(want_name or "")
             self._send({"t": "song_req"})
 
     def _start_song_send(self, sock):
@@ -596,8 +645,8 @@ class CollabSession(QObject):
             # 編集していた人が居なくなった。空ける(勝手にこちらが編集モードへ
             # 切り替わると驚くので、取りに行くのは人の操作に任せる)。
             self.grant_pen("")
-            self.notice.emit("合作: だれも編集していません"
-                             "(メニューの「編集モードに切り替え」で取れます)")
+            self.notice.emit("合作: 編集権は空いています"
+                             "(メニューの「編集モードに切り替え」で取得できます)")
         self.stateChanged.emit()
 
     def _on_guest_closed(self):
@@ -649,6 +698,23 @@ class CollabSession(QObject):
             if self.role == "host":
                 self._send(msg, skip=sock)   # ほかのゲストへも配る
             return
+        if t == "play":
+            self.playbackReceived.emit(float(msg.get("at") or 0.0),
+                                       bool(msg.get("on")))
+            if self.role == "host":
+                self._send(msg, skip=sock)
+            return
+        if t == "pen_give":
+            # **いまの編集者からの受け渡し。** ホストでなくても
+            # 自分の番を人に譲れるようにする(利用者の指定
+            # 2026-10-17)。決めるのはホストのままなので、ホストが
+            # 受けて配り直す — 2人が同時に「自分が編集者」と
+            # 思い込む形は作らない。
+            if self.role == "host":
+                who_from = str(msg.get("from") or "")
+                if who_from == self.pen:
+                    self.grant_pen(str(msg.get("to") or ""))
+            return
         if t == "pen_req" and self.role == "host":
             who = str(msg.get("who") or "")
             if not self.pen:
@@ -667,7 +733,8 @@ class CollabSession(QObject):
             return
         if t == "song_begin" and self.role == "guest":
             self._abort_recv()
-            name = str(msg.get("name") or "song")
+            # 置く名前は**譜面が指している名前**を優先する。
+            name = self._want_song or str(msg.get("name") or "song")
             dst = self._song_dest(name)
             if not dst:
                 return

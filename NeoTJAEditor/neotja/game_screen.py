@@ -844,6 +844,11 @@ TITLE_RECT = (603, 31, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
 TITLE_SIZE = 39                   # 大きさは曲名の長さによらず一定(34の1.2倍を5%詰めた)
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
+#: 作譜・軽量(compact)のときの置き場。あの画面には上の背景が無く、
+#: 右上は命令パネル(上端 8 〜 140)が占めているので、その下・レーンの
+#: 枠の手前の空きへ右詰めで出す(利用者の指定 2026-10-17)。
+TITLE_RECT_COMPACT = (603, 142, 660, 44)
+TITLE_SIZE_COMPACT = 30
 TITLE_COLOR = "#ffffff"
 # 上背景を敷いてから白1色だと柄に埋もれるので、黒で縁取る。落ち影ではなく
 # 文字の輪郭をなぞる線なので、下が何色でも読める。太さは線の幅で、外へ
@@ -2171,9 +2176,14 @@ class _GameScreenBase:
         大きさは一定。長い曲名は縮めず、右端を揃えたまま左へ伸ばす。"""
         if not self._title:
             return
-        x, y, w, h = TITLE_RECT
+        if self._compact:
+            x, y, w, h = TITLE_RECT_COMPACT
+            size = TITLE_SIZE_COMPACT
+        else:
+            x, y, w, h = TITLE_RECT
+            size = TITLE_SIZE
         f = QFont(self._title_family) if self._title_family else QFont()
-        f.setPixelSize(TITLE_SIZE)
+        f.setPixelSize(size)
         p.setFont(f)
         # 右端は固定。左へはみ出せるよう、枠の左端を画面左まで広げておく
         # (右詰めなので、収まる曲名の見た目は変わらない)。
@@ -3345,9 +3355,11 @@ class _GameScreenBase:
             if ft is not None:
                 p.drawPixmap(0, FOOTER_Y, ft)
 
-        # --- 曲名(録画の 1280x720 のときだけ。通常再生の窓では出さない) ---
-        if not self._compact:
-            self._draw_title(p)
+        # --- 曲名 ---
+        # 作譜・軽量の画面にも出す(利用者の指定 2026-10-17)。置き場は
+        # レイアウトごとに変える(_draw_title)。ここは焼いた下地なので、
+        # 毎コマの負担にはならない。
+        self._draw_title(p)
 
         # --- 左パネル (0,188 - 333x176) ---
         panel = self._skin.get("panel")
@@ -4010,6 +4022,12 @@ class _GameScreenBase:
         self._draw_lane_front(p)
         p.restore()
 
+        # --- 歌詞(#LYRIC) ---
+        # 通常の画面でだけ出す。軽量・同時再生・作譜では画面の下が
+        # 別のものに使われているので出さない。
+        if not self._compact and not self._lite:
+            self._draw_lyric(p, now)
+
         # --- 下のペイン(作譜/音声波形)も、この面の中へ続けて描く ---
         pane = self._pane
         if pane is not None:
@@ -4023,6 +4041,63 @@ class _GameScreenBase:
             p.translate(x, y)
             pane.paint_pane(p)
             p.restore()
+
+    # ------------------------------------------------------------------
+    # 歌詞(#LYRIC / 利用者の指定 2026-10-17: 通常モードの画面下に出す)
+    #
+    # 譜面の中の `#LYRIC こんにちは` が、その位置の時刻から効く。文字列の
+    # 無い `#LYRIC` で消える。次のものが来るまで出し続け、常に1枚だけ。
+    # ------------------------------------------------------------------
+    #: 文字の大きさ。30 の 1.5 倍(利用者の指定 2026-10-17)。
+    LYRIC_FONT_PX = 45
+    LYRIC_BOTTOM_PAD = 7
+    LYRIC_COLOR = "#ffffff"
+    #: 縁は青(利用者の指定 2026-10-17)。フッターの紅白の縞から字を浮かせる。
+    LYRIC_OUTLINE = "#0d47ff"
+    LYRIC_OUTLINE_W = 9.0
+    _lyric_cache = None
+
+    def _lyric_font(self):
+        """歌詞の字形。曲名と同じ勘亭流(DFP勘亭流 / 無ければ同等のもの)。"""
+        f = QFont()
+        fam = load_title_font()
+        if fam:
+            f.setFamily(fam)
+        f.setPixelSize(self.LYRIC_FONT_PX)
+        return f
+
+    def _draw_lyric(self, p, now):
+        try:
+            text = self.chart_preview.lyric_at(now)
+        except Exception:  # noqa: BLE001
+            return
+        if not text:
+            return
+        f = self._lyric_font()
+        fm = QFontMetricsF(f)
+        y = (FOOTER_Y + (FOOTER_H + fm.ascent() - fm.descent()) / 2.0
+             - self.LYRIC_BOTTOM_PAD)
+        x = (SCREEN_W - fm.horizontalAdvance(text)) / 2.0
+        path = QPainterPath()
+        path.addText(QPointF(x, y), f, text)
+        # 曲名と同じ手順。**なぞってから塗る**(塗りと線を同時に出すと線が
+        # 内側へも太って、勘亭流の細い所が埋まる)。1枚焼いて使い回す。
+        if self._lyric_cache is None:
+            self._lyric_cache = {}
+        baked = bake_text(p, self._lyric_cache, ("lyric", text, x, y),
+                          path, self.LYRIC_OUTLINE, self.LYRIC_OUTLINE_W,
+                          self.LYRIC_COLOR)
+        if baked is None:
+            p.save()
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.strokePath(path, QPen(QColor(self.LYRIC_OUTLINE),
+                                    self.LYRIC_OUTLINE_W, Qt.SolidLine,
+                                    Qt.RoundCap, Qt.RoundJoin))
+            p.fillPath(path, QColor(self.LYRIC_COLOR))
+            p.restore()
+            return
+        pm, at = baked
+        p.drawPixmap(at, pm)
 
     # ------------------------------------------------------------------
     # 下のペインを画面の中へ入れる

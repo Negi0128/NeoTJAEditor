@@ -1355,6 +1355,8 @@ class PreviewDock(QDockWidget):
 
         self._wave_dir = None
         self._current_wave_path = None
+        #: 次の読み直しで「道筋が同じでも読む」合図。
+        self._wave_reload = False
         # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
         # _current_wave_path とは別に持つ。
         self._audition_wave_path = None
@@ -1677,6 +1679,42 @@ class PreviewDock(QDockWidget):
             (self.mode_button, 96, 6), (self.course_button, 150, 6),
             (self.record_button, 84, 6), (self.zoom_button, 96, 6),
             (self.fps_label, 74, 2), (self.sim_fps_combo, 62, 6)]
+        # --- 合作の操作を画面の上に置く(利用者の指定 2026-10-17) ---
+        # 置き場所は左上、スコア枠より上の黒い所。どんちゃんにも譜面にも
+        # 掛からず、作譜しながら手が届く。合作していない間は出さない。
+        host = self.game_preview_window.scaled_host
+        self.collab_bar = QWidget(host)
+        _cb = QHBoxLayout(self.collab_bar)
+        _cb.setContentsMargins(0, 0, 0, 0)
+        _cb.setSpacing(4)
+        # 1つ目は**押すものではなく表示**。いま誰が編集権を持っているかが
+        # 常に見えていないと、読むだけなのに打ってしまう(利用者の指定
+        # 2026-10-17)。
+        self.lbl_collab_who = QLabel("編集モード: -")
+        self.lbl_collab_who.setObjectName("collabWho")
+        self.lbl_collab_who.setAlignment(Qt.AlignCenter)
+        self.lbl_collab_who.setStyleSheet(
+            "#collabWho { color:#cdd6f4; background:#1a2030;"
+            " border:1px solid #3a4763; border-radius:3px; }")
+        self.btn_collab_pen = QPushButton("編集権を渡す")
+        self.btn_collab_pen.setToolTip("編集権を相手へ渡します")
+        self.btn_collab_pen.clicked.connect(
+            lambda: self.collab_give_cb and self.collab_give_cb(self.btn_collab_pen))
+        self.btn_collab_follow = QPushButton("視点を同期")
+        self.btn_collab_follow.setCheckable(True)
+        self.btn_collab_follow.setChecked(True)
+        self.btn_collab_follow.setToolTip("編集者の視点に追従します")
+        self.btn_collab_follow.toggled.connect(
+            lambda on: self.collab_follow_cb and self.collab_follow_cb(on))
+        for _b in (self.lbl_collab_who, self.btn_collab_pen,
+                   self.btn_collab_follow):
+            _cb.addWidget(_b)
+        self.collab_bar.hide()
+        #: main_window が差す呼び出し。
+        self.collab_give_cb = None
+        self.collab_take_cb = None
+        self.collab_follow_cb = None
+
         self._load_sim_fps_choice()
         self.sim_fps_combo.currentIndexChanged.connect(self._on_sim_fps_changed)
 
@@ -1994,6 +2032,19 @@ class PreviewDock(QDockWidget):
                                 else "QPushButton { padding: 0px; }")
             w.move(x, y)
             x += bw + px(gap, s)
+        # 合作の操作は**モード切替・コース切替のすぐ下**(利用者の指定
+        # 2026-10-17)。上の行と同じ左端にそろえる。
+        bar = getattr(self, "collab_bar", None)
+        if bar is not None:
+            for b, bw2 in ((self.lbl_collab_who, 150),
+                           (self.btn_collab_pen, 104),
+                           (self.btn_collab_follow, 96)):
+                b.setFixedSize(px(bw2, s), h)
+                f2 = b.font()
+                f2.setPixelSize(fs)
+                b.setFont(f2)
+            bar.adjustSize()
+            bar.move(px(self.LANE_OVERLAY_X0, s), px(6, s) + h + px(4, s))
 
     def _apply_bottom_height(self):
         """下部パネルの高さを、いまのモードとボタンの表示から決め直す。
@@ -3326,8 +3377,13 @@ class PreviewDock(QDockWidget):
             return
 
         wave_path = os.path.join(os.path.dirname(current_file), wave)
-        if wave_path == self._current_wave_path:
+        if wave_path == self._current_wave_path and not self._wave_reload:
             return  # same song already loaded; don't reset in-progress OFFSET tweaks
+        # 道筋が同じでも読み直したいことがある。合作で音源が後から降ってきた
+        # とき(譜面が指す道筋は最初から決まっているので、ここで素通りすると
+        # 永遠に読まれない)と、「音声を再接続」を押したとき
+        # (利用者の指定 2026-10-17)。
+        self._wave_reload = False
 
         self._current_wave_path = wave_path
         self.spin_offset.blockSignals(True)
@@ -3607,6 +3663,20 @@ class PreviewDock(QDockWidget):
         # ここはカーソルを動かすたびに通るので、続けて来るぶんはまとめる。
         self._queue_command_panel_sync()
 
+    #: 譜面の中身から全部を組み直してもらう呼び出し(main_window が差す)。
+    reload_all_cb = None
+
+    def reload_wave(self):
+        """音源を読み直す(**道筋が同じでも**)。
+
+        合作で音源が後から降ってきたとき(譜面が指す道筋は最初から
+        決まっているので、素通りすると永遠に読まれない)と、
+        「音声を再接続」を押したときに使う。"""
+        self._wave_reload = True
+        cb = self.reload_all_cb
+        if cb is not None:
+            cb()
+
     def seek_to_seconds(self, seconds: float):
         self.audio.seek(max(0, int(seconds * 1000)))
         self.audio.play()
@@ -3819,6 +3889,11 @@ class PreviewDock(QDockWidget):
             else:
                 ok, msg = legacy()
         self.status_label.setText(msg)
+        if ok:
+            # 機器を開き直しただけでは、読み込みに失敗していた音源は
+            # 読まれないままになる。一緒に読み直す
+            # (利用者の指定 2026-10-17)。
+            self.reload_wave()
         try:
             self.chart_preview.show_toast("音声再接続: " + ("OK" if ok else "失敗"))
         except Exception:  # noqa: BLE001

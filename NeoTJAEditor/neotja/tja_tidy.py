@@ -294,6 +294,15 @@ def _grid_target(m, meter):
 def _regrid(m, meter):
     """小節の文字数をそろえる。増減した文字数(符号つき)を返す。"""
     L = len(m.notes)
+    # **音符が1つも無い小節は「,」だけにする**(利用者の指定 2026-10-17)。
+    # 0 を並べても読みは同じで(解析で音符・小節線が一致することを確認済み)、
+    # 画面では「ここは何も無い」が一目で分かる。小節の途中に命令がある
+    # ものは触らない — 命令の居場所が文字の割合で決まるため。
+    inner_cmd = any(0 < pos < L for pos, _line in m.cmds)
+    if L > 0 and not m.notes.strip("0") and not inner_cmd:
+        m.notes = ""
+        m.wrap = 0
+        return -L
     got = _grid_target(m, meter)
     if got is None:
         return 0

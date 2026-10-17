@@ -172,6 +172,23 @@ class TJAImagePreviewDialog(_ImagePreviewBase):
         self.resize(1000, 700)
 
     def _build_options_row(self, row):
+        # **どのコースを描くかをここで選べる**(利用者の指定 2026-10-17)。
+        # 以前は呼ばれたときのコース固定で、別の難易度を出すには画面を
+        # 開き直すしかなかった。
+        labels = []
+        try:
+            labels = [c["label"]
+                      for c in self.main_window.analyzer.parse_courses(self.content)]
+        except Exception:  # noqa: BLE001
+            labels = []
+        if len(labels) > 1:
+            row.addWidget(QLabel("コース:"))
+            self.course_combo = QComboBox()
+            self.course_combo.addItems(labels)
+            if self.selected_label in labels:
+                self.course_combo.setCurrentIndex(labels.index(self.selected_label))
+            self.course_combo.currentTextChanged.connect(self._on_course_changed)
+            row.addWidget(self.course_combo)
         # 一番上の行の右端に小節範囲を置く。「先頭/末尾」ではなく実際の小節番号を
         # 最初から入れておき(1 〜 最終小節)、値を変えたらボタンを押さなくても
         # そのまま再生成する(要望)。
@@ -217,6 +234,17 @@ class TJAImagePreviewDialog(_ImagePreviewBase):
                 self.spin_from.blockSignals(True)
                 self.spin_from.setValue(self.spin_to.value())
                 self.spin_from.blockSignals(False)
+        self._request_regen()
+
+    def _on_course_changed(self, label):
+        """コースを選び直した。小節の数も変わるので目盛りを取り直す。"""
+        self.selected_label = str(label)
+        n = self._measure_count()
+        for sp, val in ((self.spin_from, 1), (self.spin_to, max(1, n))):
+            sp.blockSignals(True)
+            sp.setRange(1, max(1, n))
+            sp.setValue(val)
+            sp.blockSignals(False)
         self._request_regen()
 
     def _build_footer(self, row):

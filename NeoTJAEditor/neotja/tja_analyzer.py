@@ -901,6 +901,8 @@ class TJACourseAnalyzer:
             big-roll ('5'/'6') spans closed by a '8' tail (an unclosed roll runs to the
             end of the course)
           - "gogo_regions": [(start_seconds, end_seconds)] from #GOGOSTART/#GOGOEND
+          - "lyrics": [(chart_time_seconds, text)] from #LYRIC. An empty
+            text clears the current line (that is how real charts use it).
           - "branch_regions": [(start_seconds, end_seconds)] 分岐している区間
             (#BRANCHSTART 〜 #BRANCHEND)。本家はこの間だけレーンの地が系統の
             色になり、右端に「普通譜面/玄人譜面/達人譜面」の字が出る。
@@ -998,6 +1000,7 @@ class TJACourseAnalyzer:
 
         empty = {
             "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [],
+            "lyrics": [],
             "branch_regions": [], "branch_path": [], "bar_times": [],
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             "title": _header_value(content, "TITLE"),
@@ -1094,6 +1097,11 @@ class TJACourseAnalyzer:
                         events.append(("SCROLL", Decimal(s.split()[1])))
                     except Exception:
                         pass
+                elif s.startswith("#LYRIC"):
+                    # **命令名のあと、行末までが丸ごと歌詞。**
+                    # 途中の空白もそのまま残す。文字列が無ければ消去
+                    # (実譜面での使われ方どおり)。
+                    events.append(("LYRIC", s[len("#LYRIC"):].strip()))
                 elif s.startswith("#GOGOSTART"):
                     events.append(("GOGOSTART", None))
                 elif s.startswith("#GOGOEND"):
@@ -1192,6 +1200,8 @@ class TJACourseAnalyzer:
         bar_lines = []
         curr_line = a + 1
         gogo_regions = []
+        #: [(譜面時刻, 歌詞)] 。空文字は消去の合図。
+        lyrics = []
         bpm_changes = [(Decimal(0), bpm)]
         measure_changes = [(Decimal(0), curr_num, curr_den)]
         scroll_changes = [(Decimal(0), curr_scroll)]
@@ -1305,6 +1315,9 @@ class TJACourseAnalyzer:
                 elif t == "SCROLL":
                     curr_scroll = v
                     scroll_changes.append((total_time, curr_scroll))
+                elif t == "LYRIC":
+                    # 次の #LYRIC が来るまで出し続ける。空なら消去。
+                    lyrics.append((total_time, v))
                 elif t == "GOGOSTART":
                     if gogo_start is None:
                         gogo_start = total_time
@@ -1441,6 +1454,8 @@ class TJACourseAnalyzer:
             "kusudamas": out_kusudamas,
             "open_spans": open_spans,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
+            # #LYRIC。[(譜面時刻, 歌詞)]。空文字はそこで消す合図。
+            "lyrics": [(float(t0), txt) for t0, txt in lyrics],
             "branch_regions": [(float(s0), float(e0), lv) for s0, e0, lv in branch_regions],
             # 区間ごとに流した系統の並び(作譜モードの書き込み先に使う)。
             "branch_path": list(branch_path),

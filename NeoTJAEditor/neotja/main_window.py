@@ -64,10 +64,14 @@ class CourseCard(QFrame):
     """Sidebar card showing one course's stats (notes/measures/time/roll/balloon),
     with a collapsible roll-by-roll detail list."""
 
+    #: 見出しを押した。本文のそのコースの所へ跳ぶ(コースの key)。
+    jumpRequested = Signal(str)
+
     def __init__(self, course, parent=None):
         super().__init__(parent)
         self.details_visible = False
         self._label = course["label"]
+        self._key = course.get("key", "")
 
         self.setFrameShape(QFrame.Box)
         self.setStyleSheet(f"CourseCard {{ border: 1px solid {course['color']}; }}")
@@ -88,7 +92,15 @@ class CourseCard(QFrame):
             f"text-align: left; border: none;"
             f" background-color: {course['color']}; color: {COLORS['bg']};"
             f" font-weight: bold; padding: 3px 0;")
-        header.clicked.connect(self.toggle_body)
+        # **押したら本文のそのコースへ跳ぶ**(利用者の指定 2026-10-17)。
+        # 畳むほうは右クリックへ移した — 跳ぶほうが使う回数が多い。
+        header.clicked.connect(
+            lambda: self.jumpRequested.emit(self._key))
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(
+            lambda _p: self.toggle_body())
+        header.setToolTip("押すと本文のこのコースへ跳びます"
+                          "（右クリックで畳む）")
         outer.addWidget(header)
         self.header = header
         self.body_visible = True
@@ -417,6 +429,34 @@ class MainWindow(QMainWindow):
 
         self._course_cards = {}
 
+    def jump_to_course(self, key):
+        """本文のそのコースの `COURSE:` の行へカーソルを移す。
+
+        難易度パネルの見出しを押したときの行き先(利用者の指定 2026-10-17)。
+        `#START` の手前にある `COURSE:` を探す — 書き方(Oni / おに / 4)が
+        譜面ごとに違うので、行の字面ではなく解析結果の範囲から辿る。"""
+        if not key:
+            return
+        text = self.editor.toPlainText()
+        try:
+            rng = self.analyzer.course_line_range(text, key)
+        except Exception:  # noqa: BLE001
+            rng = None
+        if not rng:
+            self.statusBar().showMessage("そのコースが本文に見つかりません", 4000)
+            return
+        lines = text.split("\n")
+        line_no = rng[0]                      # #START の行(1 から数える)
+        for i in range(rng[0] - 2, max(-1, rng[0] - 40), -1):
+            if 0 <= i < len(lines) and lines[i].upper().lstrip().startswith("COURSE:"):
+                line_no = i + 1
+                break
+        block = self.editor.document().findBlockByNumber(max(0, line_no - 1))
+        cur = QTextCursor(block)
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self.editor.setFocus(Qt.OtherFocusReason)
+
     def _build_central_layout(self):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.sb_outer)
@@ -424,6 +464,11 @@ class MainWindow(QMainWindow):
         splitter.setSizes([260, 1020])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        # **左の難易度パネルは畳ませない。** 0 幅まで畳むと取っ手が窓の端に
+        # 貼り付いて、つかめず開けなくなる(利用者の報告 2026-10-17
+        # 「一回閉じたら開けなくなる」)。閉じる機能そのものを無くす。
+        splitter.setCollapsible(0, False)
+        self.sb_outer.setMinimumWidth(120)
         self.splitter = splitter   # サイドバー分割比の保存/復元に使う
         self.setCentralWidget(splitter)
 
@@ -456,6 +501,12 @@ class MainWindow(QMainWindow):
             checkpoint_lines_cb=self._set_checkpoint_lines,
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
+        # 音源を読み直したいとき(合作で後から降ってきた / 音声を再接続)に、
+        # 譜面の中身から全部を組み直してもらう道。
+        self.preview_dock.reload_all_cb = self._force_update
+        # 画面の上に置いた合作の操作(編集の受け渡し・追従)。
+        self.preview_dock.collab_give_cb = self._collab_give_menu
+        self.preview_dock.collab_follow_cb = self.collab_set_follow
         # 作譜ペインの右クリックから、ツールバーと同じ道具を呼べるようにする。
         _ce = getattr(self.preview_dock, "chart_edit", None)
         if _ce is not None:
@@ -709,8 +760,15 @@ class MainWindow(QMainWindow):
             act.setCheckable(True)
             grp.addAction(act)
         cm.addSeparator()
-        self._act_collab_hand = cm.addMenu("編集を任せる")
+        self._act_collab_hand = cm.addMenu("編集権を委譲")
         self._act_collab_hand.aboutToShow.connect(self._collab_fill_hand_menu)
+        # 編集者の見ている所へ付いていく(既定で入 / 利用者の指定
+        # 2026-10-17)。再生中は再生の同期で揃うので動かさない。
+        self._act_collab_follow = cm.addAction(
+            "編集者の視点に追従", self.collab_set_follow)
+        self._act_collab_follow.setCheckable(True)
+        self._act_collab_follow.setChecked(True)
+        cm.addAction("編集者の視点へ移動", self.collab_jump_to_editor)
         cm.addSeparator()
         cm.addAction("退室", self.collab_stop)
         self._menu_collab = cm
@@ -1307,7 +1365,9 @@ class MainWindow(QMainWindow):
             if k in self._course_cards:
                 self._course_cards[k].update_course(course)
             else:
-                self._course_cards[k] = CourseCard(course)
+                card = CourseCard(course)
+                card.jumpRequested.connect(self.jump_to_course)
+                self._course_cards[k] = card
 
         for k in [k for k in self._course_cards if k not in visible_keys]:
             self._course_cards[k].deleteLater()
@@ -2877,6 +2937,10 @@ class MainWindow(QMainWindow):
         cs.presenceReceived.connect(self._collab_take_presence)
         cs.songProgress.connect(self._collab_song_progress)
         cs.songReceived.connect(self._collab_song_arrived)
+        cs.playbackReceived.connect(self._collab_take_playback)
+        # 編集者の再生/一時停止を配る。
+        self.preview_dock.audio.playingChanged.connect(
+            self._collab_send_playback)
         # 自分の居場所を流す。文字のカーソルと作譜ペインのカーソル、どちらが
         # 動いても同じ所へ集める。
         self.editor.cursorPositionChanged.connect(self._collab_queue_here)
@@ -2932,7 +2996,8 @@ class MainWindow(QMainWindow):
         よそのファイルのまま始めると、相手から来た書き換えが自分の本番の
         譜面へそのまま入ってしまう。音源も隣へ写して、2人の持ち物をそろえる。
         """
-        from neotja.collab import collab_dir, in_collab_dir, safe_file_name
+        from neotja.collab import (collab_dir, collab_file_name,
+                                   in_collab_dir)
         root = collab_dir()
         if not root:
             QMessageBox.warning(self, "合作",
@@ -2948,8 +3013,11 @@ class MainWindow(QMainWindow):
             if line.upper().startswith("TITLE:"):
                 title = line.split(":", 1)[1].strip()
                 break
-        base = safe_file_name(title or (os.path.splitext(
-            os.path.basename(cur))[0] if cur else "合作"))
+        # 元のファイル名を先に見る(無ければ曲名)。どの譜面から始めた
+        # 合作なのかが名前で分かるように。
+        stem = (os.path.splitext(os.path.basename(cur))[0] if cur
+                else "") or title or "合作"
+        base = collab_file_name(stem)
         dst = os.path.join(root, base + ".tja")
         n = 2
         while os.path.exists(dst):
@@ -2989,11 +3057,13 @@ class MainWindow(QMainWindow):
             return
         cs = self.collab()
         cs.name = got[0]
-        # 合作フォルダへ写した音源を、入ってきた人へ送れるようにする。
-        cs.song_offer(self._collab_wave_in_dir())
         code = cs.start_host()
         if not code:
             return
+        # 合作フォルダへ写した音源を、入ってきた人へ送れるようにする。
+        # **start_host() のあとで登録する** — あれは中で stop() を呼び、
+        # 部屋ごとの持ち物を忘れるので、先に登録すると消される。
+        cs.song_offer(self._collab_wave_in_dir())
         from neotja.dialogs.collab_room_dialog import CollabRoomDialog
         dlg = CollabRoomDialog(cs.codes() or [code], self)
         dlg.finished.connect(lambda _r: self._collab_forget_room_dialog())
@@ -3072,7 +3142,7 @@ class MainWindow(QMainWindow):
         cs.request_pen()
         if not cs.holds_pen():
             self.statusBar().showMessage(
-                "合作: %s に代われるか聞いています" % (cs.pen or "相手"), 4000)
+                "合作: %s へ編集権を要求しました" % (cs.pen or "編集者"), 4000)
         self._collab_sync_menu()
 
     def collab_leave_edit(self):
@@ -3096,19 +3166,62 @@ class MainWindow(QMainWindow):
                           (self._act_collab_view, on and not editing)):
             act.setEnabled(on)
             act.setChecked(bool(want))
+        # 渡せるのは**いまの編集者**(ホストに限らない / 利用者の指定
+        # 2026-10-17)。相手が居なければ渡す先が無い。
         self._act_collab_hand.setEnabled(
-            on and cs.role == "host" and bool(cs.peer_names()))
+            on and cs.holds_pen() and bool(cs.peer_names()))
+        # 画面の上のボタンも同じ状態にする。合作していなければ出さない。
+        pd = getattr(self, "preview_dock", None)
+        bar = getattr(pd, "collab_bar", None) if pd else None
+        if bar is not None:
+            bar.setVisible(bool(on))
+            if on:
+                bar.raise_()
+                pd.btn_collab_pen.setEnabled(
+                    cs.holds_pen() and bool(cs.peer_names()))
+                pd.btn_collab_follow.setEnabled(not cs.holds_pen())
+                # 誰が編集権を持っているかを常に出す。
+                who = cs.pen or ""
+                pd.lbl_collab_who.setText(
+                    "編集モード: %s" % ("あなた" if cs.holds_pen()
+                                        else (who or "なし")))
+                if pd.btn_collab_follow.isChecked() != self.collab_follow:
+                    pd.btn_collab_follow.blockSignals(True)
+                    pd.btn_collab_follow.setChecked(self.collab_follow)
+                    pd.btn_collab_follow.blockSignals(False)
+
+    def _collab_give_menu(self, anchor=None):
+        """画面の「編集を渡す」。相手が1人ならそのまま、複数なら選ぶ。"""
+        cs = self._collab
+        if cs is None or not cs.is_on() or not cs.holds_pen():
+            return
+        others = [w for w in cs.everyone() if w != cs.name]
+        if not others:
+            self.statusBar().showMessage("合作: 委譲先が居ません", 4000)
+            return
+        if len(others) == 1:
+            cs.give_pen_to(others[0])
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for who in others:
+            menu.addAction(who, lambda w=who: cs.give_pen_to(w))
+        if anchor is not None:
+            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        else:
+            menu.exec()
 
     def _collab_fill_hand_menu(self):
         """「編集を任せる」の中身を、いま居る人で作り直す。"""
         menu = self._act_collab_hand
         menu.clear()
         cs = self._collab
-        if cs is None or cs.role != "host":
+        if cs is None or not cs.is_on() or not cs.holds_pen():
             return
-        for who in [cs.name] + cs.peer_names():
-            label = who + ("(自分)" if who == cs.name else "")
-            menu.addAction(label, lambda w=who: cs.grant_pen(w))
+        for who in cs.everyone():
+            if who == cs.name:
+                continue              # いま自分が持っている
+            menu.addAction(who, lambda w=who: cs.give_pen_to(w))
 
     def _collab_check_file(self, path):
         """合作中によその譜面を開いたら、巻き込まないように退室する。
@@ -3167,7 +3280,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(os.path.join(root, os.path.basename(name))):
             return                       # もう持っている
         self.statusBar().showMessage("合作: 音源を貰っています…", 6000)
-        cs.request_song()
+        cs.request_song(os.path.basename(name))
 
     def _collab_song_progress(self, done, total, sending):
         if total <= 0:
@@ -3182,7 +3295,76 @@ class MainWindow(QMainWindow):
         """音源が届いた。譜面を読み直して鳴るようにする。"""
         self.statusBar().showMessage(
             "合作: 音源を受け取りました → %s" % os.path.basename(path), 8000)
-        self._force_update()
+        # **道筋は最初から決まっている。** 素通りさせずに読み直させる。
+        self.preview_dock.reload_wave()
+
+    # ---- 再生の同期と、編集者への追従 ----
+    #: 受け取った再生指示を当てている最中か(送り返さないための札)。
+    _collab_playing_apply = False
+    #: 編集者の見ている所へ付いていくか(利用者の指定 2026-10-17: 既定で入)。
+    collab_follow = True
+
+    def _collab_send_playback(self, playing):
+        """自分が再生/一時停止した。編集者なら相手にも同じことをさせる。"""
+        cs = self._collab
+        if cs is None or not cs.is_on() or self._collab_playing_apply:
+            return
+        try:
+            at = self.preview_dock.audio.position() / 1000.0
+        except Exception:  # noqa: BLE001
+            at = 0.0
+        cs.send_playback(at, bool(playing))
+
+    def _collab_take_playback(self, seconds, playing):
+        """編集者が再生/一時停止した。同じ所から同じ状態にする。"""
+        cs = self._collab
+        if cs is None or not cs.is_on() or cs.holds_pen():
+            return
+        pd = self.preview_dock
+        self._collab_playing_apply = True
+        try:
+            pd.seek_to_seconds(max(0.0, float(seconds)))
+            # **いまの状態と見比べて切り替えない。** 音を鳴らし始める
+            # のは非同期なので、押した直後の is_playing() はまだ嘘を
+            # つく。見比べて切り替えると取りこぼし、相手が止めたのに
+            # こちらだけ鳴り続ける(2026-10-17 の試験で実際に起きた)。
+            # 言われたとおりに「鳴らす/止める」と言う。
+            if playing:
+                pd.audio.play()
+            else:
+                pd.audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._collab_playing_apply = False
+
+    def collab_jump_to_editor(self):
+        """編集者が見ている所へ飛ぶ(1回だけ)。"""
+        cs = self._collab
+        if cs is None or not cs.is_on():
+            return
+        t = None
+        for who, (_pos, ct, _when) in (cs.peers_here() or {}).items():
+            if who == cs.pen and ct is not None:
+                t = ct
+                break
+        if t is None:
+            self.statusBar().showMessage(
+                "合作: 編集者の視点がまだ届いていません", 4000)
+            return
+        self.preview_dock.seek_to_seconds(max(0.0, float(t)))
+
+    def collab_set_follow(self, on):
+        """編集者に付いていくかどうか。"""
+        self.collab_follow = bool(on)
+        act = getattr(self, "_act_collab_follow", None)
+        if act is not None and act.isChecked() != self.collab_follow:
+            act.setChecked(self.collab_follow)
+        self.statusBar().showMessage(
+            "合作: 視点追従 %s" % ("有効" if on else "無効"),
+            4000)
+        if on:
+            self.collab_jump_to_editor()
 
     # ---- 相手の居場所(「ここ見て」が通じるようにするための飾り) ----
     #: 居場所を流す間合い(ms)。カーソルは1秒に何十回も動くので間引く。
@@ -3229,6 +3411,13 @@ class MainWindow(QMainWindow):
         if not who:
             return
         self._collab_paint_peers()
+        # 追従中なら、編集者の見ている所へ付いていく。再生中は
+        # 曲が進んでいるので邪魔しない(再生の同期で揃っている)。
+        cs = self._collab
+        if (self.collab_follow and cs is not None and who == cs.pen
+                and chart_t >= 0.0 and not cs.holds_pen()
+                and not self.preview_dock.audio.is_playing()):
+            self.preview_dock.seek_to_seconds(max(0.0, float(chart_t)))
 
     def _collab_paint_peers(self):
         """覚えている居場所を、画面へ置き直す。"""
@@ -3339,7 +3528,7 @@ class MainWindow(QMainWindow):
 
     def _collab_adopt_file(self, text):
         """貰った譜面を合作フォルダへ保存して開く。開けたら True。"""
-        from neotja.collab import collab_dir, safe_file_name
+        from neotja.collab import collab_dir, collab_file_name
         root = collab_dir()
         if not root:
             return False
@@ -3348,7 +3537,7 @@ class MainWindow(QMainWindow):
             if line.upper().startswith("TITLE:"):
                 title = line.split(":", 1)[1].strip()
                 break
-        base = safe_file_name(title, "合作")
+        base = collab_file_name(title, "合作")
         dst = os.path.join(root, base + ".tja")
         n = 2
         while os.path.exists(dst):
@@ -3393,8 +3582,8 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(
                 self, "合作",
-                "%s が編集モードになりたいそうです。代わりますか?\n"
-                "(はい を選ぶと、あなたはプレビューモードになります)" % who,
+                "%s から編集権の要求があります。委譲しますか?\n"
+                "(はい を選ぶと、あなたはプレビューモードへ移ります)" % who,
                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             cs.grant_pen(who)
 
