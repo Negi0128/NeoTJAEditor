@@ -1703,7 +1703,15 @@ class _GameScreenBase:
         #: (利用者の指定 2026-10-15)。
         self.course_sym_opacity = 1.0
 
-        self.setFixedSize(SCREEN_W, SCREEN_H_COMPACT if compact else SCREEN_H_FULL)
+        #: 表示倍率を**画面自身**に飲ませるためのもの(set_render_scale)。
+        #: 1.0 以外のときウィジェットの実寸は「論理寸 x この値」で、描く
+        #: ときに painter を同じだけ拡げる。全画面の拡大をここで受けると、
+        #: 入れ物(ScaledHost)が CPU で描き直す道を通らずに済む。
+        self._render_scale = 1.0
+        #: 倍率をかける前の寸法。いつも 1280 x 画面の高さ。
+        self._logical_w = SCREEN_W
+        self._logical_h = SCREEN_H_COMPACT if compact else SCREEN_H_FULL
+        self._apply_scaled_size()
         # キー操作はレーンが持っている(再生・シーク・速度・演奏モードの打面)。
         # レーンを子ウィジェットでなくしたので、フォーカスはこちらが受けて
         # レーンへ渡す。これが無いと F/J/D/K も Space も無言で効かなくなる。
@@ -3269,8 +3277,58 @@ class _GameScreenBase:
             pane.setGeometry(self.PANE_MARGIN_X, h + self.PANE_MARGIN_Y,
                              SCREEN_W - 2 * self.PANE_MARGIN_X, pane.height())
             h += self.pane_band_height()
-        self.setFixedSize(SCREEN_W, h)
-        self._static_layer = None      # 大きさ/中身が変わるので焼き直す
+        self._logical_h = h
+        self._apply_scaled_size()      # 大きさが変わるので下地も焼き直す
+
+    # --- 表示倍率を画面自身に飲ませる ----------------------------------
+    #
+    # 全画面では 1280x720 の絵を画面いっぱいまで拡大する。以前はそれを
+    # 入れ物(ScaledHost)が「倍率をかけた painter へ CPU で描き直す」形で
+    # やっていたが、GPU で塗る画面ではその道に入った瞬間に GPU が使われ
+    # なくなる — 実測 472fps -> 60fps(1920x1080・倍率1.5・2026-10-17)。
+    #
+    # ここでは代わりに**画面のウィジェット自身を倍率ぶん大きくして**、
+    # paintGL の painter を同じだけ拡げる。描く中身(paint_screen)は論理
+    # 座標のままで1文字も変わらず、下地と焼いた文字は deviceTransform から
+    # 読んだ倍率で焼き直されるので、絵は拡大してもぼやけない。
+    #
+    # 論理寸(_logical_w/h)と実寸(width()/height())が食い違うので、
+    # **大きさを見るところは論理寸を見ること**。
+    #: GPU で塗る画面か。入れ物がこの印を見て、倍率を自分で飲ませる相手か
+    #: どうかを決める(preview_dock.ScaledHost._self_scaling)。
+    gpu_screen = False
+
+    def logical_size(self) -> QSize:
+        """倍率をかける前の寸法(いつも 1280 x 画面の高さ)。"""
+        return QSize(self._logical_w, self._logical_h)
+
+    def render_scale(self) -> float:
+        return self._render_scale
+
+    def set_render_scale(self, s: float):
+        """画面自身が飲む表示倍率。実寸を取り直して焼き直す。"""
+        s = max(0.1, min(4.0, float(s)))
+        if abs(s - self._render_scale) < 1e-6:
+            return
+        self._render_scale = s
+        self._apply_scaled_size()
+        self.update()
+
+    def _apply_scaled_size(self):
+        s = self._render_scale
+        self.setFixedSize(max(1, int(round(self._logical_w * s))),
+                          max(1, int(round(self._logical_h * s))))
+        self._static_layer = None
+
+    def paint_self(self):
+        """自分の面へ1コマ描く(paintEvent / paintGL の中身)。
+
+        倍率を飲んでいるときは painter をそのぶん拡げてから渡す。"""
+        p = QPainter(self)
+        if abs(self._render_scale - 1.0) > 1e-6:
+            p.scale(self._render_scale, self._render_scale)
+        self.paint_screen(p)
+        p.end()
 
     # ------------------------------------------------------------------
     def _build_static_layer(self, dpr=1.0):
@@ -3297,8 +3355,10 @@ class _GameScreenBase:
         fmt = (QImage.Format_ARGB32_Premultiplied if layered
                else QImage.Format_RGB32)
         dpr = max(1.0, float(dpr))
-        img = QImage(int(round(self.width() * dpr)),
-                     int(round(self.height() * dpr)), fmt)
+        # **論理寸 x dpr。** 倍率を画面自身が飲んでいるときは width()/height()
+        # がもう倍率ぶん大きいので、そこに dpr(=倍率)を掛けると二重になる。
+        img = QImage(int(round(self._logical_w * dpr)),
+                     int(round(self._logical_h * dpr)), fmt)
         img.setDevicePixelRatio(dpr)
         img.fill(Qt.transparent if layered else QColor("#0d1117"))
         p = QPainter(img)
@@ -3332,7 +3392,8 @@ class _GameScreenBase:
             # 軽量: 背景の絵は上も下も出さない。画面ぜんぶを黒で塗っておく
             # (ここはキャッシュなので1回きり)。下地(#0d1117)のままだと青みが
             # 残って「消し忘れ」に見えるので、はっきり黒で埋める。
-            p.fillRect(QRect(0, 0, SCREEN_W, self.height()), QColor(BACKGROUND_TOP_COLOR))
+            p.fillRect(QRect(0, 0, SCREEN_W, self._logical_h),
+                       QColor(BACKGROUND_TOP_COLOR))
             bg = None
         else:
             if not SHOW_BACKGROUND_TOP:
@@ -3896,7 +3957,7 @@ class _GameScreenBase:
         self._dpr = float(p.deviceTransform().m11() or 1.0)
         # 静的な下地は1枚のキャッシュを貼るだけ(初回のみ作る)。
         if (self._static_layer is None
-                or self._static_layer.deviceIndependentSize().toSize() != self.size()
+                or self._static_layer.deviceIndependentSize().toSize() != self.logical_size()
                 or abs(self._static_layer_dpr - self._dpr) > 1e-4):
             self._static_layer = self._build_static_layer(self._dpr)
             self._static_layer_dpr = self._dpr
@@ -4022,6 +4083,14 @@ class _GameScreenBase:
         self._draw_lane_front(p)
         p.restore()
 
+        # --- 画面の中の知らせ(再生速度・等速モード・打音 ほか) ---
+        # レーン側も同じ文字を自分の上の余白へ描くが、**本家レイアウトでは
+        # その余白が無い**(TOP_MARGIN=0)。レーンの左上は判定枠と演出で
+        # 埋まっていて、そこへ描いても演出の下に沈む(実測: ×0.75 の知らせが
+        # 判定枠の火花に隠れて1画素も見えなかった)。ここで**全部の上**に
+        # 描けば、全画面でスライダーを隠していても今の倍率が分かる。
+        self._draw_toast(p)
+
         # --- 歌詞(#LYRIC) ---
         # 通常の画面でだけ出す。軽量・同時再生・作譜では画面の下が
         # 別のものに使われているので出さない。
@@ -4056,6 +4125,40 @@ class _GameScreenBase:
     LYRIC_OUTLINE = "#0d47ff"
     LYRIC_OUTLINE_W = 9.0
     _lyric_cache = None
+
+    # ------------------------------------------------------------------
+    # 画面の中の知らせ(toast)
+    # ------------------------------------------------------------------
+    #: 置き場はレーンのすぐ上、左端そろえ。レーンの中は音符と演出で埋まって
+    #: いるので上の余白へ出す。compact でもここは空いている。
+    TOAST_FONT_PX = 18
+    TOAST_H = 30
+    TOAST_PAD_X = 14
+    TOAST_GAP = 8
+
+    def _draw_toast(self, p):
+        text = getattr(self.chart_preview, "_toast_text", "") or ""
+        if not text:
+            return
+        p.save()
+        f = QFont()
+        f.setPixelSize(self.TOAST_FONT_PX)
+        f.setBold(True)
+        p.setFont(f)
+        w = QFontMetricsF(f).horizontalAdvance(text) + 2 * self.TOAST_PAD_X
+        x = LANE_X
+        y = LANE_Y - self.TOAST_H - self.TOAST_GAP
+        rect = QRectF(x, y, w, self.TOAST_H)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 200))
+        p.drawRoundedRect(rect, 6, 6)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 120), 1))
+        p.drawRoundedRect(rect, 6, 6)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(rect, Qt.AlignCenter, text)
+        p.restore()
 
     def _lyric_font(self):
         """歌詞の字形。曲名と同じ勘亭流(DFP勘亭流 / 無ければ同等のもの)。"""
@@ -4203,9 +4306,7 @@ class GameScreenWidget(_GameScreenBase, QWidget):
     """
 
     def paintEvent(self, event):
-        p = QPainter(self)
-        self.paint_screen(p)
-        p.end()
+        self.paint_self()
 
 
 class GameScreenGLWidget(_GameScreenBase, QOpenGLWidget or QWidget):
@@ -4232,10 +4333,13 @@ class GameScreenGLWidget(_GameScreenBase, QOpenGLWidget or QWidget):
     絵を取り出したいときは grabFramebuffer()。
     """
 
+    #: GPU で塗る画面。全画面の拡大は自分で飲む(_GameScreenBase の
+    #: set_render_scale 参照) — 入れ物に CPU で描き直させると
+    #: 472fps -> 60fps まで落ちる。
+    gpu_screen = True
+
     def paintGL(self):
-        p = QPainter(self)
-        self.paint_screen(p)
-        p.end()
+        self.paint_self()
 
 
 class _GLWindow(QOpenGLWindow or QWidget):
@@ -4307,10 +4411,11 @@ class GameScreenGLWindow(_GameScreenBase, _GLWindow):
     def setFocus(self, reason=None):
         self.requestActivate()
 
+    #: GPU で塗る画面(GameScreenGLWidget と同じ扱い)。
+    gpu_screen = True
+
     def paintGL(self):
-        p = QPainter(self)
-        self.paint_screen(p)
-        p.end()
+        self.paint_self()
 
 
 class GLScreenHost(QWidget):

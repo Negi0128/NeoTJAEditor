@@ -319,7 +319,6 @@ class ScaledHost(QWidget):
         self._content = widget
         widget.setParent(self)
         widget.move(0, 0)
-        widget.setVisible(self._passthrough())
         # **あとから付けた子がいちばん手前に来る。** 中身を入れ直すと、重ねて
         # あるボタン(モード切替・コース・録画・表示・fps・命令パネル)が中身の
         # 下に沈む(利用者の報告 2026-10-03: 波形モードでボタンが消えた)。
@@ -328,7 +327,7 @@ class ScaledHost(QWidget):
             if isinstance(child, QWidget) and child is not widget:
                 child.raise_()
         self._buf = None
-        self.refit()
+        self.refit()        # 新しい中身で道も決め直す(refit の中)
         self.raise_overlays()
 
     def scale(self) -> float:
@@ -343,24 +342,64 @@ class ScaledHost(QWidget):
         if abs(s - self._scale) < 1e-6:
             return
         self._scale = s
+        self.refit()        # 道を決め直してから大きさを取る(refit の中)
+
+    def _self_scaling(self) -> bool:
+        """倍率を中身に飲ませるか(GPU で塗る画面のときだけ)。
+
+        **GPU の画面をこの入れ物が CPU で描き直すと、全画面で
+        472fps -> 60fps まで落ちる**(実測 2026-10-17・1920x1080・倍率1.5。
+        利用者の報告「フルスクリーンでもFPSを維持させて欲しい」)。GPU の
+        面はそのまま使い、画面のウィジェット自身を倍率ぶん大きくして、
+        画面側の painter を同じだけ拡げてもらう(game_screen の
+        set_render_scale)。絵の組み立ては論理座標のままで変わらない。
+
+        CPU の画面(同時再生の帯・録画用)は今までどおりここが描き直す。
+        ペインを画面の中へ入れているあいだも中身には飲ませない — ペインは
+        画面の子ウィジェットで、論理座標に置いてあるため。
+        """
+        c = self._content
+        if not bool(getattr(c, "gpu_screen", False)):
+            return False
+        if not callable(getattr(c, "set_render_scale", None)):
+            return False
+        pane = getattr(c, "pane", None)
+        return not (callable(pane) and pane() is not None)
+
+    def _apply_mode(self):
+        """いまの倍率で、絵をどの道で出すか決め直す。"""
+        if self._self_scaling():
+            self._content.set_render_scale(self._scale)
+            self._timer.stop()
+            self._content.show()
+            return
+        if callable(getattr(self._content, "set_render_scale", None)):
+            self._content.set_render_scale(1.0)    # 描き直す道では倍率は painter 側
         if self._passthrough():
             self._timer.stop()
             self._content.show()
         else:
             self._content.hide()
             self._timer.start(self.FRAME_MS)
-        self.refit()
 
     def _passthrough(self) -> bool:
         # 等倍のときだけ素通り。以前は「0.999 以上」= 拡大も素通り扱いで、
         # 全画面で倍率を上げても絵が大きくならなかった。
-        return abs(self._scale - 1.0) < 0.001
+        # 中身が倍率を自分で飲んでいるときも素通り(中身がもう大きい)。
+        return abs(self._scale - 1.0) < 0.001 or self._self_scaling()
 
     def refit(self):
-        """中身の大きさが変わった/倍率が変わったときに自分の大きさを取り直す。"""
+        """中身の大きさが変わった/倍率が変わったときに自分の大きさを取り直す。
+
+        **大きさを測る前に道を決め直す。** どちらの道かで中身の寸法の意味が
+        変わる(飲ませていれば中身がもう倍率ぶん大きい)ので、途中でペインが
+        外れた等で判断が変わったまま測ると、入れ物だけ大きさが食い違う。"""
+        self._apply_mode()
         cw, ch = self._content.width(), self._content.height()
-        self.setFixedSize(max(1, int(round(cw * self._scale))),
-                          max(1, int(round(ch * self._scale))))
+        # 中身が倍率を飲んでいるなら、その寸法はもう倍率ぶん大きい。
+        s = 1.0 if self._self_scaling() else self._scale
+        self.setFixedSize(max(1, int(round(cw * s))),
+                          max(1, int(round(ch * s))))
         self._buf = None
         self.update()
 
@@ -775,6 +814,18 @@ class GamePreviewWindow(QWidget):
         if self._fullscreen:
             return
         self._fullscreen = True
+        # ペインを画面の中から出す(置き場は下部パネルへ戻る。利用者の指定
+        # 2026-10-17「fps出る方が良い」)。
+        # 画面の中のペインは**論理座標に置いた子ウィジェット**なので、画面を
+        # 拡大すると置き場所も当たり判定もずれる。入れっぱなしだと画面は
+        # 「拡大は入れ物が CPU で描き直す」道に落ちるので、全画面の作譜だけ
+        # 418fps -> 42fps になっていた(実測 2026-10-17)。出しておけば画面は
+        # GPU のまま倍率を飲めて 181fps。
+        # 縮小表示(75%)で前から通っている道と同じで、入れるかどうかの判断は
+        # _update_pane_host が持っている(等倍で全画面でないときだけ入れる)。
+        cb = getattr(self, "_pane_cb", None)
+        if cb is not None:
+            cb()
         self._fs_geometry = self.saveGeometry()
         self._fs_scale = self.scaled_host.scale()
         #: 今回の全画面で実際に隠したか。戻すときは**隠したものだけ**を
@@ -1440,9 +1491,11 @@ class PreviewDock(QDockWidget):
             # tick を完全に黙らせる(レガシー経路のみ従来通りエンジンを渡す)。
             hit_sound_engine=None if self._mixer_active else self.hit_sounds,
             branch_select_cb=self.branch_select_cb,
-            # Tab で下部パネルのモード循環。再生速度のキー(Z / C)は 13.0.4 で
-            # 外した — 速さはスライダーを押して決める(利用者の指定)。
+            # Tab で下部パネルのモード循環。再生速度のキー(Z/C・↑↓)は
+            # 13.0.4 で外したあと、利用者の指定 2026-10-17 で戻した。
+            # 速度の持ち主はスライダー1つなので、キーもそこへ流す。
             cycle_bottom_mode_cb=self.cycle_bottom_mode,
+            set_speed_cb=self.set_playback_speed,
         )
         # Info-bar transport buttons mirror the lane's Space/Q shortcuts, so
         # route them through the widget's player model rather than the raw
@@ -3206,6 +3259,14 @@ class PreviewDock(QDockWidget):
             self.set_bottom_mode(idx)
         finally:
             self._restoring_mode = False
+
+    def set_playback_speed(self, rate: float):
+        """再生速度を段階へ丸めて当てる(キーからの入口)。
+
+        速度の持ち主はスライダー1つ。ここはその値を動かすだけで、音声・
+        レーン・打音・メトロノームへ配るのは valueChanged(下)の仕事。
+        全画面でスライダーを隠していても、キーなら速度を変えられる。"""
+        self.speed_slider.setValue(snap_speed_index(snap_speed(rate)))
 
     def _on_speed_slider_changed(self, value: int):
         # スライダーが速度の単一ソース。ここから audio と chart_preview の両方の
