@@ -32,6 +32,8 @@ from PySide6.QtNetwork import (QAbstractSocket, QHostAddress,
                                QNetworkInterface)
 from PySide6.QtWebSockets import QWebSocket, QWebSocketServer
 
+from .collab_http import FrontDoor
+
 #: 既定の待ち受け口。
 DEFAULT_PORT = 7391
 #: 本文のハッシュを添えて配る間合い(秒)。
@@ -207,6 +209,17 @@ class CollabSession(QObject):
     penChanged = Signal(str)
     #: 誰かがペンを欲しがっている。(名前)
     penRequested = Signal(str)
+    #: 「ここに こう打って」が届いた。(名前, 中身)
+    #:
+    #: **本文ではなく やりたいこと を受け取る口**(利用者の指定 2026-10-22)。
+    #: スマホの画面は TJA を書かない — 「おにの12小節目の5つ目にドン」とだけ
+    #: 言ってきて、書くのはこちら(note_edit)。そうしないと、作譜の決まり
+    #: (連打の途中には置けない / BALLOON: の並べ直し / 小節の割り直し)を
+    #: 2か所に書くことになり、そのうえ相手のファイルのコメントや未対応の
+    #: 命令が書き戻しで消える。
+    #: **受けるのはホストだけ。** 書いた結果はいつもの patch として全員へ
+    #: 流れるので、ここで増えるやり取りは片道1本だけ。
+    opReceived = Signal(str, dict)
     #: 画面の隅に出す知らせ。
     notice = Signal(str)
     #: 音源の受け渡しの進み具合。(済んだバイト, 全部, 送る側か)
@@ -227,6 +240,10 @@ class CollabSession(QObject):
         #: ゲスト: ホストへの1本。
         self._sock = None
         self._server = None
+        #: ゲスト: ホストから届いた名簿(部屋に居る人ぜんぶ)。
+        self._roster = []
+        #: 待ち受けている入口(WebSocket とスマホ用のページを振り分ける)。
+        self._door = None
         self._port = 0
         #: 本文の通し番号。本文を変えた人が1つ増やす。
         self.rev = 0
@@ -238,6 +255,10 @@ class CollabSession(QObject):
         self._sum_timer.timeout.connect(self._send_sum)
         #: 本文を外から読むための呼び出し(CollabBridge が差す)。
         self.read_text = None
+        #: いま見ているコースの名前("Oni" など)を答える先。スマホの画面は
+        #: 譜面を1コースだけ映すので、**ホストに合わせる**ための手がかりに
+        #: する(利用者の指定 2026-10-22)。繋いでいなければ何も乗せない。
+        self.read_course = None
         #: 曲の見分け(名前と大きさ)。違う音源なら知らせるために持つ。
         self.song = ""
         #: 相手の居場所 {名前: (文字の位置, 譜面時刻 or None, 届いた時刻)}。
@@ -266,21 +287,55 @@ class CollabSession(QObject):
     def peer_names(self):
         if self.role == "host":
             return list(self._peers.values())
-        return ["ホスト"] if self._sock is not None else []
+        if self._sock is None:
+            return []
+        # ホストが配る名簿があれば、**ほかのゲストも見える**。無ければ
+        # 相手はホスト1人だけ、という今までの見え方に戻す。
+        if self._roster:
+            return [n for n in self._roster if n != self.name]
+        return ["ホスト"]
+
+    def _unique_name(self, want):
+        """部屋で重ならない名前にする。かぶったら末尾に数を足す。"""
+        taken = set(self._peers.values()) | {self.name}
+        if want not in taken:
+            return want
+        for n in range(2, 100):
+            cand = "%s%d" % (want, n)
+            if cand not in taken:
+                return cand
+        return "%s%d" % (want, int(time.monotonic()) % 1000)
+
+    def _broadcast_who(self):
+        """いま部屋に居る人を配る(ホストだけ)。
+
+        これが無いと、ゲストからは**ほかのゲストが見えない**。スマホから
+        「編集権を渡す」を出すのに要る(利用者の指定 2026-10-22)。PC の
+        ゲストでも、今までホストにしか渡せなかったのが誰にでも渡せる。"""
+        if self.role != "host":
+            return
+        self._send({"t": "who", "list": self.everyone()})
 
     def start_host(self, port=DEFAULT_PORT):
         """待ち受ける。開けたら合言葉を返す。駄目なら None。"""
         self.stop()
+        # **口は1つ。** 待ち受けるのは下の FrontDoor で、WebSocket の握手が
+        # 来たぶんだけこちらの QWebSocketServer へ渡ってくる(こちらは listen
+        # しない)。残りはスマホ用のページを配る口になる。握手が済めば今までと
+        # 同じく newConnection が出るので、合作側の作りは変わらない。
         srv = QWebSocketServer("NeoTJAEditor", QWebSocketServer.NonSecureMode,
                                self)
-        if not srv.listen(QHostAddress.Any, int(port)):
+        door = FrontDoor(srv, self)
+        if not door.listen(QHostAddress.Any, int(port)):
             self.notice.emit("合作: %d 番の口を開けませんでした(%s)"
-                             % (port, srv.errorString()))
+                             % (port, door.errorString()))
+            door.deleteLater()
             srv.deleteLater()
             return None
         srv.newConnection.connect(self._on_new_peer)
         self._server = srv
-        self._port = srv.serverPort()
+        self._door = door
+        self._port = door.serverPort()
         self.role = "host"
         self.pen = self.name          # 始めた人が最初に持つ
         self._sum_timer.start()
@@ -356,6 +411,11 @@ class CollabSession(QObject):
     def stop(self):
         """やめる。繋がっているものは全部閉じる。"""
         self._sum_timer.stop()
+        # 待ち受けを先に閉じる(新しい相手が入ってこないように)。
+        if self._door is not None:
+            self._door.close()
+            self._door.deleteLater()
+            self._door = None
         if self._server is not None:
             self._server.close()
             self._server.deleteLater()
@@ -368,6 +428,7 @@ class CollabSession(QObject):
             self._sock.deleteLater()
             self._sock = None
         self._here.clear()
+        self._roster = []
         self._abort_recv()
         for job in list(self._send_jobs.values()):
             try:
@@ -424,6 +485,21 @@ class CollabSession(QObject):
         msg = {"t": "here", "who": self.name, "pos": int(pos)}
         if chart_t is not None:
             msg["ct"] = float(chart_t)
+        # いま見ているコースも一緒に。スマホの画面はこれに合わせる。
+        course = self._course_now()
+        if course:
+            msg["course"] = course
+        self._send(msg)
+
+    def send_op(self, op):
+        """「ここに こう打って」をホストへ出す(本文は書かない側の入口)。
+
+        書き換えるのはホストで、結果はいつもの patch で返ってくる。"""
+        if not self.is_on():
+            return
+        msg = dict(op)
+        msg["t"] = "op"
+        msg["who"] = self.name
         self._send(msg)
 
     def peers_here(self):
@@ -583,10 +659,19 @@ class CollabSession(QObject):
             return
         self._send({"t": "sum", "rev": self.rev, "hash": text_hash(text)})
 
+    def _course_now(self):
+        """いま見ているコース。分からなければ空。"""
+        if self.read_course is None:
+            return ""
+        try:
+            return str(self.read_course() or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     def send_full(self, text, to=None):
         """本文を丸ごと送る(入った直後・ずれを直すとき)。"""
         msg = {"t": "full", "text": text, "rev": self.rev, "pen": self.pen,
-               "song": self.song}
+               "song": self.song, "course": self._course_now()}
         if to is not None:
             to.sendTextMessage(encode(msg))
         else:
@@ -647,6 +732,7 @@ class CollabSession(QObject):
             self.grant_pen("")
             self.notice.emit("合作: 編集権は空いています"
                              "(メニューの「編集モードに切り替え」で取得できます)")
+        self._broadcast_who()
         self.stateChanged.emit()
 
     def _on_guest_closed(self):
@@ -663,13 +749,34 @@ class CollabSession(QObject):
             return
         t = msg.get("t")
         if t == "hello" and self.role == "host":
-            self._peers[sock] = str(msg.get("who") or "だれか")
+            # **同じ名前は居させない。** 見分けは名前1本なので、かぶると
+            # 「2人とも自分が編集者」になり、相手の居場所も1人ぶんに潰れる
+            # (実測 2026-10-23: 同じ名前で2台つなぐと両方 holds_pen=True)。
+            # スマホの既定が「スマホ」なので、2人目は必ずぶつかる。
+            who = self._unique_name(str(msg.get("who") or "だれか"))
+            self._peers[sock] = who
+            # 付け直したことは本人に教える(本人の名前が鍵になるので)。
+            sock.sendTextMessage(encode({"t": "you", "who": who}))
             self.notice.emit("合作: %s が入りました" % self._peers[sock])
             if self.read_text is not None:
                 self.send_full(self.read_text(), to=sock)
             # いま誰が持っているかも教える。
             sock.sendTextMessage(encode({"t": "pen", "who": self.pen}))
+            self._broadcast_who()
             self.stateChanged.emit()
+            return
+        if t == "who":
+            self._roster = [str(x) for x in (msg.get("list") or [])]
+            self.stateChanged.emit()
+            return
+        if t == "you":
+            # ホストが名前を付け直した(かぶっていた)。以降こちらもその名前。
+            new = str(msg.get("who") or "")
+            if new and new != self.name:
+                self.notice.emit("合作: 同じ名前の人が居たので「%s」になりました"
+                                 % new)
+                self.name = new
+                self.stateChanged.emit()
             return
         if t == "full":
             self.rev = int(msg.get("rev") or 0)
@@ -703,6 +810,11 @@ class CollabSession(QObject):
                                        bool(msg.get("on")))
             if self.role == "host":
                 self._send(msg, skip=sock)
+            return
+        if t == "op":
+            # 書くのはホストだけ。ゲストは結果の patch を待つ。
+            if self.role == "host":
+                self.opReceived.emit(str(msg.get("who") or ""), dict(msg))
             return
         if t == "pen_give":
             # **いまの編集者からの受け渡し。** ホストでなくても

@@ -2143,9 +2143,14 @@ class MainWindow(QMainWindow):
         "ins": measure_edit.op_insert_after,
     }
 
-    def _measure_op(self, op, arg=None):
+    def _measure_op(self, op, arg=None, pos=None):
+        """小節まるごとの操作(複製/削除/空を1つ)。
+
+        pos を渡すと**そこの小節**に効く。合作でスマホから届いた「3小節目を
+        消して」は、こちらのカーソルとは関係ない所を指すので明に渡す。"""
         text = self.editor.toPlainText()
-        pos = self.editor.textCursor().position()
+        if pos is None:
+            pos = self.editor.textCursor().position()
         if op == "move":
             result = measure_edit.op_move(text, pos, arg)
         else:
@@ -2206,8 +2211,12 @@ class MainWindow(QMainWindow):
             if kind is not None and hit_sounds is not None:
                 hit_sounds.play_once(kind)
 
-    def _apply_chart_op(self, op):
+    def _apply_chart_op(self, op, course_key=None):
         """作譜モードの PeepoDrumKit 式の操作(置く/消す/連打/反転)。
+
+        course_key を渡すと**そのコースへ**書く。合作でスマホから届いた
+        操作は送り主が見ているコースへ入れたいので明に指す(こちらの表示が
+        別のコースに移っていても、相手の打ち込み先は動かない)。
 
         計算は note_edit.run_op(テキストだけを見る純ロジック)。ここでは
         結果のテキストを **変わった範囲だけ** 1回で置き換える。風船を足すと
@@ -2221,13 +2230,17 @@ class MainWindow(QMainWindow):
         # 配られないと、そこから本文が分岐する(文字の編集は setReadOnly で
         # 止まるが、作譜ペインの打ち込みはこちらを通るので別に止める)。
         cs = self._collab
-        if cs is not None and cs.is_on() and not cs.holds_pen():
+        # 相手に代わって書いているあいだ(_collab_relaying)は通す。スマホから
+        # 届いた打ち込みを書いているので、持ち主はこちらではない。
+        if (cs is not None and cs.is_on() and not cs.holds_pen()
+                and not self._collab_relaying):
             self.statusBar().showMessage(
                 "合作: いまはプレビューモードです"
                 "(編集するにはメニューの「編集モードに切り替え」)", 4000)
             return None
         text = self.editor.toPlainText()
-        course_key = (self._preview_course_override
+        course_key = (course_key
+                      or self._preview_course_override
                       or self._course_key_at_cursor(text))
         rng = self.analyzer.course_line_range(text, course_key) if course_key else None
         if rng is None:
@@ -2432,6 +2445,19 @@ class MainWindow(QMainWindow):
         self.editor.setTextCursor(tc)
         self.editor.ensureCursorVisible()
         return (m0, m1)
+
+    def _collab_course_key(self):
+        """合作で相手へ伝える「いま見ているコース」。
+
+        作譜で書く先を決めるときと**同じ規則**(表示の指定が優先、無ければ
+        カーソル行の属するコース)。スマホの画面は譜面を1コースだけ映すので、
+        これに合わせてもらう(利用者の指定 2026-10-22「ホストに合わせる」)。"""
+        try:
+            return (self._preview_course_override
+                    or self._course_key_at_cursor(self.editor.toPlainText())
+                    or "")
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _course_key_at_cursor(self, text):
         """カーソル行が属するコース。プレビューが見ているコースと同じ規則。"""
@@ -2930,10 +2956,12 @@ class MainWindow(QMainWindow):
         cs = CollabSession(
             str(self._collab_default_name() or "だれか"), self)
         cs.read_text = self.editor.toPlainText
+        cs.read_course = self._collab_course_key
         cs.fullTextReceived.connect(self._collab_take_full)
         cs.patchReceived.connect(self._collab_take_patch)
         cs.penChanged.connect(self._collab_pen_changed)
         cs.penRequested.connect(self._collab_pen_requested)
+        cs.opReceived.connect(self._collab_take_op)
         cs.presenceReceived.connect(self._collab_take_presence)
         cs.songProgress.connect(self._collab_song_progress)
         cs.songReceived.connect(self._collab_song_arrived)
@@ -3473,17 +3501,164 @@ class MainWindow(QMainWindow):
         # 開く・貰った譜面を保存して開くといった操作で本文は入れ替わる。それを
         # そのまま流すと、相手の譜面がこちらの都合で丸ごと書き換わってしまう
         # (試験で実際にホストの本文が空になった 2026-10-16)。
-        if not cs.holds_pen():
+        # ただし**相手に代わって書いているあいだ**は配る。スマホから届いた
+        # 打ち込みをこちらが書いているので、持ち主はこちらではない。
+        if not cs.holds_pen() and not self._collab_relaying:
             return
         ins = ""
         if added:
-            c = QTextCursor(self.editor.document())
-            c.setPosition(pos)
-            c.setPosition(pos + added, QTextCursor.KeepAnchor)
+            doc = self.editor.document()
+            # **終わりで1文字はみ出す。** contentsChange の数は文書の数え方
+            # (段落の切れ目も1文字)なので、末尾まで届く変更では pos+added が
+            # characterCount() と同じになり、**置けない位置**になる。
+            # QTextCursor は黙って動かないので選び取れず、ins が空のまま
+            # 「全部消して何も入れない」を配っていた(実測: 編集者が別の
+            # ファイルを開くと、相手の本文が空になった 2026-10-22)。
+            # 流す本文は改行で繋いだ平文で、最後の切れ目はそこに現れない。
+            # だから端で1つ詰めるのが正しい。
+            end = min(pos + added, doc.characterCount() - 1)
+            c = QTextCursor(doc)
+            c.setPosition(min(pos, end))
+            c.setPosition(end, QTextCursor.KeepAnchor)
             # selectedText() は改行を U+2029 で返す。そのまま流すと相手の
             # 本文に見えない字が混ざるので、必ず戻す。
             ins = c.selectedText().replace(" ", "\n")
         cs.send_patch(pos, removed, ins)
+
+    #: いま「相手に代わって」書いているか。立っているあいだは、自分が
+    #: 編集者でなくても書いたぶんを配る(_collab_on_change)。
+    _collab_relaying = False
+
+    #: スマホから受け付ける操作。**住所(a/b)で指すものだけ。** 選んだ
+    #: オブジェクトを動かす類(move_items など)は、相手がこちらの解析結果の
+    #: 中身を持っていないと組み立てられないので渡さない。
+    COLLAB_OPS = frozenset((
+        "key", "long", "delete", "flip", "size", "move",
+        "command", "measure_insert", "marker", "region",
+    ))
+
+    def _collab_take_op(self, who, op):
+        """スマホから「ここに こう打って」が届いた。こちらが書く。
+
+        **作譜モードと同じ入口へそのまま流す**(_apply_chart_op →
+        note_edit.run_op)。割り直しも、連打の途中を断るのも、BALLOON: の
+        並べ直しも、末尾の空小節も、既にあるものがそっくり効く。書いた結果は
+        いつもの patch で全員へ流れ、Undo も1操作ぶんになる。
+
+        相手は本文を1文字も書かないので、触っていない所(コメント・未対応の
+        命令・ほかのコース)は元のまま残る。"""
+        cs = self._collab
+        if cs is None or cs.role != "host":
+            return
+        # **編集者だけ。** 誰でも書けると、読むだけのつもりの人の誤爆で
+        # 相手の譜面が動く。
+        if not who or who != cs.pen:
+            self.statusBar().showMessage(
+                "合作: %s は編集モードではないので打ち込みを見送りました" % (who or "?"),
+                4000)
+            return
+        if not self._collab_op_fits(op):
+            return
+        kind = str(op.get("kind") or "")
+        if kind == "measure":
+            # 小節まるごとは住所ではなく**文字の位置**で指す別の仕掛け
+            # (measure_edit)。ここで位置に直してから渡す。
+            self._collab_relaying = True
+            try:
+                self._collab_measure_op(op)
+            finally:
+                self._collab_relaying = False
+            return
+        if kind not in self.COLLAB_OPS:
+            return
+        inner = {k: v for k, v in op.items()
+                 if k not in ("t", "who", "op", "course")}
+        inner["kind"] = kind
+        # JSON の対応表は鍵が文字になる。小節番号は数で引くので戻す。
+        if isinstance(inner.get("grids"), dict):
+            try:
+                inner["grids"] = {int(k): int(v)
+                                  for k, v in inner["grids"].items()}
+            except (TypeError, ValueError):
+                inner.pop("grids", None)
+        course = str(op.get("course") or "") or None
+        self._collab_relaying = True
+        try:
+            self._apply_chart_op(inner, course_key=course)
+        finally:
+            self._collab_relaying = False
+
+    def _collab_op_fits(self, op):
+        """送り主が思っている譜面と、こちらの本文が食い違っていないか。
+
+        **相手の解析がこちらとずれていたら、打ち込み先が別の場所になる。**
+        実際にずれる: 分岐(#BRANCHSTART)のある譜面をスマホの解析器にかけると、
+        3つの系統を**3小節として並べて**読む。同じ譜面で Neo は3小節、スマホは
+        5小節と数えた(実測 2026-10-23)。そのまま「3小節目」と言われても、
+        指している所が違う。
+
+        そこで打ち込みには「その小節はこうなっているはず(expect)」を添えて
+        もらい、**書く前に見比べる**。違えば書かずに本文を配り直す。分岐に
+        限らず、こちらがまだ知らない命令で構造が変わる譜面でも同じように
+        捕まえられる。"""
+        want = op.get("expect")
+        if want is None:
+            return True                 # 添えていないものは素通し(古い相手)
+        cs = self._collab
+        a = op.get("a")
+        try:
+            m = int(a[0])
+        except (TypeError, ValueError, IndexError):
+            return True
+        text = self.editor.toPlainText()
+        course_key = (str(op.get("course") or "")
+                      or self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = (self.analyzer.course_line_range(text, course_key)
+               if course_key else None)
+        # **書く側と同じ数え方で見ること。** 分岐のある譜面では、囲みを
+        # 付けないと全系統を並べて数えてしまい、書く側(いま流している系統
+        # だけを数える)と番号が食い違う。そのまま見比べると、ずれた
+        # 打ち込みを「合っている」と通してしまう(試験で実際に通った)。
+        with note_edit.editing_branch(self._preview_branch_level,
+                                      self._preview_branch_path):
+            body = note_edit.course_body_span(text, rng)
+            if body is None:
+                return False
+            spans = note_edit.measure_spans(text, body)
+            got = (note_edit._measure_notes(text, spans[m])
+                   if 0 <= m < len(spans) else None)
+        if got == str(want):
+            return True
+        self.statusBar().showMessage(
+            "合作: 譜面の読み方が食い違ったので打ち込みを見送り、"
+            "本文を送り直しました", 5000)
+        if cs is not None and cs.role == "host":
+            cs.send_full(text)
+        return False
+
+    def _collab_measure_op(self, op):
+        """スマホからの「何小節目を 複製/削除/手前に1つ」。"""
+        what = str(op.get("what") or "")
+        if what not in self._MEASURE_OPS:
+            return
+        text = self.editor.toPlainText()
+        course_key = (str(op.get("course") or "")
+                      or self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = (self.analyzer.course_line_range(text, course_key)
+               if course_key else None)
+        body = note_edit.course_body_span(text, rng)
+        if body is None:
+            return
+        spans = note_edit.measure_spans(text, body)
+        try:
+            m = int(op.get("m"))
+        except (TypeError, ValueError):
+            return
+        if not (0 <= m < len(spans)):
+            return
+        self._measure_op(what, pos=spans[m][0])
 
     def _collab_take_patch(self, pos, removed, ins, _rev):
         """相手の差し替えを当てる。送り返さないよう札を立てる。"""
