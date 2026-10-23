@@ -726,11 +726,24 @@ function openSettings(){stop();const H=hdr();if(AUD.name&&!H.WAVE)H.WAVE=AUD.nam
   ${S.extra.length?`<h3>その他</h3><textarea id="sExtra" style="min-height:70px">${esc(S.extra.map(([k,v])=>k+":"+v).join("\n"))}</textarea>`:""}
   <div class="row"><label class="fld">COURSE<select id="sCourse">${["Easy","Normal","Hard","Oni","Edit"].map(c=>`<option${c===S.course?" selected":""}>${c}</option>`).join("")}</select></label>
   <label class="fld">LEVEL<input id="sLv" type="number" inputmode="numeric" min="1" max="10" value="${S.level}"></label></div>
+  ${(()=>{const cs=courseList();if(CO.on||cs.length<2)return "";   // 合作中のコースはホストが決める
+    return `<h3>この譜面のコース</h3><div class="row" style="flex-wrap:wrap">`+cs.map(c=>{
+      const nm=esc(c.key)+(c.level?" ★"+c.level:"");
+      if(c.mine)return `<button class="btn pri" disabled>${nm}</button>`;
+      if(c.branch)return `<button class="btn" disabled>${nm}（分岐）</button>`;
+      return c.bi>=0?`<button class="btn coSw" data-bi="${c.bi}">${nm}</button>`:""}).join("")
+      +`</div><p class="note">ほかのコースは本文のまま預かっていて、書き出しでいっしょに出ます。押すと切り替わります(今のコースの直しは残ります)。分岐のあるコースは試作版では開けないので、預かったままです。</p>`})()}
   <div class="row"><button class="btn pri" id="sOk">保存して閉じる</button><button class="btn" id="sCancel">やめる</button><span style="flex:1"></span><button class="btn" id="sNew">新しい譜面</button></div>`);
   $("sDemo").onclick=()=>{const off=parseFloat($("sOff").value)||0;$("h_DEMOSTART").value=Math.max(0,t2s(V.cur)-off).toFixed(3)};
+  for(const b of document.querySelectorAll(".coSw"))b.onclick=()=>switchCourse(+b.dataset.bi);
   $("sCancel").onclick=closeSheet;
   $("sOk").onclick=()=>{if(coRO())return;snapShot();S.title=$("sTitle").value;const b=parseFloat($("sBpm").value);if(b>0)S.bpm=b;
-    S.offset=parseFloat($("sOff").value)||0;S.course=$("sCourse").value;S.level=parseInt($("sLv").value)||1;
+    S.offset=parseFloat($("sOff").value)||0;
+    {const want=$("sCourse").value,os=Array.isArray(S.others)?S.others:[];
+     // 同じコースが二つ入るのを止める(書き出しが壊れる)。
+     if(want!==S.course&&os.some(o=>o.body&&o.key===want))toast(want+" はもう入っているので変えませんでした");
+     else S.course=want}
+    S.level=parseInt($("sLv").value)||1;
     for(const [k] of SONG_KEYS){const v=$("h_"+k).value.trim();if(v)S.hdr[k]=v;else delete S.hdr[k]}
     if($("sExtra"))S.extra=$("sExtra").value.split("\n").map(l=>l.match(/^([A-Z0-9]+):(.*)$/i)).filter(Boolean).map(m=>[m[1].toUpperCase(),m[2]]);
     closeSheet();changed()};
@@ -744,11 +757,23 @@ function openExport(){stop();openSheet(`<h2>TJA に書き出し</h2><textarea id
   $("oClose").onclick=closeSheet}
 function openImport(){stop();openSheet(`<h2>TJA を読み込み</h2><textarea id="iTxt" placeholder="ここに TJA を貼り付け"></textarea>
   <div class="row"><button class="btn pri" id="iGo">読み込む</button><span class="btn filebtn">ファイルを選ぶ<input id="iFile" type="file" accept=".tja,text/plain"></span><button class="btn" id="iClose">閉じる</button></div>
-  <p class="note">最初のコースの #START〜#END を読み込みます。#MEASURE や分岐は試作版では読み飛ばします。</p>`);
+  <p class="note">コースがいくつもあるときは最初のコースを開きます。ほかのコースは本文のまま預かって、書き出しでいっしょに出ます（楽曲データのシートで切り替え）。#MEASURE や分岐は試作版では読み飛ばします。</p>`);
   $("iFile").onchange=async e=>{const f=e.target.files[0];if(!f)return;const buf=await f.arrayBuffer();let t;
     try{t=new TextDecoder("utf-8",{fatal:true}).decode(buf)}catch(_){t=new TextDecoder("shift_jis").decode(buf)}$("iTxt").value=t};
-  $("iGo").onclick=()=>{const r=importTJA($("iTxt").value);if(!r){toast("#START が見つかりませんでした");return}
-    snapShot();S=r.state;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;closeSheet();changed();toast(r.skipped?`読み込みました（未対応の命令 ${r.skipped} 個を読み飛ばし）`:"読み込みました")};
+  $("iGo").onclick=()=>{const txt=$("iTxt").value,sc=scanCourses(txt);
+    if(!sc.courses.length){toast("#START が見つかりませんでした");return}
+    // 分岐のあるコースは開くと壊すので、分岐のないコースを探して開く。
+    let bi=-1;for(let i=0;i<sc.courses.length;i++)if(!branchyAt(txt,i)){bi=i;break}
+    if(bi<0){toast("分岐しかない譜面は、試作版では開けません（譜面はそのままです）");return}
+    const r=importTJA(txt,bi);if(!r){toast("#START が見つかりませんでした");return}
+    snapShot();S=r.state;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;closeSheet();buildLeft();changed();
+    const kept=(S.others||[]).filter(o=>o.body).length,msg=[];
+    if(r.skipped)msg.push(`未対応の命令 ${r.skipped} 個を読み飛ばし`);
+    if(kept)msg.push(`ほかの ${kept} コースは預かりました`);
+    const br=(S.others||[]).filter(o=>o.branch).length;
+    if(br)msg.push(`分岐の ${br} コースは預かりだけ`);
+    if(r.lost)msg.push(`ほかの ${r.lost} コースは預かれませんでした`);
+    toast(msg.length?"読み込みました（"+msg.join("、")+"）":"読み込みました")};
   $("iClose").onclick=closeSheet}
 
 /* ===== 音源を端末に覚えておく（次に開いたときも読み込まれた状態にする） ===== */
@@ -812,8 +837,10 @@ function gcd(a,b){while(b){[a,b]=[b,a%b]}return a}
 function exportTJA(){
   const nM=known(),balloons=S.notes.filter(n=>n.type==="b").map(n=>n.count||5);
   const H=hdr(),opt=k=>H[k]?[`${k}:${H[k]}`]:[];
-  const out=[`TITLE:${S.title||""}`,...opt("SUBTITLE"),`BPM:${S.bpm}`,`WAVE:${H.WAVE||AUD.name||""}`,`OFFSET:${S.offset}`,
-    ...opt("DEMOSTART"),...opt("SONGVOL"),...opt("SEVOL"),...opt("GENRE"),...opt("MAKER"),...S.extra.map(([k,v])=>`${k}:${v}`),"",`COURSE:${S.course}`,`LEVEL:${S.level}`];
+  const head=[`TITLE:${S.title||""}`,...opt("SUBTITLE"),`BPM:${S.bpm}`,`WAVE:${H.WAVE||AUD.name||""}`,`OFFSET:${S.offset}`,
+    ...opt("DEMOSTART"),...opt("SONGVOL"),...opt("SEVOL"),...opt("GENRE"),...opt("MAKER"),...S.extra.map(([k,v])=>`${k}:${v}`)];
+  const own=Array.isArray(S.own)?S.own:[];
+  const out=[`COURSE:${S.course}`,`LEVEL:${S.level}`,...own.map(([k,v])=>`${k}:${v}`)];
   if(balloons.length)out.push(`BALLOON:${balloons.join(",")}`);out.push("","#START");
   for(let m=0;m<nM;m++){const s=mStart(m),e=mStart(m+1),ML_=e-s,ev=[];
     for(const n of S.notes){if(n.t>=s&&n.t<e)ev.push([n.t-s,TYPES[n.type].ch]);if(n.end!=null&&n.end>=s&&n.end<e)ev.push([n.end-s,"8"])}
@@ -821,8 +848,73 @@ function exportTJA(){
     const N=ML_/g,arr=new Array(N).fill("0");for(const [q,ch] of ev)arr[q/g]=ch;
     let idx=0;for(const c of cm){const q=(c.t-s)/g;if(q>idx){out.push(arr.slice(idx,q).join(""));idx=q}out.push("#"+c.k+(CMDS[c.k].val&&c.v!=null?" "+c.v:""))}
     out.push(arr.slice(idx).join("")+",")}
-  out.push("#END","");return out.join("\n");
+  out.push("#END");
+  // 読まなかったコースを同じ場所へ戻す。
+  const others=Array.isArray(S.others)?S.others:[],at=Math.max(0,Math.min(others.length,S.at|0));
+  const trim=s=>String(s).replace(/\s+$/,"");
+  const all=others.slice(0,at).map(o=>trim(o.text)).concat([out.join("\n")],
+    others.slice(at).map(o=>trim(o.text))).filter(s=>s.length);
+  return head.join("\n")+"\n\n"+all.join("\n\n")+"\n";
 }
+/* ===== 本文をコースの塊に割る(ほかのコースを失わないため) =====
+   利用者の報告 2026-10-23。単体で3コースの譜面を読むと、読まなかった
+   2コースが書き出しで跡形もなく消えていた。読むのは今のコースだけに
+   しておいて、ほかのコースは**本文のまま預かり**、書き出しで同じ場所へ
+   戻す。戻りの blocks は書き出しの並び。body はその塊が #START を持つか。 */
+function splitCourses(text){
+  const lines=text.replace(/\r/g,"").split("\n"),marks=[];
+  let inBody=false,fresh=true;
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i].split("//")[0].trim();
+    if(/^#START\b/i.test(l)){if(fresh){marks.push(i);fresh=false}inBody=true;continue}
+    if(/^#END\b/i.test(l)){inBody=false;fresh=true;continue}
+    if(inBody||!fresh)continue;
+    const m=l.match(/^([A-Za-z0-9]+):/);if(!m)continue;
+    const k=m[1].toUpperCase();
+    if(k==="COURSE"||PER_COURSE.has(k)){marks.push(i);fresh=false}}
+  const top=marks.length?marks[0]:lines.length;
+  let gc=null;
+  for(let i=0;i<top;i++){const m=lines[i].split("//")[0].trim().match(/^COURSE:(.*)$/i);if(m){gc=m[1];break}}
+  const blocks=marks.map((s,j)=>{
+    const seg=lines.slice(s,j+1<marks.length?marks[j+1]:lines.length);
+    let key=null,level=null,body=false;
+    for(const raw of seg){const l=raw.split("//")[0].trim();
+      if(/^#START\b/i.test(l)){body=true;break}
+      let m=l.match(/^COURSE:(.*)$/i);if(m){key=m[1];continue}
+      m=l.match(/^LEVEL:(.*)$/i);if(m)level=parseInt(m[1])||null}
+    const text=seg.join("\n");
+    return{key:courseKeyOf(key!=null?key:gc),level:level,body:body,
+      branch:/^[ \t]*#BRANCHSTART/im.test(text),text:text}});
+  return{head:lines.slice(0,top),blocks:blocks}}
+
+/* 譜面に入っているコースを書き出しの並びで並べる。mine が今開いているもの、
+   bi は importTJA に渡す番号(本文を持たない塊は -1)。 */
+function courseList(){
+  const others=Array.isArray(S.others)?S.others:[],at=Math.max(0,Math.min(others.length,S.at|0));
+  const all=others.slice(0,at).map(o=>Object.assign({},o))
+    .concat([{mine:true,key:S.course,level:S.level,body:true}])
+    .concat(others.slice(at).map(o=>Object.assign({},o)));
+  let bi=0;
+  for(const b of all)b.bi=(b.mine||b.body)?bi++:-1;
+  return all}
+
+/* その番号のコースに分岐があるか。あるものは開かない(壊すので)。 */
+function branchyAt(text,bi){
+  const sc=scanCourses(text),c=sc.courses[bi];if(!c)return false;
+  for(let i=c.from;i<c.to;i++)
+    if(/^\s*#BRANCHSTART/i.test(sc.lines[i].split("//")[0]))return true;
+  return false}
+
+/* コースの切り替え。今のコースをいったん本文へ戻してから、相手を読む。 */
+function switchCourse(bi){
+  if(coRO())return;
+  const tgt=courseList().find(c=>c.bi===bi);
+  if(tgt&&tgt.branch){toast("分岐のあるコースは、試作版では開けません（預かったままにします）");return}
+  const r=importTJA(exportTJA(),bi);
+  if(!r){toast("そのコースを読めませんでした");return}
+  snapShot();S=r.state;V.pending=null;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;
+  closeSheet();buildLeft();changed();
+  toast(S.course+" ★"+S.level+" に切り替えました")}
 function importTJA(text,want){
   // want("Oni" など)があればそのコースを読む。無ければ最初のコース。
   // 譜面ぜんたいの見出しと、そのコースだけの見出し(LEVEL/BALLOON ほか)は
@@ -830,13 +922,18 @@ function importTJA(text,want){
   const sc=scanCourses(text),lines=sc.lines;
   if(!sc.courses.length)return null;
   let pick=null;
-  if(want)pick=sc.courses.find(c=>c.key===courseKeyOf(want))||null;
+  if(typeof want==="number")pick=sc.courses[want]||null;
+  else if(want)pick=sc.courses.find(c=>c.key===courseKeyOf(want))||null;
   if(!pick)pick=sc.courses[0];
+  const pi=sc.courses.indexOf(pick);
   const Hd=pick.head;
   const st={title:Hd.TITLE||"無題",bpm:parseFloat(Hd.BPM)||120,offset:parseFloat(Hd.OFFSET)||0,
-    course:courseKeyOf(Hd.COURSE),level:parseInt(Hd.LEVEL)||1,notes:[],cmds:[],hdr:{},extra:[]};
+    course:courseKeyOf(Hd.COURSE),level:parseInt(Hd.LEVEL)||1,notes:[],cmds:[],hdr:{},extra:[],own:[],others:[],at:0};
   const OWN=new Set(["TITLE","BPM","OFFSET","COURSE","LEVEL","BALLOON",...SONG_KEYS.map(k=>k[0])]);
-  for(const [k,v] of Object.entries(Hd)){if(SONG_KEYS.some(x=>x[0]===k)){if(v)st.hdr[k]=v}else if(!OWN.has(k))st.extra.push([k,v])}
+  // コースだけに効く見出し(SCOREINIT ほか)は own へ。extra に混ぜると
+  // 書き出しで譜面ぜんたいの見出しへ移ってしまう。
+  for(const [k,v] of Object.entries(Hd)){if(SONG_KEYS.some(x=>x[0]===k)){if(v)st.hdr[k]=v}
+    else if(OWN.has(k))continue;else if(PER_COURSE.has(k))st.own.push([k,v]);else st.extra.push([k,v])}
   const bl=(Hd.BALLOON||"").split(",").map(x=>parseInt(x)).filter(x=>x>0);let bi=0,skipped=0,mt=0,buf=[],pc=[],open=null;
   const map={"1":"d","2":"k","3":"D","4":"K","5":"r","6":"R","7":"b","9":"b"};
   let curLen=TPM,nextLen=null;
@@ -853,7 +950,17 @@ function importTJA(text,want){
     for(const ch of l){if(ch===",")fin();else if(/[0-9]/.test(ch))buf.push(ch)}}
   if(buf.length||pc.length)fin();
   for(const n of st.notes)if(TYPES[n.type].long&&n.end==null)n.end=n.t+TPB;
-  return{state:st,skipped};
+  // 読まなかったコースは本文のまま預かる(書き出しで同じ場所へ戻す)。
+  // 塊の数え方が解析と食い違う変わった本文のときは預からない(二重に
+  // 書き出すほうが怖い)。lost にその数を入れて呼び手に知らせる。
+  let lost=0;
+  {const sp=splitCourses(text),bodies=sp.blocks.filter(b=>b.body).length;
+   if(bodies===sc.courses.length){let n=0;
+     for(const b of sp.blocks){
+       if(b.body&&n++===pi)st.at=st.others.length;
+       else st.others.push({key:b.key,level:b.level,body:b.body,branch:b.branch,text:b.text})}}
+   else lost=sc.courses.length-1}
+  return{state:st,skipped,lost};
 }
 
 /* ===== 試聴 ===== */
@@ -1220,7 +1327,8 @@ function coAskName(then){
 /* 外から中身を覗く口。試験と、様子がおかしいときの確認のために出しておく。
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
-  importTJA,scanCourses,courseKeyOf,textHash};
+  importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,
+  buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
 
