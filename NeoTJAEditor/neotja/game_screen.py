@@ -4129,12 +4129,18 @@ class _GameScreenBase:
     # ------------------------------------------------------------------
     # 画面の中の知らせ(toast)
     # ------------------------------------------------------------------
-    #: 置き場はレーンのすぐ上、左端そろえ。レーンの中は音符と演出で埋まって
-    #: いるので上の余白へ出す。compact でもここは空いている。
+    #: 置き場はレーンのすぐ上。**「良」の左へ寄せる**(利用者の報告
+    #: 2026-10-23「良判定文字に重なってる」)。
+    #: 「良」は判定円の真上(x = LANE_X + JUDGE_X_IN_LANE を中心に ±35、
+    #: 下端 JUDGE_BOTTOM = LANE_Y + 15)に出るので、左端そろえにすると
+    #: そのまま重なっていた。右端を「良」の手前で止めて、文字が長いぶんは
+    #: 左へ伸ばす。右側は魂ゲージ(x 499〜)なので使えない。
     TOAST_FONT_PX = 18
     TOAST_H = 30
     TOAST_PAD_X = 14
     TOAST_GAP = 8
+    #: 「良」の中心からどれだけ左で止めるか。
+    TOAST_CLEAR_X = 45
 
     def _draw_toast(self, p):
         text = getattr(self.chart_preview, "_toast_text", "") or ""
@@ -4146,7 +4152,8 @@ class _GameScreenBase:
         f.setBold(True)
         p.setFont(f)
         w = QFontMetricsF(f).horizontalAdvance(text) + 2 * self.TOAST_PAD_X
-        x = LANE_X
+        right = LANE_X + JUDGE_X_IN_LANE - self.TOAST_CLEAR_X
+        x = max(8.0, right - w)
         y = LANE_Y - self.TOAST_H - self.TOAST_GAP
         rect = QRectF(x, y, w, self.TOAST_H)
         p.setRenderHint(QPainter.Antialiasing, True)
