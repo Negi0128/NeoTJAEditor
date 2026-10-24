@@ -1446,9 +1446,9 @@ class PreviewDock(QDockWidget):
         layout = QVBoxLayout(content)
         self._content_widget = content
 
-        # Peepo式作譜(下部パネルの「作譜」モード)は実験的機能として既定オフ。
-        # settings.json の peepo_chart_edit(環境設定ダイアログ「実験的機能」
-        # タブ)。オフのときは「作譜」ページをスタックへ足さない(≒3モードで
+        # 下部パネルの「作譜」モード。13.0.0 より前は実験的機能で、
+        # settings.json の peepo_chart_edit(環境設定「実験的機能」タブ)で
+        # 切り替えていた。オフのときは「作譜」ページをスタックへ足さない(≒3モードで
         # 循環)だけにして、ChartEditWaveform 自体は常に作る。ここで作らずに
         # self.chart_edit を None のままにすると、_waveforms()/_on_preview_frame/
         # _apply_checkpoint_lines など参照箇所が全部 None チェックを持たなければ

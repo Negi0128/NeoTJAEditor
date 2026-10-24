@@ -44,13 +44,13 @@ class CollabEnterDialog(QDialog):
         self.setWindowTitle("ルームを作成" if self._mode == "create"
                             else "ルームに入室")
         lay = QVBoxLayout(self)
-        # **試験的**だと最初に言っておく(利用者の指定 2026-10-16)。
+        # 14.0.0 から正式(利用者の指定 2026-10-25)。驚かせる文言は外し、
+        # 「どこを触るか」だけ最初に伝える。
         warn = QLabel(
-            "⚠ 合作は試験的な機能です。うまく動かないことがあります。"
-            "譜面はアプリの隣の「合作」フォルダに写して扱うので元の"
-            "ファイルは触りませんが、大事な譜面は控えを取っておいてください。")
+            "譜面はアプリの隣の「合作」フォルダに写して扱うので、"
+            "元のファイルは触りません。")
         warn.setWordWrap(True)
-        warn.setStyleSheet("color:#e0af68;")
+        warn.setStyleSheet("color:#8a94a6;")
         lay.addWidget(warn)
         lay.addWidget(QLabel(
             "この名前が相手の画面に出ます（カーソルの名札・編集モードの持ち主）。"))
