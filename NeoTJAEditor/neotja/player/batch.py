@@ -23,8 +23,9 @@ import time
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidget,
+    QAbstractItemView, QComboBox, QDialog, QFileDialog, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+    QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -134,6 +135,29 @@ class BatchPage(QWidget):
         opts.addWidget(self.cb_layout)
         opts.addStretch()
         v.addLayout(opts)
+
+        # ---- 背景(動画・画像) ----
+        # 設定は Editor の録画と共通(rec_bg_*)。空なら背景なし。
+        bgrow = QHBoxLayout()
+        bgrow.addWidget(QLabel("背景:"))
+        # 中身は Editor の録画と同じ窓で決める(利用者の指定 2026-10-25)。
+        self._bg = recorder.RecordBackground(
+            self.cfg.get("rec_bg_path", ""),
+            offset=self.cfg.get("rec_bg_offset", 0.0),
+            dim=float(self.cfg.get("rec_bg_dim", 0) or 0) / 100.0,
+            lane=float(self.cfg.get("rec_bg_lane", 100) or 100) / 100.0,
+            fade_in=self.cfg.get("rec_bg_fade_in", 0.0),
+            fade_out=self.cfg.get("rec_bg_fade_out", 0.0),
+            fade_target=self.cfg.get("rec_bg_fade_target", "all"))
+        self.ed_bg = QLineEdit(self._bg.path)
+        self.ed_bg.setReadOnly(True)
+        self.ed_bg.setPlaceholderText(
+            "なし（空のままなら、曲に BGMOVIE: があればそれを使う）")
+        b_bg = QPushButton("背景...")
+        b_bg.clicked.connect(self._open_bg_dialog)
+        bgrow.addWidget(self.ed_bg, 1)
+        bgrow.addWidget(b_bg)
+        v.addLayout(bgrow)
 
         out = QHBoxLayout()
         out.setSpacing(8)
@@ -380,6 +404,16 @@ class BatchPage(QWidget):
     def start(self):
         if self._running or not self.jobs:
             return
+        # 背景の設定は Editor と共有。**自分のキーだけ**書き戻す。
+        self.cfg["rec_bg_path"] = self._bg.path
+        self.cfg["rec_bg_offset"] = float(self._bg.offset)
+        self.cfg["rec_bg_dim"] = int(round(self._bg.dim * 100))
+        self.cfg["rec_bg_lane"] = int(round(self._bg.lane * 100))
+        self.cfg["rec_bg_fade_in"] = self._bg.fade_in
+        self.cfg["rec_bg_fade_out"] = self._bg.fade_out
+        self.cfg["rec_bg_fade_target"] = self._bg.fade_target
+        if self.save_cb is not None:
+            self.save_cb()
         for job in self.jobs:
             job.state = WAITING
             job.note = ""
@@ -471,6 +505,47 @@ class BatchPage(QWidget):
         self._prep_task = task
         task.start()
 
+    # ---- 背景 ----------------------------------------------------
+    def _open_bg_dialog(self):
+        """背景を決める窓。Editor の録画と同じものを開く。
+
+        まとめ録画は曲が何本もあるので、重ねる譜面が1つに決まらない。
+        見本は背景だけになる(窓のほうがそう作ってある)。"""
+        from neotja.dialogs.record_bg_dialog import RecordBackgroundDialog
+        dlg = RecordBackgroundDialog(self, lambda: None, 60.0, self._bg,
+                                     out_dir=self._out_dir())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._bg = dlg.background()
+        self.ed_bg.setText(self._bg.path)
+
+    def _bg_for(self, job):
+        """この曲の背景。全曲共通の指定が無ければ、曲の BGMOVIE: を使う。"""
+        path = self._bg.path
+        if not path:
+            path = getattr(job, "bg_path", "") or ""
+        return recorder.RecordBackground(
+            path, offset=self._bg.offset, dim=self._bg.dim,
+            lane=self._bg.lane, fade_in=self._bg.fade_in,
+            fade_out=self._bg.fade_out, fade_target=self._bg.fade_target)
+
+    @staticmethod
+    def _bgmovie_of(tja_path, content):
+        """TJA の BGMOVIE: / #BGMOVIE が指すファイル。無ければ空。
+
+        相対の書き方は TJA と同じ場所から見る(本家と同じ)。"""
+        import os as _os
+        import re as _re
+        m = _re.search(r"^\s*#?BGMOVIE\s*:?\s*(.+?)\s*$",
+                       content or "", _re.M | _re.I)
+        if not m:
+            return ""
+        name = m.group(1).split("//")[0].strip()
+        if not name:
+            return ""
+        cand = _os.path.join(_os.path.dirname(tja_path), name)
+        return cand if _os.path.exists(cand) else ""
+
     def _prepare_one(self, job):
         """1本ぶんの解析と、出力先・長さの決定。
 
@@ -493,6 +568,7 @@ class BatchPage(QWidget):
         # ヘッダから取る — エディタでは OFFSET スピンボックスの値を使うが、
         # Player は譜面を書き換えないのでファイルの値がそのまま正。
         self._offset = float(parse_preview_headers(content).get("offset", 0.0) or 0.0)
+        job.bg_path = self._bgmovie_of(job.path, content)
         wave = self._find_wave(job.path, content)
         if not wave:
             self._fail(job, "音源(WAVE:)が見つかりません")
@@ -559,7 +635,8 @@ class BatchPage(QWidget):
         try:
             self._rec = recorder.VideoRecording(
                 self._widget, job.out_path, plan=plan, canvas=q["canvas"],
-                supersample=q["supersample"], preset=q["preset"])
+                supersample=q["supersample"], preset=q["preset"],
+                background=self._bg_for(job))
         except Exception as exc:  # noqa: BLE001
             plan.discard()
             self._fail(job, "%s: %s" % (type(exc).__name__, exc))

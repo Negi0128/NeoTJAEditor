@@ -53,10 +53,13 @@ class YtDlpDownloadWorker(QThread):
     finished_ok = Signal(str, str, str, str)  # ogg_path, video_title, uploader, thumbnail_url
     failed = Signal(str)
 
-    def __init__(self, url: str, out_dir: str, parent=None):
+    def __init__(self, url: str, out_dir: str, parent=None, want="audio"):
         super().__init__(parent)
         self.url = url
         self.out_dir = out_dir
+        #: "audio" なら今までどおり OGG。"video" は録画の背景に敷く mp4
+        #: (利用者の指定 2026-10-25)。音の道は何も変えていない。
+        self.want = "video" if str(want) == "video" else "audio"
         self._cancelled = False
 
     def cancel(self):
@@ -140,7 +143,45 @@ class YtDlpDownloadWorker(QThread):
                 # Download done; ffmpeg is now converting to OGG. There is no
                 # reliable percentage for this phase, so switch to indeterminate.
                 self.progress_pct.emit(-1.0)
-                self.progress.emit("音声をOGGに変換中...")
+                self.progress.emit("映像をまとめています..." if
+                                   self.want == "video"
+                                   else "音声をOGGに変換中...")
+
+        if self.want == "video":
+            # 背景に敷く動画。映像だけの形式は扱いにくいので mp4 へまとめる。
+            # 1080p までに抑える — 録画の画面はそれより小さく、大きくしても
+            # 落とす時間とファイルが増えるだけ。
+            ydl_opts = {
+                # 入れ物(mp4/webm)は選り好みしない — ext を縛ると、まとめ
+                # 済みの 360p しか残らないことがある(実測 2026-10-25:
+                # android クライアントで 640x360 になった)。まとめるのは
+                # merge_output_format が mp4 でやってくれる。
+                'format': ('bestvideo[height<=1080]+bestaudio'
+                           '/best[height<=1080]/best'),
+                'merge_output_format': 'mp4',
+                'outtmpl': os.path.join(self.out_dir, '%(title)s.%(ext)s'),
+                'ffmpeg_location': ffmpeg_path,
+                'progress_hooks': [hook],
+                'noplaylist': True,
+                'quiet': True,
+                'no_warnings': True,
+                'windowsfilenames': True,
+                'socket_timeout': 30,
+            }
+            if player_client:
+                ydl_opts['extractor_args'] = {
+                    'youtube': {'player_client': [player_client]}}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=True)
+                title = info.get('title') or 'untitled'
+                uploader = info.get('uploader') or info.get('channel') or ''
+                thumbnail_url = info.get('thumbnail') or ''
+                got = ydl.prepare_filename(info)
+                if not os.path.exists(got):
+                    got = os.path.splitext(got)[0] + '.mp4'
+            if not os.path.exists(got):
+                raise RuntimeError("落とした動画が見つかりません: %s" % got)
+            return got, title, uploader, thumbnail_url
 
         ydl_opts = {
             'format': 'bestaudio/best',

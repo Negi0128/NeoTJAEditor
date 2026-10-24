@@ -4016,6 +4016,28 @@ class ChartPreviewWidget(QWidget):
         else:
             cb()
 
+    #: 録画で背景を敷くときだけ True。窓の地を塗らない。
+    _rec_passthrough = False
+    #: そのときのレーンの地の濃さ(1.0 = 今までどおり)。
+    _rec_lane_opacity = 1.0
+
+    def set_background_passthrough(self, on, lane_opacity=1.0):
+        """録画で下に背景を敷くときの描き方へ切り替える。
+
+        on=True で窓の地を塗らなくなる。lane_opacity はレーンの地の
+        濃さ(1.0 で今までどおり、0 で地なし)。音符や判定の演出は
+        薄くしない — 譜面が読めなくなるため。"""
+        on = bool(on)
+        try:
+            a = max(0.0, min(1.0, float(lane_opacity)))
+        except (TypeError, ValueError):
+            a = 1.0
+        if on == self._rec_passthrough and abs(a - self._rec_lane_opacity) < 1e-6:
+            return
+        self._rec_passthrough = on
+        self._rec_lane_opacity = a
+        self.update()
+
     def paintEvent(self, event):
         """単体のウィジェットとして塗るときの入口。
 
@@ -4086,7 +4108,10 @@ class ChartPreviewWidget(QWidget):
         footer_h = int(self.SE_FOOTER_HEIGHT) if self._se_text_enabled else 0
         footer_bottom = band_bottom + footer_h
 
-        painter.fillRect(self.rect(), self._color("bg"))
+        # 背景を敷く録画のときは、窓の地を塗らずに透明のまま残す。
+        # 下に動画・画像が来る(recorder の overlay が重ねる)。
+        if not self._rec_passthrough:
+            painter.fillRect(self.rect(), self._color("bg"))
 
         now = self._strobe_time(self._current_chart_time())
         # f/j リード再生: 再生開始位置(reveal_t)より前の音符/連打/風船だけを
@@ -4164,12 +4189,18 @@ class ChartPreviewWidget(QWidget):
         painter.setClipRect(0, band_top, lane_w, band_h)
 
         # レーンの地。スキンに素材があればそれを敷く(本家と同じ色になる)。
+        # **地だけ**薄くする(音符や判定の演出は今までどおりの濃さ)。
         skinned = self._skin_lane_main is not None
+        _lane_a = self._rec_lane_opacity if self._rec_passthrough else 1.0
+        if _lane_a < 0.999:
+            painter.setOpacity(_lane_a)
         if skinned:
             blit_fitted(painter, 0, band_top, lane_w, band_h,
                         self._skin_lane_main, self._dpr, self._dev_off)
         else:
             painter.fillRect(0, band_top, lane_w, band_h, self._color("surface"))
+        if _lane_a < 0.999:
+            painter.setOpacity(1.0)
 
         # 譜面分岐。分岐している間だけ、地をその系統の色に差し替えて、右端に
         # 系統の字を出す(本家の映像どおり。利用者提供 2026-09-27)。
@@ -4654,6 +4685,10 @@ class ChartPreviewWidget(QWidget):
             # 打音表記帯の範囲へ切り替える(そうしないと丸ごと切り落とされる)。
             painter.setClipRect(0, band_bottom, lane_w, footer_h)
             # 打音表記帯の地。こちらもスキン素材があれば使う。
+            _sub_a = (self._rec_lane_opacity if self._rec_passthrough
+                      else 1.0)
+            if _sub_a < 0.999:
+                painter.setOpacity(_sub_a)
             if self._skin_lane_sub is not None:
                 # 素材の高さ(26px)ぶんぴったり敷く。1px 空けると譜面レーンとの
                 # 間に隙間の線が出て、本家の「地続き」の見え方にならない。
@@ -4664,6 +4699,8 @@ class ChartPreviewWidget(QWidget):
                 painter.setPen(QPen(self._color("border"), 2))
                 painter.drawLine(0, footer_bottom, lane_w, footer_bottom)
                 painter.drawLine(lane_w, band_bottom, lane_w, footer_bottom)
+            if _sub_a < 0.999:
+                painter.setOpacity(1.0)
         if self._se_text_enabled and (self._note_se or self._span_se):
             painter.setClipRect(0, band_bottom, lane_w, footer_h)
             # 音符の色には合わせない。本家素材の帯(灰色)のときは本家と同じ白。

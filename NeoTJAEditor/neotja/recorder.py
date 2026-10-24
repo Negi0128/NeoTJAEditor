@@ -479,6 +479,177 @@ def _video_filter(canvas, src_w, src_h, bg="0x0d1117"):
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={bg}")
 
 
+#: 背景に使える画像の拡張子(これ以外は動画として扱う)。
+BG_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+
+
+def _fade_secs(v):
+    """フェードの長さ。おかしな値は「掛けない」(0)に倒す。"""
+    try:
+        return max(0.0, min(30.0, float(v or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class RecordBackground:
+    """録画の下に敷くもの。path が空なら「背景なし」= 今までどおりの経路。
+
+    offset は「録画の 0 秒(= 音源の 0 秒)のときに背景動画の何秒目を
+    出すか」。dim は暗さ(0〜0.8)で、譜面を見やすくするためのもの。
+    tail は動画が先に終わったときに "loop"(頭から繰り返す)か
+    "hold"(最後のコマで止める)か。"""
+
+    def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
+                 fade_in=0.0, fade_out=0.0, fade_target="all"):
+        self.path = str(path or "")
+        try:
+            self.offset = float(offset or 0.0)
+        except (TypeError, ValueError):
+            self.offset = 0.0
+        try:
+            self.dim = max(0.0, min(0.8, float(dim or 0.0)))
+        except (TypeError, ValueError):
+            self.dim = 0.0
+        # 背景が先に終わったら**最後のコマで止める**。ループはしない
+        # (利用者の決定 2026-10-24「短いときのループはいらない」)。
+        #: 譜面レーンの地の濃さ(1.0 = 今までどおり、0 = 地なし)。
+        #: 利用者の指定 2026-10-24「譜面レーンも半透明にしてほしい」。
+        try:
+            self.lane = max(0.0, min(1.0, float(lane)))
+        except (TypeError, ValueError):
+            self.lane = 1.0
+        #: フェード(利用者の指定 2026-10-25)。0 なら掛けない。
+        #: fade_target は "all"(画面全体が黒から明ける)か "bg"(背景だけ)。
+        self.fade_in = _fade_secs(fade_in)
+        self.fade_out = _fade_secs(fade_out)
+        self.fade_target = "bg" if str(fade_target) == "bg" else "all"
+
+    def __bool__(self):
+        return bool(self.path)
+
+    @property
+    def is_image(self):
+        return os.path.splitext(self.path)[1].lower() in BG_IMAGE_EXT
+
+
+def as_background(bg):
+    """None / dict / RecordBackground のどれで渡されても受ける。
+
+    戻りが falsy なら背景なし。**呼ぶ側はこれだけ見ればよい。**"""
+    if bg is None:
+        return RecordBackground()
+    if isinstance(bg, RecordBackground):
+        return bg
+    if isinstance(bg, dict):
+        return RecordBackground(bg.get("path", ""), bg.get("offset", 0.0),
+                                bg.get("dim", 0.0), bg.get("lane", 1.0))
+    return RecordBackground(str(bg))
+
+
+def _bg_input_args(bg, start_sec):
+    """背景の入力ぶんの ffmpeg 引数と、頭へ足す黒の秒数。
+
+    録画は助走(RECORD_LEAD_SEC)から始まるので、渡す -ss は
+    offset + start_sec。負(曲より背景が後から始まる)なら 0 にして、
+    そのぶんを tpad で黒く足す。"""
+    if bg.is_image:
+        return ["-loop", "1", "-i", bg.path], 0.0
+    ss = bg.offset + float(start_sec)
+    args = []
+    if ss > 0.0:
+        args += ["-ss", "%.3f" % ss]
+    args += ["-i", bg.path]
+    return args, max(0.0, -ss)
+
+
+def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec):
+    """背景の上に画面を重ねるフィルタ。入力 0 が画面、1 が背景。
+
+    画面の側は **premultiplied のまま** ffmpeg へ渡しているので、
+    overlay に alpha=premultiplied を付ける(付け忘れると縁が黒ずむ)。"""
+    if canvas is None:
+        w = src_w + (src_w & 1)
+        h = src_h + (src_h & 1)
+    else:
+        w, h = canvas
+    # **上下を合わせて、余る左右は黒**(利用者の指定 2026-10-25)。録画の
+    # 画面は 16:9 より横長なので、敷き詰めると MV の上下が大きく切れる。
+    # 高さをぴったり合わせ、足りない左右は黒のまま残す。横長すぎる素材は
+    # 次の crop で左右を切る(pad は縮められないので max で逃がす)。
+    parts = ["scale=-2:%d" % h,
+             "pad=max(iw\\,%d):%d:(ow-iw)/2:0:color=black" % (w, h),
+             "crop=%d:%d" % (w, h), "setsar=1", "fps=%s" % fps]
+    if pre_black > 0.001:
+        parts.append("tpad=start_duration=%.3f:color=black" % pre_black)
+    if not bg.is_image:
+        # 背景が先に終わったら最後のコマで止める。これが無いと overlay の
+        # shortest=1 でそこから先が**丸ごと切れる**。
+        parts.append("tpad=stop_mode=clone:stop_duration=%.3f" % dur_sec)
+    d = 1.0 - bg.dim
+    if d < 0.999:
+        parts.append("colorchannelmixer=rr=%.3f:gg=%.3f:bb=%.3f" % (d, d, d))
+    if bg.fade_target == "bg":
+        # 背景だけを明滅させる。譜面はずっとはっきり見えたまま。
+        parts += _fade_parts(bg, dur_sec)
+    graph = "[1:v]" + ",".join(parts) + "[bg];"
+    if (w, h) == (src_w, src_h):
+        graph += "[0:v]null[fg];"
+    else:
+        # 余白は**透明**で足す。黒で足すと背景がそこだけ隠れる。
+        graph += ("[0:v]scale=%d:%d:force_original_aspect_ratio=decrease:"
+                  "flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:"
+                  "color=black@0[fg];" % (w, h, w, h))
+    # **format=rgb を明に。** auto だと主入力(背景)が yuv の動画のとき
+    # yuv で重ねることになり、こちらの premultiplied なアルファが潰れて
+    # 画面ぜんぶが黒になった(実測 2026-10-24: 画像の背景は出るのに
+    # 動画の背景だけ真っ黒)。画面は rgba なので rgb で重ねるのが筋。
+    tail = ""
+    if bg.fade_target == "all":
+        # 画面ごと黒から明ける / 黒へ沈む。重ねたあとに掛ける。
+        tail = "".join("," + f for f in _fade_parts(bg, dur_sec))
+    graph += ("[bg][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
+              + tail + ",format=yuv420p[v]")
+    return graph
+
+
+def _fade_parts(bg, dur_sec):
+    """フェードのフィルタ(利用者の指定 2026-10-25)。掛けないなら空。
+
+    時刻は**録画の頭から**数える(助走のぶんも含む)。終わりの秒数が
+    録画より長いときは掛けない — 頭から暗いままになるため。"""
+    out = []
+    if bg.fade_in > 0.001:
+        out.append("fade=t=in:st=0:d=%.3f" % bg.fade_in)
+    if bg.fade_out > 0.001 and dur_sec > bg.fade_out:
+        out.append("fade=t=out:st=%.3f:d=%.3f"
+                   % (dur_sec - bg.fade_out, bg.fade_out))
+    return out
+
+
+def set_background_passthrough(widget, on, lane_opacity=1.0):
+    """録画用の画面に「背景を描くな」と言う。持っていなければ何もしない。
+
+    録画の画面は3通りある: ゲーム画面そのもの / 音声波形モードの包み
+    (_WaveRecordScreen.game) / 同時再生の並び(MultiBandScreen._screens)。
+    どれでも届くように、中に居る画面まで見に行く。"""
+    targets = [widget]
+    targets.append(getattr(widget, "game", None))
+    targets.extend(list(getattr(widget, "_screens", None) or []))
+    seen = []
+    for obj in targets:
+        if obj is None or any(o is obj for o in seen):
+            continue
+        seen.append(obj)
+        fn = getattr(obj, "set_background_passthrough", None)
+        if callable(fn):
+            try:
+                fn(bool(on), lane_opacity)
+            except TypeError:
+                fn(bool(on))      # 古い形(レーンの濃さを取らない)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def frame_pixel_size(widget, supersample=1.0):
     """録画で実際に描く画素数。VideoRecording と1pxも違わない丸め方をする。
 
@@ -491,8 +662,13 @@ def frame_pixel_size(widget, supersample=1.0):
     return pw + (pw & 1), ph + (ph & 1), ss
 
 
-def _new_frame_image(pw, ph, ss):
+def _new_frame_image(pw, ph, ss, alpha=False):
     """1コマぶんの描画先を作る。
+
+    alpha=True は**背景を敷くとき**だけ。画面は背景を描かずに透明の
+    まま残すので、入れ物もアルファ付き(ARGB32_Premultiplied)にして、
+    毎コマ透明で塗り直してから描く。中身の並びは RGB32 と同じ
+    B,G,R,A なので、ffmpeg へは変わらず "bgra" で渡せる。
 
     Format_RGB32 なのは速さのため。Qt のラスタエンジンが素で扱えるのは
     ARGB32_Premultiplied 系(= RGB32 と同じ B,G,R,X 並び)で、以前使っていた
@@ -506,7 +682,8 @@ def _new_frame_image(pw, ph, ss):
     (WA_OpaquePaintEvent + paintEvent 冒頭の fillRect)ので、毎コマの
     fill() は不要。ただし ss が小数のとき端に 1px 塗り残る可能性があるので、
     最初の1回だけ塗って未初期化メモリを避ける。"""
-    img = QImage(pw, ph, QImage.Format_RGB32)
+    img = QImage(pw, ph, (QImage.Format_ARGB32_Premultiplied if alpha
+                          else QImage.Format_RGB32))
     # devicePixelRatio を上げると、Qt は同じ論理座標のまま ss 倍の細かさで
     # 描いてくれる(円も文字も本当に高精細になる。単なる拡大ではない)。
     img.setDevicePixelRatio(ss)
@@ -556,12 +733,20 @@ class FrameCostProbe:
     """
 
     def __init__(self, widget, *, supersample=1.0, song_seconds=0.0,
-                 warmup=8, samples=24, crf=18, preset="veryfast"):
+                 warmup=8, samples=24, crf=18, preset="veryfast",
+                 background=None, canvas="720p", fps=60):
         self.widget = widget
         self.warmup = max(1, int(warmup))
         self.samples = max(1, int(samples))
         pw, ph, ss = frame_pixel_size(widget, supersample)
-        self._img = _new_frame_image(pw, ph, ss)
+        # 背景ありは ffmpeg 側でデコードと重ね合わせが増える。**同じ入力を
+        # 付けて測る**(付けないと見積もりが短く出る)。
+        bg = as_background(background)
+        self._bg_alpha = bool(bg)
+        self._img = _new_frame_image(pw, ph, ss, alpha=self._bg_alpha)
+        if bg:
+            set_background_passthrough(widget, True, bg.lane)
+        self._passthrough = bool(bg)
         # 測る時刻は曲の中ほどへ散らす。頭は音符が無くて軽く、そこだけ測ると
         # 見積もりが短く出てしまう。
         span = max(1.0, float(song_seconds))
@@ -578,6 +763,16 @@ class FrameCostProbe:
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
             "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
             "-thread_queue_size", "64", "-r", "60", "-i", "-",
+        ]
+        if bg:
+            args, pre = _bg_input_args(bg, 0.0)
+            cmd += args
+            dur = max(1.0, (self.warmup + self.samples) / float(fps or 60))
+            cmd += ["-filter_complex",
+                    _bg_filter_complex(CANVAS_PRESETS.get(canvas),
+                                       pw, ph, fps or 60, bg, pre, dur),
+                    "-map", "[v]"]
+        cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
             "-pix_fmt", "yuv420p", "-f", "null", "-",
         ]
@@ -602,6 +797,8 @@ class FrameCostProbe:
         while self._i < end:
             t0 = time.perf_counter()
             self.widget.set_render_time(self._times[self._i])
+            if self._bg_alpha:
+                self._img.fill(0)        # 透明。背景は ffmpeg が敷く
             self.widget.render(self._img)
             if self._proc is not None:
                 try:
@@ -622,6 +819,9 @@ class FrameCostProbe:
             self.widget.end_offline_render()
         except RuntimeError:
             pass                      # ウィジェットが先に消えていた
+        if self._passthrough:
+            set_background_passthrough(self.widget, False)
+            self._passthrough = False
         self._img = None
         if self._proc is not None:
             # 溜まっているぶんを最後まで encode させる必要はない。閉じてから
@@ -782,7 +982,7 @@ class VideoRecording:
                  offset=0.0, song_path="", start_sec=0.0, end_sec=None, fps=60,
                  canvas="720p", don_path="", ka_path="", song_volume=0.8,
                  sfx_volume=0.9, hit_sounds=True, crf=18, supersample=1,
-                 preset="medium"):
+                 preset="medium", background=None):
         if plan is None:
             plan = prepare_recording(
                 preview_data=preview_data, offset=offset, song_path=song_path,
@@ -814,7 +1014,13 @@ class VideoRecording:
         # 不要になり、パイプに流すデータ量も大きく減る(整数丸めだと 2 倍固定に
         # なってしまい、出力の4倍を描いて捨てていた)。
         pw, ph, ss = frame_pixel_size(widget, supersample)
-        vf = _video_filter(CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"]), pw, ph)
+        canvas_wh = CANVAS_PRESETS.get(canvas, CANVAS_PRESETS["720p"])
+        # 背景を敷くときは、画面を透明のまま描いて ffmpeg の overlay で
+        # 重ねる。**背景なしの経路は今までどおり**(RGB32・-vf)。
+        bg = as_background(background)
+        self._bg_alpha = bool(bg)
+        self._passthrough = False
+        vf = None if bg else _video_filter(canvas_wh, pw, ph)
 
         cmd = [
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
@@ -825,8 +1031,20 @@ class VideoRecording:
             # 重なりやすくなる(既定は浅くて待ちが生じる)。
             "-thread_queue_size", "64",
             "-r", str(fps), "-i", "-",
+        ]
+        if bg:
+            # 入力 1 が背景、2 が音声。**背景の音は map しない**
+            # (利用者の決定: 音は譜面の曲 + 打音だけ)。
+            args, pre = _bg_input_args(bg, self.start_sec)
+            cmd += args
+        cmd += [
             "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
         ]
+        if bg:
+            dur = self.total_frames / float(fps or 60)
+            cmd += ["-filter_complex",
+                    _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur),
+                    "-map", "[v]", "-map", "2:a"]
         if vf:
             cmd += ["-vf", vf]
         cmd += [
@@ -844,7 +1062,10 @@ class VideoRecording:
             _cleanup(self._tmp_dir)
             raise RecordingError(f"ffmpeg を起動できませんでした: {e}") from e
 
-        self._img = _new_frame_image(pw, ph, ss)
+        self._img = _new_frame_image(pw, ph, ss, alpha=self._bg_alpha)
+        if self._bg_alpha:
+            set_background_passthrough(widget, True, bg.lane)
+            self._passthrough = True
         widget.begin_offline_render()
 
     def step(self, max_frames=8) -> bool:
@@ -856,6 +1077,8 @@ class VideoRecording:
         end = min(self.frame + max(1, int(max_frames)), self.total_frames)
         while self.frame < end:
             self.widget.set_render_time(self.start_sec + self.frame / float(self.fps))
+            if self._bg_alpha:
+                self._img.fill(0)        # 透明。背景は ffmpeg が敷く
             self.widget.render(self._img)
             try:
                 self._proc.stdin.write(self._img.constBits())
@@ -893,6 +1116,9 @@ class VideoRecording:
         if getattr(self, "_widget_detached", False):
             return
         self._widget_detached = True
+        if getattr(self, "_passthrough", False):
+            set_background_passthrough(self.widget, False)
+            self._passthrough = False
         try:
             self.widget.end_offline_render()
         except RuntimeError:

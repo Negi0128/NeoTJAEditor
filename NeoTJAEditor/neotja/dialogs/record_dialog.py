@@ -29,9 +29,9 @@ import time
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
-    QPushButton, QSpinBox, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from neotja import recorder
@@ -347,6 +347,36 @@ class RecordDialog(QDialog):
         self.chk_hit.setChecked(True)
         form.addRow("", self.chk_hit)
 
+        # ---- 背景(動画・画像) ----
+        # 画面を描いてから合成するのではなく、ffmpeg が「背景の上に
+        # 画面を重ねる」。画面側は背景を描かず透明のまま残す。
+        # **背景の音は入れない**(利用者の決定: 音は譜面の曲 + 打音だけ)。
+        # 中身は専用の窓で決める(利用者の指定 2026-10-24「背景は専用の
+        # 画面で調整したい」)。ここに残すのは「いま何を敷くか」だけ。
+        cfg0 = main_window.config_data
+        self._bg = recorder.RecordBackground(
+            cfg0.get("rec_bg_path", ""),
+            offset=cfg0.get("rec_bg_offset", 0.0),
+            dim=float(cfg0.get("rec_bg_dim", 0) or 0) / 100.0,
+            lane=float(cfg0.get("rec_bg_lane", 100) or 100) / 100.0,
+            fade_in=cfg0.get("rec_bg_fade_in", 0.0),
+            fade_out=cfg0.get("rec_bg_fade_out", 0.0),
+            fade_target=cfg0.get("rec_bg_fade_target", "all"))
+        bg_row = QHBoxLayout()
+        self.ed_bg = QLineEdit(self._bg.path)
+        self.ed_bg.setReadOnly(True)      # 触るのは窓のほう
+        self.ed_bg.setPlaceholderText(
+            "なし（動画 mp4/webm/mov・画像 png/jpg）")
+        self.btn_bg = QPushButton("背景...")
+        self.btn_bg.clicked.connect(self._open_bg_dialog)
+        bg_row.addWidget(self.ed_bg, 1)
+        bg_row.addWidget(self.btn_bg)
+        form.addRow("背景", bg_row)
+        self._bg_opt_widgets = (self.btn_bg,)
+        self.ed_bg.textChanged.connect(self._on_bg_path_changed)
+        self._bg_measured = self.ed_bg.text().strip()
+        self._sync_bg_enabled()
+
         path_row = QHBoxLayout()
         self._auto_path = os.path.join(
             self._resolve_out_dir(main_window.config_data, default_dir),
@@ -381,6 +411,53 @@ class RecordDialog(QDialog):
         # (スキンの読み込み)だけで数百ms かかることがあり、__init__ の中で
         # やると「メニューを押したのに窓が出ない」時間になってしまう。
         QTimer.singleShot(0, self._begin_measure)
+
+    # ---- 背景 ----------------------------------------------------
+    def _sync_bg_enabled(self):
+        on = bool(self.ed_bg.text().strip())
+        for w in self._bg_opt_widgets:
+            w.setEnabled(on)
+
+    def _on_bg_path_changed(self):
+        """背景を変えたら、見積もりを測り直す。
+
+        背景ありは ffmpeg のデコードと重ね合わせが増えるので、1コマの
+        重さが変わる。前の数字を使い回すと見積もりが短く出る。"""
+        self._sync_bg_enabled()
+        now = self.ed_bg.text().strip()
+        if now == self._bg_measured or self.is_busy():
+            return
+        self._bg_measured = now
+        self._cost_ms.clear()
+        self._cancel_measure()
+        self._refresh_estimates()
+        QTimer.singleShot(0, self._begin_measure)
+
+    def _bg_now(self):
+        """いま決まっている背景。path が空なら「背景なし」。"""
+        return self._bg
+
+    def _open_bg_dialog(self):
+        """背景を決める窓を開く。
+
+        見本は**本番と同じ大きさ**で重ねたいので、見積もりに使っている
+        描画用ウィジェットをそのまま貸す。offline モードの入り切りが
+        ぶつかるため、見積もりは先に止める。"""
+        from neotja.dialogs.record_bg_dialog import RecordBackgroundDialog
+        if self.is_busy():
+            return
+        self._cancel_measure()
+        if self._widget is None:
+            self._widget = self._make_widget()
+        start_sec, end_sec = self._range_secs()
+        dlg = RecordBackgroundDialog(self, lambda: self._widget,
+                                     max(0.1, end_sec - start_sec), self._bg,
+                                     out_dir=os.path.dirname(self._auto_path),
+                                     song_path=self._song)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._bg = dlg.background()
+        self.ed_bg.setText(self._bg.path)
 
     @staticmethod
     def _resolve_out_dir(cfg, default_dir):
@@ -535,9 +612,13 @@ class RecordDialog(QDialog):
             ss = self._probe_queue.pop(0)
             if ss in self._cost_ms or self._widget is None:
                 continue
+            q0 = self.cb_quality.currentData() or {}
             self._probe = recorder.FrameCostProbe(
                 self._widget, supersample=ss, song_seconds=self._song_seconds,
-                warmup=_PROBE_WARMUP, samples=_PROBE_SAMPLES)
+                warmup=_PROBE_WARMUP, samples=_PROBE_SAMPLES,
+                background=self._bg_now(),
+                canvas=q0.get("canvas", "720p"),
+                fps=int(q0.get("fps", 60)))
             self._probe_ss = ss
             self._probe_timer.start()
             return
@@ -660,6 +741,15 @@ class RecordDialog(QDialog):
         # 履歴キーへ書く — 同じキーだと、一度よそへ書き出しただけで環境設定の
         # 指定が黙って上書きされ、戻す手立てが無くなるため。
         cfg["record_last_dir"] = os.path.dirname(out)
+        # 背景の設定は Player と共有する。**自分のキーだけ**書き戻す。
+        bg = self._bg_now()
+        cfg["rec_bg_path"] = bg.path
+        cfg["rec_bg_offset"] = bg.offset
+        cfg["rec_bg_dim"] = int(round(bg.dim * 100))
+        cfg["rec_bg_lane"] = int(round(bg.lane * 100))
+        cfg["rec_bg_fade_in"] = bg.fade_in
+        cfg["rec_bg_fade_out"] = bg.fade_out
+        cfg["rec_bg_fade_target"] = bg.fade_target
         settings_mod.save_settings(cfg)
         # 描画用ウィジェットは見積もりのときに作ってある(_begin_measure)。
         # 作り直さないのは、スキンの読み込みぶんだけ待ちが増えるのと、
@@ -700,7 +790,7 @@ class RecordDialog(QDialog):
             sfx_volume=float(cfg.get("sfx_volume", 0.9)),
             hit_sounds=self.chk_hit.isChecked(),
             want_mips=(self._layout == "wave"))
-        self._pending = (out, q)
+        self._pending = (out, q, bg)
         self._t0 = time.perf_counter()
         # 下ごしらえは途中で止められるようにしておく。止めないと、書き出しを
         # 始めた直後に閉じた人がデコードの終わりまで待たされる(_Task.cancel /
@@ -750,7 +840,7 @@ class RecordDialog(QDialog):
             self._finish()
             self.lbl_status.setText("中止しました。")
             return
-        out, q = pending
+        out, q, bg = pending
         # 音声波形モードの録画は、ここで初めて曲の波形が手に入る。
         # 流し込まないと下画面の波形の線だけが出ないまま録れてしまう。
         if self._layout == "wave" and getattr(plan, "mips", None) is not None:
@@ -761,7 +851,8 @@ class RecordDialog(QDialog):
         try:
             self._rec = recorder.VideoRecording(
                 self._widget, out, plan=plan, canvas=q["canvas"],
-                supersample=q["supersample"], preset=q["preset"])
+                supersample=q["supersample"], preset=q["preset"],
+                background=bg)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             plan.discard()
