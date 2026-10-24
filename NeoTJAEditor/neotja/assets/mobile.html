@@ -297,10 +297,13 @@ function draw(){
   p.strokeStyle=PAL.border;p.lineWidth=1;
   for(const [kind] of NEO.ROWS){const y=crisp(G.rows[kind][0]);line(0,y,W,y)}
   line(0,crisp(G.RH),W,crisp(G.RH));
+  // 相手の居場所(赤い線より下。自分のカーソルを隠さない)
+  drawPeers();
   // 再生位置（＝カーソル）の赤い線
   const xp=sx(V.playing?V.pos:t2s(V.cur));p.strokeStyle=PAL.err;p.lineWidth=2;line(Math.round(xp),G.RH,Math.round(xp),H);
   p.restore();
   drawLabels();drawLegend();
+  coHereKick();   // 動いたら自分の居場所も流す(間引いてある)
 }
 const fmtG=v=>String(+(+v).toPrecision(6));
 function cmdRow(kind,items,t0,t1){
@@ -1007,7 +1010,7 @@ $("tPlay").onclick=()=>V.playing?stop():play();
 
    **ここでは本文を書かない。** 受け取った本文をそのまま持って、描くために
    解析するだけ。打てるようにするのは次の段(op を送る)。 */
-const CO={on:false,ws:null,me:"",pen:"",text:"",rev:0,course:"",roster:[]};
+const CO={on:false,ws:null,me:"",pen:"",text:"",rev:0,course:"",roster:[],peers:{}};
 
 /* 名前の決まりは PC 側と同じ(かな漢字5文字 / 英数字8文字ぶんの幅まで)。 */
 const NAME_W_MAX=8.0;
@@ -1091,6 +1094,78 @@ function coSync(){
   el.textContent=base+" / "+(CO.pen?("編集: "+CO.pen):"編集者なし")
     +(n>1?(" / "+n+"人"):"")+(coBranchy()?" / 分岐(見るだけ)":"")}
 
+
+/* ===== 相手の居場所(利用者の指定 2026-10-23) =====
+   だれがどこを見ているかを出す。**譜面には一切効かない飾り**なので、
+   落ちても困らない。色の決め方は Neo の _collab_peer_color と同じ
+   (名前の符号位置の和)。同じ人は両方の画面で同じ色になる。 */
+const CO_COLORS=["#7aa2f7","#9ece6a","#e0af68","#bb9af7","#f7768e","#2ac3de"];
+function coColor(name){let n=0;for(const ch of String(name||""))n+=ch.codePointAt(0);
+  return CO_COLORS[n%CO_COLORS.length]}
+
+/* 自分が見ている所の、本文での文字位置。Neo の文字エディタが相手の居る
+   行に色を敷くのに使う。小節の行の頭でよい(飾りなので多少ずれても困らない)。 */
+function coCharPos(){
+  if(!CO.text)return 0;
+  const sc=scanCourses(CO.text),c=sc.courses.find(x=>x.key===CO.course)||sc.courses[0];
+  if(!c)return 0;
+  const m=mIndex(V.playing?s2t(V.pos):V.cur);
+  let seen=0,li=c.from;
+  for(let i=c.from;i<c.to;i++){
+    const l=sc.lines[i].split("//")[0],tr=l.trim();
+    if(!tr||tr[0]==="#")continue;
+    li=i;const k=(l.match(/,/g)||[]).length;
+    if(seen+k>m)break;
+    seen+=k}
+  let pos=0;for(let i=0;i<li;i++)pos+=sc.lines[i].length+1;
+  return pos}
+
+/* 送るのは間引く(カーソルは指に付いて何十回も動く)。同じ所なら送らない。 */
+const CO_HERE_MS=120;
+let coHereT=null,coHereWas="";
+function coHereKick(){
+  if(!CO.on||!coLive()||coHereT)return;
+  coHereT=setTimeout(()=>{coHereT=null;coHereSend()},CO_HERE_MS)}
+function coHereSend(){
+  if(!CO.on||!coLive())return;
+  // ct は**音源の時刻**(Neo の bar_times と同じ数え方)。譜面の時刻から
+  // OFFSET を引く。再生中は再生位置を、止まっていればカーソルを出す。
+  const off=+S.offset||0,sec=(V.playing?V.pos:t2s(V.cur))-off;
+  const key=CO.course+"/"+sec.toFixed(3);
+  if(key===coHereWas)return;
+  coHereWas=key;
+  // mob を付ける。これが付いた here では**コースを追わない**
+  // (スマホ同士で引っぱり合うため)。Neo は知らない印を黙って捨てる。
+  coSend({t:"here",who:CO.me,pos:coCharPos(),ct:sec,course:CO.course,mob:1})}
+
+/* 受けたもの。{名前:{ct(音源の時刻), at}} */
+function coPeerSet(who,ct){
+  if(!who||who===CO.me||!isFinite(ct))return;
+  CO.peers[who]={ct:+ct,at:Date.now()};draw()}
+/* 名簿から消えた人のぶんは捨てる。**時間では消さない** — じっとして
+   いる人は here を出さないので、古いからといって居ないとは限らない。 */
+function coPeerPrune(){
+  const list=CO.roster||[];if(!list.length)return;
+  const keep=new Set(list.filter(n=>n!==CO.me));
+  for(const k of Object.keys(CO.peers))if(!keep.has(k))delete CO.peers[k]}
+
+/* 譜面の上へ。点線と名札。画面の外に居るときは端へ寄せて向きを出す
+   (Neo の _draw_peer_marks と同じ考え。消すと「ここ見て」が通じない)。 */
+function drawPeers(){
+  if(!CO.on)return;
+  const names=Object.keys(CO.peers);if(!names.length)return;
+  const off=+S.offset||0;
+  p.font=fpx(11)+"px "+FONT;p.textBaseline="middle";
+  for(const who of names.sort()){
+    const q=CO.peers[who],col=coColor(who),x=sx(q.ct+off);
+    const inside=x>=G.X0&&x<=W,xx=Math.min(W-2,Math.max(G.X0+1,x));
+    p.strokeStyle=col;p.lineWidth=1;p.setLineDash([4,3]);
+    line(crisp(xx),G.RH,crisp(xx),H);p.setLineDash([]);
+    const label=(inside?"":(x<G.X0?"◀":"▶"))+who;
+    const tw=p.measureText(label).width+8*K,th=15*K;
+    let lx=xx+3;if(lx+tw>W)lx=xx-3-tw;
+    p.fillStyle=col;p.globalAlpha=.85;p.fillRect(lx,G.RH+2,tw,th);p.globalAlpha=1;
+    p.fillStyle="#10131a";p.fillText(label,lx+4*K,G.RH+2+th/2)}}
 /* 自分が編集者か。 */
 function coMine(){return CO.on&&!!CO.pen&&CO.pen===CO.me}
 /* いま本当に繋がっているか(繋ぎ直しの最中は false)。 */
@@ -1264,7 +1339,7 @@ function coPenGive(){
    そのまま残すと、どちらを触っているのか分からなくなるため。 */
 function coLeave(why){
   const was=CO.on;
-  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];
+  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};coHereWas="";
   if(coTimer){clearTimeout(coTimer);coTimer=null}
   coTries=0;coWakeOff();
   const ws=CO.ws;CO.ws=null;
@@ -1289,7 +1364,7 @@ function coMsg(raw){
     CO.text=CO.text.slice(0,p)+ins+CO.text.slice(p+rm);
     CO.rev=(m.rev==null?CO.rev+1:+m.rev);coApply();return}
   if(t==="pen"){CO.pen=String(m.who||"");coSync();return}
-  if(t==="who"){CO.roster=(m.list||[]).map(String);coSync();return}
+  if(t==="who"){CO.roster=(m.list||[]).map(String);coPeerPrune();coSync();draw();return}
   if(t==="you"){
     // ホストが名前を付け直した(同じ名前の人が居た)。
     const n=String(m.who||"");
@@ -1298,9 +1373,12 @@ function coMsg(raw){
       toast("同じ名前の人が居たので「"+n+"」になりました");coSync()}
     return}
   if(t==="here"){
-    // ホストの見ているコースに合わせる(利用者の指定)。
-    if(m.who&&m.who!==CO.me&&m.course){const k=courseKeyOf(m.course);
+    if(!m.who||m.who===CO.me)return;
+    // コースは Neo に合わせる(利用者の指定)。mob の付いた here は
+    // ほかのスマホのものなので追わない(引っぱり合う)。
+    if(!m.mob&&m.course){const k=courseKeyOf(m.course);
       if(k!==CO.course){CO.course=k;coApply()}}
+    if(m.ct!=null)coPeerSet(String(m.who),+m.ct);
     return}
   if(t==="sum"){
     // ずれていたら作り直してもらう。**文字の数え方の違い**(JS は UTF-16、
@@ -1360,7 +1438,7 @@ function coConnect(){
   // 4秒で返事が無ければ諦める(初回は単体のまま / 2回目以降は繋ぎ直し)。
   const giveUp=setTimeout(()=>{try{ws.close()}catch(e){}},4000);
   ws.onopen=()=>{clearTimeout(giveUp);coTries=0;coWakeOn();
-    const enter=who=>{CO.me=who;CO.on=true;coSend({t:"hello",who,song:""});
+    const enter=who=>{CO.me=who;CO.on=true;coHereWas="";coSend({t:"hello",who,song:""});
       toast("合作に入りました");coSync()};
     const n=coName();
     if(n)enter(n);else coAskName(enter)};

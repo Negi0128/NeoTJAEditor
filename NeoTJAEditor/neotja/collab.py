@@ -762,11 +762,27 @@ class CollabSession(QObject):
                 self.send_full(self.read_text(), to=sock)
             # いま誰が持っているかも教える。
             sock.sendTextMessage(encode({"t": "pen", "who": self.pen}))
+            # もう分かっている人の居場所も渡す。これが無いと、**後から
+            # 入った人からは誰も見えない**(居場所はカーソルが動いた人しか
+            # 流さないので、全員がじっとしていると永久に届かない)。
+            for name, (pos, ct, _when) in self._here.items():
+                if name == who:
+                    continue
+                m = {"t": "here", "who": name, "pos": int(pos)}
+                if ct is not None:
+                    m["ct"] = float(ct)
+                sock.sendTextMessage(encode(m))
             self._broadcast_who()
             self.stateChanged.emit()
             return
         if t == "who":
             self._roster = [str(x) for x in (msg.get("list") or [])]
+            # 居なくなった人の居場所は捨てる。**時間では消さない** —
+            # じっとしている人は here を出さないので、古いからといって
+            # 居ないとは限らない(名簿が唯一の手がかり)。
+            keep = set(self._roster) - {self.name}
+            for who in [k for k in self._here if k not in keep]:
+                self._here.pop(who, None)
             self.stateChanged.emit()
             return
         if t == "you":

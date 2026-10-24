@@ -2980,6 +2980,7 @@ class MainWindow(QMainWindow):
         cs.notice.connect(lambda s: self.statusBar().showMessage(s, 6000))
         cs.stateChanged.connect(self._collab_update_title)
         cs.stateChanged.connect(self._collab_paint_peers)
+        cs.stateChanged.connect(self._collab_here_keepalive)
         self.editor.document().contentsChange.connect(self._collab_on_change)
         self._collab = cs
         return cs
@@ -3398,6 +3399,12 @@ class MainWindow(QMainWindow):
     #: 居場所を流す間合い(ms)。カーソルは1秒に何十回も動くので間引く。
     COLLAB_HERE_MS = 80
     _collab_here_timer = None
+    #: 念のため見に行く間合い(ms)。自分の操作以外でカーソルが動いたとき
+    #: (視点追従・再解析)は cursorMoved が出ないので、これが要る。
+    COLLAB_HERE_KEEP_MS = 2000
+    _collab_here_keep = None
+    #: 最後に流した居場所。同じなら流さない。
+    _collab_here_last = None
     #: 相手ごとの色。名前から決めるので、席順が変わっても色は変わらない。
     _COLLAB_COLORS = ("#7aa2f7", "#9ece6a", "#e0af68", "#bb9af7", "#f7768e",
                       "#2ac3de")
@@ -3424,6 +3431,7 @@ class MainWindow(QMainWindow):
     def _collab_send_here(self):
         cs = self._collab
         if cs is None or not cs.is_on():
+            self._collab_here_last = None
             return
         ct = None
         try:
@@ -3432,7 +3440,38 @@ class MainWindow(QMainWindow):
                 ct = float(ce.cursor_time())
         except Exception:  # noqa: BLE001
             ct = None
-        cs.send_here(self.editor.textCursor().position(), ct)
+        pos = self.editor.textCursor().position()
+        now = (pos, None if ct is None else round(ct, 4),
+               cs.read_course() if callable(cs.read_course) else None)
+        if now == self._collab_here_last:
+            return
+        self._collab_here_last = now
+        cs.send_here(pos, ct)
+
+    def _collab_here_keepalive(self):
+        """居場所を流し直す見張り。
+
+        カーソルが**自分の操作以外**で動くと cursorMoved が出ない
+        (視点追従で引っぱられたとき、再解析で貼り直されたとき)。
+        それだと相手の画面に古い位置が残るので、ときどき見に行く。
+        中身が同じときは送らないので、黙っていれば何も流れない。"""
+        cs = self._collab
+        t = self._collab_here_keep
+        if cs is not None and cs.is_on():
+            if t is None:
+                t = QTimer(self)
+                t.setInterval(self.COLLAB_HERE_KEEP_MS)
+                t.timeout.connect(self._collab_send_here)
+                self._collab_here_keep = t
+            if not t.isActive():
+                t.start()
+            # 顔ぶれが変わったら名乗り直す。**後から入った人には、
+            # 自分が動くまで自分の居場所が届かない**ため。
+            self._collab_here_last = None
+            self._collab_send_here()
+        elif t is not None and t.isActive():
+            t.stop()
+            self._collab_here_last = None
 
     def _collab_take_presence(self, who, _pos, chart_t):
         """相手の居場所が届いた。作譜ペインと文字エディタの両方へ出す。"""
