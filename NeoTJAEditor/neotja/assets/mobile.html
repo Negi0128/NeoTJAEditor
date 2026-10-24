@@ -1554,7 +1554,7 @@ function coAskName(then){
 /* 外から中身を覗く口。試験と、様子がおかしいときの確認のために出しておく。
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
-  importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,
+  importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,
   coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
@@ -1601,9 +1601,15 @@ function coConnect(){
       CO.pen="";coSync();draw();coRetry()}};
   ws.onerror=()=>{}}
 
+/* 単独で使う口(?solo)。合作へ繋ぎに行かない。ルームの画面が配る URL に
+   これが付いている(利用者の指定 2026-10-24)。 */
+function coSolo(){return /(^|[?&])solo(=|&|$)/i.test(location.search||"")}
+
 function coBoot(){
   // file:// で開いたときや、claude.ai の中では繋ぎに行かない。
   if(!/^https?:$/.test(location.protocol))return;
+  // 単独で使う口。繋ぎに行かないので「合作に入る」も出ない。
+  if(coSolo()){toast("スマホ単体で使います");return}
   document.addEventListener("visibilitychange",()=>{
     if(document.visibilityState!=="visible")return;
     coWakeOn();
