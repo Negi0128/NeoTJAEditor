@@ -73,6 +73,9 @@ class YtDlpDownloadWorker(QThread):
     # challenge-solving).
     PLAYER_CLIENTS = [None, "android", "tv", "ios"]
 
+    # 背景の動画でも並びは同じ。android_vr は 1080p を一覧に出すが、
+    # いざ取ると 403 で弾かれ、結局 android(360p まで)へ落ちた
+    # (実測 2026-10-25)。先に試しても1回ぶん待つだけで得が無い。
     def player_clients(self):
         """今回のURLで試すプレイヤークライアントの並びを返す。
         player_client はYouTubeの抽出器にしか効かないので、他サイト
