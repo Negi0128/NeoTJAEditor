@@ -259,6 +259,9 @@ class CollabSession(QObject):
         #: 譜面を1コースだけ映すので、**ホストに合わせる**ための手がかりに
         #: する(利用者の指定 2026-10-22)。繋いでいなければ何も乗せない。
         self.read_course = None
+        #: いま流している分岐の系統を返す手(なければ None)。
+        #: 戻りは (level, path)。
+        self.read_branch = None
         #: 曲の見分け(名前と大きさ)。違う音源なら知らせるために持つ。
         self.song = ""
         #: 相手の居場所 {名前: (文字の位置, 譜面時刻 or None, 届いた時刻)}。
@@ -489,6 +492,9 @@ class CollabSession(QObject):
         course = self._course_now()
         if course:
             msg["course"] = course
+        br = self._branch_now()
+        if br is not None:
+            msg["branch"] = br
         self._send(msg)
 
     def send_op(self, op):
@@ -668,10 +674,32 @@ class CollabSession(QObject):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _branch_now(self):
+        """いま流している分岐の系統。{"level":..., "path":[...]} か None。
+
+        分岐のある譜面は、系統ごとに小節の数え方が変わる(実測
+        2026-10-23: Neo は3小節、スマホは全部並べて5小節と数えた)。
+        **こちらが映しているものを伝えて、相手にも同じ数え方を
+        させる。** コースと同じ決まり(利用者の指定 2026-10-22)。"""
+        if self.read_branch is None:
+            return None
+        try:
+            got = self.read_branch()
+        except Exception:  # noqa: BLE001
+            return None
+        if not got:
+            return None
+        level, path = got
+        return {"level": str(level or ""),
+                "path": [str(x) for x in (path or [])]}
+
     def send_full(self, text, to=None):
         """本文を丸ごと送る(入った直後・ずれを直すとき)。"""
         msg = {"t": "full", "text": text, "rev": self.rev, "pen": self.pen,
                "song": self.song, "course": self._course_now()}
+        br = self._branch_now()
+        if br is not None:
+            msg["branch"] = br
         if to is not None:
             to.sendTextMessage(encode(msg))
         else:

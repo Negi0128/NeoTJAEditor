@@ -2459,6 +2459,19 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _collab_branch_now(self):
+        """合作で相手へ伝える「いま流している分岐の系統」。
+
+        作譜で書く先を決めるとき(_apply_chart_op の editing_branch)と
+        **同じものを渡す**。これが揃っていないと、分岐のある譜面で
+        小節の数え方が食い違う(実測 2026-10-23: Neo 3小節 / スマホ
+        5小節)。"""
+        try:
+            return (self._preview_branch_level,
+                    list(self._preview_branch_path or []))
+        except Exception:  # noqa: BLE001
+            return None
+
     def _course_key_at_cursor(self, text):
         """カーソル行が属するコース。プレビューが見ているコースと同じ規則。"""
         hit = self._cursor_index.get(self.editor.textCursor().blockNumber() + 1)
@@ -2957,6 +2970,7 @@ class MainWindow(QMainWindow):
             str(self._collab_default_name() or "だれか"), self)
         cs.read_text = self.editor.toPlainText
         cs.read_course = self._collab_course_key
+        cs.read_branch = self._collab_branch_now
         cs.fullTextReceived.connect(self._collab_take_full)
         cs.patchReceived.connect(self._collab_take_patch)
         cs.penChanged.connect(self._collab_pen_changed)

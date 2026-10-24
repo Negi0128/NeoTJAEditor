@@ -918,7 +918,36 @@ function switchCourse(bi){
   snapShot();S=r.state;V.pending=null;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;
   closeSheet();buildLeft();changed();
   toast(S.course+" ★"+S.level+" に切り替えました")}
-function importTJA(text,want){
+/* ===== 分岐の系統の追い方 =====
+   Neo の note_edit.measure_spans と**同じ順で**追う。name には行の
+   命令の名前(大文字)を渡す。戻り true はその行が系統の切り替えで、
+   命令としては扱わない、という意味。
+   level が 'N'/'E'/'M' ならその系統で固定、'auto' なら path(区間ごとの
+   系統の並び)に沿う。どちらでもなければ分岐を見ない(全部数える)。 */
+const BRANCH_LEVELS=["N","E","M"];
+function branchState(level,path){
+  const auto=(level==="auto");
+  let want=auto?null:(BRANCH_LEVELS.indexOf(level)>=0?level:null);
+  const blind=(!auto&&!want);
+  let active=true,sec=-1;
+  return{
+    blind:blind,
+    active(){return blind?true:active},
+    line(name){
+      if(blind)return false;
+      if(name==="BRANCHSTART"){sec++;if(auto)want=(path&&path[sec])||"N";
+        active=true;return true}
+      if(name==="BRANCHEND"){active=true;return true}
+      if(BRANCH_LEVELS.indexOf(name)>=0){active=(name===want);return true}
+      return false}}}
+
+/* その系統の風船の数。BALLOONNOR / BALLOONEXP / BALLOONMAS があれば
+   そちらを使う(本家と同じ)。無ければ BALLOON。 */
+function balloonsFor(head,level){
+  const k={N:"BALLOONNOR",E:"BALLOONEXP",M:"BALLOONMAS"}[level];
+  const v=(k&&head[k])||head.BALLOON||"";
+  return String(v).split(/[,\s]+/).map(x=>parseInt(x)).filter(x=>x>0)}
+function importTJA(text,want,branch){
   // want("Oni" など)があればそのコースを読む。無ければ最初のコース。
   // 譜面ぜんたいの見出しと、そのコースだけの見出し(LEVEL/BALLOON ほか)は
   // scanCourses が分けて持ってくる。
@@ -937,7 +966,10 @@ function importTJA(text,want){
   // 書き出しで譜面ぜんたいの見出しへ移ってしまう。
   for(const [k,v] of Object.entries(Hd)){if(SONG_KEYS.some(x=>x[0]===k)){if(v)st.hdr[k]=v}
     else if(OWN.has(k))continue;else if(PER_COURSE.has(k))st.own.push([k,v]);else st.extra.push([k,v])}
-  const bl=(Hd.BALLOON||"").split(",").map(x=>parseInt(x)).filter(x=>x>0);let bi=0,skipped=0,mt=0,buf=[],pc=[],open=null;
+  // いま流している系統(合作なら Neo が教えてくる)。
+  const BR=branchState(branch&&branch.level,branch&&branch.path);
+  const bl=balloonsFor(Hd,branch&&branch.level);
+  let bi=0,skipped=0,mt=0,buf=[],pc=[],open=null;
   const map={"1":"d","2":"k","3":"D","4":"K","5":"r","6":"R","7":"b","9":"b"};
   let curLen=TPM,nextLen=null;
   const fin=()=>{for(const c of pc)if(c.k==="MEASURE"){const L2=parseSig(c.v);if(L2){if(c.idx===0)curLen=L2;else nextLen=L2;c.idx=0}}
@@ -949,9 +981,13 @@ function importTJA(text,want){
     mt+=ml;buf=[];pc=[];if(nextLen){curLen=nextLen;nextLen=null}};
   for(let i=pick.from;i<pick.to;i++){const l=lines[i].replace(/\/\/.*$/,"").trim();if(!l)continue;
     if(l[0]==="#"){const m=l.match(/^#([A-Z]+)\s*(.*)$/i);if(!m)continue;const k=m[1].toUpperCase();
+      if(BR.line(k))continue;            // 系統の切り替えそのもの
+      if(!BR.active())continue;          // 流していない系統の命令
       if(CMDS[k]){const c={k,idx:buf.length};if(CMDS[k].val)c.v=CMDS[k].val==="text"?m[2].trim():parseFloat(m[2]);pc.push(c)}else skipped++;continue}
-    for(const ch of l){if(ch===",")fin();else if(/[0-9]/.test(ch))buf.push(ch)}}
-  if(buf.length||pc.length)fin();
+    // 流していない系統の小節は、数にも時間にも入れない(Neo と同じ)。
+    for(const ch of l){if(ch===","){if(BR.active())fin();else{buf=[];pc=[]}}
+      else if(BR.active()&&/[0-9]/.test(ch))buf.push(ch)}}
+  if((buf.length||pc.length)&&BR.active())fin();
   for(const n of st.notes)if(TYPES[n.type].long&&n.end==null)n.end=n.t+TPB;
   // 読まなかったコースは本文のまま預かる(書き出しで同じ場所へ戻す)。
   // 塊の数え方が解析と食い違う変わった本文のときは預からない(二重に
@@ -1014,7 +1050,8 @@ $("tPlay").onclick=()=>V.playing?stop():play();
 
    **ここでは本文を書かない。** 受け取った本文をそのまま持って、描くために
    解析するだけ。打てるようにするのは次の段(op を送る)。 */
-const CO={on:false,ws:null,me:"",pen:"",text:"",rev:0,course:"",roster:[],peers:{}};
+const CO={on:false,ws:null,me:"",pen:"",text:"",rev:0,course:"",roster:[],peers:{},
+  song:null,songAsked:"",branch:null};
 
 /* 名前の決まりは PC 側と同じ(かな漢字5文字 / 英数字8文字ぶんの幅まで)。 */
 const NAME_W_MAX=8.0;
@@ -1078,7 +1115,7 @@ function scanCourses(text){
 
 /* ===== 受け取った本文を画面へ ===== */
 function coApply(){
-  const r=importTJA(CO.text,CO.course);
+  const r=importTJA(CO.text,CO.course,CO.branch);
   if(!r){toast("合作: 譜面を読めませんでした");return}
   // **localStorage へは書かない。** 端末に置いてある自分の譜面を、
   // 預かっているだけの本文で潰さないため。
@@ -1086,7 +1123,7 @@ function coApply(){
   S.notes.sort((a,b)=>a.t-b.t);S.cmds.sort((a,b)=>a.t-b.t);
   buildTempo();buildMeasures();
   if(V.cur>lastTick())V.cur=0;
-  buildLeft();draw();coSync()}
+  buildLeft();draw();coSync();coSongMaybe()}
 
 function coSync(){
   // いま誰が編集者か・何人居るか・繋がっているかを画面に出す。
@@ -1095,8 +1132,10 @@ function coSync(){
   if(!CO.on){el.textContent=base;return}
   if(!coLive()){el.textContent=base+" / 繋ぎ直し中…";return}
   const n=(CO.roster||[]).length;
+  if(CO.song){const pc=CO.song.size?Math.min(99,Math.floor(CO.song.got*100/CO.song.size)):0;
+    el.textContent=base+" / 音源 "+pc+"%";return}
   el.textContent=base+" / "+(CO.pen?("編集: "+CO.pen):"編集者なし")
-    +(n>1?(" / "+n+"人"):"")+(coBranchy()?" / 分岐(見るだけ)":"")}
+    +(n>1?(" / "+n+"人"):"")+(coBranchy()?(" / 分岐:"+coBranchName()):"")}
 
 
 /* ===== 相手の居場所(利用者の指定 2026-10-23) =====
@@ -1208,6 +1247,44 @@ function coPlayTake(at,on){
   // 譜面は流れるので、音だけ出ないことをその場で言う。
   if(on&&AUD.ctx&&AUD.ctx.state!=="running"&&!coPlayWarned){
     coPlayWarned=true;toast("画面を一度さわると音も鳴ります")}}
+
+/* ===== 合作の音源(利用者の指定 2026-10-24) =====
+   ホストは song_begin のあと、256KB ずつ**生の枠**で送ってくる。
+   繋ぎ直して decodeAudioData に渡す。
+   **端末には残さない。** 本文と同じで預かりもの。 */
+function coSongChunk(buf){
+  const s=CO.song;if(!s)return;
+  const ab=(buf&&buf.byteLength!=null)?buf:null;if(!ab)return;
+  s.parts.push(ab);s.got+=ab.byteLength;
+  // 進み具合は名札の所に出す(ここだけ書き換える)。
+  coSync()}
+
+function coSongDone(){
+  const s=CO.song;CO.song=null;coSync();
+  if(!s||!s.got){if(s)toast(s.name+(' を受け取れませんでした'));return}
+  const all=new Uint8Array(s.got);let o=0;
+  for(const p of s.parts){all.set(new Uint8Array(p),o);o+=p.byteLength}
+  s.parts.length=0;
+  // decodeAudioData は渡した入れ物を空にするので、控えを取ってから。
+  AUD.bytes=all.buffer.slice(0);
+  actx().decodeAudioData(all.buffer).then(b=>{
+    AUD.buf=b;AUD.name=s.name;AUD.peaks=null;buildPeaks();draw();
+    toast(s.name+" を受け取りました")},
+    ()=>{AUD.bytes=null;AUD.buf=null;
+      toast(s.name+" は、この端末では鳴らせない形式でした")})}
+
+/* 譜面の WAVE: が指す音源を持っていなければ、もらいに行く。
+   **一度頼んだ名前はもう頼まない**(ホストが音源を持っていないときは
+   返事が来ないので、繰り返すと鳴り続ける)。 */
+function coSongMaybe(){
+  if(!CO.on||!coLive()||CO.song)return;
+  const want=String((S.hdr&&S.hdr.WAVE)||"");
+  if(!want)return;
+  if(AUD.buf&&AUD.name===want)return;
+  if(CO.songAsked===want)return;
+  CO.songAsked=want;
+  coSend({t:"song_req"});
+  toast("音源をもらっています…")}
 /* 自分が編集者か。 */
 function coMine(){return CO.on&&!!CO.pen&&CO.pen===CO.me}
 /* いま本当に繋がっているか(繋ぎ直しの最中は false)。 */
@@ -1216,7 +1293,10 @@ function coLive(){return !!CO.ws&&CO.ws.readyState===1}
 function coCanWrite(){
   if(!coLive()){toast("繋ぎ直しています…");return false}
   if(!coMine()){toast("編集権がありません");return false}
-  if(coBranchy()){toast("分岐のある譜面は、スマホからは打てません");return false}
+  // 分岐は**系統を揃えて**打てるようになった(2026-10-24)。ただし
+  // 向こうが系統を教えてくれていないときは、数え方が揃わないので止める。
+  if(coBranchy()&&!CO.branch){
+    toast("分岐の系統がまだ届いていません");return false}
   return true}
 /* まだ op にしていない操作(連打・風船・命令・大小・設定・ZIP)。 */
 function coRO(){if(!CO.on)return false;
@@ -1244,20 +1324,33 @@ function addrOf(t){const m=mIndex(t),g=gridFor(m,[t]);return{m,k:slotOf(m,t,g),g
 function coMeasureNotes(course){
   const sc=scanCourses(CO.text),c=sc.courses.find(x=>x.key===(course||CO.course));
   if(!c)return[];
+  // **系統も揃える。** ここがずれると、向こうの小節番号と食い違った
+  // まま「思っている中身」を送ることになり、安全弁が意味を失う。
+  const BR=branchState(CO.branch&&CO.branch.level,CO.branch&&CO.branch.path);
   const out=[];let cur="";
   for(let i=c.from;i<c.to;i++){
     let l=sc.lines[i];const h=l.indexOf("//");if(h>=0)l=l.slice(0,h);
-    if(l.trim()[0]==="#")continue;
+    const tr=l.trim();
+    if(tr[0]==="#"){const m=tr.match(/^#([A-Z]+)/i);
+      if(m)BR.line(m[1].toUpperCase());continue}
     for(const ch of l){
-      if(ch===","){out.push(cur);cur=""}
+      if(ch===","){if(BR.active())out.push(cur);cur=""}
       else if(ch>="0"&&ch<="9")cur+=ch}}
-  if(cur.length)out.push(cur);
+  if(cur.length&&BR.active())out.push(cur);
   return out}
 
 /* 分岐のある譜面か。**こちらの解析は分岐を知らない** — 3つの系統を
    3小節として並べて読むので、小節の番号が向こうとずれる(実測: 同じ譜面を
    Neo が3小節、こちらが5小節と数えた)。打つと別の場所が書き換わるので、
    見るだけにする。 */
+/* いま映している系統の呼び名。 */
+function coBranchName(){
+  const lv=CO.branch&&CO.branch.level;
+  if(lv==="N")return "普通";
+  if(lv==="E")return "玄人";
+  if(lv==="M")return "達人";
+  if(lv==="auto")return "自動";
+  return "？"}
 function coBranchy(){
   const sc=scanCourses(CO.text),c=sc.courses.find(x=>x.key===CO.course);
   if(!c)return false;
@@ -1381,7 +1474,8 @@ function coPenGive(){
    そのまま残すと、どちらを触っているのか分からなくなるため。 */
 function coLeave(why){
   const was=CO.on;
-  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};coHereWas="";coPlayApply=false;
+  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};
+  CO.song=null;CO.songAsked="";CO.branch=null;coHereWas="";coPlayApply=false;
   if(coTimer){clearTimeout(coTimer);coTimer=null}
   coTries=0;coWakeOff();
   const ws=CO.ws;CO.ws=null;
@@ -1397,10 +1491,13 @@ function coLeave(why){
 function coSend(msg){try{CO.ws&&CO.ws.readyState===1&&CO.ws.send(JSON.stringify(msg))}catch(e){}}
 
 function coMsg(raw){
+  // 文字でないものは音源の切れはし。
+  if(typeof raw!=="string"){coSongChunk(raw);return}
   let m;try{m=JSON.parse(raw)}catch(e){return}
   const t=m&&m.t;
   if(t==="full"){CO.text=String(m.text==null?"":m.text);CO.rev=+m.rev||0;
-    CO.pen=String(m.pen||"");if(m.course)CO.course=courseKeyOf(m.course);coApply();return}
+    CO.pen=String(m.pen||"");if(m.course)CO.course=courseKeyOf(m.course);
+    if(m.branch!==undefined)CO.branch=m.branch||null;coApply();return}
   if(t==="patch"){
     const p=Math.max(0,+m.pos||0),rm=Math.max(0,+m.rm||0),ins=String(m.ins==null?"":m.ins);
     CO.text=CO.text.slice(0,p)+ins+CO.text.slice(p+rm);
@@ -1418,11 +1515,20 @@ function coMsg(raw){
     if(!m.who||m.who===CO.me)return;
     // コースは Neo に合わせる(利用者の指定)。mob の付いた here は
     // ほかのスマホのものなので追わない(引っぱり合う)。
-    if(!m.mob&&m.course){const k=courseKeyOf(m.course);
-      if(k!==CO.course){CO.course=k;coApply()}}
+    if(!m.mob){
+      // 系統も Neo に合わせる(小節の数え方がこれで決まる)。
+      const bOld=JSON.stringify(CO.branch||null);
+      if(m.branch!==undefined)CO.branch=m.branch||null;
+      const k=m.course?courseKeyOf(m.course):CO.course;
+      if(k!==CO.course||JSON.stringify(CO.branch||null)!==bOld){
+        CO.course=k;coApply()}}
     if(m.ct!=null)coPeerSet(String(m.who),+m.ct);
     return}
   if(t==="play"){coPlayTake(m.at,m.on);return}
+  if(t==="song_begin"){
+    CO.song={name:String(m.name||"song"),size:+m.size||0,got:0,parts:[]};
+    coSync();return}
+  if(t==="song_end"){coSongDone();return}
   if(t==="sum"){
     // ずれていたら作り直してもらう。**文字の数え方の違い**(JS は UTF-16、
     // Python は符号位置)でずれても、ここで必ず拾える。
@@ -1449,7 +1555,7 @@ function coAskName(then){
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
   importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,
-  coColor,coCharPos,coPlayTake,curFromSec,play,stop,
+  coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
@@ -1478,6 +1584,8 @@ function coRetry(){
 
 function coConnect(){
   let ws;try{ws=new WebSocket(coURL())}catch(e){coRetry();return}
+  // 音源は**生の枠**で来る。Blob のままだと繋ぐのが面倒なので配列で。
+  ws.binaryType="arraybuffer";
   CO.ws=ws;
   // 4秒で返事が無ければ諦める(初回は単体のまま / 2回目以降は繋ぎ直し)。
   const giveUp=setTimeout(()=>{try{ws.close()}catch(e){}},4000);
