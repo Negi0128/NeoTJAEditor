@@ -2505,6 +2505,12 @@ def set_marker(text, course_range, m, slot, grid, kind, which, present):
     body = course_body_span(text, course_range)
     if body is None:
         return None
+    # ゴーゴーの外に #GOGOEND だけ置かせない(利用者の指定 2026-10-24)。
+    # 本文には残るのに画面では何も変わらないので、置いたつもりで気づけない。
+    if present and kind == "GOGO" and which == "off":
+        if not _state_before(_region_lines(text, body, kind),
+                             _key(m, slot, grid)):
+            return None
     spans = measure_spans(text, body)
     if m >= len(spans):
         if not present:

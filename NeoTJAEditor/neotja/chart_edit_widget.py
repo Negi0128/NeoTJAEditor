@@ -1584,6 +1584,12 @@ class ChartEditWaveform(WaveformWidget):
                 text = base + ("を消す" if present else "")
                 act = menu.addAction(text)
                 act.setData((kind, which))
+                # ゴーゴーの外に「終了」だけ置かせない。本文には残るのに
+                # 画面では何も変わらないので、置いたつもりで気づけない
+                # (利用者の指定 2026-10-24)。
+                if (kind == "GOGO" and which == "off" and not present
+                        and not info.get("before")):
+                    act.setEnabled(False)
                 if present:
                     act.triggered.connect(
                         lambda _c=False, k=kind, wh=which:
@@ -1941,7 +1947,7 @@ class ChartEditWaveform(WaveformWidget):
     _OWN_KEYS = frozenset((
         Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Home, Qt.Key_End,
         Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
-        Qt.Key_W, Qt.Key_Q, Qt.Key_H,
+        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_G,
     )) | frozenset(_PLAIN_KEYS) | frozenset(_PEEPO_NOTE_KEYS) | frozenset(_PEEPO_LONG_KEYS)
 
     def event(self, e):
@@ -2112,7 +2118,16 @@ class ChartEditWaveform(WaveformWidget):
         if key == Qt.Key_Q and not mods & (Qt.ControlModifier | Qt.AltModifier):
             self._delete_or_transform("size")
             return
-        # 命令(BPM / HS / ゴーゴー / 小節線)はキーでは置かない。右クリックの
+        # ゴーゴーだけはキーで置く(利用者の指定 2026-10-24)。音符と同じ
+        # 気持ちで打てるように、開始か終了かは**今の状態**で決まる。
+        # Ctrl+G / Alt+G は窓のほう(本文へ #GOGOSTART)なので取らない。
+        if (key == Qt.Key_G and not mods & (Qt.ControlModifier
+                                            | Qt.AltModifier
+                                            | Qt.MetaModifier)):
+            if not event.isAutoRepeat():
+                self.toggle_gogo_at_cursor()
+            return
+        # ほかの命令(BPM / HS / 小節線)はキーでは置かない。右クリックの
         # メニューか、窓の「作譜」メニューから置く(利用者の希望 2026-09-25)。
         if key == Qt.Key_Home:
             self.jump_to_edge(False)
@@ -2372,6 +2387,23 @@ class ChartEditWaveform(WaveformWidget):
         return self._run_op({"kind": "command_value",
                              "pos": (pos.numerator, pos.denominator),
                              "name": str(name).upper(), "value": value})
+
+    def toggle_gogo_at_cursor(self):
+        """G。ゴーゴーの開始/終了を、**今の状態に合わせて**置く。
+
+        ・ゴーゴーの外 → 開始を置く
+        ・ゴーゴーの中 → 終了を置く
+        ・その位置にもう印がある → それを消す(押し間違いを同じキーで戻す)
+
+        音符と同じ気持ちで打てるように(利用者の指定 2026-10-24)。
+        音符を選んでいるときの「開始」は、今までどおり選んだ範囲を覆う。"""
+        info = self._marker_info("GOGO") or {}
+        if info.get("here_on") or info.get("here_off"):
+            which = "on" if info.get("here_on") else "off"
+            return self._run_op({"kind": "marker", "a": self._cursor_addr(),
+                                 "region": "GOGO", "which": which,
+                                 "present": False})
+        return self.place_marker("GOGO", "off" if info.get("before") else "on")
 
     def place_marker(self, kind, which):
         """カーソルの位置に開始/終了の印を置く(命令パネルのボタンから)。
