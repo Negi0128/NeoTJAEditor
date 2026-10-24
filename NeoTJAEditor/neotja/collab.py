@@ -24,6 +24,7 @@ OT も CRDT も要らない — 本文の同期は「○文字目から○文字
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -598,11 +599,48 @@ class CollabSession(QObject):
         else:
             self.song = ""
 
-    def _song_info(self):
-        p = self._song_path
+    def _song_info(self, path=None):
+        p = path or self._song_path
         if not p or not os.path.exists(p):
             return None
         return {"name": os.path.basename(p), "size": os.path.getsize(p)}
+
+    #: スマホ向けに作り直した音源(部屋ごとに1本だけ作って使い回す)。
+    _song_aac = ""
+
+    def _song_for(self, aac):
+        """送るファイル。
+
+        **スマホは ogg を鳴らせないことがある**(利用者の報告 2026-10-24:
+        「ogg はこの端末では読み込めません」。iOS の Safari は Ogg Vorbis を
+        decodeAudioData できない)。頼まれたときだけ m4a(AAC)へ作り直して
+        送る。PC のゲストは今までどおり**元のファイル**をもらう —
+        あちらは譜面の WAVE: が指す名前で置くので、中身を変えてはいけない。
+        """
+        p = self._song_path
+        if not aac or not p or not os.path.exists(p):
+            return p
+        if os.path.splitext(p)[1].lower() in (".m4a", ".mp3", ".wav",
+                                              ".aac"):
+            return p                     # そのまま鳴らせる形
+        if self._song_aac and os.path.exists(self._song_aac):
+            return self._song_aac
+        import tempfile
+        out = os.path.join(tempfile.gettempdir(),
+                           "neotja_song_%d.m4a" % os.getpid())
+        try:
+            from neotja.recorder import _ffmpeg_exe, _no_window
+            subprocess.run([_ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+                            "-i", p, "-vn", "-c:a", "aac", "-b:a", "192k",
+                            out], capture_output=True, timeout=180,
+                           **_no_window())
+        except Exception:  # noqa: BLE001
+            return p                     # 作れなければ元のまま送る
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            self._song_aac = out
+            self.notice.emit("合作: 音源をスマホで鳴る形にしました")
+            return out
+        return p
 
     def request_song(self, want_name=""):
         """ゲスト: 音源をくださいと言う。
@@ -614,13 +652,14 @@ class CollabSession(QObject):
             self._want_song = str(want_name or "")
             self._send({"t": "song_req"})
 
-    def _start_song_send(self, sock):
+    def _start_song_send(self, sock, aac=False):
         """ホスト: 音源を切りながら送り始める。"""
-        info = self._song_info()
+        path = self._song_for(bool(aac))
+        info = self._song_info(path)
         if info is None or sock is None:
             return
         try:
-            fh = open(self._song_path, "rb")
+            fh = open(path, "rb")
         except OSError:
             return
         sock.sendTextMessage(encode({"t": "song_begin", "name": info["name"],
@@ -919,7 +958,7 @@ class CollabSession(QObject):
             self.songReceived.emit(dst)
             return
         if t == "song_req" and self.role == "host":
-            self._start_song_send(sock)
+            self._start_song_send(sock, msg.get("aac"))
             return
         if t == "sum" and self.role == "guest":
             if self.read_text is None:

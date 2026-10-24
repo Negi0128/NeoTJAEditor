@@ -1721,6 +1721,8 @@ class _GameScreenBase:
         # 静的な下地(背景・左パネル・黒枠 等)を焼いたキャッシュ。None なら
         # 次の paintEvent で作り直す。compact 切替やスキン再読込で捨てること。
         self._static_layer = None
+        # 背景を描かず透明のまま残すか(録画で下に動画を敷くときだけ)。
+        self._bg_passthrough = False
         # 静的キャッシュを焼いたときの devicePixelRatio。録画(1080p)は 1.5 で
         # 描くので、DPR 1 で焼いた1枚を貼ると毎コマ 1.5 倍へ拡大される
         # (1コマ 3.2ms、1080p の描画時間の 3割)。DPR ごとに焼き直して
@@ -3320,6 +3322,27 @@ class _GameScreenBase:
                           max(1, int(round(self._logical_h * s))))
         self._static_layer = None
 
+    def set_background_passthrough(self, on, lane_opacity=1.0):
+        """背景(上下の絵・フッター・軽量の黒塗り)を描かずに透明のまま残す。
+
+        録画で**下に動画や画像を敷く**ための切り替え。合成は ffmpeg の
+        overlay がやるので、こちらは「背景の無い画面」を描くだけ。
+        レーン・左パネル・黒枠・魂ゲージ・曲名は今までどおり描く。
+
+        焼いた下地(_static_layer)は背景ごと入っているので、切り替えたら
+        捨てて焼き直させる。"""
+        on = bool(on)
+        # レーンは子ウィジェットが自分で地を敷くので、そちらへ渡す。
+        cp = getattr(self, "chart_preview", None)
+        fn = getattr(cp, "set_background_passthrough", None)
+        if callable(fn):
+            fn(on, lane_opacity)
+        if on == self._bg_passthrough:
+            return
+        self._bg_passthrough = on
+        self._static_layer = None
+        self.update()
+
     def paint_self(self):
         """自分の面へ1コマ描く(paintEvent / paintGL の中身)。
 
@@ -3352,7 +3375,9 @@ class _GameScreenBase:
         # ままで中身が dpr 倍の細かさで焼き直される。貼るときは DPR が一致する
         # ので拡大なしの単純ブリットになる。
         layered = self._layered_top()
-        fmt = (QImage.Format_ARGB32_Premultiplied if layered
+        # 背景を敷くときも、下地そのものを透明にして焼く。
+        alpha = layered or self._bg_passthrough
+        fmt = (QImage.Format_ARGB32_Premultiplied if alpha
                else QImage.Format_RGB32)
         dpr = max(1.0, float(dpr))
         # **論理寸 x dpr。** 倍率を画面自身が飲んでいるときは width()/height()
@@ -3360,7 +3385,7 @@ class _GameScreenBase:
         img = QImage(int(round(self._logical_w * dpr)),
                      int(round(self._logical_h * dpr)), fmt)
         img.setDevicePixelRatio(dpr)
-        img.fill(Qt.transparent if layered else QColor("#0d1117"))
+        img.fill(Qt.transparent if alpha else QColor("#0d1117"))
         p = QPainter(img)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         self._paint_static(p)
@@ -3386,7 +3411,10 @@ class _GameScreenBase:
         # 重ね式のときはここでは何も敷かない(paintEvent が毎フレーム描く)。
         # 絵を出さないときは黒で塗る。下地(#0d1117)のままだと少し青みが
         # 残って「消し忘れ」に見えるので、はっきり黒にする。
-        if self._layered_top():
+        if self._bg_passthrough:
+            # 背景は敷かない(録画で下に動画・画像が来る)。
+            bg = None
+        elif self._layered_top():
             bg = None
         elif self._lite:
             # 軽量: 背景の絵は上も下も出さない。画面ぜんぶを黒で塗っておく
@@ -3406,7 +3434,8 @@ class _GameScreenBase:
             # レーンの上に来るので、本家と同じ「奥行きのある」見え方になる。
             p.drawPixmap(0, 0, bg)
 
-        if not self._compact and not self._lite and SHOW_BACKGROUND:
+        if (not self._compact and not self._lite and SHOW_BACKGROUND
+                and not self._bg_passthrough):
             # --- 下部背景 (360..720) ---
             bd = self._skin.get("bg_down")
             if bd is not None:
@@ -3962,7 +3991,8 @@ class _GameScreenBase:
             self._static_layer = self._build_static_layer(self._dpr)
             self._static_layer_dpr = self._dpr
         # 重ね式の上背景はキャッシュに焼けないので、先に敷いてから被せる。
-        if self._layered_top():
+        # 背景を敷くときは、動く上背景も虹も描かない(そこへ動画が来る)。
+        if self._layered_top() and not self._bg_passthrough:
             try:
                 bg_now = self.chart_preview.game_state()[0]
             except Exception:  # noqa: BLE001
@@ -4020,9 +4050,12 @@ class _GameScreenBase:
             # クリア背景が完全に被さったら、その下の提灯の光は1画素も見えない。
             # 加算合成の全面貼りなので、見えないぶんはまるごと省く。
             el = self._clear_elapsed(now)
-            if self._clear_fade(el, BG_CLEAR_FADE_SEC) < 1.0:
-                self._draw_bg_light(p, now)
-            self._draw_bg_clear(p, el)
+            # 背景を敷くときは提灯の光もクリア背景も描かない(下背景の
+            # 仲間なので)。踊り子とどんちゃんは**人**なので今までどおり。
+            if not self._bg_passthrough:
+                if self._clear_fade(el, BG_CLEAR_FADE_SEC) < 1.0:
+                    self._draw_bg_light(p, now)
+                self._draw_bg_clear(p, el)
             # 踊り子はクリア背景より**手前**。流れる背景に乗らず、その場で
             # 踊る(実機のキャプチャでもそう見える)。
             self._draw_dancers(p, now, ratio)
@@ -4177,11 +4210,36 @@ class _GameScreenBase:
         return f
 
     def _draw_lyric(self, p, now):
+        """#LYRIC の字を出す。
+
+        **覚えを先に引く。** 以前は毎コマ QPainterPath に字形を起こして
+        から bake_text を呼んでいた。焼いた絵は使い回せていたのに、その
+        手前の addText(勘亭流の漢字の輪郭)が毎コマ走り、1コマ数MBを
+        作っては捨てていた(実測 2026-10-24: 歌詞のある譜面を8秒流すと
+        +2.0GB、この一行で +7MB まで落ちた)。
+
+        字形を起こすのは**覚えに無いときだけ**にする。"""
         try:
             text = self.chart_preview.lyric_at(now)
         except Exception:  # noqa: BLE001
             return
         if not text:
+            return
+        if self._lyric_cache is None:
+            self._lyric_cache = {}
+        # bake_text と同じ倍率の出し方。鍵も倍率ごとに分ける。
+        try:
+            scale = float(p.transform().m11()) or 1.0
+        except Exception:  # noqa: BLE001
+            scale = 1.0
+        scale = max(0.25, min(4.0, scale))
+        ck = (text, round(scale, 3))
+        got = self._lyric_cache.get(ck)
+        if got is not None:
+            if got is False:
+                return          # 焼けない大きさ(4096 超え)。出さない
+            pm, at = got
+            p.drawPixmap(at, pm)
             return
         f = self._lyric_font()
         fm = QFontMetricsF(f)
@@ -4192,12 +4250,13 @@ class _GameScreenBase:
         path.addText(QPointF(x, y), f, text)
         # 曲名と同じ手順。**なぞってから塗る**(塗りと線を同時に出すと線が
         # 内側へも太って、勘亭流の細い所が埋まる)。1枚焼いて使い回す。
-        if self._lyric_cache is None:
-            self._lyric_cache = {}
         baked = bake_text(p, self._lyric_cache, ("lyric", text, x, y),
                           path, self.LYRIC_OUTLINE, self.LYRIC_OUTLINE_W,
                           self.LYRIC_COLOR)
         if baked is None:
+            # 焼けなかった(大きすぎる)。その場で描いて、次からは出さない
+            # — 毎コマ字形を起こし直すほうが害が大きい。
+            self._lyric_cache[ck] = False
             p.save()
             p.setRenderHint(QPainter.Antialiasing, True)
             p.strokePath(path, QPen(QColor(self.LYRIC_OUTLINE),
@@ -4206,6 +4265,7 @@ class _GameScreenBase:
             p.fillPath(path, QColor(self.LYRIC_COLOR))
             p.restore()
             return
+        self._lyric_cache[ck] = baked
         pm, at = baked
         p.drawPixmap(at, pm)
 

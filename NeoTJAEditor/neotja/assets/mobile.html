@@ -38,7 +38,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .chip.armed{border-color:var(--accent);background:var(--surface)}
 .nb.sub{color:var(--fg-dim)}
 /* 右手: カーソルとモード */
-.right{grid-area:right;display:flex;flex-direction:column;gap:3px;min-height:0}
+/* 右の列。**はみ出させない。** 8個の縦並びなので、背の低い端末だと
+   下(や上)が切れて再生ボタンが消えていた(利用者の報告 2026-10-24)。
+   縮められる所まで縮めて、それでも足りなければ縦に送れるようにする。 */
+.right{grid-area:right;display:flex;flex-direction:column;gap:3px;min-height:0;overflow-y:auto;scrollbar-width:none}
+.right::-webkit-scrollbar{display:none}
+.right .rb{flex:1 1 0;min-height:26px}
+@media (max-height:420px){.rb svg{width:14px;height:14px}.rb{font-size:9px;gap:0}.right .rb{min-height:22px}}
 .right .rb{flex:1}
 .notes{display:flex;gap:4px;align-items:center;overflow-x:auto;scrollbar-width:none;min-width:0;flex:1}
 .notes::-webkit-scrollbar{display:none}
@@ -114,7 +120,15 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
 .cmdlist span{flex:1}
 .tool.on{color:var(--fg);border-color:var(--accent)}
 .rot{position:fixed;inset:0;z-index:30;background:var(--bg);display:none;place-items:center;text-align:center;padding:24px;line-height:1.8}
-@media (orientation:portrait) and (max-width:700px){.rot{display:grid}}
+/* 縦のときは、**画面を回してもらう代わりにこちらが回す**
+   (利用者の指定 2026-10-24: 横にできないブラウザがあるため)。
+   当たり判定はブラウザが回したまま見てくれるが、座標の計算は
+   こちらで付け替える(ROT / rotXY)。 */
+@media (orientation:portrait) and (max-width:700px){
+  .rot{display:none}
+  html,body{overflow:hidden}
+  .app{position:fixed;top:50%;left:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);transform-origin:center}
+}
 @media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
 
@@ -239,7 +253,15 @@ function geom(){
   const [nt,nh]=G.rows.note;G.waveH=Math.floor(nh*NEO.WAVE_FRAC);G.upperH=nh-G.waveH;G.cy=nt+Math.floor(G.upperH/2);
   G.laneW=Math.max(1,W-G.X0);G.xs=G.laneW/V.span;
 }
-function fit(){const r=cv.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,3);W=r.width;H=r.height;cv.width=W*d;cv.height=H*d;p.setTransform(d,0,0,d,0,0);draw()}
+/* 回しているか。回しているときは外枠の縦横が入れ替わる。 */
+function isRot(){return getComputedStyle($("app")).transform.indexOf("matrix")===0&&Math.abs(cv.getBoundingClientRect().width-cv.clientWidth)>2}
+/* 画面の点を、回す前の板の中の点へ直す。 */
+function rotXY(e,r){
+  if(!isRot())return[e.clientX-r.left,e.clientY-r.top];
+  return[e.clientY-r.top,r.width-(e.clientX-r.left)]}
+/* 指の動きも同じだけ回す(横の滑りが縦の動きになる)。 */
+function rotDX(e,p){return isRot()?(e.clientY-p.y):(e.clientX-p.x)}
+function fit(){const d=Math.min(devicePixelRatio||1,3);W=cv.clientWidth;H=cv.clientHeight;cv.width=W*d;cv.height=H*d;p.setTransform(d,0,0,d,0,0);draw()}
 new ResizeObserver(fit).observe(cv);
 const sx=sec=>G.X0+(sec-V.view)*G.xs;
 const xs2sec=x=>V.view+(x-G.X0)/G.xs;
@@ -470,8 +492,9 @@ function snapTick(sec){const t=Math.max(0,s2t(Math.max(0,sec))),m=mIndex(t),mg=m
 function rowAt(y){if(y<G.RH)return"ruler";for(const [kind] of NEO.ROWS){const [ry,rh]=G.rows[kind];if(y>=ry&&y<ry+rh)return kind}return null}
 let P=null;
 cv.addEventListener("pointerdown",e=>{const r=cv.getBoundingClientRect();cv.setPointerCapture(e.pointerId);
-  P={x:e.clientX,y:e.clientY-r.top,lx:e.clientX-r.left,view:V.view,drag:false,sec0:t2s(V.cur),cur0:V.cur}});
-cv.addEventListener("pointermove",e=>{if(!P)return;const dx=e.clientX-P.x;if(Math.abs(dx)>8)P.drag=true;
+  const[lx,ly]=rotXY(e,r);
+  P={x:e.clientX,y:ly,lx:lx,view:V.view,drag:false,sec0:t2s(V.cur),cur0:V.cur}});
+cv.addEventListener("pointermove",e=>{if(!P)return;const dx=rotDX(e,P);if(Math.abs(dx)>8)P.drag=true;
   if(!P.drag||V.playing)return;
   if(V.mode==="preview"){const L=liteScale(),sec=Math.max(0,P.sec0-dx/(L*speedAt(P.cur0)));V.cur=snapTick(sec);draw();return}
   V.view=P.view-dx/G.xs;draw()});
@@ -686,6 +709,7 @@ $("gDn").onclick=()=>setGrid(-1);$("tUndo").onclick=undo;$("gUp").onclick=()=>se
 $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu">
   ${CO.on?`<button class="btn" id="mPen">${coMine()?"編集権を返す":"編集権をもらう"}</button>
   ${coMine()?`<button class="btn" id="mGive">編集権を渡す</button>`:``}
+  <button class="btn" id="mSync">同期し直す</button>
   <button class="btn" id="mLeave">ルームから退出</button>`:`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>
   <button class="btn" id="mZipOut">ZIP を書き出す</button>
   <button class="btn" id="mSet">楽曲データ</button>`}
@@ -694,6 +718,7 @@ $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu"
   <button class="btn" id="mZoom">拡大倍率</button></div>
   <div class="row"><button class="btn" id="mClose">閉じる</button></div>`);
   if(CO.on){$("mLeave").onclick=()=>{closeSheet();coLeave()};
+  $("mSync").onclick=()=>{closeSheet();coResync()};
   $("mPen").onclick=()=>{closeSheet();coMine()?coPenFree():coPenReq()};
   if($("mGive"))$("mGive").onclick=()=>coPenGive()}
   else{$("mSet").onclick=openSettings;$("mZipOut").onclick=savePackage;
@@ -1283,8 +1308,23 @@ function coSongMaybe(){
   if(AUD.buf&&AUD.name===want)return;
   if(CO.songAsked===want)return;
   CO.songAsked=want;
-  coSend({t:"song_req"});
+  // aac を頼む。iOS は ogg を鳴らせないので、ホストが作り直して送る。
+  coSend({t:"song_req",aac:1});
   toast("音源をもらっています…")}
+/* ===== 同期し直す(利用者の報告 2026-10-24) =====
+   再生の位置がずれたとき、これまでは入り直すしかなかった。
+   本文を配り直してもらい、音源と居場所も取り直す。 */
+function coResync(){
+  if(!CO.on){toast("合作に入っていません");return}
+  if(!coLive()){
+    toast("繋ぎ直しています…");coTries=0;coConnect();return}
+  coSend({t:"resync"});
+  CO.songAsked="";coHereWas="";
+  coHereSend();
+  // 音源を持っていなければ、ついでにもらい直す。
+  coSongMaybe();
+  toast("同期し直しています…")}
+
 /* 自分が編集者か。 */
 function coMine(){return CO.on&&!!CO.pen&&CO.pen===CO.me}
 /* いま本当に繋がっているか(繋ぎ直しの最中は false)。 */
@@ -1554,7 +1594,7 @@ function coAskName(then){
 /* 外から中身を覗く口。試験と、様子がおかしいときの確認のために出しておく。
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
-  importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,
+  importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,coResync,isRot,
   coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
