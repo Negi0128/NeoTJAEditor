@@ -3738,9 +3738,16 @@ class PreviewDock(QDockWidget):
         if cb is not None:
             cb()
 
-    def seek_to_seconds(self, seconds: float):
+    def seek_to_seconds(self, seconds: float, play: bool = True):
+        """その秒へ移る。既定ではそのまま鳴らし始める。
+
+        play=False は**見る所だけ変えたいとき**。合作の視点追従が
+        これを使う。鳴らしてしまうと、編集者が止めた直後に届いた
+        「ここに居る」でこちらだけ再生が戻ってしまう(実測 2026-10-24:
+        スマホが止めても PC が流れ続けた)。"""
         self.audio.seek(max(0, int(seconds * 1000)))
-        self.audio.play()
+        if play:
+            self.audio.play()
 
     def _on_seek_cursor(self):
         if self.seek_cursor_cb is None:

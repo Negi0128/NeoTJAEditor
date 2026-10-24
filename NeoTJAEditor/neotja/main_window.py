@@ -3352,7 +3352,7 @@ class MainWindow(QMainWindow):
         pd = self.preview_dock
         self._collab_playing_apply = True
         try:
-            pd.seek_to_seconds(max(0.0, float(seconds)))
+            pd.seek_to_seconds(max(0.0, float(seconds)), play=False)
             # **いまの状態と見比べて切り替えない。** 音を鳴らし始める
             # のは非同期なので、押した直後の is_playing() はまだ嘘を
             # つく。見比べて切り替えると取りこぼし、相手が止めたのに
@@ -3484,7 +3484,9 @@ class MainWindow(QMainWindow):
         if (self.collab_follow and cs is not None and who == cs.pen
                 and chart_t >= 0.0 and not cs.holds_pen()
                 and not self.preview_dock.audio.is_playing()):
-            self.preview_dock.seek_to_seconds(max(0.0, float(chart_t)))
+            # **鳴らさない。** 付いていくのは見る所だけ。
+            self.preview_dock.seek_to_seconds(max(0.0, float(chart_t)),
+                                              play=False)
 
     def _collab_paint_peers(self):
         """覚えている居場所を、画面へ置き直す。"""

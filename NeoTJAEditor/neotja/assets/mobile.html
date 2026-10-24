@@ -988,17 +988,21 @@ function gains(){const ac=actx();if(!GAIN.master){GAIN.master=ac.createGain();GA
 function hitSE(when,type){const ac=AUD.ctx,buf=type==="pop"?SE.pop:(TYPES[type].don?SE.don:SE.ka);if(!buf)return;
   const src=ac.createBufferSource();src.buffer=buf;src.connect(gains().se);src.start(when)}
 let PL=null;
-function play(){const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
-  const sec0=t2s(V.cur),start=ac.currentTime+.08;
-  PL={sec0,start,q:S.notes.filter(n=>!TYPES[n.type].long&&n.t>=V.cur).map(n=>({s:t2s(n.t),type:n.type}))
-    .concat(S.notes.filter(n=>n.type==="b"&&n.end>=V.cur).map(n=>({s:balloonPop(n),type:"pop"}))).sort((a,b)=>a.s-b.s),qi:0,end:t2s(lastTick())+1.5};
+/* from(譜面の秒)を渡すと、カーソルではなくその所から流す。合作で
+   「編集者と同じ所から」流すのに要る。 */
+function play(from){const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
+  const sec0=(from==null?t2s(V.cur):+from),tick0=(from==null?V.cur:s2t(sec0)),start=ac.currentTime+.08;
+  PL={sec0,start,q:S.notes.filter(n=>!TYPES[n.type].long&&n.t>=tick0).map(n=>({s:t2s(n.t),type:n.type}))
+    .concat(S.notes.filter(n=>n.type==="b"&&n.end>=tick0).map(n=>({s:balloonPop(n),type:"pop"}))).sort((a,b)=>a.s-b.s),qi:0,end:t2s(lastTick())+1.5};
   if(AUD.buf){const off=+S.offset||0,a=sec0-off,src=ac.createBufferSource();src.buffer=AUD.buf;src.connect(gains().song);
     if(a>=0)src.start(start,a);else src.start(start-a,0);AUD.src=src;PL.end=Math.max(PL.end,AUD.buf.duration+off)}
-  V.playing=true;V.pos=sec0;$("tPlay").innerHTML=ICON.stop+"<small>停止</small>";$("tPlay").setAttribute("aria-label","停止");requestAnimationFrame(tick)}
+  V.playing=true;V.pos=sec0;$("tPlay").innerHTML=ICON.stop+"<small>停止</small>";$("tPlay").setAttribute("aria-label","停止");
+  coPlaySend(true);requestAnimationFrame(tick)}
 function stop(){if(!V.playing)return;V.playing=false;if(AUD.src){try{AUD.src.stop()}catch(e){}AUD.src=null}
   // 止めたらカーソルを再生位置のグリッドへ（Neo と同じく切り捨て）
   const t=s2t(V.pos),m=mIndex(t);V.cur=slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6));
-  $("tPlay").innerHTML=ICON.play+"<small>再生</small>";$("tPlay").setAttribute("aria-label","再生");draw()}
+  $("tPlay").innerHTML=ICON.play+"<small>再生</small>";$("tPlay").setAttribute("aria-label","再生");
+  coPlaySend(false);draw()}
 function tick(){if(!V.playing)return;const ac=AUD.ctx,now=PL.sec0+(ac.currentTime-PL.start);
   while(PL.qi<PL.q.length&&PL.q[PL.qi].s<now+.25){const q=PL.q[PL.qi++],w=PL.start+(q.s-PL.sec0);if(w>=ac.currentTime-.01)hitSE(Math.max(w,ac.currentTime),q.type)}
   V.pos=Math.max(PL.sec0,now);V.view=V.pos-V.span*NEO.FOLLOW_FRAC_PLAY;draw();if(now>PL.end){stop();return}requestAnimationFrame(tick)}
@@ -1166,6 +1170,44 @@ function drawPeers(){
     let lx=xx+3;if(lx+tw>W)lx=xx-3-tw;
     p.fillStyle=col;p.globalAlpha=.85;p.fillRect(lx,G.RH+2,tw,th);p.globalAlpha=1;
     p.fillStyle="#10131a";p.fillText(label,lx+4*K,G.RH+2+th/2)}}
+
+/* ===== 再生の同期(利用者の指定 2026-10-23) =====
+   **配るのは編集者だけ。** 全員が配ると、受けた側がまた配り返して
+   永遠に止まらない(Neo の send_playback と同じ決まり)。
+   at は音源の時刻。譜面の時刻から OFFSET を引く(here の ct と同じ)。 */
+let coPlayApply=false,coPlayWarned=false;
+function coPlaySend(on){
+  if(!CO.on||!coLive()||coPlayApply||!coMine())return;
+  const off=+S.offset||0,sec=(V.playing?V.pos:t2s(V.cur))-off;
+  coSend({t:"play",at:sec,on:!!on})}
+
+/* その秒(譜面の時刻)の、いちばん近い手前のグリッドへカーソルを置く。
+   stop() がやっているのと同じ数え方。 */
+function curFromSec(sec){
+  const t=s2t(Math.max(0,sec)),m=mIndex(t);
+  return slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6))}
+
+/* 編集者が再生/一時停止した。同じ所から同じ状態にする。
+   **いまの状態と見比べて切り替えない**(Neo の _collab_take_playback と
+   同じ理由。音が鳴り始めるのは非同期なので、直後の V.playing は当てに
+   ならない)。言われたとおりに流す/止める。 */
+function coPlayTake(at,on){
+  if(!CO.on||coMine())return;
+  const off=+S.offset||0,sec=Math.max(0,(+at||0)+off);
+  coPlayApply=true;
+  try{
+    if(V.playing){V.playing=false;
+      if(AUD.src){try{AUD.src.stop()}catch(e){}AUD.src=null}}
+    if(on){play(sec)}
+    else{V.cur=curFromSec(sec);V.pos=sec;
+      V.view=t2s(V.cur)-V.span*NEO.FOLLOW_FRAC;
+      $("tPlay").innerHTML=ICON.play+"<small>再生</small>";
+      $("tPlay").setAttribute("aria-label","再生");draw()}
+  }finally{coPlayApply=false}
+  // 画面を一度も触っていない端末は音が出せない(ブラウザの決まり)。
+  // 譜面は流れるので、音だけ出ないことをその場で言う。
+  if(on&&AUD.ctx&&AUD.ctx.state!=="running"&&!coPlayWarned){
+    coPlayWarned=true;toast("画面を一度さわると音も鳴ります")}}
 /* 自分が編集者か。 */
 function coMine(){return CO.on&&!!CO.pen&&CO.pen===CO.me}
 /* いま本当に繋がっているか(繋ぎ直しの最中は false)。 */
@@ -1339,7 +1381,7 @@ function coPenGive(){
    そのまま残すと、どちらを触っているのか分からなくなるため。 */
 function coLeave(why){
   const was=CO.on;
-  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};coHereWas="";
+  CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};coHereWas="";coPlayApply=false;
   if(coTimer){clearTimeout(coTimer);coTimer=null}
   coTries=0;coWakeOff();
   const ws=CO.ws;CO.ws=null;
@@ -1380,6 +1422,7 @@ function coMsg(raw){
       if(k!==CO.course){CO.course=k;coApply()}}
     if(m.ct!=null)coPeerSet(String(m.who),+m.ct);
     return}
+  if(t==="play"){coPlayTake(m.at,m.on);return}
   if(t==="sum"){
     // ずれていたら作り直してもらう。**文字の数え方の違い**(JS は UTF-16、
     // Python は符号位置)でずれても、ここで必ず拾える。
@@ -1406,6 +1449,7 @@ function coAskName(then){
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
   importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,
+  coColor,coCharPos,coPlayTake,curFromSec,play,stop,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
