@@ -652,9 +652,15 @@ class CollabSession(QObject):
             self._want_song = str(want_name or "")
             self._send({"t": "song_req"})
 
-    def _start_song_send(self, sock, aac=False):
-        """ホスト: 音源を切りながら送り始める。"""
-        path = self._song_for(bool(aac))
+    def _start_song_send(self, sock, aac=False, raw=False):
+        """ホスト: 音源を切りながら送り始める。
+
+        raw=True は**元のファイルをそのまま**という頼み(利用者の指定
+        2026-10-24)。スマホは鳴らすために m4a をもらうが、ZIP を書き出す
+        ときは元の ogg が要る。m4a から ogg へ戻すと非可逆を2度通って
+        音が落ちるので、**手元にある元ファイルを送る**。
+        """
+        path = self._song_path if raw else self._song_for(bool(aac))
         info = self._song_info(path)
         if info is None or sock is None:
             return
@@ -662,8 +668,11 @@ class CollabSession(QObject):
             fh = open(path, "rb")
         except OSError:
             return
-        sock.sendTextMessage(encode({"t": "song_begin", "name": info["name"],
-                                     "size": info["size"]}))
+        begin = {"t": "song_begin", "name": info["name"],
+                 "size": info["size"]}
+        if raw:
+            begin["raw"] = 1          # 受け側は鳴らさず、保存用に取り置く
+        sock.sendTextMessage(encode(begin))
         self._send_jobs[sock] = [fh, 0, info["size"]]
         QTimer.singleShot(0, lambda s=sock: self._pump_song(s))
 
@@ -958,7 +967,8 @@ class CollabSession(QObject):
             self.songReceived.emit(dst)
             return
         if t == "song_req" and self.role == "host":
-            self._start_song_send(sock, msg.get("aac"))
+            self._start_song_send(sock, msg.get("aac"),
+                                  msg.get("raw"))
             return
         if t == "sum" and self.role == "guest":
             if self.read_text is None:

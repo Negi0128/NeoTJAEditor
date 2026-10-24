@@ -271,7 +271,11 @@ function line(x0,y0,x1,y1){p.beginPath();p.moveTo(x0,y0);p.lineTo(x1,y1);p.strok
 const crisp=x=>Math.round(x)+.5;
 
 /* ===== 波形 ===== */
-const AUD={ctx:null,buf:null,bytes:null,name:"",src:null,peaks:null,rate:0,bin:256,noise:null};
+const AUD={ctx:null,buf:null,bytes:null,name:"",src:null,peaks:null,rate:0,bin:256,noise:null,
+  /* fromHost: 合作でもらった音源か(ホストが鳴る形へ作り直している
+     ことがあるので、保存のときは元ファイルを頼む)。
+     raw: その元ファイル。もらえたら使い回す。 */
+  fromHost:false,raw:null};
 function buildPeaks(){const b=AUD.buf,bin=AUD.bin,n=Math.ceil(b.length/bin),pk=new Float32Array(n);
   for(let c=0;c<b.numberOfChannels;c++){const d=b.getChannelData(c);for(let i=0;i<n;i++){let m=0;const e=Math.min(d.length,(i+1)*bin);for(let j=i*bin;j<e;j++){const v=d[j]<0?-d[j]:d[j];if(v>m)m=v}if(m>pk[i])pk[i]=m}}
   AUD.peaks=pk;AUD.rate=b.sampleRate/bin}
@@ -709,20 +713,24 @@ $("gDn").onclick=()=>setGrid(-1);$("tUndo").onclick=undo;$("gUp").onclick=()=>se
 $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu">
   ${CO.on?`<button class="btn" id="mPen">${coMine()?"編集権を返す":"編集権をもらう"}</button>
   ${coMine()?`<button class="btn" id="mGive">編集権を渡す</button>`:``}
-  <button class="btn" id="mSync">同期し直す</button>
-  <button class="btn" id="mLeave">ルームから退出</button>`:`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>
-  <button class="btn" id="mZipOut">ZIP を書き出す</button>
+  <button class="btn" id="mSync">同期し直す</button>`:`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>
   <button class="btn" id="mSet">楽曲データ</button>`}
+  <!-- 書き出しは**部屋の中でも**出す。中に居るうちでなければ、ホストから
+       元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
+       詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 -->
+  <button class="btn" id="mZipOut">ZIP を書き出す</button>
   <span class="btn filebtn" style="height:44px">音源の再読み込み<input id="mAud" type="file" accept="audio/*"></span>
   <button class="btn" id="mVol">音量調整</button>
-  <button class="btn" id="mZoom">拡大倍率</button></div>
+  <button class="btn" id="mZoom">拡大倍率</button>
+  ${CO.on?`<button class="btn" id="mLeave">ルームから退出</button>`:``}</div>
   <div class="row"><button class="btn" id="mClose">閉じる</button></div>`);
   if(CO.on){$("mLeave").onclick=()=>{closeSheet();coLeave()};
   $("mSync").onclick=()=>{closeSheet();coResync()};
   $("mPen").onclick=()=>{closeSheet();coMine()?coPenFree():coPenReq()};
   if($("mGive"))$("mGive").onclick=()=>coPenGive()}
-  else{$("mSet").onclick=openSettings;$("mZipOut").onclick=savePackage;
+  else{$("mSet").onclick=openSettings;
   $("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)}}
+  $("mZipOut").onclick=savePackage;
   $("mVol").onclick=openVolume;$("mZoom").onclick=openZoom;
   $("mAud").onchange=e=>{const f=e.target.files[0];if(f)reloadAudio(f)};
 $("mClose").onclick=closeSheet};
@@ -808,9 +816,9 @@ function openImport(){stop();openSheet(`<h2>TJA を読み込み</h2><textarea id
 function idb(){return new Promise((res,rej)=>{try{const r=indexedDB.open("neotja-mobile",1);r.onupgradeneeded=()=>r.result.createObjectStore("kv");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}catch(e){rej(e)}})}
 async function kvSet(k,v){try{const db=await idb();await new Promise((res,rej)=>{const tx=db.transaction("kv","readwrite");v==null?tx.objectStore("kv").delete(k):tx.objectStore("kv").put(v,k);tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}catch(e){}}
 async function kvGet(k){try{const db=await idb();return await new Promise((res,rej)=>{const r=db.transaction("kv").objectStore("kv").get(k);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}catch(e){return null}}
-function rememberAudio(){kvSet("audio",AUD.bytes?{name:AUD.name,bytes:AUD.bytes.slice(0)}:null)}
+function rememberAudio(){kvSet("audio",AUD.bytes?{name:AUD.name,bytes:AUD.bytes.slice(0),fromHost:!!AUD.fromHost}:null)}
 async function restoreAudio(){const a=await kvGet("audio");if(!a||!a.bytes||AUD.bytes)return;
-  try{AUD.bytes=a.bytes.slice(0);AUD.buf=await actx().decodeAudioData(a.bytes.slice(0));AUD.name=a.name;buildPeaks();draw()}catch(e){AUD.bytes=null}}
+  try{AUD.bytes=a.bytes.slice(0);AUD.buf=await actx().decodeAudioData(a.bytes.slice(0));AUD.name=a.name;AUD.fromHost=!!a.fromHost;AUD.raw=null;buildPeaks();draw()}catch(e){AUD.bytes=null}}
 
 /* ===== ZIP（.tja と .ogg を同封） ===== */
 const AUDIO_RE=/\.(ogg|mp3|wav|m4a|opus)$/i;
@@ -833,6 +841,7 @@ async function loadPackage(file){
     const r=importTJA(tjaText);if(!r){toast(".tja に #START がありません");return}
     snapShot();S=r.state;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;V.pending=null;
     AUD.buf=null;AUD.peaks=null;AUD.bytes=null;AUD.name="";
+    AUD.fromHost=false;AUD.raw=null;
     if(audioFile){AUD.bytes=audioFile.slice(0);try{AUD.buf=await actx().decodeAudioData(audioFile);AUD.name=audioName;buildPeaks()}catch(e){toast(audioName+" を再生できる形に読めませんでした")}}
     changed();buildLeft();rememberAudio();
     toast((AUD.name?"譜面と "+AUD.name+" を読み込みました":"譜面を読み込みました（音源なし）")+(r.skipped?`・未対応の命令 ${r.skipped} 個`:""));
@@ -849,14 +858,25 @@ function encodeTJA(text){
 async function savePackage(){
   closeSheet();if(!window.JSZip){toast("ZIP を作る部品が読み込めませんでした");return}
   const H=hdr(),safe=(S.title||"譜面").replace(/[\\/:*?"<>|]/g,"_").trim()||"譜面";
-  const audioName=AUD.bytes?(H.WAVE||AUD.name||safe+".ogg"):"";
-  if(audioName&&!H.WAVE)H.WAVE=audioName;
+  /* 合作でもらった音源は、ホストが**鳴る形へ作り直したもの**かもしれない。
+     そのまま WAVE: の名前(.ogg)で詰めると、名前と中身が食い違う。
+     保存のときだけ元ファイルを頼む(利用者の指定 2026-10-24)。 */
+  let bytes=AUD.bytes,aname=AUD.name,lost=false;
+  if(bytes&&AUD.fromHost){
+    const r=await coSongRawAsk();
+    if(r&&r.bytes){bytes=r.bytes;aname=r.name}else{lost=true}}
+  let audioName=bytes?(H.WAVE||aname||safe+".ogg"):"";
+  // もらえなかったら、せめて**中身どおりの拡張子**にして嘘をつかない。
+  if(audioName&&lost){const m=/\.[A-Za-z0-9]+$/.exec(aname||"");
+    if(m&&audioName.slice(-m[0].length).toLowerCase()!==m[0].toLowerCase())
+      audioName=audioName.replace(/\.[^.]*$/,"")+m[0]}
+  if(audioName&&audioName!==H.WAVE)H.WAVE=audioName;
   const {data,enc}=encodeTJA(exportTJA()),zip=new JSZip();zip.file(safe+".tja",data);
-  if(AUD.bytes)zip.file(audioName,AUD.bytes);
+  if(bytes)zip.file(audioName,bytes);
   const blob=await zip.generateAsync({type:"blob",compression:"DEFLATE"});
   const dl=await window.claude?.use?.("downloads");
   if(!dl){toast("この画面ではファイルを保存できません");return}
-  try{await dl.save({filename:safe+".zip",data:blob});toast((AUD.bytes?"":"音源なしで ")+safe+".zip を保存しました"+(enc==="UTF-8"?"（cp932 に無い文字があったので UTF-8）":""))}
+  try{await dl.save({filename:safe+".zip",data:blob});toast((bytes?"":"音源なしで ")+safe+".zip を保存しました"+(lost?"（元の音源をもらえなかったので "+audioName+" で入れました）":"")+(enc==="UTF-8"?"（cp932 に無い文字があったので UTF-8）":""))}
   catch(e){if(e&&e.code!=="declined")toast("保存できませんでした（"+(e&&e.code||"不明")+"）")}
 }
 
@@ -1076,7 +1096,9 @@ $("tPlay").onclick=()=>V.playing?stop():play();
    **ここでは本文を書かない。** 受け取った本文をそのまま持って、描くために
    解析するだけ。打てるようにするのは次の段(op を送る)。 */
 const CO={on:false,ws:null,me:"",pen:"",text:"",rev:0,course:"",roster:[],peers:{},
-  song:null,songAsked:"",branch:null};
+  song:null,songAsked:"",branch:null,
+  /* songRaw: 保存用にもらっている最中の元ファイル。rawWait: その待ち。 */
+  songRaw:null,rawWait:null};
 
 /* 名前の決まりは PC 側と同じ(かな漢字5文字 / 英数字8文字ぶんの幅まで)。 */
 const NAME_W_MAX=8.0;
@@ -1157,7 +1179,8 @@ function coSync(){
   if(!CO.on){el.textContent=base;return}
   if(!coLive()){el.textContent=base+" / 繋ぎ直し中…";return}
   const n=(CO.roster||[]).length;
-  if(CO.song){const pc=CO.song.size?Math.min(99,Math.floor(CO.song.got*100/CO.song.size)):0;
+  const sp=CO.song||CO.songRaw;
+  if(sp){const pc=sp.size?Math.min(99,Math.floor(sp.got*100/sp.size)):0;
     el.textContent=base+" / 音源 "+pc+"%";return}
   el.textContent=base+" / "+(CO.pen?("編集: "+CO.pen):"編集者なし")
     +(n>1?(" / "+n+"人"):"")+(coBranchy()?(" / 分岐:"+coBranchName()):"")}
@@ -1278,7 +1301,7 @@ function coPlayTake(at,on){
    繋ぎ直して decodeAudioData に渡す。
    **端末には残さない。** 本文と同じで預かりもの。 */
 function coSongChunk(buf){
-  const s=CO.song;if(!s)return;
+  const s=CO.songRaw||CO.song;if(!s)return;
   const ab=(buf&&buf.byteLength!=null)?buf:null;if(!ab)return;
   s.parts.push(ab);s.got+=ab.byteLength;
   // 進み具合は名札の所に出す(ここだけ書き換える)。
@@ -1291,12 +1314,36 @@ function coSongDone(){
   for(const p of s.parts){all.set(new Uint8Array(p),o);o+=p.byteLength}
   s.parts.length=0;
   // decodeAudioData は渡した入れ物を空にするので、控えを取ってから。
-  AUD.bytes=all.buffer.slice(0);
+  AUD.bytes=all.buffer.slice(0);AUD.fromHost=true;AUD.raw=null;
   actx().decodeAudioData(all.buffer).then(b=>{
     AUD.buf=b;AUD.name=s.name;AUD.peaks=null;buildPeaks();draw();
     toast(s.name+" を受け取りました")},
     ()=>{AUD.bytes=null;AUD.buf=null;
       toast(s.name+" は、この端末では鳴らせない形式でした")})}
+
+/* ===== 保存用に、ホストの元ファイルをもらう(利用者の指定 2026-10-24) =====
+   鳴らすのは作り直した m4a のままで、ZIP には**元の ogg**を入れる。
+   m4a から ogg へ戻すと非可逆を2度通るので、戻さずにもらう。
+   頼むのは保存を押したときだけ。一度もらったら使い回す。 */
+function coSongRawAsk(){
+  if(AUD.raw&&AUD.raw.bytes)return Promise.resolve(AUD.raw);
+  if(!CO.on||!coLive()||CO.song)return Promise.resolve(null);
+  if(CO.rawWait)return CO.rawWait.p;
+  let done;const p=new Promise(r=>{done=r});
+  CO.rawWait={done:done,p:p,tm:0};
+  coSend({t:"song_req",raw:1});
+  toast("元の音源をもらっています…");
+  // 返事が来ないまま待ち続けない(ホストが持っていないこともある)。
+  CO.rawWait.tm=setTimeout(()=>{if(CO.rawWait){const w=CO.rawWait;CO.rawWait=null;CO.songRaw=null;w.done(null)}},180000);
+  return p}
+function coSongRawDone(){
+  const s=CO.songRaw;CO.songRaw=null;coSync();
+  const w=CO.rawWait;CO.rawWait=null;
+  if(w&&w.tm)clearTimeout(w.tm);
+  if(s&&s.got){const all=new Uint8Array(s.got);let o=0;
+    for(const q of s.parts){all.set(new Uint8Array(q),o);o+=q.byteLength}
+    s.parts.length=0;AUD.raw={name:s.name,bytes:all.buffer}}
+  if(w)w.done(AUD.raw&&AUD.raw.bytes?AUD.raw:null)}
 
 /* 譜面の WAVE: が指す音源を持っていなければ、もらいに行く。
    **一度頼んだ名前はもう頼まない**(ホストが音源を持っていないときは
@@ -1516,6 +1563,8 @@ function coLeave(why){
   const was=CO.on;
   CO.on=false;CO.pen="";CO.text="";CO.course="";CO.roster=[];CO.peers={};
   CO.song=null;CO.songAsked="";CO.branch=null;coHereWas="";coPlayApply=false;
+  CO.songRaw=null;if(CO.rawWait){const rw=CO.rawWait;CO.rawWait=null;
+  if(rw.tm)clearTimeout(rw.tm);rw.done(null)}
   if(coTimer){clearTimeout(coTimer);coTimer=null}
   coTries=0;coWakeOff();
   const ws=CO.ws;CO.ws=null;
@@ -1566,9 +1615,11 @@ function coMsg(raw){
     return}
   if(t==="play"){coPlayTake(m.at,m.on);return}
   if(t==="song_begin"){
-    CO.song={name:String(m.name||"song"),size:+m.size||0,got:0,parts:[]};
+    const s={name:String(m.name||"song"),size:+m.size||0,got:0,parts:[]};
+    // raw は保存用。鳴らさずに取り置く。
+    if(m.raw)CO.songRaw=s;else CO.song=s;
     coSync();return}
-  if(t==="song_end"){coSongDone();return}
+  if(t==="song_end"){CO.songRaw?coSongRawDone():coSongDone();return}
   if(t==="sum"){
     // ずれていたら作り直してもらう。**文字の数え方の違い**(JS は UTF-16、
     // Python は符号位置)でずれても、ここで必ず拾える。
@@ -1595,7 +1646,7 @@ function coAskName(then){
    **読むだけ**に使うこと(ここから直接いじると画面と食い違う)。 */
 window.NEOTJA={CO,get state(){return S},get view(){return V},
   importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,coResync,isRot,
-  coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,
+  coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,coSongRawAsk,CO,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
