@@ -12,11 +12,12 @@ QPainter を使って重ねている。確認のための1枚なので ffmpeg �
 無く、押してすぐ出るほうが大事。暗さと位置の出し方は本番と同じ式。
 """
 import os
+import shutil
 import subprocess
 import tempfile
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QVBoxLayout,
 )
@@ -88,20 +89,138 @@ def _gray(v):
     return QColor(v, v, v)
 
 
-def compose_check_frame(widget, bg, song_sec):
+#: 焼いたジャケット(枠つき)の覚え。**毎回焼かない。**
+#: 枠を毎コマ描いて重くなったことがある(利用者の注意 2026-10-26)ので、
+#: 同じ見た目なら焼いた絵をそのまま使い回す。
+_ART_CACHE = {}
+_ART_CACHE_MAX = 4
+
+
+def _baked_art(bg, h):
+    """枠まで付けて焼いたジャケット。作れなければ None。"""
+    path = getattr(bg, "art", "")
+    if not path or not os.path.exists(path):
+        return None
+    ah = max(8, int(round(h * bg.art_pct / 100.0)))
+    e = int(getattr(bg, "art_edge", 0) or 0)
+    col = getattr(bg, "art_edge_color", "#ffffff")
+    try:
+        key = (path, os.path.getmtime(path), ah, e, col)
+    except OSError:
+        return None
+    got = _ART_CACHE.get(key)
+    if got is not None:
+        return got
+    src = QImage(path)
+    if src.isNull():
+        return None
+    img = src.scaledToHeight(ah, Qt.SmoothTransformation)
+    if e > 0:
+        out = QImage(img.width() + e * 2, img.height() + e * 2,
+                     QImage.Format_ARGB32_Premultiplied)
+        out.fill(QColor(col))
+        q = QPainter(out)
+        q.drawImage(e, e, img)
+        q.end()
+        img = out
+    if len(_ART_CACHE) >= _ART_CACHE_MAX:
+        _ART_CACHE.clear()
+    _ART_CACHE[key] = img
+    return img
+
+
+def _draw_art(p, bg, w, h):
+    """左下へジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。"""
+    img = _baked_art(bg, h)
+    if img is None:
+        return
+    p.drawImage(bg.art_pad, max(0, h - img.height() - bg.art_pad), img)
+
+
+#: 焼いた棒の覚え。つまみを動かすたびに ffmpeg を呼ばないため。
+_WAVE_CACHE = {}
+_WAVE_CACHE_MAX = 6
+
+
+def _wave_image(bg, song, at, w, h):
+    """その時刻の音から棒を1枚作る。作れなければ None。
+
+    本番と同じ式(モノラルにまとめてから showfreqs)。見本なので
+    ffmpeg を1回だけ呼び、焼いた絵は覚えて使い回す。
+    """
+    if not getattr(bg, "wave", False) or not song or not os.path.exists(song):
+        return None
+    wh = max(8, int(round(h * bg.wave_pct / 100.0)))
+    col = "0x" + bg.wave_color[1:]
+    at = max(0.0, float(at))
+    try:
+        key = (song, os.path.getmtime(song), round(at, 2), w, wh, col)
+    except OSError:
+        return None
+    got = _WAVE_CACHE.get(key)
+    if got is not None:
+        return got
+    tmp = tempfile.mkdtemp(prefix="neotja_wv_")
+    png = os.path.join(tmp, "w.png")
+    img = None
+    try:
+        subprocess.run(
+            [recorder._ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+             "-ss", "%.3f" % at, "-t", "0.5", "-i", song,
+             "-filter_complex",
+             "[0:a]aformat=channel_layouts=mono,"
+             "showfreqs=s=%dx%d:mode=bar:ascale=log:fscale=log:colors=%s[v]"
+             % (w, wh, col),
+             "-map", "[v]", "-frames:v", "1", png],
+            capture_output=True, timeout=30, **recorder._no_window())
+        if os.path.exists(png):
+            got = QImage(png)
+            img = None if got.isNull() else got
+    except (OSError, subprocess.SubprocessError):
+        img = None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if img is None:
+        return None
+    if len(_WAVE_CACHE) >= _WAVE_CACHE_MAX:
+        _WAVE_CACHE.clear()
+    _WAVE_CACHE[key] = img
+    return img
+
+
+def _draw_wave(p, bg, song, at, w, h):
+    """画面の下へ棒を重ねる。濃さはそのまま効かせる。"""
+    img = _wave_image(bg, song, at, w, h)
+    if img is None:
+        return
+    p.save()
+    p.setOpacity(max(0.05, min(1.0, bg.wave_alpha / 100.0)))
+    p.drawImage(0, max(0, h - img.height()), img)
+    p.restore()
+
+
+def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
     """背景の上に譜面画面を1コマ重ねた絵を作る。駄目なら None。
 
     song_sec は**音源の時刻**。背景の中の秒は offset + song_sec
     (本番の -ss の出し方と同じ)。
+
+    canvas は出来上がりの大きさ (w, h)。渡すと**本番と同じ画面比**で
+    組み立てる — 画面は縦横比のままその中へ収め、余りは背景が見える
+    (利用者の指定 2026-10-26「全部プレビューしてほしい」)。渡さなければ
+    今までどおりウィジェットの大きさで作る。
     """
-    w, h = widget.width(), widget.height()
+    sw, sh = widget.width(), widget.height()
+    if sw <= 0 or sh <= 0:
+        return None
+    w, h = (canvas if canvas else (sw, sh))
     if w <= 0 or h <= 0:
         return None
     base = _bg_frame(bg, bg.offset + float(song_sec), w, h)
     if base is None:
         return None
     # 画面は背景を描かずに透明のまま。重ねるのはこちらでやる。
-    shot = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+    shot = QImage(sw, sh, QImage.Format_ARGB32_Premultiplied)
     shot.fill(0)
     recorder.set_background_passthrough(widget, True, bg.lane)
     try:
@@ -115,7 +234,17 @@ def compose_check_frame(widget, bg, song_sec):
             pass
         recorder.set_background_passthrough(widget, False)
     p = QPainter(base)
-    p.drawImage(0, 0, shot)
+    # **飾りを先、画面を最後。** 本番(ffmpeg)と同じ順にしないと、
+    # 画面の下のほうにある歌詞(#LYRIC)が棒やジャケットに隠れる
+    # (利用者の指定 2026-10-26)。
+    _draw_wave(p, bg, song, bg.offset + float(song_sec), w, h)
+    _draw_art(p, bg, w, h)
+    if (sw, sh) == (w, h):
+        p.drawImage(0, 0, shot)
+    else:
+        # 本番(ffmpeg)と同じ「縦横比のまま収めて、余りは透明」。
+        fit = shot.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawImage((w - fit.width()) // 2, (h - fit.height()) // 2, fit)
     p.end()
     return base
 

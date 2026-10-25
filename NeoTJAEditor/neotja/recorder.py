@@ -483,6 +483,18 @@ def _video_filter(canvas, src_w, src_h, bg="0x0d1117"):
 BG_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
+def _hex_color(v, fallback):
+    """"#rrggbb" に正す。おかしな値は fallback(ffmpeg へ素で渡さない)。"""
+    s = str(v or "").strip()
+    if len(s) == 7 and s[0] == "#":
+        try:
+            int(s[1:], 16)
+            return s.lower()
+        except ValueError:
+            pass
+    return fallback
+
+
 def _fade_secs(v):
     """フェードの長さ。おかしな値は「掛けない」(0)に倒す。"""
     try:
@@ -500,7 +512,11 @@ class RecordBackground:
     "hold"(最後のコマで止める)か。"""
 
     def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
-                 fade_in=0.0, fade_out=0.0, fade_target="all"):
+                 fade_in=0.0, fade_out=0.0, fade_target="all",
+                 art="", art_pct=30.0, art_pad=24,
+                 art_edge=6, art_edge_color="#ffffff",
+                 wave=False, wave_pct=15.0, wave_color="#ffb300",
+                 wave_alpha=70):
         self.path = str(path or "")
         try:
             self.offset = float(offset or 0.0)
@@ -523,6 +539,35 @@ class RecordBackground:
         self.fade_in = _fade_secs(fade_in)
         self.fade_out = _fade_secs(fade_out)
         self.fade_target = "bg" if str(fade_target) == "bg" else "all"
+        #: 左下へ置くジャケット写真(利用者の指定 2026-10-26)。空なら置かない。
+        #: art_pct は画面の高さに対する割合、art_pad は端からの余白(画素)。
+        self.art = str(art or "")
+        try:
+            self.art_pct = max(2.0, min(60.0, float(art_pct)))
+        except (TypeError, ValueError):
+            self.art_pct = 30.0
+        try:
+            self.art_pad = max(0, min(400, int(art_pad)))
+        except (TypeError, ValueError):
+            self.art_pad = 24
+        #: 写真のまわりの枠(画素)と色。0 なら枠なし。
+        try:
+            self.art_edge = max(0, min(40, int(art_edge)))
+        except (TypeError, ValueError):
+            self.art_edge = 6
+        self.art_edge_color = _hex_color(art_edge_color, "#ffffff")
+        #: 画面の下に出す「音に合わせて動く棒」(利用者の指定 2026-10-26)。
+        #: wave_pct は画面の高さに対する高さ、wave_alpha は濃さ(%)。
+        self.wave = bool(wave)
+        try:
+            self.wave_pct = max(3.0, min(50.0, float(wave_pct)))
+        except (TypeError, ValueError):
+            self.wave_pct = 15.0
+        self.wave_color = _hex_color(wave_color, "#ffb300")
+        try:
+            self.wave_alpha = max(5, min(100, int(wave_alpha)))
+        except (TypeError, ValueError):
+            self.wave_alpha = 70
 
     def __bool__(self):
         return bool(self.path)
@@ -541,8 +586,20 @@ def as_background(bg):
     if isinstance(bg, RecordBackground):
         return bg
     if isinstance(bg, dict):
-        return RecordBackground(bg.get("path", ""), bg.get("offset", 0.0),
-                                bg.get("dim", 0.0), bg.get("lane", 1.0))
+        # **全部拾う。** 以前はフェードを落としていて、dict で渡すと
+        # 掛からなかった(2026-10-26 に気づいた)。
+        return RecordBackground(
+            bg.get("path", ""), bg.get("offset", 0.0),
+            bg.get("dim", 0.0), bg.get("lane", 1.0),
+            fade_in=bg.get("fade_in", 0.0), fade_out=bg.get("fade_out", 0.0),
+            fade_target=bg.get("fade_target", "all"),
+            art=bg.get("art", ""), art_pct=bg.get("art_pct", 30.0),
+            art_pad=bg.get("art_pad", 24),
+            art_edge=bg.get("art_edge", 6),
+            art_edge_color=bg.get("art_edge_color", "#ffffff"),
+            wave=bg.get("wave", False), wave_pct=bg.get("wave_pct", 15.0),
+            wave_color=bg.get("wave_color", "#ffb300"),
+            wave_alpha=bg.get("wave_alpha", 70))
     return RecordBackground(str(bg))
 
 
@@ -562,7 +619,102 @@ def _bg_input_args(bg, start_sec):
     return args, max(0.0, -ss)
 
 
-def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec):
+def _art_input_args(bg):
+    """ジャケットの入力ぶん(焼かない版)。置かないなら空。"""
+    if not getattr(bg, "art", "") or not os.path.exists(bg.art):
+        return []
+    return ["-loop", "1", "-i", bg.art]
+
+
+def _bg_out_size(canvas, src_w, src_h):
+    """出来上がりの大きさ。フィルタと焼きで同じ値を使うためにここへ出す。"""
+    if canvas is None:
+        return src_w + (src_w & 1), src_h + (src_h & 1)
+    return canvas
+
+
+def art_total_h(bg, out_h):
+    """枠まで入れたジャケットの高さ(画素)。"""
+    ah = max(8, int(round(out_h * bg.art_pct / 100.0)))
+    return ah + int(bg.art_edge) * 2
+
+
+#: 焼いたジャケットの覚え。同じ見た目なら作り直さない。
+_ART_BAKED = {}
+
+
+def _bake_art(bg, out_h):
+    """出来上がりの大きさ・枠つきで1枚だけ焼いて、その道を返す。
+
+    **毎コマの scale/pad をやめるため。** 焼けなければ空を返して、
+    呼び手は今までどおり元の絵を渡す(見た目は同じ、少し重いだけ)。"""
+    try:
+        key = (bg.art, os.path.getmtime(bg.art), int(out_h),
+               round(float(bg.art_pct), 3), int(bg.art_edge),
+               bg.art_edge_color)
+    except OSError:
+        return ""
+    got = _ART_BAKED.get(key)
+    if got and os.path.exists(got):
+        return got
+    ah = max(8, int(round(out_h * bg.art_pct / 100.0)))
+    e = int(bg.art_edge)
+    vf = "scale=-2:%d" % ah
+    if e > 0:
+        vf += (",pad=iw+%d:ih+%d:%d:%d:color=%s"
+               % (e * 2, e * 2, e, e, bg.art_edge_color))
+    out = os.path.join(tempfile.gettempdir(),
+                       "neotja_art_%08x.png" % (abs(hash(key)) & 0xffffffff))
+    try:
+        subprocess.run([_ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+                        "-i", bg.art, "-vf", vf, "-frames:v", "1", out],
+                       capture_output=True, timeout=60, **_no_window())
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not os.path.exists(out) or os.path.getsize(out) <= 0:
+        return ""
+    _ART_BAKED[key] = out
+    return out
+
+
+def wants_wave(bg, aud_idx):
+    """棒を出すか。音の入力が無ければ出せない。"""
+    return bool(getattr(bg, "wave", False)) and aud_idx is not None
+
+
+def _wave_chain(bg, aud_idx, w, h, cur):
+    """音から棒を作って cur の上へ重ねる一節と、次の名札を返す。
+
+    音は asplit で2つに分ける — 片方は出力の音、片方は棒の絵。
+    こうしないと同じ音を二度使えない。"""
+    wh = max(8, int(round(h * bg.wave_pct / 100.0)))
+    col = "0x" + bg.wave_color[1:]
+    a = max(0.05, min(1.0, bg.wave_alpha / 100.0))
+    nxt = cur + "w"
+    # **棒用はモノラルにまとめる。** ステレオのままだと左右で2組の棒が
+    # 描かれ、色の指定は1つ目にしか当たらないので2つ目が既定の白になり、
+    # 重なって白く見えた(実測 2026-10-26: (255,255,255))。
+    s = ("[%d:a]asplit=2[aout][avis];" % aud_idx
+         + "[avis]aformat=channel_layouts=mono,"
+           "showfreqs=s=%dx%d:mode=bar:ascale=log:fscale=log"
+           ":colors=%s[wv0];" % (w, wh, col)
+         + "[wv0]format=rgba,colorchannelmixer=aa=%.3f[wv];" % a
+         + "[%s][wv]overlay=0:%d[%s];" % (cur, h - wh, nxt))
+    return s, nxt
+
+
+def _art_plan(bg, out_h):
+    """(入力の引数, 焼いてあるか)。焼けていれば毎コマの scale が要らない。"""
+    if not getattr(bg, "art", "") or not os.path.exists(bg.art):
+        return [], False
+    baked = _bake_art(bg, out_h)
+    if baked:
+        return ["-loop", "1", "-i", baked], True
+    return ["-loop", "1", "-i", bg.art], False
+
+
+def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
+                       art_idx=None, art_baked=False, aud_idx=None):
     """背景の上に画面を重ねるフィルタ。入力 0 が画面、1 が背景。
 
     画面の側は **premultiplied のまま** ffmpeg へ渡しているので、
@@ -607,8 +759,36 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec):
     if bg.fade_target == "all":
         # 画面ごと黒から明ける / 黒へ沈む。重ねたあとに掛ける。
         tail = "".join("," + f for f in _fade_parts(bg, dur_sec))
-    graph += ("[bg][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
-              + tail + ",format=yuv420p[v]")
+    # **画面をいちばん上に重ねる。** 飾り(棒・ジャケット)を画面より後に
+    # 重ねると、画面の下のほうにある歌詞(#LYRIC)が隠れる(利用者の指定
+    # 2026-10-26「LYRIC の文字は一番手前に表示して」)。
+    # 背景 → 棒 → ジャケット → 画面 の順。画面は背景を描いていないので、
+    # 字も音符も無い所では飾りがそのまま見える。
+    cur = "bg"
+    if wants_wave(bg, aud_idx):
+        chain, cur = _wave_chain(bg, aud_idx, w, h, cur)
+        graph += chain
+    if art_idx is not None and _art_input_args(bg):
+        # 左下へ。高さは画面に対する割合、横は縦横比のまま。
+        ah = max(8, int(round(h * bg.art_pct / 100.0)))
+        e = int(bg.art_edge)
+        if art_baked:
+            # もう出来上がりの大きさで焼いてある。触らずに重ねるだけ。
+            art_chain = "[%d:v]null" % art_idx
+        else:
+            art_chain = "[%d:v]scale=-2:%d" % (art_idx, ah)
+            if e > 0:
+                art_chain += (",pad=iw+%d:ih+%d:%d:%d:color=%s"
+                              % (e * 2, e * 2, e, e, bg.art_edge_color))
+        total_h = ah + e * 2
+        nxt = cur + "a"
+        graph += (art_chain + "[art];"
+                  + "[%s][art]overlay=%d:%d[%s];"
+                  % (cur, bg.art_pad, max(0, h - total_h - bg.art_pad),
+                     nxt))
+        cur = nxt
+    graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
+              % cur + tail + ",format=yuv420p[v]")
     return graph
 
 
@@ -767,10 +947,23 @@ class FrameCostProbe:
         if bg:
             args, pre = _bg_input_args(bg, 0.0)
             cmd += args
+            art_args, art_baked = _art_plan(
+                bg, _bg_out_size(CANVAS_PRESETS.get(canvas), pw, ph)[1])
+            cmd += art_args
+            # 棒のぶんも見積もりに入れる。ここには音の入力が無いので、
+            # 無音を1本足して同じ組み立てにする(重さはほぼ同じ)。
+            probe_aud = None
+            if getattr(bg, "wave", False):
+                cmd += ["-f", "lavfi", "-i",
+                        "anullsrc=r=%d:cl=stereo" % SAMPLE_RATE]
+                probe_aud = 2 + (1 if art_args else 0)
             dur = max(1.0, (self.warmup + self.samples) / float(fps or 60))
             cmd += ["-filter_complex",
                     _bg_filter_complex(CANVAS_PRESETS.get(canvas),
-                                       pw, ph, fps or 60, bg, pre, dur),
+                                       pw, ph, fps or 60, bg, pre, dur,
+                                       art_idx=2 if art_args else None,
+                                       art_baked=art_baked,
+                                       aud_idx=probe_aud),
                     "-map", "[v]"]
         cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
@@ -1040,11 +1233,21 @@ class VideoRecording:
         cmd += [
             "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
         ]
+        # ジャケットは**音のうしろ**。前に入れると -map 2:a がずれる。
+        art_args, art_baked = (
+            _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1]) if bg
+            else ([], False))
+        cmd += art_args
         if bg:
             dur = self.total_frames / float(fps or 60)
+            # 棒を出すときは音を asplit で分けるので、出力の音は
+            # 入力そのものではなく [aout] のほうを map する。
+            a_out = "[aout]" if wants_wave(bg, 2) else "2:a"
             cmd += ["-filter_complex",
-                    _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur),
-                    "-map", "[v]", "-map", "2:a"]
+                    _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur,
+                                       art_idx=3 if art_args else None,
+                                       art_baked=art_baked, aud_idx=2),
+                    "-map", "[v]", "-map", a_out]
         if vf:
             cmd += ["-vf", vf]
         cmd += [

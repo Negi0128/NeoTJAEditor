@@ -11,7 +11,7 @@ QPainter で重ねているが、縮め方・暗さ・位置の出し方は本�
 import os
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -48,7 +48,7 @@ class RecordBackgroundDialog(QDialog):
     MAX_VIEW_W = 900
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
-                 song_path=""):
+                 song_path="", canvas_wh=None):
         super().__init__(parent)
         self.setWindowTitle("録画の背景")
         self._make_widget = make_widget
@@ -58,6 +58,8 @@ class RecordBackgroundDialog(QDialog):
         #: 曲の音源。「音から推定」で背景の音と見比べる相手。
         self._song = str(song_path or "")
         self._yt = None
+        #: 出来上がりの大きさ (w, h)。見本を本番と同じ画面比で作るため。
+        self._canvas_wh = tuple(canvas_wh) if canvas_wh else None
         self._duration = max(0.1, float(duration or 0.1))
 
         lay = QVBoxLayout(self)
@@ -83,7 +85,7 @@ class RecordBackgroundDialog(QDialog):
         # ---- 見本 ----
         self.view = QLabel("背景を選ぶと、ここに重なった1コマが出ます。")
         self.view.setAlignment(Qt.AlignCenter)
-        self.view.setMinimumHeight(180)
+        self.view.setMinimumHeight(240)
         self.view.setFrameShape(QFrame.StyledPanel)
         lay.addWidget(self.view, 1)
 
@@ -174,6 +176,89 @@ class RecordBackgroundDialog(QDialog):
         form.addRow("フェード", fade)
         lay.addLayout(form)
 
+        # ---- 飾り(ジャケット写真) ----
+        art_row = QHBoxLayout()
+        self.ed_art = QLineEdit(getattr(bg, "art", "") if bg else "")
+        self.ed_art.setPlaceholderText("なし（png / jpg）")
+        self.ed_art.textChanged.connect(self._schedule)
+        btn_art = QPushButton("選ぶ...")
+        btn_art.clicked.connect(self._browse_art)
+        btn_art_none = QPushButton("なし")
+        btn_art_none.clicked.connect(lambda: self.ed_art.setText(""))
+        art_row.addWidget(self.ed_art, 1)
+        art_row.addWidget(btn_art)
+        art_row.addWidget(btn_art_none)
+        form.addRow("ジャケット", art_row)
+
+        art_opt = QHBoxLayout()
+        self.sp_art_pct = QSpinBox()
+        self.sp_art_pct.setRange(2, 60)
+        self.sp_art_pct.setSuffix(" %")
+        self.sp_art_pct.setValue(int(round(getattr(bg, "art_pct", 20.0)
+                                           if bg else 20.0)))
+        self.sp_art_pct.setToolTip("画面の高さに対する大きさ。")
+        self.sp_art_pct.valueChanged.connect(self._schedule)
+        self.sp_art_pad = QSpinBox()
+        self.sp_art_pad.setRange(0, 400)
+        self.sp_art_pad.setSuffix(" px")
+        self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg else 24))
+        self.sp_art_pad.setToolTip("左と下の端からの余白。")
+        self.sp_art_pad.valueChanged.connect(self._schedule)
+        art_opt.addWidget(QLabel("大きさ"))
+        art_opt.addWidget(self.sp_art_pct)
+        art_opt.addWidget(QLabel("余白"))
+        art_opt.addWidget(self.sp_art_pad)
+        self.sp_art_edge = QSpinBox()
+        self.sp_art_edge.setRange(0, 40)
+        self.sp_art_edge.setSuffix(" px")
+        self.sp_art_edge.setValue(int(getattr(bg, "art_edge", 6) if bg else 6))
+        self.sp_art_edge.setToolTip("写真のまわりの枠の太さ。0 で枠なし。")
+        self.sp_art_edge.valueChanged.connect(self._schedule)
+        self._art_color = str(getattr(bg, "art_edge_color", "#ffffff")
+                              if bg else "#ffffff")
+        self.btn_art_color = QPushButton("枠の色")
+        self.btn_art_color.clicked.connect(self._pick_art_color)
+        art_opt.addWidget(QLabel("枠"))
+        art_opt.addWidget(self.sp_art_edge)
+        art_opt.addWidget(self.btn_art_color)
+        art_opt.addStretch(1)
+        self._show_art_color()
+        form.addRow("", art_opt)
+
+        # ---- 波形(音に合わせて動く棒) ----
+        wv = QHBoxLayout()
+        self.chk_wave = QCheckBox("出す")
+        self.chk_wave.setChecked(bool(getattr(bg, "wave", False) if bg
+                                      else False))
+        self.chk_wave.toggled.connect(self._schedule)
+        self.sp_wave_pct = QSpinBox()
+        self.sp_wave_pct.setRange(3, 50)
+        self.sp_wave_pct.setSuffix(" %")
+        self.sp_wave_pct.setValue(int(round(getattr(bg, "wave_pct", 15.0)
+                                            if bg else 15.0)))
+        self.sp_wave_pct.setToolTip("画面の高さに対する棒の高さ。")
+        self.sp_wave_pct.valueChanged.connect(self._schedule)
+        self.sp_wave_alpha = QSpinBox()
+        self.sp_wave_alpha.setRange(5, 100)
+        self.sp_wave_alpha.setSuffix(" %")
+        self.sp_wave_alpha.setValue(int(getattr(bg, "wave_alpha", 70)
+                                        if bg else 70))
+        self.sp_wave_alpha.setToolTip("棒の濃さ。下げると背景が透ける。")
+        self.sp_wave_alpha.valueChanged.connect(self._schedule)
+        self._wave_color = str(getattr(bg, "wave_color", "#ffb300")
+                               if bg else "#ffb300")
+        self.btn_wave_color = QPushButton("棒の色")
+        self.btn_wave_color.clicked.connect(self._pick_wave_color)
+        wv.addWidget(self.chk_wave)
+        wv.addWidget(QLabel("高さ"))
+        wv.addWidget(self.sp_wave_pct)
+        wv.addWidget(QLabel("濃さ"))
+        wv.addWidget(self.sp_wave_alpha)
+        wv.addWidget(self.btn_wave_color)
+        wv.addStretch(1)
+        form.addRow("波形", wv)
+        self._show_wave_color()
+
         lay.addWidget(QLabel(
             "※ 縦横が合わないときは上下を合わせて、左右は黒で埋めます。"))
 
@@ -182,6 +267,8 @@ class RecordBackgroundDialog(QDialog):
         box.rejected.connect(self.reject)
         lay.addWidget(box)
 
+        # 窓の大きさが変わったら見本も焼き直す(収まる大きさが変わるため)。
+        self.view.installEventFilter(self)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._render)
@@ -189,6 +276,12 @@ class RecordBackgroundDialog(QDialog):
         self._schedule()
 
     # ------------------------------------------------------------------
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is self.view and ev.type() == QEvent.Resize:
+            self._timer.start(PREVIEW_MS)
+        return super().eventFilter(obj, ev)
+
     def background(self):
         """いま欄に入っている背景。path が空なら「背景なし」。"""
         return recorder.RecordBackground(
@@ -198,18 +291,68 @@ class RecordBackgroundDialog(QDialog):
             lane=self.sp_lane.value() / 100.0,
             fade_in=self.sp_in.value() if self.chk_in.isChecked() else 0.0,
             fade_out=self.sp_out.value() if self.chk_out.isChecked() else 0.0,
-            fade_target=self.cb_target.currentData())
+            fade_target=self.cb_target.currentData(),
+            art=self.ed_art.text().strip(),
+            art_pct=self.sp_art_pct.value(),
+            art_pad=self.sp_art_pad.value(),
+            art_edge=self.sp_art_edge.value(),
+            art_edge_color=self._art_color,
+            wave=self.chk_wave.isChecked(),
+            wave_pct=self.sp_wave_pct.value(),
+            wave_color=self._wave_color,
+            wave_alpha=self.sp_wave_alpha.value())
 
     def _sync_enabled(self):
         on = bool(self.ed_path.text().strip())
         for wdg in (self.sp_offset, self.sp_dim, self.sp_lane, self.chk_in,
-                    self.chk_out, self.cb_target, self.sl_at):
+                    self.chk_out, self.cb_target, self.sl_at,
+                    self.ed_art, self.sp_art_pct, self.sp_art_pad,
+                    self.sp_art_edge, self.btn_art_color,
+                    self.chk_wave, self.sp_wave_pct, self.sp_wave_alpha,
+                    self.btn_wave_color):
             wdg.setEnabled(on)
         self.sp_in.setEnabled(on and self.chk_in.isChecked())
         self.sp_out.setEnabled(on and self.chk_out.isChecked())
         # 「音から推定」は動画(＝音が入りうるもの)で、曲の音源があるときだけ。
         bg = self.background()
         self.btn_guess.setEnabled(on and not bg.is_image and bool(self._song))
+
+    def _show_art_color(self):
+        """ボタンの地をいまの色にする(見れば分かるように)。"""
+        c = QColor(self._art_color)
+        fg = "#000" if c.lightness() > 140 else "#fff"
+        self.btn_art_color.setStyleSheet(
+            "QPushButton{background:%s;color:%s}" % (self._art_color, fg))
+
+    def _show_wave_color(self):
+        c = QColor(self._wave_color)
+        fg = "#000" if c.lightness() > 140 else "#fff"
+        self.btn_wave_color.setStyleSheet(
+            "QPushButton{background:%s;color:%s}" % (self._wave_color, fg))
+
+    def _pick_wave_color(self):
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(self._wave_color), self, "棒の色")
+        if c.isValid():
+            self._wave_color = c.name()
+            self._show_wave_color()
+            self._schedule()
+
+    def _pick_art_color(self):
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(self._art_color), self, "枠の色")
+        if c.isValid():
+            self._art_color = c.name()
+            self._show_art_color()
+            self._schedule()
+
+    def _browse_art(self):
+        got, _ = QFileDialog.getOpenFileName(
+            self, "左下へ置くジャケット写真",
+            self.ed_art.text().strip() or "",
+            "画像 (*.png *.jpg *.jpeg *.bmp *.webp);;すべて (*.*)")
+        if got:
+            self.ed_art.setText(got)
 
     def _browse(self):
         got, _ = QFileDialog.getOpenFileName(
@@ -313,15 +456,23 @@ class RecordBackgroundDialog(QDialog):
         if self._widget is None:
             # まとめ録画から開いたときは、重ねる譜面が1つに決まらない。
             # 背景だけを出す(暗さと位置はここで見られる)。
+            cw, ch = self._canvas_wh or (960, 540)
             img = _bg_frame(bg, bg.offset + self.sl_at.value() / 100.0,
-                            960, 270)
+                            cw, ch)
         else:
             img = compose_check_frame(self._widget, bg,
-                                      self.sl_at.value() / 100.0)
+                                      self.sl_at.value() / 100.0,
+                                      canvas=self._canvas_wh,
+                                      song=self._song)
         if img is None:
             self.view.setText("背景のコマを取り出せませんでした。")
             return
-        pm = QPixmap.fromImage(img)
-        if pm.width() > self.MAX_VIEW_W:
-            pm = pm.scaledToWidth(self.MAX_VIEW_W, Qt.SmoothTransformation)
+        # **入る大きさに収める。** 幅だけで縮めていたので、窓が低いと
+        # 下が切れて「レーンの所だけ」に見えていた(利用者の報告
+        # 2026-10-26「全部プレビューしてほしい」)。
+        box = self.view.contentsRect()
+        bw = max(160, min(self.MAX_VIEW_W, box.width()))
+        bh = max(120, box.height())
+        pm = QPixmap.fromImage(img).scaled(bw, bh, Qt.KeepAspectRatio,
+                                           Qt.SmoothTransformation)
         self.view.setPixmap(pm)

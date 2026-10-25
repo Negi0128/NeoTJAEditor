@@ -361,7 +361,16 @@ class RecordDialog(QDialog):
             lane=float(cfg0.get("rec_bg_lane", 100) or 100) / 100.0,
             fade_in=cfg0.get("rec_bg_fade_in", 0.0),
             fade_out=cfg0.get("rec_bg_fade_out", 0.0),
-            fade_target=cfg0.get("rec_bg_fade_target", "all"))
+            fade_target=cfg0.get("rec_bg_fade_target", "all"),
+            art=cfg0.get("rec_bg_art", ""),
+            art_pct=cfg0.get("rec_bg_art_pct", 30.0),
+            art_pad=cfg0.get("rec_bg_art_pad", 24),
+            art_edge=cfg0.get("rec_bg_art_edge", 6),
+            art_edge_color=cfg0.get("rec_bg_art_edge_color", "#ffffff"),
+            wave=cfg0.get("rec_bg_wave", False),
+            wave_pct=cfg0.get("rec_bg_wave_pct", 15.0),
+            wave_color=cfg0.get("rec_bg_wave_color", "#ffb300"),
+            wave_alpha=cfg0.get("rec_bg_wave_alpha", 70))
         bg_row = QHBoxLayout()
         self.ed_bg = QLineEdit(self._bg.path)
         self.ed_bg.setReadOnly(True)      # 触るのは窓のほう
@@ -430,6 +439,11 @@ class RecordDialog(QDialog):
         self._refresh_estimates()
         QTimer.singleShot(0, self._begin_measure)
 
+    def _canvas_now(self):
+        """いま選んでいる画質の出来上がりの大きさ。native なら None。"""
+        q = self.cb_quality.currentData() or {}
+        return recorder.CANVAS_PRESETS.get(q.get("canvas", "720p"))
+
     def _bg_now(self):
         """いま決まっている背景。path が空なら「背景なし」。"""
         return self._bg
@@ -450,7 +464,8 @@ class RecordDialog(QDialog):
         dlg = RecordBackgroundDialog(self, lambda: self._widget,
                                      max(0.1, end_sec - start_sec), self._bg,
                                      out_dir=os.path.dirname(self._auto_path),
-                                     song_path=self._song)
+                                     song_path=self._song,
+                                     canvas_wh=self._canvas_now())
         if dlg.exec() != QDialog.Accepted:
             return
         self._bg = dlg.background()
@@ -747,6 +762,15 @@ class RecordDialog(QDialog):
         cfg["rec_bg_fade_in"] = bg.fade_in
         cfg["rec_bg_fade_out"] = bg.fade_out
         cfg["rec_bg_fade_target"] = bg.fade_target
+        cfg["rec_bg_art"] = bg.art
+        cfg["rec_bg_art_pct"] = bg.art_pct
+        cfg["rec_bg_art_pad"] = bg.art_pad
+        cfg["rec_bg_art_edge"] = bg.art_edge
+        cfg["rec_bg_art_edge_color"] = bg.art_edge_color
+        cfg["rec_bg_wave"] = bg.wave
+        cfg["rec_bg_wave_pct"] = bg.wave_pct
+        cfg["rec_bg_wave_color"] = bg.wave_color
+        cfg["rec_bg_wave_alpha"] = bg.wave_alpha
         settings_mod.save_settings(cfg)
         # 描画用ウィジェットは見積もりのときに作ってある(_begin_measure)。
         # 作り直さないのは、スキンの読み込みぶんだけ待ちが増えるのと、
