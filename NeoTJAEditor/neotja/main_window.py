@@ -113,9 +113,14 @@ class CourseCard(QFrame):
 
         self.lbl_time = QLabel()
         self.lbl_notes = QLabel()
+        self.lbl_density = QLabel()
+        self.lbl_density.setToolTip(
+            "最初の音符から最後の音符までで割った、音符の詰まり具合。\n"
+            "連打と風船は数に入れません(上の「ノーツ」と同じ数え方)。")
         self.lbl_measures = QLabel()
         self.lbl_roll = QLabel()
-        for lbl in (self.lbl_time, self.lbl_notes, self.lbl_measures, self.lbl_roll):
+        for lbl in (self.lbl_time, self.lbl_notes, self.lbl_density,
+                    self.lbl_measures, self.lbl_roll):
             body_layout.addWidget(lbl)
 
         self.btn_toggle = QPushButton("連打詳細 [開く]")
@@ -156,6 +161,9 @@ class CourseCard(QFrame):
     def update_course(self, course):
         self.lbl_time.setText(f"時間: {course['time']}")
         self.lbl_notes.setText(f"ノーツ: {course['notes']}")
+        dens = course.get("density") or 0.0
+        self.lbl_density.setText(
+            f"平均密度: {dens:.2f} 打/秒" if dens > 0 else "平均密度: ―")
         self.lbl_measures.setText(f"小節: {course['measures']}")
 
         rolls = course.get("rolls_info", [])

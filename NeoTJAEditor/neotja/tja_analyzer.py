@@ -285,6 +285,10 @@ class TJACourseAnalyzer:
         ka = 0
         big_don = 0
         big_ka = 0
+        # 平均密度を出すための両端(利用者の指定 2026-10-25)。連打や風船は
+        # 数に入れないので、端も音符(1〜4)だけで取る。
+        first_note_t = None
+        last_note_t = None
         roll_start_time = None
         balloon_start_time = None
         b_idx = 0
@@ -307,6 +311,10 @@ class TJACourseAnalyzer:
                     time_per_note = ((Decimal("240") * measure_val / curr_bpm) / n_len
                                      if (n_len > 0 and curr_bpm > 0) else Decimal("0"))
                     c = ev[1]
+                    if c in "1234":
+                        if first_note_t is None:
+                            first_note_t = total_time
+                        last_note_t = total_time
                     if c == "1":
                         don += 1
                     elif c == "2":
@@ -347,8 +355,19 @@ class TJACourseAnalyzer:
         ms = int((total_time - int(total_time)) * 1000)
         time_str = f"{m}:{s:02}.{ms:03}"
 
+        # 平均密度。**最初の音符から最後の音符まで**で割る
+        # (利用者の指定 2026-10-25)。前奏・後奏の長さに引きずられない。
+        n_notes = don + ka + big_don + big_ka
+        if first_note_t is None or last_note_t is None:
+            note_span = 0.0
+        else:
+            note_span = float(last_note_t - first_note_t)
+        density = (n_notes / note_span) if note_span > 0 else 0.0
+
         return {
-            "notes": don + ka + big_don + big_ka,
+            "notes": n_notes,
+            "density": density,
+            "note_span": note_span,
             "don_count": don + big_don,
             "ka_count": ka + big_ka,
             "measures": len(measures),
