@@ -261,8 +261,45 @@ function rotXY(e,r){
   return[e.clientY-r.top,r.width-(e.clientX-r.left)]}
 /* 指の動きも同じだけ回す(横の滑りが縦の動きになる)。 */
 function rotDX(e,p){return isRot()?(e.clientY-p.y):(e.clientX-p.x)}
-function fit(){const d=Math.min(devicePixelRatio||1,3);W=cv.clientWidth;H=cv.clientHeight;cv.width=W*d;cv.height=H*d;p.setTransform(d,0,0,d,0,0);draw()}
-new ResizeObserver(fit).observe(cv);
+/* キャンバスの実体を、表示している大きさに合わせる。
+   **呼び口を1つにしない。** ResizeObserver だけに頼っていたら
+   届くのが1回ぶん遅れ、実体が前の大きさのまま残って絵が縦に
+   潰れた(利用者の報告 2026-10-25「アスペクト比が合わない」。
+   実測: 表示 841x222 に対して実体 906x374)。 */
+const bpx=()=>Math.min(devicePixelRatio||1,3);
+const want=()=>[Math.max(1,Math.round(cv.clientWidth*bpx())),
+                Math.max(1,Math.round(cv.clientHeight*bpx()))];
+let fitting=false;
+function fit(){const d=bpx(),[bw,bh]=want();
+  W=cv.clientWidth;H=cv.clientHeight;
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh}
+  p.setTransform(d,0,0,d,0,0);
+  fitting=true;try{draw()}finally{fitting=false}}
+/* 実体と表示がずれていたら直す。描くたびに見るので、どの呼び口を
+   取りこぼしても次の1コマで戻る。直したときは true(そこで描き
+   直しているので、呼び元は続けなくてよい)。 */
+function fitIfStale(){
+  if(fitting)return false;
+  const [bw,bh]=want();
+  if(cv.width===bw&&cv.height===bh)return false;
+  fit();return true}
+/* **requestAnimationFrame には頼らない。** 画面が描かれていない
+   (隠れている・別のタブ)あいだ rAF は止まるので、そこで大きさが
+   変わると直す機会を失う。その場で直し、少し後にもう一度見る
+   (寸法が落ち着くのが1拍あとのことがある)。 */
+const refit=()=>{fit();setTimeout(fit,0);setTimeout(fit,120)};
+new ResizeObserver(refit).observe(cv);
+addEventListener("resize",refit);
+/* 画面を回したときは、寸法が落ち着くまで少し待つ。 */
+addEventListener("orientationchange",()=>setTimeout(refit,200));
+addEventListener("pageshow",refit);
+document.addEventListener("visibilitychange",()=>{
+  if(!document.hidden)refit()});
+/* **ここで直に呼ばない。** fit() は draw() を呼ぶので、この下で作って
+   いる物(CO など)にまだ触れず、落ちて以降が丸ごと動かなくなる
+   (2026-10-25 の実測: "Cannot access 'CO' before initialization")。
+   script を最後まで走らせてから1回合わせる。 */
+setTimeout(refit,0);
 const sx=sec=>G.X0+(sec-V.view)*G.xs;
 const xs2sec=x=>V.view+(x-G.X0)/G.xs;
 const fpx=n=>Math.max(5,Math.round(n*K));
@@ -294,6 +331,7 @@ function spans(a,b){const r=[];let s=null;for(const c of S.cmds){if(c.k===a&&s==
 
 /* ===== 描画（chart_edit_widget._paint_rows_inner と同じ順番） ===== */
 function draw(){
+  if(fitIfStale())return;      // ずれていたら直して描き直す
   syncTitle();if(!W||!H)return;geom();
   if(V.mode==="preview"){drawLite();return}
   const t0=V.view,t1=V.view+V.span,[nt,nh]=G.rows.note;
