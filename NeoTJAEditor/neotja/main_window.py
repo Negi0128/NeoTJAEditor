@@ -476,6 +476,7 @@ class MainWindow(QMainWindow):
         self.preview_dock = PreviewDock(
             lambda v: self.replace_header_line("OFFSET", v),
             self,
+            demostart_cb=lambda v: self.set_header_line("DEMOSTART", v),
             seek_cursor_cb=self._cursor_preview_seconds,
             volume_cb=self._save_preview_volume,
             duration_ready_cb=self._update_metronome_schedule,
@@ -655,6 +656,48 @@ class MainWindow(QMainWindow):
                 return True
             block = block.next()
         return False
+
+    def set_header_line(self, key: str, value: str) -> bool:
+        """ヘッダの1行を書く。**無ければ作る。**
+
+        replace_header_line は在る行を置き換えるだけなので、DEMOSTART の
+        ように最初から無いことのある行を書けない(利用者の指定 2026-10-25)。
+        入れる場所は OFFSET: の次 — 譜面の本体(COURSE: や #START)より前で
+        あればどこでもよいが、近い意味の行の隣に置くと見つけやすい。"""
+        if self.replace_header_line(key, value):
+            return True
+        doc = self.editor.document()
+        block = doc.firstBlock()
+        anchor = None
+        while block.isValid():
+            s = block.text().strip()
+            if block.text().startswith("OFFSET:"):
+                anchor = block
+            up = s.upper()
+            if up.startswith("#START") or up.startswith("COURSE:"):
+                break
+            if s:
+                anchor = anchor if anchor is not None else block
+            block = block.next()
+        if anchor is None:
+            anchor = doc.firstBlock()
+        cursor = QTextCursor(anchor)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        cursor.insertText("%s%s:%s" % (chr(10), key, value))
+        return True
+
+    def demostart_seconds(self):
+        """いま本文に入っている DEMOSTART の秒。無ければ None。"""
+        for line in self.editor.toPlainText().splitlines():
+            up = line.strip().upper()
+            if up.startswith("#START") or up.startswith("COURSE:"):
+                break
+            if up.startswith("DEMOSTART:"):
+                try:
+                    return float(line.split(":", 1)[1].strip())
+                except (ValueError, IndexError):
+                    return None
+        return None
 
     def _build_statusbar(self):
         self.btn_theme = QPushButton("テーマ切替")
@@ -1138,6 +1181,7 @@ class MainWindow(QMainWindow):
                 result["preview"], self._find_course_stats(result["preview"].get("course_key")),
             )
             self._preview_build_sec = time.perf_counter() - t0
+            self.preview_dock.set_demostart(self.demostart_seconds())
             self._settle_preview_key(cursor_line)
 
     def _apply_preview_payload(self, payload):
@@ -1262,6 +1306,7 @@ class MainWindow(QMainWindow):
                 self._last_heavy_error = sig
                 self.statusBar().showMessage(f"プレビュー更新中にエラーが発生しました: {sig}", 8000)
         self._preview_build_sec = time.perf_counter() - t0
+        self.preview_dock.set_demostart(self.demostart_seconds())
 
     def _set_preview_content(self, content):
         """プレビューが映す譜面スナップショットを更新する(保存/開く/新規時)。"""

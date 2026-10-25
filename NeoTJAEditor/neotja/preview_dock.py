@@ -1290,9 +1290,12 @@ class PreviewDock(QDockWidget):
                  se_text_enabled=True, record_cb=None, note_edit_cb=None,
                  chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
-                 checkpoint_lines_cb=None, undo_cb=None, redo_cb=None):
+                 checkpoint_lines_cb=None, undo_cb=None, redo_cb=None,
+                 demostart_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
+        #: DEMOSTART を本文へ書く口(MainWindow が持つ)。
+        self.demostart_cb = demostart_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
         self.note_edit_cb = note_edit_cb
         # 作譜モードの PeepoDrumKit 式の操作(置く/消す/連打など)。
@@ -4058,6 +4061,8 @@ class PreviewDock(QDockWidget):
         wf.seekRequested.connect(self._on_seek_requested)
         wf.offsetPreview.connect(self._on_waveform_offset_preview)
         wf.offsetCommitted.connect(self._on_waveform_offset_committed)
+        wf.demoStartRequested.connect(
+            lambda w=wf: self._on_demostart_requested(w))
         if sync_stereo:
             wf.stereoToggled.connect(self._on_waveform_stereo_toggled)
             wf.set_stereo_view(self._waveform_stereo)
@@ -4066,6 +4071,28 @@ class PreviewDock(QDockWidget):
 
     def _waveforms(self):
         return (self.waveform, self.game_waveform, self.chart_edit)
+
+    def set_demostart(self, sec):
+        """試聴開始の印を全部の波形へ配る。None で消える。"""
+        for wf in self._waveforms():
+            if wf is not None:
+                wf.set_demostart(sec)
+
+    def _on_demostart_requested(self, wf):
+        """「ここを試聴開始に」。いまのカーソル位置を DEMOSTART: に入れる。
+
+        秒は**音源の時計**。波形の目盛りと同じものなので、押した所に
+        そのまま印が立つ(譜面の OFFSET を引き直す必要はない)。"""
+        if self.demostart_cb is None:
+            return
+        if hasattr(wf, "cursor_time"):
+            sec = wf.cursor_time()
+        else:
+            sec = wf.position_sec
+        sec = max(0.0, float(sec or 0.0))
+        self.demostart_cb("%.3f" % sec)
+        self.set_demostart(sec)
+        self.status_label.setText("試聴開始を %.3f 秒にしました。" % sec)
 
     def _on_waveform_stereo_toggled(self, stereo: bool):
         # ドック側の波形の合成/ステレオ設定のみ同期・保存する。作譜モードの

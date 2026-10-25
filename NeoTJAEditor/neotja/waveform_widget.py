@@ -28,6 +28,9 @@ class WaveformWidget(QWidget):
     offsetPreview = Signal(float)     # ドラッグ中の暫定値(未確定)
     offsetCommitted = Signal(float)   # 確定値
     stereoToggled = Signal(bool)
+    #: 「ここを試聴開始に」が押された。秒は受け側(ドック)が出す —
+    #: 波形は譜面の OFFSET を知らないため。
+    demoStartRequested = Signal()
     offsetModeToggled = Signal(bool)
     # 追従モードの表示幅(秒)が Alt/Ctrl+ホイールで変わった。
     # 受け側(preview_dock)が設定へ覚える。
@@ -135,6 +138,16 @@ class WaveformWidget(QWidget):
             "ONの間、波形の上でビートグリッドを左右にドラッグして OFFSET を合わせます。\n"
             "Escape で取り消し、矢印キーで ±1ms(Shift で ±10ms)。")
         self.btn_offset.toggled.connect(self.set_offset_mode)
+
+        # 試聴開始(DEMOSTART)。いまのカーソル位置をそのまま入れる。
+        # これが無いと本文に手で秒数を打つしかなかった(利用者の指定
+        # 2026-10-25)。スマホ側には前から同じ物がある。
+        self.btn_demo = QPushButton("ここを試聴開始に", self)
+        self.btn_demo.setFocusPolicy(Qt.NoFocus)
+        self.btn_demo.setToolTip(
+            "いまのカーソル位置を DEMOSTART: に入れます。\n"
+            "選曲画面でここから試聴が始まります。")
+        self.btn_demo.clicked.connect(self.demoStartRequested)
 
         self._place_buttons()
 
@@ -431,6 +444,20 @@ class WaveformWidget(QWidget):
     #: 掛け算の丸めが整数の境目で揺れて、小節線と音符が 1px 食い違う。
     _x_shift = 0
 
+    #: いま譜面に入っている DEMOSTART(音源の秒)。無ければ None。
+    _demostart = None
+
+    def set_demostart(self, sec):
+        """試聴開始の印を置く秒。None で印を消す。"""
+        try:
+            v = None if sec is None else float(sec)
+        except (TypeError, ValueError):
+            v = None
+        if v == self._demostart:
+            return
+        self._demostart = v
+        self.update()
+
     def _sec_to_x(self, sec: float) -> int:
         key = (self._follow_window, self.duration, self.zoom, self.width())
         if key != self._xs_key:
@@ -451,7 +478,7 @@ class WaveformWidget(QWidget):
         # Size from the font's own metrics rather than hardcoded pixels: the
         # labels are Japanese and swap between ステレオ/合成, so a fixed width
         # clips the text on some fonts/DPI settings.
-        for btn in (self.btn_stereo, self.btn_offset):
+        for btn in (self.btn_stereo, self.btn_offset, self.btn_demo):
             hint = btn.sizeHint()
             w = hint.width() + 8
             h = max(22, hint.height())
@@ -471,6 +498,9 @@ class WaveformWidget(QWidget):
         self.btn_offset.move(w - self.btn_offset.width() - self.spx(6), y)
         self.btn_stereo.move(
             w - self.btn_offset.width() - self.btn_stereo.width() - self.spx(12), y)
+        self.btn_demo.move(
+            w - self.btn_offset.width() - self.btn_stereo.width()
+            - self.btn_demo.width() - self.spx(18), y)
 
     def _buttons_y(self):
         """ボタンを置く y。既定は左上(従来どおり)。"""
@@ -878,6 +908,8 @@ class WaveformWidget(QWidget):
             self._draw_checkpoints(painter, note_top, note_bottom, cmd_strip, t0, t1)
             self._draw_command_labels(painter, w, note_top, note_bottom, cmd_strip, t0, t1)
 
+        self._draw_demostart(painter, h, t0, t1)
+
         painter.setPen(self._pen("err", 2 if self.offset_mode else 1))
         x = self._sec_to_x(self.position_sec)
         painter.drawLine(x, 0, x, h)
@@ -1204,6 +1236,29 @@ class WaveformWidget(QWidget):
             painter.drawRect(x + 1, ly, tw + 4, fm.height())
             painter.setPen(pen)
             painter.drawText(x + 3, ly + fm.ascent(), txt)
+
+    def _draw_demostart(self, painter, h: int, t0: float, t1: float):
+        """試聴開始(DEMOSTART)の印。板を貫く縦線と「試聴」の札。
+
+        チェックポイントの黄色とぶつからない色にする。印が見えるだけで
+        「どこから鳴るのか」が本文を見ずに分かる(利用者の指定 2026-10-25)。
+        """
+        v = self._demostart
+        if v is None or v < t0 or v > t1:
+            return
+        col = QColor("#49c7b0")
+        x = self._sec_to_x(v)
+        painter.setPen(QPen(col, 2, Qt.DashLine))
+        painter.drawLine(x, 0, x, h)
+        painter.setFont(self._label_font())
+        fm = painter.fontMetrics()
+        label = "試聴"
+        tw = fm.horizontalAdvance(label)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 180))
+        painter.drawRect(x + 1, 1, tw + 4, fm.height())
+        painter.setPen(col)
+        painter.drawText(x + 3, 1 + fm.ascent(), label)
 
     def _draw_checkpoints(self, painter, note_top: int, note_bottom: int,
                           cmd_h: int, t0: float, t1: float):
