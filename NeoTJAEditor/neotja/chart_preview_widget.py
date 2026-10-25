@@ -2029,7 +2029,12 @@ class ChartPreviewWidget(QWidget):
         scale = d / pack["body_h"]
         mid, cap, head = pack["mid"], pack["cap"], pack["head"]
         cap_dst = cap.width() * scale
-        total = max(cap_dst, x1 - x0)
+        # **尻尾も中心合わせ。** 頭は x0 を中心に描く(x0-r から)のに、尻尾は
+        # 右端を x1 に合わせていたので、帯が終点側だけ半径ぶん短く見えていた
+        # (利用者の報告 2026-10-25「黄色い連打の音符が短く描写される」)。
+        # 素材が無いときの帯(_draw_roll_bar)は前から x1 を中心に丸を置いて
+        # いて、2つの描き方が食い違っていた。こちらを合わせる。
+        total = max(cap_dst, (x1 + r) - x0)
         mid_dst = max(0.0, total - cap_dst)
         # head は丸い顔で、x0-r〜x0+r の外接矩形をいっぱいには塗っていない
         # (素材を alpha でタイトクロップした結果、正方形より少し細い)。
