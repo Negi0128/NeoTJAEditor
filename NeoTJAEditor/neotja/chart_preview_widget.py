@@ -2465,9 +2465,20 @@ class ChartPreviewWidget(QWidget):
         self._bar_bpms = [bpm for _, bpm, _, _ in bars]
         self._bar_scrolls = [sc for _, _, sc, _ in bars]
         self._bar_visible = [vis for _, _, _, vis in bars]
-        self._bpm_changes = sorted(data.get("bpm_changes") or [(0.0, DEFAULT_BPM)])
-        self._measure_changes = sorted(data.get("measure_changes") or [(0.0, 4, 4)])
-        self._scroll_changes = sorted(data.get("scroll_changes") or [(0.0, 1.0)])
+        # **時刻だけで並べる。** タプルごと並べると、同じ時刻のときに値の
+        # 大小で順が入れ替わる。解析は「既定値 → 譜面の指定」の順で返して
+        # いて、引くときは「その時刻以下の最後」を取るので、入れ替わると
+        # 既定値のほうを拾ってしまう(利用者の報告 2026-10-25「連打の終点が
+        # 後ろのハイスピに引っ張られる」。実測: 0秒の #SCROLL 0.5 が
+        # [(0.0,1.0),(0.0,0.5)] → [(0.0,0.5),(0.0,1.0)] になり、尻尾だけ
+        # ちょうど2倍の速さで動いていた)。sorted は安定なので、時刻だけを
+        # 鍵にすれば譜面の順がそのまま残る。
+        self._bpm_changes = sorted(data.get("bpm_changes") or [(0.0, DEFAULT_BPM)],
+                                   key=lambda c: c[0])
+        self._measure_changes = sorted(data.get("measure_changes") or [(0.0, 4, 4)],
+                                       key=lambda c: c[0])
+        self._scroll_changes = sorted(data.get("scroll_changes") or [(0.0, 1.0)],
+                                      key=lambda c: c[0])
         self._bpm_times = [c[0] for c in self._bpm_changes]
         self._measure_times = [c[0] for c in self._measure_changes]
         self._scroll_times = [c[0] for c in self._scroll_changes]
