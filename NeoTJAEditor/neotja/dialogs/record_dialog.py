@@ -372,10 +372,13 @@ class RecordDialog(QDialog):
         bg_row.addWidget(self.ed_bg, 1)
         bg_row.addWidget(self.btn_bg)
         form.addRow("背景", bg_row)
-        self._bg_opt_widgets = (self.btn_bg,)
+        # 「背景...」は**いつでも押せる**。以前は細かい欄(開始位置・暗さ)を
+        # 背景が空のあいだ灰色にしていて、欄を窓へまとめたときにその仕掛けを
+        # ボタンへ残してしまった。空のときこそ開きたいので、押せなくなると
+        # 一生選べない(利用者の報告 2026-10-25)。録画中かどうかは
+        # _open_bg_dialog の中で見る。
         self.ed_bg.textChanged.connect(self._on_bg_path_changed)
         self._bg_measured = self.ed_bg.text().strip()
-        self._sync_bg_enabled()
 
         path_row = QHBoxLayout()
         self._auto_path = os.path.join(
@@ -413,17 +416,11 @@ class RecordDialog(QDialog):
         QTimer.singleShot(0, self._begin_measure)
 
     # ---- 背景 ----------------------------------------------------
-    def _sync_bg_enabled(self):
-        on = bool(self.ed_bg.text().strip())
-        for w in self._bg_opt_widgets:
-            w.setEnabled(on)
-
     def _on_bg_path_changed(self):
         """背景を変えたら、見積もりを測り直す。
 
         背景ありは ffmpeg のデコードと重ね合わせが増えるので、1コマの
         重さが変わる。前の数字を使い回すと見積もりが短く出る。"""
-        self._sync_bg_enabled()
         now = self.ed_bg.text().strip()
         if now == self._bg_measured or self.is_busy():
             return
