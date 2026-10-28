@@ -999,6 +999,19 @@ function encodeTJA(text){
     if(back===crlf)return{data:new Uint8Array(codes),enc:"cp932"}}
   return{data:new TextEncoder().encode("\uFEFF"+crlf),enc:"UTF-8"}
 }
+/* 普通の web(GitHub Pages など)でのファイル保存。<a download> を
+   押したことにする。download を見ない古い入れ物では新しい窓で
+   開いて、長押しで保存できるようにしておく。 */
+function saveBlob(name,blob){
+  try{
+    const url=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=url;a.download=name;a.rel="noopener";
+    if(!("download" in a))a.target="_blank";
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+    return true}
+  catch(e){return false}
+}
 async function savePackage(){
   closeSheet();if(!window.JSZip){toast("ZIP を作る部品が読み込めませんでした");return}
   const H=hdr(),safe=(S.title||"譜面").replace(/[\\/:*?"<>|]/g,"_").trim()||"譜面";
@@ -1018,10 +1031,17 @@ async function savePackage(){
   const {data,enc}=encodeTJA(exportTJA()),zip=new JSZip();zip.file(safe+".tja",data);
   if(bytes)zip.file(audioName,bytes);
   const blob=await zip.generateAsync({type:"blob",compression:"DEFLATE"});
-  const dl=await window.claude?.use?.("downloads");
-  if(!dl){toast("この画面ではファイルを保存できません");return}
-  try{await dl.save({filename:safe+".zip",data:blob});toast((bytes?"":"音源なしで ")+safe+".zip を保存しました"+(lost?"（元の音源をもらえなかったので "+audioName+" で入れました）":"")+(enc==="UTF-8"?"（cp932 に無い文字があったので UTF-8）":""))}
-  catch(e){if(e&&e.code!=="declined")toast("保存できませんでした（"+(e&&e.code||"不明")+"）")}
+  const msg=(bytes?"":"音源なしで ")+safe+".zip を保存しました"
+    +(lost?"（元の音源をもらえなかったので "+audioName+" で入れました）":"")
+    +(enc==="UTF-8"?"（cp932 に無い文字があったので UTF-8）":"");
+  // Claude の中にいるときだけ専用の口がある。無ければ普通の方へ。
+  let dl=null;try{dl=await window.claude?.use?.("downloads")}catch(e){dl=null}
+  if(dl){
+    try{await dl.save({filename:safe+".zip",data:blob});toast(msg)}
+    catch(e){if(e&&e.code!=="declined")toast("保存できませんでした（"+(e&&e.code||"不明")+"）")}
+    return}
+  if(saveBlob(safe+".zip",blob))toast(msg);
+  else toast("この入れ物ではファイルを保存できません");
 }
 
 /* ===== TJA 入出力 ===== */
@@ -1791,7 +1811,7 @@ function coAskName(then){
 window.NEOTJA={CO,get state(){return S},get view(){return V},
   importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,coResync,isRot,
   coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,coSongRawAsk,CO,
-  openText,closeText,txtSave,txtCmd,
+  openText,closeText,txtSave,txtCmd,saveBlob,savePackage,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
@@ -1844,8 +1864,11 @@ function coSolo(){return /(^|[?&])solo(=|&|$)/i.test(location.search||"")}
 function coBoot(){
   // file:// で開いたときや、claude.ai の中では繋ぎに行かない。
   if(!/^https?:$/.test(location.protocol))return;
-  // 単独で使う口。繋ぎに行かないので「合作に入る」も出ない。
-  if(coSolo()){toast("スマホ単体で使います");return}
+  /* 単独で使う口(?solo)。繋ぎに行かないので「合作に入る」も出ない。
+     web に置いた版もここを通る(リポジトリの根の index.html が ?solo を
+     付けて送る) — 合作の相手が居ないのに繋ぎに行くと、延々と繋ぎ直しを
+     繰り返すため。 */
+  if(coSolo()){toast("単体で使います");return}
   document.addEventListener("visibilitychange",()=>{
     if(document.visibilityState!=="visible")return;
     coWakeOn();
