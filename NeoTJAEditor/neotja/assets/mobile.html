@@ -111,6 +111,28 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
 .btn{height:34px;padding:0 14px;border-radius:4px;border:1px solid var(--border);background:var(--bg3);font-size:13px}
 .btn.pri{background:var(--accent);color:var(--bg);border-color:var(--accent)}
 .note{font-size:12px;color:var(--fg-dim);line-height:1.6;margin:0}
+/* 本文モード。譜面の画面の上にかぶせる(grid は触らない)。 */
+.txt{position:fixed;inset:0;z-index:20;background:var(--bg);
+  display:flex;flex-direction:column}
+.txt .tabs{display:flex;gap:4px;padding:6px 8px;background:var(--bg2);
+  border-bottom:1px solid var(--border)}
+.txt .tab{height:32px;padding:0 18px;border-radius:4px;
+  border:1px solid var(--border);background:var(--bg3);color:var(--fg);
+  font-size:13px;font-family:var(--font)}
+.txt .tab.on{background:var(--accent);color:var(--bg);
+  border-color:var(--accent)}
+.txt .grow{flex:1;min-height:0;padding:8px;display:flex}
+.txt textarea{flex:1;width:100%;min-height:0;border-radius:4px;
+  border:1px solid var(--border);background:var(--bg);color:var(--fg);
+  padding:8px;resize:none;
+  font:13px/1.55 Consolas,"SF Mono",ui-monospace,monospace}
+.txt .bar{display:flex;flex-wrap:wrap;gap:6px;padding:6px 8px;
+  background:var(--bg2);border-top:1px solid var(--border);
+  align-items:center}
+.txt .sep{width:1px;height:22px;background:var(--border);margin:0 2px}
+/* 保存と取り消しは右端にまとめる。1行に混ぜると、折り返したときに
+   片方だけ下へ落ちて見た目が崩れた(2026-10-29 の実測)。 */
+.txt .bar.end{justify-content:flex-end;border-top:none;padding-top:0}
 .filebtn{position:relative;overflow:hidden;display:inline-flex;align-items:center}
 .filebtn input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .cmdgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
@@ -151,6 +173,29 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
   </div>
 </div>
 <div class="rot"><div>画面を横向きにしてください<br><span class="note">作譜モードは横画面で PC 版と同じ比率になります</span></div></div>
+<div class="txt" id="txt" hidden>
+  <div class="tabs">
+    <button class="tab" id="tTabChart">譜面</button>
+    <button class="tab on">本文</button>
+  </div>
+  <div class="grow"><textarea id="tTxt" spellcheck="false"></textarea></div>
+  <div class="bar">
+    <button class="btn" id="tTxtUndo">↶ 元に戻す</button>
+    <button class="btn" id="tTxtRedo">↷ やり直す</button>
+    <div class="sep"></div>
+    <button class="btn tcmd" data-k="BPMCHANGE">BPM</button>
+    <button class="btn tcmd" data-k="SCROLL">スクロール</button>
+    <button class="btn tcmd" data-k="MEASURE">拍子</button>
+    <button class="btn tcmd" data-k="GOGOSTART">ゴーゴー開始</button>
+    <button class="btn tcmd" data-k="GOGOEND">ゴーゴー終了</button>
+    <button class="btn tcmd" data-k="BARLINEOFF">小節線を隠す</button>
+    <button class="btn tcmd" data-k="BARLINEON">小節線を戻す</button>
+  </div>
+  <div class="bar end">
+    <button class="btn pri" id="tTxtSave">保存</button>
+    <button class="btn" id="tTxtCancel">取り消し</button>
+  </div>
+</div>
 <div class="sheet" id="sheet" hidden><div class="card" id="card"></div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -756,6 +801,7 @@ $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu"
   <!-- 書き出しは**部屋の中でも**出す。中に居るうちでなければ、ホストから
        元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
        詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 -->
+  <button class="btn" id="mText">本文を編集</button>
   <button class="btn" id="mZipOut">ZIP を書き出す</button>
   <span class="btn filebtn" style="height:44px">音源の再読み込み<input id="mAud" type="file" accept="audio/*"></span>
   <button class="btn" id="mVol">音量調整</button>
@@ -769,6 +815,7 @@ $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu"
   else{$("mSet").onclick=openSettings;
   $("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)}}
   $("mZipOut").onclick=savePackage;
+  $("mText").onclick=()=>{closeSheet();openText()};
   $("mVol").onclick=openVolume;$("mZoom").onclick=openZoom;
   $("mAud").onchange=e=>{const f=e.target.files[0];if(f)reloadAudio(f)};
 $("mClose").onclick=closeSheet};
@@ -824,6 +871,65 @@ function openSettings(){stop();const H=hdr();if(AUD.name&&!H.WAVE)H.WAVE=AUD.nam
   $("sNew").onclick=()=>{$("sNew").outerHTML='<button class="btn" id="sNew2">本当に消して新規作成</button>';
     $("sNew2").onclick=()=>{snapShot();S={title:"無題",bpm:S.bpm,offset:S.offset,course:S.course,level:S.level,notes:[],cmds:[],hdr:{},extra:[]};V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;closeSheet();changed()}};
 }
+/* ===== 本文モード(利用者の指定 2026-10-29) =====
+   TJA をそのまま打つ画面。読み込みは importTJA をそのまま通すので、
+   ZIP から読んだときと同じ結果になる。「保存」は**譜面へ反映**で、
+   ファイルに残すのは別の「ZIP を書き出す」。 */
+let txtDirty=false;
+function openText(){
+  if(coRO()){toast("いまは編集できません（編集権がありません）");return}
+  stop();closeSheet();
+  const ta=$("tTxt");ta.value=exportTJA();txtDirty=false;
+  $("txt").hidden=false;setTimeout(()=>ta.focus(),0)}
+function closeText(force){
+  if(!force&&txtDirty&&
+     !confirm("保存していない変更があります。閉じますか？"))return;
+  $("txt").hidden=true;draw()}
+/* 本文を譜面へ反映する。読めない本文のときは**何もしない**。 */
+function txtSave(){
+  const r=importTJA($("tTxt").value);
+  if(!r){toast("#START が見つかりませんでした");return false}
+  snapShot();
+  S=r.state;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;V.pending=null;
+  changed();buildLeft();txtDirty=false;
+  toast("譜面に反映しました"
+        +(r.skipped?("・未対応の命令 "+r.skipped+" 個"):""));
+  return true}
+/* 命令を1行として入れる。**カーソルのある行の手前**へ置く —
+   行の途中に差し込むと小節が壊れるため。値が要るものは数字だけ
+   選んだ状態にして、すぐ打ち替えられるようにする。 */
+function txtCmd(name){
+  const ta=$("tTxt"),info=CMDS[name]||{};
+  let val="";
+  if(info.val)val=name==="MEASURE"?"4/4"
+    :name==="BPMCHANGE"?String(+S.bpm||120):"1";
+  const line="#"+name+(val?(" "+val):"");
+  const v=ta.value,p=ta.selectionStart;
+  const ls=v.lastIndexOf("\n",Math.max(0,p-1))+1;
+  ta.focus();ta.setSelectionRange(ls,ls);
+  // execCommand で入れると、ブラウザ自身の「元に戻す」に残る。
+  let done=false;
+  try{done=document.execCommand("insertText",false,line+"\n")}
+  catch(e){done=false}
+  if(!done)ta.setRangeText(line+"\n",ls,ls,"end");
+  txtDirty=true;
+  if(val){const a=ls+line.length-val.length;
+    ta.setSelectionRange(a,a+val.length)}
+  else ta.setSelectionRange(ls+line.length+1,ls+line.length+1);
+  ta.focus()}
+function txtEdit(cmd){
+  $("tTxt").focus();
+  try{document.execCommand(cmd)}catch(e){}
+  txtDirty=true}
+$("tTxt").oninput=()=>{txtDirty=true};
+$("tTabChart").onclick=()=>closeText(false);
+$("tTxtCancel").onclick=()=>closeText(false);
+$("tTxtSave").onclick=()=>{if(txtSave())closeText(true)};
+$("tTxtUndo").onclick=()=>txtEdit("undo");
+$("tTxtRedo").onclick=()=>txtEdit("redo");
+for(const b of document.querySelectorAll(".tcmd"))
+  b.onclick=()=>txtCmd(b.dataset.k);
+
 function openExport(){stop();openSheet(`<h2>TJA に書き出し</h2><textarea id="oTxt" readonly>${esc(exportTJA())}</textarea>
   <div class="row"><button class="btn pri" id="oCopy">コピー</button><button class="btn" id="oClose">閉じる</button></div>
   <p class="note">PC 版 NeoTJAEditor に貼り付けてそのまま続きを編集できます。</p>`);
@@ -1685,6 +1791,7 @@ function coAskName(then){
 window.NEOTJA={CO,get state(){return S},get view(){return V},
   importTJA,exportTJA,scanCourses,splitCourses,courseList,switchCourse,branchyAt,courseKeyOf,textHash,coSolo,coResync,isRot,
   coColor,coCharPos,coPlayTake,curFromSec,play,stop,AUD,coSongMaybe,coSongRawAsk,CO,
+  openText,closeText,txtSave,txtCmd,
   buildTempo,buildMeasures,setState(st){S=st;buildTempo();buildMeasures()}};
 
 function coURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/"}
