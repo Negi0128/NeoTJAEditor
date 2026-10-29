@@ -1358,6 +1358,22 @@ class ChartEditWaveform(WaveformWidget):
                 self.clear_range()
         self.update()
 
+    def extend_range(self, delta):
+        """Shift+←→: カーソルを動かしながら帯を伸ばす。
+
+        起点は**動かす前のカーソル**。すでに張ってある帯があれば
+        その起点を保ったまま、反対の端だけを動かす(文字を選ぶのと
+        同じ気持ちで伸ばし縮みできる)。"""
+        if self._range_start is None or self._range_end is None:
+            self._range_start = self._range_key(
+                self._cur_measure, self._cur_slot,
+                self._measure_grid(self._cur_measure))
+        self.move_cursor(delta)
+        self._range_end = self._range_key(
+            self._cur_measure, self._cur_slot,
+            self._measure_grid(self._cur_measure))
+        self.update()
+
     def _range_addresses(self):
         """範囲を今のグリッドの住所2つで。範囲が無ければ None。"""
         if not self.has_range():
@@ -1496,10 +1512,17 @@ class ChartEditWaveform(WaveformWidget):
         return (self._cur_measure, self._cur_slot)
 
     def _peepo_note_key(self, char, mods):
-        # Shift + 音符キーの「敷き詰め」は廃止した(利用者の指定 2026-10-03)。
-        # 範囲に効くのは Delete / W / Q と、つかんで動かすほう。
         if mods & Qt.AltModifier:
             char = _BIG[char]
+        # Shift + 音符キーは、帯があればそこを敷き詰める
+        # (利用者の指定 2026-10-26)。帯は Shift+←→ で伸ばす。
+        # 帯が無いときは今までどおり1つ置くだけ — Shift を
+        # 押しっぱなしで伸ばしてすぐ打てるように。
+        if (mods & Qt.ShiftModifier) and self.has_range():
+            rng = self._range_addresses()
+            self._run_op({"kind": "fill", "a": rng[0], "b": rng[1],
+                          "char": char})
+            return
         self._run_op({"kind": "key", "a": self._cursor_addr(), "char": char})
 
     def _begin_long(self, key, char):
@@ -2136,11 +2159,15 @@ class ChartEditWaveform(WaveformWidget):
             self.jump_to_edge(True)
             return
 
-        if key == Qt.Key_Left:
-            self.move_cursor(-1)
-            return
-        if key == Qt.Key_Right:
-            self.move_cursor(1)
+        if key in (Qt.Key_Left, Qt.Key_Right):
+            step = -1 if key == Qt.Key_Left else 1
+            # Shift を押していれば帯を伸ばす(利用者の指定 2026-10-26)。
+            # **帯は消さない。** Tab で張った帯は ←→ で端まで
+            # 歩いてからもう一度 Tab、という使い方をする。
+            if mods & Qt.ShiftModifier:
+                self.extend_range(step)
+            else:
+                self.move_cursor(step)
             return
         if key == Qt.Key_Up:
             self.change_grid(1)

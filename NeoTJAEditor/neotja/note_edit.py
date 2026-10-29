@@ -783,6 +783,39 @@ def op_long(text, course_range, a, b, grid, char):
     return _result(text, new, sound=char, reparse=True)
 
 
+def op_fill(text, course_range, a, b, grid, char):
+    """範囲を char(1〜4)で敷き詰める(利用者の指定 2026-10-26)。
+
+    端は両方とも含む。範囲に掛かる長い音符(連打・風船)は**終端ごと**
+    先に消す — 途中へ書き込むと終端の 8 だけが取り残されるため。
+    小節ごとに割る数が違うので、1小節ずつ歩いて置く。"""
+    body = course_body_span(text, course_range)
+    if body is None or char not in _SMALL:
+        return None
+    G = _as_grids(grid)
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    k0, k1 = G.key(m0, s0), G.key(m1, s1)
+    items = chart_items(text, body)
+    writes = []
+    removed = []
+    for it in items:
+        if _is_long(it) and it["k0"] <= k1 and k0 <= it["k1"]:
+            writes.extend(_removal_writes(it))
+            if it["ord"] is not None:
+                removed.append(it["ord"])
+    m, s = m0, s0
+    while m <= m1:
+        writes.append((m, s, G.at(m), char))
+        if (m, s) == (m1, s1):
+            break
+        s += 1
+        if s >= G.at(m):
+            m, s = m + 1, 0
+    new = _apply_writes(text, body, writes)
+    new = _update_balloons(new, course_range, removed)
+    return _result(text, new, sound=char, reparse=True)
+
+
 def _items_in(items, a, b, grid, single):
     G = _as_grids(grid)
     if single:
@@ -1660,6 +1693,7 @@ def run_op(text, course_range, op):
       {"kind": "key",    "a": (小節, スロット), "grid": G, "char": "1"〜"4"}
       {"kind": "long",   "a": ..., "b": ..., "grid": G, "char": "5"/"6"/"7"/"9"}
       {"kind": "delete", "a": ..., "b": None か住所, "grid": G}
+      {"kind": "fill",   "a": ..., "b": 住所, "grid": G, "char": "1"〜"4"}
       {"kind": "flip" / "size", "a": ..., "b": None か住所, "grid": G}
 
     "grids" を {小節: いくつに割るか} で添えられる。拍子が変わる譜面では
@@ -1705,6 +1739,8 @@ def run_op(text, course_range, op):
         return op_long(text, course_range, a, b, g, op["char"])
     if kind == "delete":
         return op_delete(text, course_range, a, b, g)
+    if kind == "fill" and b is not None:
+        return op_fill(text, course_range, a, b, g, op["char"])
     if kind in ("flip", "size"):
         return op_transform(text, course_range, a, b, g, kind)
     if kind == "move" and b is not None:
