@@ -149,7 +149,16 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
 @media (orientation:portrait) and (max-width:700px){
   .rot{display:none}
   html,body{overflow:hidden}
-  .app{position:fixed;top:50%;left:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);transform-origin:center}
+  /* 回した板の外枠。**見えている分**に合わせる —
+     iOS の 100vh は隠れている上下の帯まで入った高さなので、
+     そのまま使うと板が画面より大きくなり端が切れる
+     (利用者の報告 2026-10-30)。--vv-* は JS が測って渡す。
+     渡らなかったときのために dvh/dvw → vh/vw と下がる。 */
+  .app{position:fixed;top:50%;left:50%;
+    width:100vh;height:100vw;
+    width:100dvh;height:100dvw;
+    width:var(--vv-h,100dvh);height:var(--vv-w,100dvw);
+    transform:translate(-50%,-50%) rotate(90deg);transform-origin:center}
 }
 @media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
@@ -332,7 +341,22 @@ function fitIfStale(){
    (隠れている・別のタブ)あいだ rAF は止まるので、そこで大きさが
    変わると直す機会を失う。その場で直し、少し後にもう一度見る
    (寸法が落ち着くのが1拍あとのことがある)。 */
-const refit=()=>{fit();setTimeout(fit,0);setTimeout(fit,120)};
+/* 見えている分を測って CSS へ渡す(上の .app が使う)。
+   キーボードが出ているあいだは visualViewport が縮むので、
+   文字を打っている最中は触らない — 板が跳ねてしまう。 */
+function vvSet(){
+  const el=document.activeElement;
+  if(el&&/^(INPUT|TEXTAREA)$/.test(el.tagName))return;
+  const vv=window.visualViewport;
+  const w=Math.round(vv?vv.width:innerWidth),
+        h=Math.round(vv?vv.height:innerHeight);
+  if(!w||!h)return;
+  const s=document.documentElement.style;
+  s.setProperty("--vv-w",w+"px");s.setProperty("--vv-h",h+"px")}
+const refit=()=>{vvSet();fit();setTimeout(fit,0);setTimeout(()=>{vvSet();fit()},120)};
+if(window.visualViewport){
+  visualViewport.addEventListener("resize",refit);
+  visualViewport.addEventListener("scroll",vvSet)}
 new ResizeObserver(refit).observe(cv);
 addEventListener("resize",refit);
 /* 画面を回したときは、寸法が落ち着くまで少し待つ。 */
