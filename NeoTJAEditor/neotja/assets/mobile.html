@@ -987,20 +987,19 @@ function openPrefs(){const cur=NEO.WINDOW/V.span;
   <h3>音量</h3>
   ${[["master","マスター"],["se","SE（打音）"],["song","楽曲の音源"]].map(([k,l])=>`<label class="vrow"><span>${l}</span><input type="range" id="v_${k}" min="0" max="100" step="1" value="${VOL[k]}"><b id="vv_${k}">${VOL[k]}</b></label>`).join("")}
   <div class="row"><button class="btn" id="vTest">ドン・カッで確認</button></div>
-  <h3>拡大倍率</h3>
-  <div class="zgrid" id="pZoom">${ZOOMS.map(z=>`<button class="btn" data-z="${z}" aria-pressed="${Math.abs(z-cur)<.02}">×${z}</button>`).join("")}</div>
-  <h3>表示</h3>
-  <div class="zgrid" id="pNo"><button class="btn" data-v="1" aria-pressed="${PREF.measureNo}">小節番号を出す</button>
-    <button class="btn" data-v="0" aria-pressed="${!PREF.measureNo}">出さない</button></div>
-  <h3>描き直す速さ</h3>
-  <div class="zgrid" id="pFps">${FPS_CHOICES.map(f=>`<button class="btn" data-f="${f}" aria-pressed="${PREF.fps===f}">${f?f+"fps":"制限なし"}</button>`).join("")}</div>
-  <p class="note">PC 版と同じ 60 が既定です。上げると滑らかになりますが、電池を使います。</p>
+  ${TVER?``:`<h3>拡大倍率</h3>
+  <div class="zgrid" id="pZoom">${ZOOMS.map(z=>`<button class="btn" data-z="${z}" aria-pressed="${Math.abs(z-cur)<.02}">×${z}</button>`).join("")}</div>`}
+  <h3>小節番号</h3>
+  <div class="zgrid" id="pNo"><button class="btn" data-v="1" aria-pressed="${PREF.measureNo}">表示</button>
+    <button class="btn" data-v="0" aria-pressed="${!PREF.measureNo}">非表示</button></div>
+  <h3>シミュレーション</h3>
+  <div class="zgrid" id="pFps">${FPS_CHOICES.map(f=>`<button class="btn" data-f="${f}" aria-pressed="${PREF.fps===f}">${f?f+"fps":"無制限"}</button>`).join("")}</div>
   <div class="row"><button class="btn pri" id="pClose">閉じる</button></div>`);
   for(const k of ["master","se","song"])$("v_"+k).oninput=e=>{VOL[k]=+e.target.value;$("vv_"+k).textContent=VOL[k];gains();try{localStorage.setItem("neotja-vol",JSON.stringify(VOL))}catch(_){}};
   $("vTest").onclick=()=>{const ac=actx();if(ac.state==="suspended")ac.resume();const t=ac.currentTime+.05;hitSE(t,"d");hitSE(t+.25,"k")};
   const press=(box,fn)=>{for(const b of $(box).querySelectorAll("button"))b.onclick=()=>{fn(b);
     for(const o of $(box).querySelectorAll("button"))o.setAttribute("aria-pressed",o===b)}};
-  press("pZoom",b=>setZoom(+b.dataset.z));
+  if($("pZoom"))press("pZoom",b=>setZoom(+b.dataset.z));
   press("pNo",b=>{PREF.measureNo=b.dataset.v==="1";savePref();draw()});
   press("pFps",b=>{PREF.fps=+b.dataset.f;savePref()});
   $("pClose").onclick=closeSheet}
@@ -1012,7 +1011,9 @@ const PREF=(()=>{const d={measureNo:true,fps:60};
   try{return Object.assign(d,JSON.parse(localStorage.getItem("neotja-pref")||"{}"))}
   catch(e){return d}})();
 function savePref(){try{localStorage.setItem("neotja-pref",JSON.stringify(PREF))}catch(e){}}
-const FPS_CHOICES=[30,60,120,0];   // 0 は「制限なし」
+const FPS_CHOICES=[60,120,0];   // 0 は「無制限」
+/* 前に 30 を選んであった人は 60 に戻す(選べる所から外したため)。 */
+if(!FPS_CHOICES.includes(PREF.fps))PREF.fps=60;
 const ZOOMS=[.5,.64,.8,1,1.25,1.56,1.95,2.44,3.05];
 function openZoom(){const cur=NEO.WINDOW/V.span;openSheet(`<h2>拡大倍率</h2><div class="zgrid">${ZOOMS.map(z=>`<button class="btn" data-z="${z}" aria-pressed="${Math.abs(z-cur)<.02}">×${z}</button>`).join("")}</div>
   <div class="row"><button class="btn pri" id="zClose">閉じる</button></div>`);
