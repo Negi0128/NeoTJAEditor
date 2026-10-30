@@ -308,6 +308,9 @@ class ChartEditWaveform(WaveformWidget):
         # op dict を渡すと、結果(暫定表示用)を返す。
         self._op_cb = None
         # 範囲選択。(小節, 小節の中の割合) の組。終わりが決まるまで end は None。
+        # 最後に打った音符。Shift+←→ でこれを引きずる
+        # (利用者の言い直し 2026-10-30)。
+        self._paint_char = None
         self._range_start = None
         self._range_end = None
         # 右ドラッグでの範囲選択の起点(画面 x)。
@@ -1358,21 +1361,25 @@ class ChartEditWaveform(WaveformWidget):
                 self.clear_range()
         self.update()
 
-    def extend_range(self, delta):
-        """Shift+←→: カーソルを動かしながら帯を伸ばす。
+    def paint_move(self, delta):
+        """Shift+←→: 動いた先に、最後に打った音符を置いていく。
 
-        起点は**動かす前のカーソル**。すでに張ってある帯があれば
-        その起点を保ったまま、反対の端だけを動かす(文字を選ぶのと
-        同じ気持ちで伸ばし縮みできる)。"""
-        if self._range_start is None or self._range_end is None:
-            self._range_start = self._range_key(
-                self._cur_measure, self._cur_slot,
-                self._measure_grid(self._cur_measure))
+        音符キーを押したあと Shift を押しっぱなしで左右に動かすと
+        通った所が同じ音符で埋まる(利用者の言い直し 2026-10-30)。
+        まだ一度も打っていないときは、ただ動くだけ。
+
+        置くのは「敷き詰め」の操作(fill)。音符キーの操作(key)は
+        同じ音符がもう在ると**消す**ので、行ったり来たりすると
+        せっかく置いた音符が消えてしまう。"""
+        before = self._cursor_addr()
         self.move_cursor(delta)
-        self._range_end = self._range_key(
-            self._cur_measure, self._cur_slot,
-            self._measure_grid(self._cur_measure))
-        self.update()
+        if self._paint_char is None:
+            return
+        here = self._cursor_addr()
+        if here == before:
+            return                      # 端に着いていて動けなかった
+        self._run_op({"kind": "fill", "a": here, "b": here,
+                      "char": self._paint_char})
 
     def _range_addresses(self):
         """範囲を今のグリッドの住所2つで。範囲が無ければ None。"""
@@ -1514,15 +1521,9 @@ class ChartEditWaveform(WaveformWidget):
     def _peepo_note_key(self, char, mods):
         if mods & Qt.AltModifier:
             char = _BIG[char]
-        # Shift + 音符キーは、帯があればそこを敷き詰める
-        # (利用者の指定 2026-10-26)。帯は Shift+←→ で伸ばす。
-        # 帯が無いときは今までどおり1つ置くだけ — Shift を
-        # 押しっぱなしで伸ばしてすぐ打てるように。
-        if (mods & Qt.ShiftModifier) and self.has_range():
-            rng = self._range_addresses()
-            self._run_op({"kind": "fill", "a": rng[0], "b": rng[1],
-                          "char": char})
-            return
+        # 打った音符を覚える。このあと Shift+←→ で引きずれる
+        # (利用者の言い直し 2026-10-30)。
+        self._paint_char = char
         self._run_op({"kind": "key", "a": self._cursor_addr(), "char": char})
 
     def _begin_long(self, key, char):
@@ -2161,11 +2162,12 @@ class ChartEditWaveform(WaveformWidget):
 
         if key in (Qt.Key_Left, Qt.Key_Right):
             step = -1 if key == Qt.Key_Left else 1
-            # Shift を押していれば帯を伸ばす(利用者の指定 2026-10-26)。
+            # Shift を押していれば、動いた先に最後の音符を置く
+            # (利用者の言い直し 2026-10-30)。
             # **帯は消さない。** Tab で張った帯は ←→ で端まで
             # 歩いてからもう一度 Tab、という使い方をする。
             if mods & Qt.ShiftModifier:
-                self.extend_range(step)
+                self.paint_move(step)
             else:
                 self.move_cursor(step)
             return
