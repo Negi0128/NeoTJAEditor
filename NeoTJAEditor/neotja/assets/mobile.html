@@ -444,6 +444,15 @@ function mIndex(t){if(t<0)return 0;extendTo(t);let lo=0,hi=MS.length-1;while(lo<
 function mGrid(m){return Math.max(1,Math.round(mLen(m)/TPB*V.grid/4))}   // Neo の _measure_grid と同じ
 function slotTick(m,k){return mStart(m)+Math.round(k*mLen(m)/mGrid(m))}
 function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
+/* 1小節目の手前(利用者の指定 2026-10-30)。OFFSET を合わせるとき、
+   曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
+const LEAD_MEASURES=2;
+const leadLen=()=>mLen(0);
+const minTick=()=>-LEAD_MEASURES*leadLen();
+/* 手前も数えた小節番号。1小節目が 0、その手前が -1。 */
+function mIndexLead(t){return t<0?Math.max(-LEAD_MEASURES,
+  -Math.ceil(-t/leadLen())):mIndex(t)}
+const mStartLead=m=>m<0?m*leadLen():mStart(m);
 
 /* ===== 寸法（300px 基準 × 拡縮率） ===== */
 const cv=$("cv"),p=cv.getContext("2d");let W=0,H=0,K=1,G={};
@@ -651,7 +660,10 @@ function drawLegend(){
   const sec=V.playing?V.pos:t2s(V.cur),c=GRID_COLORS[V.grid]||[255,210,60];p.font=fpx(11)+"px "+FONT;p.textBaseline="middle";
   p.fillStyle=PAL.fg_dim;p.fillText(timeText(sec),10*K,G.RH/2);p.fillStyle=rgba(c,1);p.fillText("1/"+V.grid,84*K,G.RH/2);
 }
-function timeText(t){t=Math.max(0,t);const m=Math.floor(t/60);return String(m).padStart(2,"0")+":"+(t-m*60).toFixed(3).padStart(6,"0")}
+/* 1小節目の手前はマイナスで出す(利用者の指定 2026-10-30)。 */
+function timeText(t){const sign=t<0?"-":"";t=Math.abs(t);
+  const m=Math.floor(t/60);
+  return sign+String(m).padStart(2,"0")+":"+(t-m*60).toFixed(3).padStart(6,"0")}
 
 /* ===== 軽量モード（game_screen.py の 1280x720 配置・スキン無しの自前の絵） ===== */
 const LITE={W:1280,H:720,LANE_X:333,LANE_Y:196,LANE_W:947,LANE_H:130,JUDGE_X:81,R:35.5,RB:53,RING:53,RING_IN:35,PPB:240,
@@ -771,10 +783,16 @@ function drawLite(){
     p.font="bold 40px "+FONT;p.textAlign="center";p.textBaseline="bottom";p.lineJoin="round";p.lineWidth=6;p.strokeStyle="#3a1d00";
     p.strokeText("良",LITE.LANE_X+jx,y);p.fillStyle="rgb(255,206,70)";p.fillText("良",LITE.LANE_X+jx,y);p.restore()}
   // 時刻（画面の左下に小さく）
-  p.fillStyle=PAL.fg_dim;p.font="12px "+FONT;p.textBaseline="bottom";p.textBaseline="top";p.fillText(timeText(now)+"  小節 "+(mIndex(nowT)+1),ox+8,oy+CROP.h*L+6>H-18?6:oy+CROP.h*L+6);
+  p.fillStyle=PAL.fg_dim;p.font="12px "+FONT;p.textBaseline="bottom";p.textBaseline="top";p.fillText(timeText(now)+"  小節 "+(mIndexLead(nowT)+1),ox+8,oy+CROP.h*L+6>H-18?6:oy+CROP.h*L+6);
 }
 
 /* ===== 操作 ===== */
+/* つまんで動かすとき用。1小節目の手前へも置ける(置けるのは
+   カーソルだけで、音符は今までどおり譜面の中にしか置けない)。 */
+function snapTickLead(sec){const t=s2t(sec);
+  if(t>=0)return snapTick(sec);
+  const step=leadLen()/mGrid(0);
+  return Math.max(minTick(),Math.round(t/step)*step)}
 function snapTick(sec){const t=Math.max(0,s2t(Math.max(0,sec))),m=mIndex(t),mg=mGrid(m);
   const k=Math.round((t-mStart(m))/mLen(m)*mg);return slotTick(m,k)}
 function rowAt(y){if(y<G.RH)return"ruler";for(const [kind] of NEO.ROWS){const [ry,rh]=G.rows[kind];if(y>=ry&&y<ry+rh)return kind}return null}
@@ -784,7 +802,7 @@ cv.addEventListener("pointerdown",e=>{const r=cv.getBoundingClientRect();cv.setP
   P={x:e.clientX,y:ly,lx:lx,view:V.view,drag:false,sec0:t2s(V.cur),cur0:V.cur}});
 cv.addEventListener("pointermove",e=>{if(!P)return;const dx=rotDX(e,P);if(Math.abs(dx)>8)P.drag=true;
   if(!P.drag||V.playing)return;
-  if(V.mode==="preview"){const L=liteScale(),sec=Math.max(0,P.sec0-dx/(L*speedAt(P.cur0)));V.cur=snapTick(sec);draw();return}
+  if(V.mode==="preview"){const L=liteScale(),sec=P.sec0-dx/(L*speedAt(P.cur0));V.cur=snapTickLead(sec);draw();return}
   V.view=P.view-dx/G.xs;draw()});
 cv.addEventListener("pointerup",()=>{if(!P)return;const q=P;P=null;if(q.drag)return;if(V.mode==="preview"){if(!V.playing)stepMeasure(q.lx<W/2?-1:1);return}tap(q.lx,q.y)});
 cv.addEventListener("pointercancel",()=>P=null);
@@ -870,8 +888,11 @@ function setMode(m){V.mode=m;V.pending=null;closePicker();const b=$("tMode");
   $("app").classList.toggle("preview",m==="preview");
   if(m==="edit")V.view=t2s(V.cur)-V.span*NEO.FOLLOW_FRAC;buildPal();draw()}
 $("tMode").onclick=()=>setMode(V.mode==="preview"?"edit":"preview");
-function gotoMeasure(m){if(V.playing)stop();V.cur=mStart(Math.max(0,Math.min(known()-1,m)));V.view=t2s(V.cur)-V.span*NEO.FOLLOW_FRAC;draw()}
-function stepMeasure(d){const m=mIndex(V.cur);if(d<0&&V.cur>mStart(m))gotoMeasure(m);else gotoMeasure(m+d)}
+function gotoMeasure(m){if(V.playing)stop();
+  m=Math.max(-LEAD_MEASURES,Math.min(known()-1,m));
+  V.cur=mStartLead(m);V.view=t2s(V.cur)-V.span*NEO.FOLLOW_FRAC;draw()}
+function stepMeasure(d){const m=mIndexLead(V.cur);
+  if(d<0&&V.cur>mStartLead(m))gotoMeasure(m);else gotoMeasure(m+d)}
 function syncNav(){if(V.mode!=="preview"||!$("nNo"))return;const n=known(),m=mIndex(Math.max(0,V.playing?s2t(V.pos):V.cur))+1;
   $("nNo").textContent=`小節 ${m} / ${n}`;const r=$("nBar");r.max=n;if(document.activeElement!==r)r.value=m}
 function sigText(len){const q=len/(TPM/16);return Number.isInteger(q)&&q%4===0?(q/4)+"/4":q+"/16"}
@@ -1555,7 +1576,7 @@ function play(from){const ac=actx();if(ac.state==="suspended")ac.resume();closeP
   coPlaySend(true);requestAnimationFrame(tick)}
 function stop(){if(!V.playing)return;V.playing=false;if(AUD.src){try{AUD.src.stop()}catch(e){}AUD.src=null}
   // 止めたらカーソルを再生位置のグリッドへ（Neo と同じく切り捨て）
-  const t=s2t(V.pos),m=mIndex(t);V.cur=slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6));
+  const t=s2t(V.pos),m=mIndex(t);V.cur=Math.max(minTick(),slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6)));
   setPlayIcon(false);
   coPlaySend(false);draw()}
 function tick(){if(!V.playing)return;const ac=AUD.ctx,now=PL.sec0+(ac.currentTime-PL.start);
