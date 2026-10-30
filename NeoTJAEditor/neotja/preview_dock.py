@@ -1802,6 +1802,9 @@ class PreviewDock(QDockWidget):
             # 作譜ペインの右クリックと同じ道を通す。
             self.command_panel.highspeedRequested.connect(
                 lambda: self._run_chart_tool("highspeed"))
+            # 拍子の「!」は、選んだ音符ごとに小節線を付ける。
+            self.command_panel.meterSplitRequested.connect(
+                self._on_panel_meter_split)
             # 「戻す / 進む」はキー(Ctrl+Z / Ctrl+Y)と同じ所へ。
             self.command_panel.undoRequested.connect(
                 lambda: self._do_undo(False))
@@ -3102,6 +3105,12 @@ class PreviewDock(QDockWidget):
         ce = getattr(self, "chart_edit", None)
         if ce is not None:
             ce.apply_selection_command(name, value)
+
+    def _on_panel_meter_split(self):
+        """拍子の「!」。選んだ音符それぞれに小節線を付ける。"""
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None:
+            ce.split_meter_at_selection()
 
     def _run_chart_tool(self, name):
         """作譜ペインの右クリックと同じ道具を呼ぶ(無ければ何もしない)。"""

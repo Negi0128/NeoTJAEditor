@@ -1771,6 +1771,20 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
         return bool(res)
 
+    def split_meter_at_selection(self):
+        """選んだ音符それぞれに小節線が付くように拍子を変える
+        (命令パネルの拍子の「!」。利用者の指定 2026-10-31)。
+
+        音符から次の音符までの隔たりを、そのまま1小節の長さにする。
+        範囲が終わったら元の拍子へ戻す。音符は1つも動かない。"""
+        if not self.has_note_selection():
+            return False
+        res = self._run_op({"kind": "meter_split",
+                            "a": self._cursor_addr(),
+                            "items": self.selected_items()})
+        self.update()
+        return bool(res)
+
     def open_selection_region_menu(self, kind, global_pos):
         """ゴーゴー / 小節線の「!」。
 

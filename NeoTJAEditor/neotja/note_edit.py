@@ -1750,6 +1750,8 @@ def run_op(text, course_range, op):
                           op.get("value"))
     if kind == "measure_insert":
         return op_measure_insert(text, course_range, a[0], op.get("value"))
+    if kind == "meter_split":
+        return op_meter_split(text, course_range, op.get("items"))
     if kind == "marker":
         return op_marker(text, course_range, a[0], a[1], ga,
                          str(op.get("region", "")).upper(),
@@ -2211,6 +2213,95 @@ def _emit_measures(elements, total_beats, meter, dens=()):
             out.append("".join(chars) + ",")
         beat = end
     return "\n".join(out) + "\n"
+
+
+def _beats_to_meter(beats):
+    """拍の長さ → (分子, 分母)。#MEASURE n/d は 4*n/d 拍。"""
+    f = Fraction(beats) / 4
+    if f <= 0:
+        return None
+    return (f.numerator, f.denominator)
+
+
+def op_meter_split(text, course_range, items):
+    """選んだ音符それぞれに小節線が付くように拍子を変える。
+
+    利用者の指定 2026-10-31。
+        1000100010101010,   (4/4・16分)
+    を選ぶと
+        #MEASURE 1/4 / 1, / 1, / #MEASURE 1/8 / 1, / 1, / 1, / 1,
+        #MEASURE 4/4        ← 範囲の次の小節から元へ戻す
+    になる。音符から次の音符までの隔たりを、そのまま1小節の長さにする。
+    最後の音符は、その音符がいる小節の終わりまでを1小節にする。
+
+    音符は1つも動かない(拍の位置はそのまま)。変わるのは小節線の位置と、
+    本文の小節の区切り方だけ。"""
+    body = course_body_span(text, course_range)
+    if body is None or not items:
+        return None
+    want = sorted({_item_pos(i) for i in items
+                   if i.get("kind") in ("note", "tail")})
+    if not want:
+        return None
+    spans = measure_spans(text, body)
+    if not spans:
+        return None
+    meters = _meters_by_measure(text, spans)
+    m0 = int(want[0])
+    if m0 >= len(spans) or _has_branch(text, spans, m0):
+        return None
+
+    def beat_of(pos):
+        """位置(小節+小節内の割合) → m0 の頭からの拍。"""
+        m = int(pos)
+        b = Fraction(0)
+        for k in range(m0, min(m, len(meters))):
+            b += _meter_beats(meters[k])
+        if m < len(meters):
+            b += _meter_beats(meters[m]) * (Fraction(pos) - m)
+        return b
+
+    cuts = []
+    for p in want:
+        b = beat_of(p)
+        if not cuts or b > cuts[-1]:
+            cuts.append(b)
+    m_last = int(want[-1])
+    end_beat = beat_of(Fraction(m_last + 1))
+    if end_beat <= cuts[0]:
+        return None
+    elements, total, _dens = _elements_from(text, spans, m0, meters)
+    bounds = cuts + [end_beat]
+    adds = []
+    # **変わるときだけ書く。** 同じ長さが続くところに毎回 #MEASURE を
+    # 並べると本文が読みにくい(利用者の例も、変わり目にだけ書いてある)。
+    cur_mt = meters[m0]
+    for i, b in enumerate(cuts):
+        mt = _beats_to_meter(bounds[i + 1] - b)
+        if mt is None:
+            return None
+        if mt != cur_mt:
+            adds.append((b, "line", "#MEASURE %d/%d" % mt))
+            cur_mt = mt
+    # 範囲が終わったら元の拍子へ戻す(利用者の指定)。
+    after = meters[m_last] if m_last < len(meters) else _DEFAULT_METER
+    if after != cur_mt:
+        adds.append((end_beat, "line", "#MEASURE %d/%d" % after))
+    # 範囲の中に元からあった #MEASURE は、新しいものと喧嘩するので外す。
+    keep = [e for e in elements
+            if not (e[1] == "line" and _command_name(e[2]) == "MEASURE"
+                    and cuts[0] <= e[0] <= end_beat)]
+    merged = sorted(keep + adds,
+                    key=lambda e: (e[0], 0 if e[1] == "line" else 1))
+    head = text[:spans[m0][0]]
+    if head and not head.endswith(("\n", "\r")):
+        head += "\n"
+    # 細かさ(dens)は渡さない。1小節に音符1つなら "1," と短く書きたい
+    # (利用者の例のとおり)。
+    new = head + _emit_measures(merged, total, meters[m0]) + text[body[1]:]
+    if new == text:
+        return None
+    return _result(text, new, reparse=True)
 
 
 def op_measure_insert(text, course_range, m, value):

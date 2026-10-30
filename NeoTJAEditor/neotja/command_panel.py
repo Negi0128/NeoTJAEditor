@@ -32,6 +32,9 @@ class CommandPanel(QFrame):
     placeMarker = Signal(str, str)
     #: 譜面分岐の系統を選ぶ。("N"/"E"/"M")
     selectBranch = Signal(str)
+    #: 拍子の「!」。選んだ音符すべてに小節線が付くように拍子を変える
+    #: (利用者の指定 2026-10-31)。
+    meterSplitRequested = Signal()
     #: スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定 2026-10-31)。
     highspeedRequested = Signal()
     #: 欄ごとの「!」。その欄の値を**選んだ音符すべて**に付ける。(名前, 値)
@@ -128,10 +131,13 @@ class CommandPanel(QFrame):
         slash = QLabel("/")
         slash.setFixedWidth(8)
         slash.setAlignment(Qt.AlignCenter)
+        # 拍子の「!」は**選んだ音符ごとに小節線を付ける**
+        # (利用者の指定 2026-10-31)。
         grid.addWidget(self._box("measure", "拍子記号",
                                  [self.sp_num, slash, self.sp_den], "MEASURE",
                                  lambda: "%d/%d" % (self.sp_num.value(),
-                                                    self.sp_den.value())),
+                                                    self.sp_den.value()),
+                                 mark=self._meter_mark),
                        0, 1)
 
         # --- スクロール(HS): 倍率と「見た目BPM」。どちらを変えても連動する
@@ -411,6 +417,13 @@ class CommandPanel(QFrame):
             return
         self._auto_pending[kind] = get_value()
         timer.start()
+
+    def _meter_mark(self):
+        """拍子の「!」。選んだ音符それぞれに小節線が付くように拍子を
+        変える(利用者の指定 2026-10-31)。"""
+        return self._mark_button(
+            "選んだ音符それぞれに小節線が付くように拍子を変えます",
+            self.meterSplitRequested.emit)
 
     def _highspeed_mark(self):
         """スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定
