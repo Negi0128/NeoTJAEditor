@@ -450,7 +450,7 @@ function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.30.2";
+const WEB_VER="2026.10.30.3";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -1318,8 +1318,31 @@ function idb(){return new Promise((res,rej)=>{try{const r=indexedDB.open("neotja
 async function kvSet(k,v){try{const db=await idb();await new Promise((res,rej)=>{const tx=db.transaction("kv","readwrite");v==null?tx.objectStore("kv").delete(k):tx.objectStore("kv").put(v,k);tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}catch(e){}}
 async function kvGet(k){try{const db=await idb();return await new Promise((res,rej)=>{const r=db.transaction("kv").objectStore("kv").get(k);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}catch(e){return null}}
 function rememberAudio(){kvSet("audio",AUD.bytes?{name:AUD.name,bytes:AUD.bytes.slice(0),fromHost:!!AUD.fromHost}:null)}
+/* 預けてある音源を戻す。**ここでは音の口を作らない** —
+   起動の途中(まだ指が触れていないとき)に作った口は、iPhone では
+   そのあと鳴らせないことがある(利用者の報告 2026-10-30
+   「ブラウザを閉じて開き直すと再生できなくなる」)。字(bytes)だけ
+   持っておいて、指が触れてから読む。 */
 async function restoreAudio(){const a=await kvGet("audio");if(!a||!a.bytes||AUD.bytes)return;
-  try{AUD.bytes=a.bytes.slice(0);AUD.buf=await actx().decodeAudioData(a.bytes.slice(0));AUD.name=a.name;AUD.fromHost=!!a.fromHost;AUD.raw=null;buildPeaks();draw()}catch(e){AUD.bytes=null}}
+  AUD.bytes=a.bytes.slice(0);AUD.name=a.name;AUD.fromHost=!!a.fromHost;AUD.raw=null;
+  if(AUD.ctx)await decodeSong();}
+/* 持っている字を音に直す。1回だけ走るようにして、読めなかった物は
+   捨てる(堂々巡りにしない)。 */
+let songWait=null;
+function decodeSong(){
+  if(!AUD.bytes||AUD.buf)return Promise.resolve();
+  if(songWait)return songWait;
+  songWait=actx().decodeAudioData(AUD.bytes.slice(0))
+    .then(b=>{AUD.buf=b;buildPeaks();draw()})
+    .catch(()=>{AUD.bytes=null})
+    .then(()=>{songWait=null});
+  return songWait}
+/* 最初に指が触れた所で音の口を作る(iPhone の決まり)。 */
+function audioWake(){
+  try{const ac=actx();if(ac.state!=="running")ac.resume()}catch(e){}
+  decodeSong()}
+for(const ev of ["pointerdown","touchend","keydown"])
+  addEventListener(ev,audioWake,{passive:true});
 
 /* ===== ZIP（.tja と .ogg を同封） ===== */
 const AUDIO_RE=/\.(ogg|mp3|wav|m4a|opus)$/i;
@@ -1653,7 +1676,10 @@ function hitQueue(sec0){
 let PL=null;
 /* from(譜面の秒)を渡すと、カーソルではなくその所から流す。合作で
    「編集者と同じ所から」流すのに要る。 */
-function play(from){const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
+function play(from){const ac=actx();if(ac.state!=="running")ac.resume();
+  /* まだ音に直していなければ、直してから鳴らす。 */
+  if(AUD.bytes&&!AUD.buf){decodeSong().then(()=>play(from));return}
+  closePicker();V.pending=null;
   const sec0=(from==null?t2s(V.cur):+from),tick0=(from==null?V.cur:s2t(sec0)),start=ac.currentTime+.08;
   PL={sec0,start,q:hitQueue(sec0),qi:0,end:t2s(lastTick())+1.5};
   if(AUD.buf){const off=+S.offset||0,a=sec0-off,src=ac.createBufferSource();src.buffer=AUD.buf;src.connect(gains().song);
