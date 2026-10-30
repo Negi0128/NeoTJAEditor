@@ -1,3 +1,4 @@
+import datetime
 from decimal import getcontext
 
 APP_NAME = "NeoTJAEditor"
@@ -8,7 +9,7 @@ getcontext().prec = 50
 NEW_FILE_TEMPLATE = """\
 TITLE:
 SUBTITLE:--
-BPM:
+BPM:120
 WAVE:
 OFFSET:0.00
 SONGVOL:100
@@ -16,7 +17,7 @@ SEVOL:100
 DEMOSTART:0.00
 
 COURSE:oni
-LEVEL:
+LEVEL:10
 BALLOON:
 SCOREINIT:
 SCOREDIFF:
@@ -28,6 +29,20 @@ SCOREDIFF:
 1111,
 #END
 """
+
+def new_file_text(title: str = "") -> str:
+    """新しい譜面の本文。**1行目に作った日の印**を入れる
+    (利用者の指定 2026-10-30)。
+
+    ひな形そのもの(NEW_FILE_TEMPLATE)は日付を持てないので、
+    作るたびにここで頭へ付ける。web 版(assets/mobile.html)の
+    新規作成も同じ形の行を書く。"""
+    stamp = datetime.date.today().strftime("%Y/%m/%d")
+    text = f"// {APP_NAME} {stamp}\n" + NEW_FILE_TEMPLATE
+    if title:
+        text = text.replace("TITLE:\n", f"TITLE:{title}\n", 1)
+    return text
+
 
 VALID_MEASURE_COUNTS = {1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256}
 

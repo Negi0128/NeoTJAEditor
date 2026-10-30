@@ -20,7 +20,7 @@ from neotja import note_edit
 from neotja import settings as settings_mod
 from neotja.analysis_worker import AnalysisWorker
 from neotja.child_env import child_env
-from neotja.constants import APP_NAME, NEW_FILE_TEMPLATE, VERSION
+from neotja.constants import APP_NAME, VERSION, new_file_text
 from neotja.find_replace import FindReplaceBar
 from neotja.editor_widget import TJAEditor
 from neotja.theme import COLORS
@@ -1476,7 +1476,9 @@ class MainWindow(QMainWindow):
     def new_file(self, confirm=True):
         if confirm and not self._unsaved_check():
             return
-        self.editor.setPlainText(NEW_FILE_TEMPLATE)
+        # 作った日の印を1行目に入れる(利用者の指定 2026-10-30)。
+        text = new_file_text()
+        self.editor.setPlainText(text)
         self.current_file = None
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
@@ -1484,7 +1486,7 @@ class MainWindow(QMainWindow):
         self.editor.checkpointsChanged.emit()
         self._refresh_title()
         self._mark_saved()
-        self._set_preview_content(NEW_FILE_TEMPLATE)
+        self._set_preview_content(text)
         self._force_update()
 
     def new_file_dialog(self):
@@ -1535,16 +1537,14 @@ class MainWindow(QMainWindow):
         if os.path.abspath(wave_path) != os.path.abspath(new_wave_path):
             self._relocate_wave_file(wave_path, new_wave_path)
 
-        content = NEW_FILE_TEMPLATE.replace("TITLE:\n", f"TITLE:{title}\n", 1)
+        content = new_file_text(title)
         # SUBTITLE always carries a leading "--" marker (see
         # parse_preview_headers's matching read-side convention) - the
         # actual text, if any, goes right after it, never replacing it.
         content = content.replace("SUBTITLE:--\n", f"SUBTITLE:--{subtitle}\n" if subtitle else "SUBTITLE:--\n", 1)
         content = content.replace("WAVE:\n", f"WAVE:{wave_name}\n", 1)
-        # LEVEL は空だと「未設定」扱いで、そのまま忘れられがち。YouTube から
-        # 作るのはたいてい創作譜面のおにで、後から直すにしても数字が入って
-        # いたほうが早いので 10 を入れておく。
-        content = content.replace("LEVEL:\n", "LEVEL:10\n", 1)
+        # ひな形が最初から LEVEL:10 なので、ここで入れ直すことは
+        # もう無い(利用者の指定 2026-10-30)。
         # BPM/OFFSET auto-detection (experimental) already ran once in the
         # new-project dialog against the downloaded audio - pre-fill the
         # headers with its result rather than leaving them blank/0.00. Best-
@@ -1554,7 +1554,7 @@ class MainWindow(QMainWindow):
         # untitled content).
         try:
             if bpm:
-                content = content.replace("BPM:\n", f"BPM:{bpm:g}\n", 1)
+                content = content.replace("BPM:120\n", f"BPM:{bpm:g}\n", 1)
             if offset is not None:
                 content = content.replace("OFFSET:0.00\n", f"OFFSET:{offset:.3f}\n", 1)
         except (TypeError, ValueError):
