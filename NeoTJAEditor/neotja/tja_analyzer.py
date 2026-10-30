@@ -184,22 +184,28 @@ class TJACourseAnalyzer:
         """Estimated tap count for a roll/big-roll of the given duration
         (seconds), honoring the short-roll compensation setting. Shared by
         _analyze() (sidebar stats) and build_preview_timeline() (live
-        preview) so the two never drift out of sync."""
+        preview) so the two never drift out of sync.
+
+        **どんなに短くても1打は返す**(利用者の指定 2026-10-31
+        「すごく短い連打でも1打は叩いてほしい」)。切り捨てだけだと
+        秒速より短い連打が 0打になり、音も打数も出なかった。"""
         short_roll = self.config_data.get("short_roll_comp", "段階的補正 (60fps理論値)")
         rs = self.config_data.get("roll_speed", 45)
+        if duration <= 0:
+            return 0
         if short_roll == "段階的補正 (60fps理論値)":
             if duration <= 0.10:
-                return int(duration * max(60, rs))
+                return max(1, int(duration * max(60, rs)))
             elif duration <= 0.15:
-                return int(duration * max(55, rs))
-            return int(duration * rs)
+                return max(1, int(duration * max(55, rs)))
+            return max(1, int(duration * rs))
         elif short_roll == "段階的補正 (理論値-1)":
             if duration <= 0.10:
-                return int(duration * max(55, rs))
+                return max(1, int(duration * max(55, rs)))
             elif duration <= 0.15:
-                return int(duration * max(50, rs))
-            return int(duration * rs)
-        return int(duration * rs)
+                return max(1, int(duration * max(50, rs)))
+            return max(1, int(duration * rs))
+        return max(1, int(duration * rs))
 
     def _analyze(self, data, all_lines, branch_level: str = "M"):
         bpm = Decimal("120")

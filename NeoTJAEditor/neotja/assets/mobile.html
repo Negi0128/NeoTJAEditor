@@ -455,7 +455,7 @@ function known(){return Math.max(mIndex(lastTick())+1,(S&&S.bars)||0)}
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.31.2";
+const WEB_VER="2026.10.31.3";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -704,9 +704,12 @@ const ROLL_SPEED=18,BALLOON_SPEED=45,ROLL_RED_HITS=10;
 /* 終わった連打の打数を出しておく時間と、最後に薄くする時間
    (PC 版 chart_preview_widget の ROLL_HOLD_SEC / ROLL_FADE_SEC)。 */
 const ROLL_HOLD_SEC=1.433,ROLL_FADE_SEC=.083;
-// tja_analyzer._roll_hits（段階的補正。短い連打だけ速い）
-function rollHits(d){return d<=.1?Math.floor(d*Math.max(60,ROLL_SPEED))
-  :d<=.15?Math.floor(d*Math.max(55,ROLL_SPEED)):Math.floor(d*ROLL_SPEED)}
+/* tja_analyzer._roll_hits（段階的補正。短い連打だけ速い）。
+   **どんなに短くても1打は返す**(利用者の指定 2026-10-31)。 */
+function rollHits(d){if(d<=0)return 0;
+  const n=d<=.1?Math.floor(d*Math.max(60,ROLL_SPEED))
+    :d<=.15?Math.floor(d*Math.max(55,ROLL_SPEED)):Math.floor(d*ROLL_SPEED);
+  return Math.max(1,n)}
 function balloonPop(n){const s0=t2s(n.t),s1=t2s(n.end),need=n.count||5;return Math.min(s1,s0+need/BALLOON_SPEED)}
 /* 上の読み出し: 連打は数え上げ、風船は残り打数（_live_top_count）。
    {n:打数, a:濃さ} を返す。終わった連打は ROLL_HOLD_SEC のあいだ
