@@ -754,7 +754,7 @@ function drawLite(){
   const hidden=spans("BARLINEOFF","BARLINEON");p.strokeStyle=LITE.fg_dim;p.lineWidth=2;
   p.font="16px "+FONT;p.textBaseline="top";
   for(let m=0;m<=known();m++){const t=mStart(m);if(hidden.some(([a,b])=>t>=a&&(b==null||t<b)))continue;const x=xOf(t);if(x<-8||x>lw+8)continue;line(Math.floor(x),0,Math.floor(x),bh);
-    if(m<known()){p.fillStyle=LITE.fg_dim;p.fillText(String(m+1),Math.floor(x)+4,6)}}
+    if(m<known()&&PREF.measureNo){p.fillStyle=LITE.fg_dim;p.fillText(String(m+1),Math.floor(x)+4,6)}}
   // 判定円
   p.strokeStyle=LITE.bright;p.lineWidth=3;p.beginPath();p.arc(jx,mid,LITE.RING,0,7);p.stroke();p.beginPath();p.arc(jx,mid,LITE.RING_IN,0,7);p.stroke();
   // ゴーゴーの入り: 判定円が赤く脈打つ（Neo の gogo_pulse と同じ ADSR）
@@ -982,12 +982,37 @@ async function newChart(f){
 async function reloadAudio(f){closeSheet();toast("読み込み中…");
   try{const ab=await f.arrayBuffer();AUD.bytes=ab.slice(0);AUD.buf=await actx().decodeAudioData(ab);AUD.name=f.name;hdr().WAVE=f.name;buildPeaks();rememberAudio();save();draw();toast(f.name+" を読み込みました")}
   catch(e){toast("この形式は読めませんでした。ogg / mp3 / wav を試してください")}}
-function openVolume(){openSheet(`<h2>音量調整</h2>
+function openPrefs(){const cur=NEO.WINDOW/V.span;
+  openSheet(`<h2>環境設定</h2>
+  <h3>音量</h3>
   ${[["master","マスター"],["se","SE（打音）"],["song","楽曲の音源"]].map(([k,l])=>`<label class="vrow"><span>${l}</span><input type="range" id="v_${k}" min="0" max="100" step="1" value="${VOL[k]}"><b id="vv_${k}">${VOL[k]}</b></label>`).join("")}
-  <div class="row"><button class="btn" id="vTest">ドン・カッで確認</button><span style="flex:1"></span><button class="btn pri" id="vClose">閉じる</button></div>`);
+  <div class="row"><button class="btn" id="vTest">ドン・カッで確認</button></div>
+  <h3>拡大倍率</h3>
+  <div class="zgrid" id="pZoom">${ZOOMS.map(z=>`<button class="btn" data-z="${z}" aria-pressed="${Math.abs(z-cur)<.02}">×${z}</button>`).join("")}</div>
+  <h3>表示</h3>
+  <div class="zgrid" id="pNo"><button class="btn" data-v="1" aria-pressed="${PREF.measureNo}">小節番号を出す</button>
+    <button class="btn" data-v="0" aria-pressed="${!PREF.measureNo}">出さない</button></div>
+  <h3>描き直す速さ</h3>
+  <div class="zgrid" id="pFps">${FPS_CHOICES.map(f=>`<button class="btn" data-f="${f}" aria-pressed="${PREF.fps===f}">${f?f+"fps":"制限なし"}</button>`).join("")}</div>
+  <p class="note">PC 版と同じ 60 が既定です。上げると滑らかになりますが、電池を使います。</p>
+  <div class="row"><button class="btn pri" id="pClose">閉じる</button></div>`);
   for(const k of ["master","se","song"])$("v_"+k).oninput=e=>{VOL[k]=+e.target.value;$("vv_"+k).textContent=VOL[k];gains();try{localStorage.setItem("neotja-vol",JSON.stringify(VOL))}catch(_){}};
   $("vTest").onclick=()=>{const ac=actx();if(ac.state==="suspended")ac.resume();const t=ac.currentTime+.05;hitSE(t,"d");hitSE(t+.25,"k")};
-  $("vClose").onclick=closeSheet}
+  const press=(box,fn)=>{for(const b of $(box).querySelectorAll("button"))b.onclick=()=>{fn(b);
+    for(const o of $(box).querySelectorAll("button"))o.setAttribute("aria-pressed",o===b)}};
+  press("pZoom",b=>setZoom(+b.dataset.z));
+  press("pNo",b=>{PREF.measureNo=b.dataset.v==="1";savePref();draw()});
+  press("pFps",b=>{PREF.fps=+b.dataset.f;savePref()});
+  $("pClose").onclick=closeSheet}
+/* ===== 環境設定(利用者の指定 2026-10-30) =====
+   音量と拡大倍率はここへまとめた。小節番号の出し入れと、絵を描き
+   直す fps もここ。fps は PC 版と同じく既定 60 — 端末によっては
+   120 まで出てしまい、速く見えるため。 */
+const PREF=(()=>{const d={measureNo:true,fps:60};
+  try{return Object.assign(d,JSON.parse(localStorage.getItem("neotja-pref")||"{}"))}
+  catch(e){return d}})();
+function savePref(){try{localStorage.setItem("neotja-pref",JSON.stringify(PREF))}catch(e){}}
+const FPS_CHOICES=[30,60,120,0];   // 0 は「制限なし」
 const ZOOMS=[.5,.64,.8,1,1.25,1.56,1.95,2.44,3.05];
 function openZoom(){const cur=NEO.WINDOW/V.span;openSheet(`<h2>拡大倍率</h2><div class="zgrid">${ZOOMS.map(z=>`<button class="btn" data-z="${z}" aria-pressed="${Math.abs(z-cur)<.02}">×${z}</button>`).join("")}</div>
   <div class="row"><button class="btn pri" id="zClose">閉じる</button></div>`);
@@ -1093,8 +1118,7 @@ $("tMenu").onclick=()=>{stop();
      元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
      詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 */
   items.push(`<button class="btn" id="mZipOut">ZIP を書き出す</button>`);
-  items.push(`<button class="btn" id="mVol">音量調整</button>`);
-  items.push(`<button class="btn" id="mZoom">拡大倍率</button>`);
+  items.push(`<button class="btn" id="mPref">環境設定</button>`);
   /* 作譜の画面(?chart)だけに出す物。縦2段では本文がいつも出ているし、
      見出しは本文で直すので要らない。 */
   if(!TVER){if(!CO.on)items.push(`<button class="btn" id="mSet">楽曲データ</button>`);
@@ -1111,7 +1135,7 @@ $("tMenu").onclick=()=>{stop();
   $("mZipOut").onclick=savePackage;
   if($("mSet"))$("mSet").onclick=openSettings;
   if($("mText"))$("mText").onclick=()=>{closeSheet();openText()};
-  $("mVol").onclick=openVolume;$("mZoom").onclick=openZoom;
+  $("mPref").onclick=openPrefs;
   $("mAud").onchange=e=>{const f=e.target.files[0];if(f)reloadAudio(f)};
 $("mClose").onclick=closeSheet};
 
@@ -1551,11 +1575,38 @@ function actx(){if(!AUD.ctx){const ac=AUD.ctx=new(window.AudioContext||window.we
   for(const k of ["don","ka","pop"])ac.decodeAudioData(b64buf(SE_DATA[k])).then(b=>{SE[k]=b}).catch(()=>{})}return AUD.ctx}
 const VOL=(()=>{try{return Object.assign({master:80,se:80,song:80},JSON.parse(localStorage.getItem("neotja-vol")||"{}"))}catch(e){return{master:80,se:80,song:80}}})();
 const GAIN={};
-function gains(){const ac=actx();if(!GAIN.master){GAIN.master=ac.createGain();GAIN.master.connect(ac.destination);
+function gains(){const ac=actx();if(!GAIN.master){GAIN.master=ac.createGain();
+  /* 足し合わせた結果を 1.0 に収める(利用者の報告 2026-10-30
+     「録画したら音がやばい」)。曲と打音をそのまま足しているので
+     合計は簡単に 1.0 を超え、超えたぶんは切られて歪む。PC 版も
+     同じ所でリミッターを掛けている(mixer_engine._limit)。 */
+  GAIN.limit=ac.createDynamicsCompressor();
+  GAIN.limit.threshold.value=-3;GAIN.limit.knee.value=0;
+  GAIN.limit.ratio.value=20;GAIN.limit.attack.value=.002;
+  GAIN.limit.release.value=.3;
+  GAIN.master.connect(GAIN.limit);GAIN.limit.connect(ac.destination);
   GAIN.se=ac.createGain();GAIN.se.connect(GAIN.master);GAIN.song=ac.createGain();GAIN.song.connect(GAIN.master)}
   GAIN.master.gain.value=VOL.master/100;GAIN.se.gain.value=VOL.se/100;GAIN.song.gain.value=VOL.song/100;return GAIN}
+/* 同じ打音を同時に鳴らせる数。打音の素材は 0.8 秒ほどあり、連打では
+   前の音の尾が残ったまま次が乗る。数を絞らないと峰が何倍にもなって
+   割れる(PC 版 mixer_engine._MAX_VOICES_PER_SOUND と同じ 4)。
+   重なった尾は新しい打音にかき消されるので、絞っても聞こえ方は
+   ほとんど変わらない。切るときは 5ms で絞ってから — ぶつ切りだと
+   「プチッ」と鳴る。 */
+const SE_MAX_VOICES=4,SE_EVICT_FADE=.005;
+const SE_LIVE={};
 function hitSE(when,type){const ac=AUD.ctx,buf=type==="pop"?SE.pop:(TYPES[type].don?SE.don:SE.ka);if(!buf)return;
-  const src=ac.createBufferSource();src.buffer=buf;src.connect(gains().se);src.start(when)}
+  const g=ac.createGain();g.connect(gains().se);
+  const src=ac.createBufferSource();src.buffer=buf;src.connect(g);src.start(when);
+  const key=type==="pop"?"pop":(TYPES[type].don?"d":"k");
+  const list=SE_LIVE[key]||(SE_LIVE[key]=[]);
+  list.push({src,g,end:when+buf.duration});
+  const now=ac.currentTime;
+  for(let i=list.length-1;i>=0;i--)if(list[i].end<=now)list.splice(i,1);
+  while(list.length>SE_MAX_VOICES){const old=list.shift();
+    try{old.g.gain.setValueAtTime(old.g.gain.value,now);
+        old.g.gain.linearRampToValueAtTime(0,now+SE_EVICT_FADE);
+        old.src.stop(now+SE_EVICT_FADE)}catch(e){}}}
 /* 鳴らす打音の一覧。PC 版 preview_dock.set_preview_data と
    同じ作り方(利用者の指定 2026-10-30「すべて PC に合わせて」)。
    ・音符はそのまま
@@ -1595,9 +1646,22 @@ function stop(){if(!V.playing)return;V.playing=false;if(AUD.src){try{AUD.src.sto
   const t=s2t(V.pos),m=mIndex(t);V.cur=Math.max(minTick(),slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6)));
   setPlayIcon(false);
   coPlaySend(false);draw()}
+/* 絵を描き直す速さ。既定は PC 版と同じ 60fps(利用者の指定
+   2026-10-30)。端末によっては画面が 120Hz で、そのぶん速く
+   描き直していた。**音を並べるのは毎回やる** — 描くのを間引く
+   だけで、鳴る時刻はずれない。 */
+let lastDraw=0;
 function tick(){if(!V.playing)return;const ac=AUD.ctx,now=PL.sec0+(ac.currentTime-PL.start);
   while(PL.qi<PL.q.length&&PL.q[PL.qi].s<now+.25){const q=PL.q[PL.qi++],w=PL.start+(q.s-PL.sec0);if(w>=ac.currentTime-.01)hitSE(Math.max(w,ac.currentTime),q.type)}
-  V.pos=Math.max(PL.sec0,now);V.view=V.pos-V.span*NEO.FOLLOW_FRAC_PLAY;draw();if(now>PL.end){stop();return}requestAnimationFrame(tick)}
+  V.pos=Math.max(PL.sec0,now);V.view=V.pos-V.span*NEO.FOLLOW_FRAC_PLAY;
+  lastDraw=performance.now();draw();
+  if(now>PL.end){stop();return}
+  /* **間引くときは rAF を毎コマ回さない。** 描かないコマが続くと
+     ブラウザが「何も描いていない」と見て rAF 自体を 3Hz ほどまで
+     落とす(実測: 30fps 指定で 2秒に3コマ)。待ってから1コマ頼む。 */
+  if(PREF.fps>0)setTimeout(()=>requestAnimationFrame(tick),
+    Math.max(0,1000/PREF.fps-(performance.now()-lastDraw)));
+  else requestAnimationFrame(tick)}
 $("tPlay").onclick=()=>V.playing?stop():play();
 
 /* ===== 合作(Neo のホストが配ったページのときだけ) =====
