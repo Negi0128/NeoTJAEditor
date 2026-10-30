@@ -363,7 +363,10 @@ let S;try{const raw=localStorage.getItem("neotja-mobile2");S=raw?JSON.parse(raw)
 if(!S||!Array.isArray(S.notes))S=sample();
 const V={view:-NEO.WINDOW*NEO.FOLLOW_FRAC,span:NEO.WINDOW,grid:16,cur:0,tool:"d",balloon:5,bpmVal:"",hsVal:"1",pending:null,playing:false,pos:0,mode:"edit",big:false};
 const hist=[];
-function snapShot(){hist.push(JSON.stringify(S));if(hist.length>80)hist.shift()}
+/* 音符や命令を触る前に必ず通る所。ここで預かった本文を捨てる —
+   触ったあとの譜面は、預かっている字とは別物になるため。 */
+function snapShot(){hist.push(JSON.stringify(S));if(hist.length>80)hist.shift();
+  S.raw=null}
 function save(){if(CO.on)return;   // 合作中の本文は預かりもの
   try{localStorage.setItem("neotja-mobile2",JSON.stringify(S))}catch(e){}}
 function changed(){S.notes.sort((a,b)=>a.t-b.t);S.cmds.sort((a,b)=>a.t-b.t);buildTempo();buildMeasures();save();draw();syncTxt()}
@@ -450,7 +453,7 @@ function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.30.3";
+const WEB_VER="2026.10.31.1";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -1430,7 +1433,26 @@ async function savePackage(){
 
 /* ===== TJA 入出力 ===== */
 function gcd(a,b){while(b){[a,b]=[b,a%b]}return a}
+/* 預かった本文の見出しだけ、いまの値に差し替える。中身(音符と
+   分岐)はそのまま。 */
+const HEAD_KEYS=["TITLE","SUBTITLE","BPM","WAVE","OFFSET","DEMOSTART",
+  "SONGVOL","SEVOL","GENRE","MAKER"];
+function rawWithHead(raw){
+  const H=hdr(),now={TITLE:S.title||"",BPM:String(S.bpm),
+    OFFSET:String(S.offset),WAVE:H.WAVE||AUD.name||""};
+  for(const k of HEAD_KEYS)if(now[k]==null&&H[k]!=null)now[k]=H[k];
+  const lines=raw.split(/\r?\n/);
+  const seen={};
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(/^(\s*)([A-Z0-9]+):(.*)$/);
+    if(!m)continue;
+    const k=m[2].toUpperCase();
+    if(k==="COURSE")break;            // ここから下はコースの中身
+    if(seen[k]||now[k]==null)continue;
+    seen[k]=true;lines[i]=m[1]+k+":"+now[k]}
+  return lines.join("\n")}
 function exportTJA(){
+  if(S.raw)return rawWithHead(S.raw);
   const nM=known(),balloons=S.notes.filter(n=>n.type==="b").map(n=>n.count||5);
   const H=hdr(),opt=k=>H[k]?[`${k}:${H[k]}`]:[];
   const head=[`TITLE:${S.title||""}`,...opt("SUBTITLE"),`BPM:${S.bpm}`,`WAVE:${H.WAVE||AUD.name||""}`,`OFFSET:${S.offset}`,
@@ -1558,6 +1580,12 @@ function importTJA(text,want,branch){
   /* 1行目のウォーターマークを預かる(利用者の指定 2026-10-30)。
      見出しではないので extra にも入らず、預からないと反映した
      時点で消えてしまう。 */
+  /* 譜面分岐(#BRANCHSTART)のある本文は**そのまま預かる**
+     (利用者の報告 2026-10-31「分岐がうまくいかない」)。
+     読むのは流れている系統だけなので、書き出しで組み立て直すと
+     ほかの系統が消えてしまう。音符を触ったら預かりは捨てる
+     (snapShot)。 */
+  if(/^\s*#BRANCHSTART/im.test(text))st.raw=text;
   {const first=(text.split("\n").find(l=>l.trim())||"").trim();
    st.mark=MARK_RE.test(first)?first:""}
   const OWN=new Set(["TITLE","BPM","OFFSET","COURSE","LEVEL","BALLOON",...SONG_KEYS.map(k=>k[0])]);
@@ -1565,8 +1593,12 @@ function importTJA(text,want,branch){
   // 書き出しで譜面ぜんたいの見出しへ移ってしまう。
   for(const [k,v] of Object.entries(Hd)){if(SONG_KEYS.some(x=>x[0]===k)){if(v)st.hdr[k]=v}
     else if(OWN.has(k))continue;else if(PER_COURSE.has(k))st.own.push([k,v]);else st.extra.push([k,v])}
-  // いま流している系統(合作なら Neo が教えてくる)。
-  const BR=branchState(branch&&branch.level,branch&&branch.path);
+  /* いま流している系統(合作なら Neo が教えてくる)。
+     **単体では「普通(N)」。** 何も渡さないと系統の切り替えを素通りして
+     N・玄人・達人の3本を順につないだ譜面になり、長さも中身も
+     めちゃくちゃになっていた(利用者の報告 2026-10-31
+     「分岐がうまくいかない」)。 */
+  const BR=branchState((branch&&branch.level)||"N",branch&&branch.path);
   const bl=balloonsFor(Hd,branch&&branch.level);
   let bi=0,skipped=0,mt=0,buf=[],pc=[],open=null;
   const map={"1":"d","2":"k","3":"D","4":"K","5":"r","6":"R","7":"b","9":"b"};
