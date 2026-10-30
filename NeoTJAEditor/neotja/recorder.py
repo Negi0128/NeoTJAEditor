@@ -514,7 +514,7 @@ class RecordBackground:
     def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
                  fade_in=0.0, fade_out=0.0, fade_target="all",
                  art="", art_pct=30.0, art_pad=24,
-                 art_x=0.0, art_y=100.0,
+                 art_x=24, art_y=-24,
                  art_edge=6, art_edge_color="#ffffff",
                  wave=False, wave_pct=15.0, wave_color="#ffb300",
                  wave_alpha=70):
@@ -557,17 +557,17 @@ class RecordBackground:
         except (TypeError, ValueError):
             self.art_edge = 6
         self.art_edge_color = _hex_color(art_edge_color, "#ffffff")
-        #: 置く場所。余白の内側を 0〜100% で指る(利用者の指定 2026-10-31
-        #: 「真ん中まで持っていけるようにしたい」)。
-        #: x は 0=左端 / 100=右端、y は 0=上端 / 100=下端。
-        #: 既定(0, 100)は今までどおり左下。
+        #: 置く場所。**出来上がりの絵の中の座標(画素)**で持つ
+        #: (利用者の指定 2026-10-31「ジャケットは座標でよくないか」)。
+        #: 左上が (0, 0)。**負の数は反対の端からの距離** — -24 なら
+        #: 右端(下端)から 24px。既定 (24, -24) は今までどおり左下。
         def _pos(v, d):
             try:
-                return max(0.0, min(100.0, float(v)))
+                return int(round(float(v)))
             except (TypeError, ValueError):
                 return d
-        self.art_x = _pos(art_x, 0.0)
-        self.art_y = _pos(art_y, 100.0)
+        self.art_x = _pos(art_x, 24)
+        self.art_y = _pos(art_y, -24)
         #: 画面の下に出す「音に合わせて動く棒」(利用者の指定 2026-10-26)。
         #: wave_pct は画面の高さに対する高さ、wave_alpha は濃さ(%)。
         self.wave = bool(wave)
@@ -607,7 +607,7 @@ def as_background(bg):
             fade_target=bg.get("fade_target", "all"),
             art=bg.get("art", ""), art_pct=bg.get("art_pct", 30.0),
             art_pad=bg.get("art_pad", 24),
-            art_x=bg.get("art_x", 0.0), art_y=bg.get("art_y", 100.0),
+            art_x=bg.get("art_x", 24), art_y=bg.get("art_y", -24),
             art_edge=bg.get("art_edge", 6),
             art_edge_color=bg.get("art_edge_color", "#ffffff"),
             wave=bg.get("wave", False), wave_pct=bg.get("wave_pct", 15.0),
@@ -796,13 +796,13 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
                               % (e * 2, e * 2, e, e, bg.art_edge_color))
         total_h = ah + e * 2
         nxt = cur + "a"
-        pad = int(bg.art_pad)
         # W,H は下の絵、w,h は乗せる絵の大きさ(ffmpeg の overlay の式)。
-        # 横幅は縦横比で決まって先には分からないので、式のまま渡す。
+        # 負の座標は反対の端から数える。横幅は縦横比で決まって先には
+        # 分からないので、式のまま渡す。
+        ex = ("%d" % bg.art_x) if bg.art_x >= 0 else ("W-w%d" % bg.art_x)
+        ey = ("%d" % bg.art_y) if bg.art_y >= 0 else ("H-h%d" % bg.art_y)
         graph += (art_chain + "[art];"
-                  + "[%s][art]overlay=x=%d+(W-w-%d)*%.5f:y=%d+(H-h-%d)*%.5f[%s];"
-                  % (cur, pad, pad * 2, bg.art_x / 100.0,
-                     pad, pad * 2, bg.art_y / 100.0, nxt))
+                  + "[%s][art]overlay=x=%s:y=%s[%s];" % (cur, ex, ey, nxt))
         cur = nxt
     graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
               % cur + tail + ",format=yuv420p[v]")

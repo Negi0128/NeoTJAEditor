@@ -204,34 +204,26 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg else 24))
         self.sp_art_pad.setToolTip("左と下の端からの余白。")
         self.sp_art_pad.valueChanged.connect(self._schedule)
-        # 置き場所(利用者の指定 2026-10-31「真ん中まで持っていけるように」)。
-        # 余白の内側を 0〜100% で指す。0,100 が今までの左下。
+        # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。左上が 0,0。
+        # 負の数は反対の端からの距離(-24 なら右端/下端から 24px)。
         self.sp_art_x = QSpinBox()
-        self.sp_art_x.setRange(0, 100)
-        self.sp_art_x.setSuffix(" %")
-        self.sp_art_x.setValue(int(round(getattr(bg, "art_x", 0.0)
-                                         if bg else 0.0)))
-        self.sp_art_x.setToolTip("横の位置。0 で左端、50 で中央、100 で右端。")
+        self.sp_art_x.setRange(-9999, 9999)
+        self.sp_art_x.setSuffix(" px")
+        self.sp_art_x.setValue(int(getattr(bg, "art_x", 24) if bg else 24))
+        self.sp_art_x.setToolTip("左からの位置。負の数は右端からの距離。")
         self.sp_art_x.valueChanged.connect(self._schedule)
         self.sp_art_y = QSpinBox()
-        self.sp_art_y.setRange(0, 100)
-        self.sp_art_y.setSuffix(" %")
-        self.sp_art_y.setValue(int(round(getattr(bg, "art_y", 100.0)
-                                         if bg else 100.0)))
-        self.sp_art_y.setToolTip("縦の位置。0 で上端、50 で中央、100 で下端。")
+        self.sp_art_y.setRange(-9999, 9999)
+        self.sp_art_y.setSuffix(" px")
+        self.sp_art_y.setValue(int(getattr(bg, "art_y", -24) if bg else -24))
+        self.sp_art_y.setToolTip("上からの位置。負の数は下端からの距離。")
         self.sp_art_y.valueChanged.connect(self._schedule)
-        self.btn_art_center = QPushButton("中央へ")
-        self.btn_art_center.setToolTip("横も縦も 50% にする。")
-        self.btn_art_center.clicked.connect(self._art_center)
         art_opt.addWidget(QLabel("大きさ"))
         art_opt.addWidget(self.sp_art_pct)
-        art_opt.addWidget(QLabel("余白"))
-        art_opt.addWidget(self.sp_art_pad)
-        art_opt.addWidget(QLabel("位置 横"))
+        art_opt.addWidget(QLabel("位置 X"))
         art_opt.addWidget(self.sp_art_x)
-        art_opt.addWidget(QLabel("縦"))
+        art_opt.addWidget(QLabel("Y"))
         art_opt.addWidget(self.sp_art_y)
-        art_opt.addWidget(self.btn_art_center)
         self.sp_art_edge = QSpinBox()
         self.sp_art_edge.setRange(0, 40)
         self.sp_art_edge.setSuffix(" px")
@@ -250,38 +242,10 @@ class RecordBackgroundDialog(QDialog):
         form.addRow("", art_opt)
 
         # ---- 波形(音に合わせて動く棒) ----
-        wv = QHBoxLayout()
-        self.chk_wave = QCheckBox("出す")
-        self.chk_wave.setChecked(bool(getattr(bg, "wave", False) if bg
-                                      else False))
-        self.chk_wave.toggled.connect(self._schedule)
-        self.sp_wave_pct = QSpinBox()
-        self.sp_wave_pct.setRange(3, 50)
-        self.sp_wave_pct.setSuffix(" %")
-        self.sp_wave_pct.setValue(int(round(getattr(bg, "wave_pct", 15.0)
-                                            if bg else 15.0)))
-        self.sp_wave_pct.setToolTip("画面の高さに対する棒の高さ。")
-        self.sp_wave_pct.valueChanged.connect(self._schedule)
-        self.sp_wave_alpha = QSpinBox()
-        self.sp_wave_alpha.setRange(5, 100)
-        self.sp_wave_alpha.setSuffix(" %")
-        self.sp_wave_alpha.setValue(int(getattr(bg, "wave_alpha", 70)
-                                        if bg else 70))
-        self.sp_wave_alpha.setToolTip("棒の濃さ。下げると背景が透ける。")
-        self.sp_wave_alpha.valueChanged.connect(self._schedule)
-        self._wave_color = str(getattr(bg, "wave_color", "#ffb300")
-                               if bg else "#ffb300")
-        self.btn_wave_color = QPushButton("棒の色")
-        self.btn_wave_color.clicked.connect(self._pick_wave_color)
-        wv.addWidget(self.chk_wave)
-        wv.addWidget(QLabel("高さ"))
-        wv.addWidget(self.sp_wave_pct)
-        wv.addWidget(QLabel("濃さ"))
-        wv.addWidget(self.sp_wave_alpha)
-        wv.addWidget(self.btn_wave_color)
-        wv.addStretch(1)
-        form.addRow("波形", wv)
-        self._show_wave_color()
+        # **出さない。** 使わないことにした(利用者の指定 2026-10-31
+        # 「ジャケットの下の波形は消して」)。中の仕掛けは残してあるが、
+        # 窓から入れる口が無いので、どの道これ以降は描かれない。
+        self._wave_color = "#ffb300"
 
         lay.addWidget(QLabel(
             "※ 縦横が合わないときは上下を合わせて、左右は黒で埋めます。"))
@@ -323,25 +287,19 @@ class RecordBackgroundDialog(QDialog):
             art_y=self.sp_art_y.value(),
             art_edge=self.sp_art_edge.value(),
             art_edge_color=self._art_color,
-            wave=self.chk_wave.isChecked(),
-            wave_pct=self.sp_wave_pct.value(),
+            wave=False,
+            wave_pct=15.0,
             wave_color=self._wave_color,
-            wave_alpha=self.sp_wave_alpha.value())
-
-    def _art_center(self):
-        """ジャケットを真ん中へ(利用者の指定 2026-10-31)。"""
-        self.sp_art_x.setValue(50)
-        self.sp_art_y.setValue(50)
+            wave_alpha=70)
 
     def _sync_enabled(self):
         on = bool(self.ed_path.text().strip())
         for wdg in (self.sp_offset, self.sp_dim, self.sp_lane, self.chk_in,
                     self.chk_out, self.cb_target, self.sl_at,
                     self.ed_art, self.sp_art_pct, self.sp_art_pad,
-                    self.sp_art_x, self.sp_art_y, self.btn_art_center,
+                    self.sp_art_x, self.sp_art_y,
                     self.sp_art_edge, self.btn_art_color,
-                    self.chk_wave, self.sp_wave_pct, self.sp_wave_alpha,
-                    self.btn_wave_color):
+                    ):
             wdg.setEnabled(on)
         self.sp_in.setEnabled(on and self.chk_in.isChecked())
         self.sp_out.setEnabled(on and self.chk_out.isChecked())
@@ -355,20 +313,6 @@ class RecordBackgroundDialog(QDialog):
         fg = "#000" if c.lightness() > 140 else "#fff"
         self.btn_art_color.setStyleSheet(
             "QPushButton{background:%s;color:%s}" % (self._art_color, fg))
-
-    def _show_wave_color(self):
-        c = QColor(self._wave_color)
-        fg = "#000" if c.lightness() > 140 else "#fff"
-        self.btn_wave_color.setStyleSheet(
-            "QPushButton{background:%s;color:%s}" % (self._wave_color, fg))
-
-    def _pick_wave_color(self):
-        from PySide6.QtWidgets import QColorDialog
-        c = QColorDialog.getColor(QColor(self._wave_color), self, "棒の色")
-        if c.isValid():
-            self._wave_color = c.name()
-            self._show_wave_color()
-            self._schedule()
 
     def _pick_art_color(self):
         from PySide6.QtWidgets import QColorDialog
