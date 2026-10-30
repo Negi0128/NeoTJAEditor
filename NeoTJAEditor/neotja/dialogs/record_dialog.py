@@ -365,6 +365,8 @@ class RecordDialog(QDialog):
             art=cfg0.get("rec_bg_art", ""),
             art_pct=cfg0.get("rec_bg_art_pct", 30.0),
             art_pad=cfg0.get("rec_bg_art_pad", 24),
+            art_x=cfg0.get("rec_bg_art_x", 0.0),
+            art_y=cfg0.get("rec_bg_art_y", 100.0),
             art_edge=cfg0.get("rec_bg_art_edge", 6),
             art_edge_color=cfg0.get("rec_bg_art_edge_color", "#ffffff"),
             wave=cfg0.get("rec_bg_wave", False),
@@ -765,6 +767,8 @@ class RecordDialog(QDialog):
         cfg["rec_bg_art"] = bg.art
         cfg["rec_bg_art_pct"] = bg.art_pct
         cfg["rec_bg_art_pad"] = bg.art_pad
+        cfg["rec_bg_art_x"] = bg.art_x
+        cfg["rec_bg_art_y"] = bg.art_y
         cfg["rec_bg_art_edge"] = bg.art_edge
         cfg["rec_bg_art_edge_color"] = bg.art_edge_color
         cfg["rec_bg_wave"] = bg.wave

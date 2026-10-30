@@ -204,10 +204,34 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg else 24))
         self.sp_art_pad.setToolTip("左と下の端からの余白。")
         self.sp_art_pad.valueChanged.connect(self._schedule)
+        # 置き場所(利用者の指定 2026-10-31「真ん中まで持っていけるように」)。
+        # 余白の内側を 0〜100% で指す。0,100 が今までの左下。
+        self.sp_art_x = QSpinBox()
+        self.sp_art_x.setRange(0, 100)
+        self.sp_art_x.setSuffix(" %")
+        self.sp_art_x.setValue(int(round(getattr(bg, "art_x", 0.0)
+                                         if bg else 0.0)))
+        self.sp_art_x.setToolTip("横の位置。0 で左端、50 で中央、100 で右端。")
+        self.sp_art_x.valueChanged.connect(self._schedule)
+        self.sp_art_y = QSpinBox()
+        self.sp_art_y.setRange(0, 100)
+        self.sp_art_y.setSuffix(" %")
+        self.sp_art_y.setValue(int(round(getattr(bg, "art_y", 100.0)
+                                         if bg else 100.0)))
+        self.sp_art_y.setToolTip("縦の位置。0 で上端、50 で中央、100 で下端。")
+        self.sp_art_y.valueChanged.connect(self._schedule)
+        self.btn_art_center = QPushButton("中央へ")
+        self.btn_art_center.setToolTip("横も縦も 50% にする。")
+        self.btn_art_center.clicked.connect(self._art_center)
         art_opt.addWidget(QLabel("大きさ"))
         art_opt.addWidget(self.sp_art_pct)
         art_opt.addWidget(QLabel("余白"))
         art_opt.addWidget(self.sp_art_pad)
+        art_opt.addWidget(QLabel("位置 横"))
+        art_opt.addWidget(self.sp_art_x)
+        art_opt.addWidget(QLabel("縦"))
+        art_opt.addWidget(self.sp_art_y)
+        art_opt.addWidget(self.btn_art_center)
         self.sp_art_edge = QSpinBox()
         self.sp_art_edge.setRange(0, 40)
         self.sp_art_edge.setSuffix(" px")
@@ -295,6 +319,8 @@ class RecordBackgroundDialog(QDialog):
             art=self.ed_art.text().strip(),
             art_pct=self.sp_art_pct.value(),
             art_pad=self.sp_art_pad.value(),
+            art_x=self.sp_art_x.value(),
+            art_y=self.sp_art_y.value(),
             art_edge=self.sp_art_edge.value(),
             art_edge_color=self._art_color,
             wave=self.chk_wave.isChecked(),
@@ -302,11 +328,17 @@ class RecordBackgroundDialog(QDialog):
             wave_color=self._wave_color,
             wave_alpha=self.sp_wave_alpha.value())
 
+    def _art_center(self):
+        """ジャケットを真ん中へ(利用者の指定 2026-10-31)。"""
+        self.sp_art_x.setValue(50)
+        self.sp_art_y.setValue(50)
+
     def _sync_enabled(self):
         on = bool(self.ed_path.text().strip())
         for wdg in (self.sp_offset, self.sp_dim, self.sp_lane, self.chk_in,
                     self.chk_out, self.cb_target, self.sl_at,
                     self.ed_art, self.sp_art_pct, self.sp_art_pad,
+                    self.sp_art_x, self.sp_art_y, self.btn_art_center,
                     self.sp_art_edge, self.btn_art_color,
                     self.chk_wave, self.sp_wave_pct, self.sp_wave_alpha,
                     self.btn_wave_color):

@@ -130,11 +130,16 @@ def _baked_art(bg, h):
 
 
 def _draw_art(p, bg, w, h):
-    """左下へジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。"""
+    """ジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。
+
+    置き場所は art_x / art_y(余白の内側を 0〜100%)。既定は左下。"""
     img = _baked_art(bg, h)
     if img is None:
         return
-    p.drawImage(bg.art_pad, max(0, h - img.height() - bg.art_pad), img)
+    pad = int(bg.art_pad)
+    x = pad + max(0, w - img.width() - pad * 2) * float(bg.art_x) / 100.0
+    y = pad + max(0, h - img.height() - pad * 2) * float(bg.art_y) / 100.0
+    p.drawImage(int(round(x)), int(round(y)), img)
 
 
 #: 焼いた棒の覚え。つまみを動かすたびに ffmpeg を呼ばないため。
