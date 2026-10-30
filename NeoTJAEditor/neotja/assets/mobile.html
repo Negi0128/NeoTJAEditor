@@ -354,7 +354,8 @@ function sample(){
   n.push({t:6*TPM,type:"r",end:6*TPM+2*TPB});put(6,3,"K");
   n.push({t:7*TPM,type:"b",end:7*TPM+3*TPB,count:8});
   c.push({t:8*TPM,k:"GOGOEND"});c.push({t:8*TPM,k:"BPMCHANGE",v:180});put(8,0,"D");
-  return{title:"サンプル譜面",bpm:150,offset:0,course:"Oni",level:8,notes:n,cmds:c,hdr:{SUBTITLE:"--自由に書き換えてOK",DEMOSTART:"4.8",MAKER:"Ne"},extra:[]};
+  /* 1行目の印はサンプルにも入れる(利用者の指定 2026-10-30)。 */
+  return{mark:stampToday(),title:"サンプル譜面",bpm:150,offset:0,course:"Oni",level:8,notes:n,cmds:c,hdr:{SUBTITLE:"--自由に書き換えてOK",DEMOSTART:"4.8"},extra:[]};
 }
 let S;try{const raw=localStorage.getItem("neotja-mobile2");S=raw?JSON.parse(raw):null}catch(e){S=null}
 if(!S||!Array.isArray(S.notes))S=sample();
