@@ -4103,7 +4103,7 @@ class PreviewDock(QDockWidget):
         sec = max(0.0, float(sec or 0.0))
         self.demostart_cb("%.3f" % sec)
         self.set_demostart(sec)
-        self.status_label.setText("試聴開始を %.3f 秒にしました。" % sec)
+        self.status_label.setText("DEMOSTART を %.3f 秒にしました。" % sec)
 
     def _on_waveform_stereo_toggled(self, stereo: bool):
         # ドック側の波形の合成/ステレオ設定のみ同期・保存する。作譜モードの

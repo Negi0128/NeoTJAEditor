@@ -142,7 +142,7 @@ class WaveformWidget(QWidget):
         # 試聴開始(DEMOSTART)。いまのカーソル位置をそのまま入れる。
         # これが無いと本文に手で秒数を打つしかなかった(利用者の指定
         # 2026-10-25)。スマホ側には前から同じ物がある。
-        self.btn_demo = QPushButton("ここを試聴開始に", self)
+        self.btn_demo = QPushButton("ここを DEMOSTART に", self)
         self.btn_demo.setFocusPolicy(Qt.NoFocus)
         self.btn_demo.setToolTip(
             "いまのカーソル位置を DEMOSTART: に入れます。\n"
@@ -1252,7 +1252,7 @@ class WaveformWidget(QWidget):
         painter.drawLine(x, 0, x, h)
         painter.setFont(self._label_font())
         fm = painter.fontMetrics()
-        label = "試聴"
+        label = "DEMOSTART"
         tw = fm.horizontalAdvance(label)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(0, 0, 0, 180))
