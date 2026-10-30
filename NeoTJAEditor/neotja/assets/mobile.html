@@ -448,12 +448,14 @@ function mLen(m){mStart(m+1);return ML[Math.max(0,m)]}
 function mIndex(t){if(t<0)return 0;extendTo(t);let lo=0,hi=MS.length-1;while(lo<hi){const mid=(lo+hi+1)>>1;if(MS[mid]<=t)lo=mid;else hi=mid-1}return Math.min(lo,ML.length-1)}
 function mGrid(m){return Math.max(1,Math.round(mLen(m)/TPB*V.grid/4))}   // Neo の _measure_grid と同じ
 function slotTick(m,k){return mStart(m)+Math.round(k*mLen(m)/mGrid(m))}
-function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
+/* 既存の譜面の小節数。書いてあった小節数(S.bars)を下限にする —
+   末尾の空小節は音符が無いので lastTick() には出てこない。 */
+function known(){return Math.max(mIndex(lastTick())+1,(S&&S.bars)||0)}
 /* 1小節目の手前(利用者の指定 2026-10-30)。OFFSET を合わせるとき、
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.31.1";
+const WEB_VER="2026.10.31.2";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -1600,6 +1602,11 @@ function importTJA(text,want,branch){
      「分岐がうまくいかない」)。 */
   const BR=branchState((branch&&branch.level)||"N",branch&&branch.path);
   const bl=balloonsFor(Hd,branch&&branch.level);
+  /* 書いてある小節の数。**音符の無い小節も数える** — 末尾の空小節は
+     音符が無いので lastTick() に出てこず、読み込むたびに消えていた
+     (利用者の報告 2026-10-31「空白の最後の小節が消える/3小節しか
+     出ない」)。 */
+  let bars=0;
   let bi=0,skipped=0,mt=0,buf=[],pc=[],open=null;
   const map={"1":"d","2":"k","3":"D","4":"K","5":"r","6":"R","7":"b","9":"b"};
   let curLen=TPM,nextLen=null;
@@ -1609,7 +1616,7 @@ function importTJA(text,want,branch){
     buf.forEach((ch,k)=>{const t=at(k);if(ch==="8"){if(open){open.end=t;open=null}return}
       const ty=map[ch];if(!ty||(open&&TYPES[ty].long))return;const n={t,type:ty};
       if(TYPES[ty].long){if(ty==="b")n.count=bl[bi++]||5;open=n}st.notes.push(n)});
-    mt+=ml;buf=[];pc=[];if(nextLen){curLen=nextLen;nextLen=null}};
+    mt+=ml;bars++;buf=[];pc=[];if(nextLen){curLen=nextLen;nextLen=null}};
   for(let i=pick.from;i<pick.to;i++){const l=lines[i].replace(/\/\/.*$/,"").trim();if(!l)continue;
     if(l[0]==="#"){const m=l.match(/^#([A-Z]+)\s*(.*)$/i);if(!m)continue;const k=m[1].toUpperCase();
       if(BR.line(k))continue;            // 系統の切り替えそのもの
@@ -1619,6 +1626,7 @@ function importTJA(text,want,branch){
     for(const ch of l){if(ch===","){if(BR.active())fin();else{buf=[];pc=[]}}
       else if(BR.active()&&/[0-9]/.test(ch))buf.push(ch)}}
   if((buf.length||pc.length)&&BR.active())fin();
+  st.bars=bars;
   for(const n of st.notes)if(TYPES[n.type].long&&n.end==null)n.end=n.t+TPB;
   // 読まなかったコースは本文のまま預かる(書き出しで同じ場所へ戻す)。
   // 塊の数え方が解析と食い違う変わった本文のときは預からない(二重に
