@@ -1929,6 +1929,11 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
         self._clamp_cursor()
         self.update()
+        # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
+        # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
+        # かったので、線の位置と打った音符の位置が食い違っていた
+        # (利用者の報告 2026-10-31)。
+        self._cursor_changed()
 
     # ------------------------------------------------------------------
     # 入力
@@ -3120,6 +3125,11 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
         self._clamp_cursor()
         self.update()
+        # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
+        # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
+        # かったので、線の位置と打った音符の位置が食い違っていた
+        # (利用者の報告 2026-10-31)。
+        self._cursor_changed()
 
     def open_grid_picker(self):
         """左上の「1/16」を押したときに出す、分割のつまみ。"""
@@ -3421,16 +3431,16 @@ class ChartEditWaveform(WaveformWidget):
         return (GRID_COLORS.get(self._grid, GRID_COLORS[64]), SUB_FRAC)
 
     def _grid_measures(self):
-        """グリッドの目盛りを引く小節の番号。
+        """グリッドの目盛りを引く小節の番号。None なら**見えている所ぜんぶ**。
 
-        「いま編集している小節」と「次の小節」だけに引く(利用者の指定)。
-        画面いっぱいに引くと、どこを編集しているのかがかえって読みにくい。
-        再生中は1つ前の小節にも引く(利用者の指定 2026-09-25)。流れていく
-        譜面の後ろ側が無地だと、いまどの位置を通ったのかが読めない。"""
-        m = self._cur_measure
-        if self._playing:
-            return (m - 1, m, m + 1, m + 2)
-        return (m, m + 1, m + 2)
+        以前は「編集している小節と次の小節」だけに引いていた(画面いっぱい
+        だと読みにくい、という指定)。前の小節にも引いてほしい、と言い直しが
+        あったので、見えている範囲は全部引く(利用者の指定 2026-10-31
+        「前の小節のグリッドも見える範囲で全部表示してほしい」)。
+
+        細かすぎる所は描く側で間引くので(1グリッド 4px 未満は引かない)、
+        密な譜面で線が潰れることはない。"""
+        return None
 
     _grid_pen_cache = None
 
@@ -3475,6 +3485,8 @@ class ChartEditWaveform(WaveformWidget):
         # 1秒に781小節)では毎回数千回まわることになるが、実際に線を引くのは
         # せいぜい数小節ぶんなので、初めからその番号だけを見る。
         lo, hi = self._measure_range(t0, t1)
+        if grid_measures is None:        # 見えている所ぜんぶ
+            grid_measures = set(range(lo, hi))
         for m in sorted({m for m in grid_measures if lo <= m < hi}
                         | set(range(max(known, lo), hi))):
             m_start = self._bar_time(m)
