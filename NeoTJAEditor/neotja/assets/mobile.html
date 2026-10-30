@@ -1585,7 +1585,14 @@ function synthKa(ac){const sr=ac.sampleRate,n=Math.floor(sr*.05),b=ac.createBuff
   for(let i=0;i<n;i++){const t=i/sr,nz=Math.random()*2-1,hp=i?nz-prev:0;prev=nz;const tone=.25*Math.sin(2*Math.PI*950*t);
     d[i]=Math.tanh(((.9*hp+tone)*Math.exp(-t*85))*1.2)*.8}return b}
 function b64buf(s){const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer}
-function actx(){if(!AUD.ctx){const ac=AUD.ctx=new(window.AudioContext||window.webkitAudioContext)();SE.don=synthDon(ac);SE.ka=synthKa(ac);
+/* 音をためておく量。既定(interactive)は数ミリ秒しか貯めないので、
+   画面録画のように端末が重くなる場面では間に合わず、途切れが
+   「ガリガリ」という音になる(利用者の報告 2026-10-30)。playback は
+   多めに貯める。そのぶん音は遅れて出るので、絵のほうを outputLatency
+   だけずらして合わせる(tick を参照)。 */
+function actx(){if(!AUD.ctx){const C=window.AudioContext||window.webkitAudioContext;
+  let ac;try{ac=new C({latencyHint:"playback"})}catch(e){ac=new C()}
+  AUD.ctx=ac;SE.don=synthDon(ac);SE.ka=synthKa(ac);
   for(const k of ["don","ka","pop"])ac.decodeAudioData(b64buf(SE_DATA[k])).then(b=>{SE[k]=b}).catch(()=>{})}return AUD.ctx}
 /* ===== 録画を始めたときの作り直し(利用者の報告 2026-10-30) =====
    画面録画を始めると、端末が音の通り道と動作周波数を切り替える
@@ -1703,7 +1710,11 @@ function stop(){if(!V.playing)return;V.playing=false;if(AUD.src){try{AUD.src.sto
    描き直していた。**音を並べるのは毎回やる** — 描くのを間引く
    だけで、鳴る時刻はずれない。 */
 let lastDraw=0;
-function tick(){if(!V.playing)return;const ac=AUD.ctx,now=PL.sec0+(ac.currentTime-PL.start);
+function tick(){if(!V.playing)return;const ac=AUD.ctx;
+  /* いま**耳に届いている**所。出口で貯めているぶん、鳴らした時刻より
+     遅れて聞こえるので、その分だけ絵を戻す。 */
+  const lat=ac.outputLatency||ac.baseLatency||0;
+  const now=PL.sec0+(ac.currentTime-PL.start)-lat;
   while(PL.qi<PL.q.length&&PL.q[PL.qi].s<now+.25){const q=PL.q[PL.qi++],w=PL.start+(q.s-PL.sec0);if(w>=ac.currentTime-.01)hitSE(Math.max(w,ac.currentTime),q.type)}
   V.pos=Math.max(PL.sec0,now);V.view=V.pos-V.span*NEO.FOLLOW_FRAC_PLAY;
   lastDraw=performance.now();draw();
