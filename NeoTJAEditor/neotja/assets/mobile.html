@@ -245,6 +245,8 @@ html.tver .txt textarea::selection{background:rgba(79,156,249,.35);
 #tHi .nc{color:var(--hi-comma)}    /* , */
 #tHi .b{font-weight:bold}          /* 大音符・大連打 */
 /* 小節送りの列に置く再生。 */
+/* 送りの札は細く。7つ並ぶので(利用者の指定 2026-10-30)。 */
+html.tver .nav .skip{flex:1 1 0;min-width:0;padding:0 2px;font-size:12px}
 html.tver .nav #nPlay{flex:none;min-width:78px;height:36px;gap:5px;
   display:flex;align-items:center;justify-content:center}
 html.tver .nav #nPlay svg{width:16px;height:16px;flex:none}
@@ -855,15 +857,25 @@ function buildPal(){const el=$("pal");el.textContent="";if(V.mode!=="preview")re
   if(V.mode==="preview"){
     /* 縦2段では、小節番号とつまみをやめて**再生**を真ん中へ
        (利用者の指定 2026-10-30)。 */
+    /* 送りは 1 / 4 / 16 小節(利用者の指定 2026-10-30)。 */
     el.innerHTML=TVER?`<div class="nav">
-    <button class="chip" id="nFirst" aria-label="先頭へ">|◀</button><button class="chip" id="nPrev">◀ 前の小節</button>
+    <button class="chip skip" id="nB16" aria-label="16小節戻る">◀◀◀</button>
+    <button class="chip skip" id="nB4" aria-label="4小節戻る">◀◀</button>
+    <button class="chip skip" id="nPrev" aria-label="1小節戻る">◀</button>
     <button class="chip" id="nPlay" aria-label="再生"></button>
-    <button class="chip" id="nNext">次の小節 ▶</button></div>`:`<div class="nav">
+    <button class="chip skip" id="nNext" aria-label="1小節進む">▶</button>
+    <button class="chip skip" id="nF4" aria-label="4小節進む">▶▶</button>
+    <button class="chip skip" id="nF16" aria-label="16小節進む">▶▶▶</button></div>`:`<div class="nav">
     <button class="chip" id="nFirst" aria-label="先頭へ">|◀</button><button class="chip" id="nPrev">◀ 前の小節</button>
     <span class="mno" id="nNo"></span>
     <button class="chip" id="nNext">次の小節 ▶</button>
     <input type="range" id="nBar" min="1" max="1" step="1" aria-label="小節を選ぶ"></div>`;
-    $("nFirst").onclick=()=>gotoMeasure(0);$("nPrev").onclick=()=>stepMeasure(-1);$("nNext").onclick=()=>stepMeasure(1);
+    if($("nFirst"))$("nFirst").onclick=()=>gotoMeasure(0);
+    $("nPrev").onclick=()=>stepMeasure(-1);$("nNext").onclick=()=>stepMeasure(1);
+    /* まとめて飛ぶぶんは、いまの小節から数える。 */
+    const jump=d=>gotoMeasure(mIndexLead(V.cur)+d);
+    for(const [id,d] of [["nB16",-16],["nB4",-4],["nF4",4],["nF16",16]])
+      if($(id))$(id).onclick=()=>jump(d);
     if($("nBar"))$("nBar").oninput=e=>gotoMeasure(+e.target.value-1);
     if($("nPlay")){$("nPlay").onclick=()=>V.playing?stop():play();setPlayIcon(V.playing)}
     syncNav();return}
