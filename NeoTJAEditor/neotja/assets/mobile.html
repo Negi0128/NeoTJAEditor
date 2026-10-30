@@ -7,6 +7,12 @@
   --bg:#0f1117; --bg2:#161b27; --bg3:#1e2535; --surface:#252d3d; --border:#2e3a50;
   --accent:#4f9cf9; --fg:#cdd6f4; --fg-dim:#6c7a96;
   --don:#ff6b6b; --ka:#5bc8fc; --roll:#fcdb38; --balloon:#ff9f43;
+  /* 本文の色。PC 版 theme.py の COLORS をそのまま
+     (利用者の指定 2026-10-30「全部合わせていいよ」)。 */
+  --hi-roll:#ffd166; --hi-zero:#2e3a50; --hi-comma:#3d4f6b;
+  --hi-key:#74b9ff; --hi-val:#55efc4; --hi-comment:#4a5568;
+  --cmd:#a29bfe;   /* 本文の色: #START/#END 以外の命令。PC版と同じ色
+                      (theme.py の COLORS["cmd"]。利用者の指定 2026-10-30) */
   --font:"Yu Gothic UI","Meiryo UI","Hiragino Sans","Segoe UI",system-ui,sans-serif;
   color-scheme:dark;
 }
@@ -160,6 +166,89 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
     width:var(--vv-h,100dvh);height:var(--vv-w,100dvw);
     transform:translate(-50%,-50%) rotate(90deg);transform-origin:center}
 }
+/* ===== 縦2段(利用者の指定 2026-10-30) =====
+   今は作譜モードを出さない。上にプレビューの帯、下に本文。
+   プレビューは 947:240 の横長なので、縦画面の幅でも高さ 100px
+   ほどで収まり、本文と同時に見られる。
+   作譜の板は**消していない** — ?chart を付けると今までの画面。 */
+html.tver,html.tver body{height:100%}
+html.tver body{display:flex;flex-direction:column;overflow:hidden;
+  padding-left:max(8px,env(safe-area-inset-left,0px));
+  padding-right:max(8px,env(safe-area-inset-right,0px))}
+html.tver .rot{display:none!important}
+/* 回さない。縦のまま使う。 */
+html.tver .app{position:static;flex:none;height:auto;width:auto;
+  transform:none;gap:4px;padding-block:4px;
+  grid-template-columns:minmax(0,1fr);
+  grid-template-rows:auto auto auto auto;
+  grid-template-areas:"title" "pane" "pal" "right"}
+html.tver .pane{aspect-ratio:947 / 240;min-height:64px}
+/* 道具列は横に寝かせる。作譜だけの物は出さない。 */
+html.tver .right{flex-direction:row;overflow:visible;flex:none;
+  height:38px;gap:4px}
+html.tver .right .rb{flex:1 1 0;min-height:0}
+/* 縦2段のときだけ出す札。作譜の画面では邪魔なので隠す。 */
+#tCmd,#tTU,#tTR{display:none}
+html.tver #tCmd,html.tver #tTU,html.tver #tTR{display:flex}
+/* 並びは メニュー・命令・戻す・やり直す。 */
+html.tver #tMenu{order:1}html.tver #tCmd{order:2}
+html.tver #tTU{order:3}html.tver #tTR{order:4}
+/* 再生は上の段(プレビューのすぐ下)へ移した。 */
+html.tver .right #tPlay,html.tver #mPrev,html.tver #mNext,
+html.tver #tMode,html.tver #gUp,html.tver #gDn,
+html.tver #tUndo{display:none}
+/* 本文は**かぶせない**。下の段として並べる。 */
+html.tver .txt{position:static;flex:1;min-height:0;z-index:auto}
+html.tver .txt .tabs{display:none}
+html.tver .txt .grow{padding:0 0 4px}
+/* 命令と戻す・やり直すは上の段へ移したので、本文の下は
+   「プレビューに反映」だけ。 */
+html.tver .txt .bar:not(.end){display:none}
+html.tver #tTxtSave{flex:1}
+html.tver #tTxtCancel{display:none}
+/* 反映はやり直すの右(利用者の指定 2026-10-30)。色はそのまま青。 */
+html.tver .txt .bar.end{display:none}
+html.tver .right #tTxtSave{order:5;flex:1 1 0;height:auto;
+  background:var(--accent);color:var(--bg);border-color:var(--accent)}
+html.tver .right #tTxtSave small{color:var(--bg);opacity:.75}
+/* ===== 本文の色(利用者の指定 2026-10-30) =====
+   textarea は字ごとに色を付けられないので、**後ろに同じ字を
+   同じ形で敷いて**、前の textarea の字だけ透かす。
+   折り返し・余白・書体がずれると二重に見えるので、下の2つは
+   まったく同じ指定にする。 */
+#tHi{display:none}
+html.tver .txt .grow{position:relative}
+html.tver #tHi,html.tver .txt textarea{
+  font:13px/1.55 Consolas,"SF Mono",ui-monospace,monospace;
+  padding:8px;border:1px solid var(--border);border-radius:4px;
+  white-space:pre-wrap;overflow-wrap:break-word;word-break:break-all}
+html.tver #tHi{display:block;position:absolute;inset:0 0 4px 0;
+  margin:0;overflow:hidden;background:var(--bg);color:var(--fg);
+  border-color:var(--border);pointer-events:none}
+html.tver .txt textarea{position:relative;z-index:1;
+  background:transparent;color:transparent;caret-color:var(--fg);
+  scrollbar-width:none}
+html.tver .txt textarea::-webkit-scrollbar{display:none}
+html.tver .txt textarea::selection{background:rgba(79,156,249,.35);
+  color:transparent}
+#tHi i{font-style:normal}
+#tHi .hc{color:var(--accent)}      /* #START / #END */
+#tHi .hp{color:var(--cmd)}         /* ほかの命令 */
+#tHi .hk{color:var(--hi-key)}      /* TITLE: などの名前 */
+#tHi .hm{color:var(--hi-comment)}  /* // の行 */
+#tHi .hv{color:var(--hi-val)}      /* ヘッダの値 */
+#tHi .n0{color:var(--hi-zero)}     /* 0 と 9 */
+#tHi .n1{color:var(--don)}
+#tHi .n2{color:var(--ka)}
+#tHi .n5{color:var(--hi-roll)}     /* 連打の帯 */
+#tHi .n7{color:var(--balloon)}     /* 風船の帯 */
+#tHi .nc{color:var(--hi-comma)}    /* , */
+#tHi .b{font-weight:bold}          /* 大音符・大連打 */
+/* 小節送りの列に置く再生。 */
+html.tver .nav #nPlay{flex:none;min-width:78px;height:36px;gap:5px;
+  display:flex;align-items:center;justify-content:center}
+html.tver .nav #nPlay svg{width:16px;height:16px;flex:none}
+html.tver .nav #nPlay small{font-size:11px;color:var(--fg-dim)}
 @media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
 
@@ -179,6 +268,9 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
     <button class="rb" id="gDn" aria-label="分割を粗く">−<small>分割</small></button>
     <button class="rb" id="tUndo" aria-label="元に戻す">↶<small>戻す</small></button>
     <button class="rb" id="tMenu" aria-label="メニュー">☰<small>メニュー</small></button>
+    <button class="rb" id="tCmd" aria-label="命令を入れる">#<small>命令</small></button>
+    <button class="rb" id="tTU" aria-label="元に戻す">↶<small>戻す</small></button>
+    <button class="rb" id="tTR" aria-label="やり直す">↷<small>やり直す</small></button>
   </div>
 </div>
 <div class="rot"><div>画面を横向きにしてください<br><span class="note">作譜モードは横画面で PC 版と同じ比率になります</span></div></div>
@@ -187,7 +279,8 @@ textarea{width:100%;min-height:170px;border-radius:4px;border:1px solid var(--bo
     <button class="tab" id="tTabChart">譜面</button>
     <button class="tab on">本文</button>
   </div>
-  <div class="grow"><textarea id="tTxt" spellcheck="false"></textarea></div>
+  <div class="grow"><pre id="tHi" aria-hidden="true"></pre>
+  <textarea id="tTxt" spellcheck="false"></textarea></div>
   <div class="bar">
     <button class="btn" id="tTxtUndo">↶ 元に戻す</button>
     <button class="btn" id="tTxtRedo">↷ やり直す</button>
@@ -270,7 +363,61 @@ const hist=[];
 function snapShot(){hist.push(JSON.stringify(S));if(hist.length>80)hist.shift()}
 function save(){if(CO.on)return;   // 合作中の本文は預かりもの
   try{localStorage.setItem("neotja-mobile2",JSON.stringify(S))}catch(e){}}
-function changed(){S.notes.sort((a,b)=>a.t-b.t);S.cmds.sort((a,b)=>a.t-b.t);buildTempo();buildMeasures();save();draw()}
+function changed(){S.notes.sort((a,b)=>a.t-b.t);S.cmds.sort((a,b)=>a.t-b.t);buildTempo();buildMeasures();save();draw();syncTxt()}
+/* 縦2段のときは本文も出たままなので、譜面が外から変わったら
+   (ZIP を読んだ・合作で届いた)書き替える。**打っている途中は
+   触らない** — 打ちかけの字を消してしまうため。 */
+function syncTxt(){
+  if(!TVER||txtDirty)return;const ta=$("tTxt");
+  if(document.activeElement===ta)return;txtFill()}
+/* 本文を入れ直す。打つ場所は **#START の次の行**へ置く —
+   入れたままだと末尾(#END のうしろ)になり、触らずに「命令」を
+   押すと譜面の外へ入ってしまう(2026-10-30 の実測)。 */
+/* ===== 本文の色(利用者の指定 2026-10-30) ===== */
+const hiEsc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+/* 1文字ごとの色。0 と 9 は zero、3・4 は 1・2 の太字
+   (PC 版 highlighter.py と同じ)。 */
+const NOTE_CLS={"0":"n0","9":"n0","1":"n1","3":"n1 b",
+  "2":"n2","4":"n2 b"};
+/* 連打・風船の帯。**頭(5/6/7)から 8 まで**を塗る。途中の 0 や ,
+   も、行をまたいでも同じ色(PC 版と同じ)。開いたままの帯は次の
+   行へ持ち越すので、塗り始めに hiBand を戻しておく。 */
+const BAND_CLS={"5":"n5","6":"n5 b","7":"n7"};
+let hiBand=null;
+function hiLine(l){
+  if(/^\s*\/\//.test(l))return '<i class="hm">'+hiEsc(l)+"</i>";
+  /* #START と #END だけ青のまま。ほかの命令は紫
+     (利用者の指定 2026-10-30)。命令の行は帯の途中でも命令の色。 */
+  if(/^\s*#/.test(l))return '<i class="'
+    +(/^\s*#(START|END)\b/.test(l)?"hc":"hp")+'">'+hiEsc(l)+"</i>";
+  const m=l.match(/^([A-Za-z0-9]+):(.*)$/);
+  if(m)return '<i class="hk">'+hiEsc(m[1])+':</i><i class="hv">'
+    +hiEsc(m[2])+"</i>";
+  if(!/^[0-9,\s]*$/.test(l))return hiEsc(l);
+  let out="",cls=null,buf="";
+  const flush=()=>{if(buf){out+='<i class="'+cls+'">'+buf+"</i>";buf=""}};
+  for(const c of l){
+    let k;
+    if(hiBand){k=hiBand;if(c==="8")hiBand=null}
+    else if(BAND_CLS[c]){k=BAND_CLS[c];hiBand=k}
+    else k=c===","?"nc":(NOTE_CLS[c]||"nc");
+    if(k!==cls){flush();cls=k}
+    buf+=c}
+  flush();return out}
+/* 1打ごとに塗り直すと重いので、1コマに1回へまとめる。 */
+let hiWait=false;
+function hiSync(){
+  if(!TVER||hiWait)return;hiWait=true;
+  requestAnimationFrame(()=>{hiWait=false;
+    const el=$("tHi"),ta=$("tTxt");if(!el)return;
+    hiBand=null;
+    el.innerHTML=ta.value.split("\n").map(hiLine).join("\n")+"\n";
+    el.scrollTop=ta.scrollTop;el.scrollLeft=ta.scrollLeft})}
+function txtFill(src){
+  const ta=$("tTxt");ta.value=src==null?exportTJA():src;txtDirty=false;
+  const i=ta.value.indexOf("#START");
+  const a=i<0?0:ta.value.indexOf("\n",i)+1;
+  try{ta.setSelectionRange(a,a)}catch(e){}hiSync()}
 
 /* ===== 時刻 ===== */
 let TEMPO=[];
@@ -509,6 +656,10 @@ function timeText(t){t=Math.max(0,t);const m=Math.floor(t/60);return String(m).p
 const LITE={W:1280,H:720,LANE_X:333,LANE_Y:196,LANE_W:947,LANE_H:130,JUDGE_X:81,R:35.5,RB:53,RING:53,RING_IN:35,PPB:240,
   surface:"#252d3d",border:"#2e3a50",fg_dim:"#6c7a96",bright:"#ffffff",roll:"#ffd166",balloon:"#ff9f43",gogo:"rgba(255,90,90,"+(55/255)+")"};
 function scrollAt(t){let v=1;for(const c of S.cmds){if(c.t>t)break;if(c.k==="SCROLL"&&isFinite(+c.v))v=+c.v}return v}
+/* 縦2段か(利用者の指定 2026-10-30)。既定はこちら。
+   ?chart を付けたときだけ、今までの作譜の画面になる。 */
+const TVER=!/(^|[?&])chart(=|&|$)/i.test(location.search||"");
+if(TVER)document.documentElement.classList.add("tver");
 function speedAt(t){return LITE.PPB*segT(t).bpm/60*scrollAt(t)}
 function liteNote(x,y,r,fill){
   p.beginPath();p.arc(x,y,r,0,7);p.fillStyle="rgb(54,32,30)";p.fill();
@@ -517,13 +668,37 @@ function liteNote(x,y,r,fill){
 // プレビューは画面の 1280x720 のうちレーンの周り（x 333〜1280, y 140〜380）だけを切り出して、横幅いっぱいに出す
 const CROP={x:LITE.LANE_X,y:140,w:LITE.W-LITE.LANE_X,h:240};
 function liteScale(){return Math.min(W/CROP.w,H/CROP.h)}
-const ROLL_SPEED=45,ROLL_RED_HITS=10;   // Neo の既定の連打秒速と、真っ赤になる打数
-function rollHits(d){return d<=.1?Math.floor(d*60):d<=.15?Math.floor(d*55):Math.floor(d*ROLL_SPEED)}   // tja_analyzer._roll_hits（段階的補正）
-function balloonPop(n){const s0=t2s(n.t),s1=t2s(n.end),need=n.count||5;return Math.min(s1,s0+need/ROLL_SPEED)}
-// 上の読み出し: 連打は数え上げ、風船は残り打数（_live_top_count）
-function liveTopCount(now){for(const n of S.notes){const T=TYPES[n.type];if(!T.long)continue;const s0=t2s(n.t),s1=t2s(n.end);
-    if(T.long!=="balloon"){if(s0<=now&&now<=s1){const h=rollHits(s1-s0);return s1<=s0?h:Math.floor(h*(now-s0)/(s1-s0))}}
-    else{const pop=balloonPop(n);if(s0<=now&&now<pop)return Math.max(0,(n.count||5)-Math.floor((now-s0)*ROLL_SPEED))}}return null}
+/* 連打の秒速は 18、風船・くす玉は 45(利用者の指定 2026-10-30)。 */
+const ROLL_SPEED=18,BALLOON_SPEED=45,ROLL_RED_HITS=10;
+/* 終わった連打の打数を出しておく時間と、最後に薄くする時間
+   (PC 版 chart_preview_widget の ROLL_HOLD_SEC / ROLL_FADE_SEC)。 */
+const ROLL_HOLD_SEC=1.433,ROLL_FADE_SEC=.083;
+// tja_analyzer._roll_hits（段階的補正。短い連打だけ速い）
+function rollHits(d){return d<=.1?Math.floor(d*Math.max(60,ROLL_SPEED))
+  :d<=.15?Math.floor(d*Math.max(55,ROLL_SPEED)):Math.floor(d*ROLL_SPEED)}
+function balloonPop(n){const s0=t2s(n.t),s1=t2s(n.end),need=n.count||5;return Math.min(s1,s0+need/BALLOON_SPEED)}
+/* 上の読み出し: 連打は数え上げ、風船は残り打数（_live_top_count）。
+   {n:打数, a:濃さ} を返す。終わった連打は ROLL_HOLD_SEC のあいだ
+   最後の打数を出しておく(PC 版 _held_roll と同じ)。 */
+function liveTopCount(now){
+  for(const n of S.notes){const T=TYPES[n.type];if(!T.long)continue;
+    const s0=t2s(n.t),s1=t2s(n.end);
+    if(T.long!=="balloon"){if(s0<=now&&now<=s1){const h=rollHits(s1-s0);
+      return{n:s1<=s0?h:Math.floor(h*(now-s0)/(s1-s0)),a:1}}}
+    else{const pop=balloonPop(n);if(s0<=now&&now<pop)
+      return{n:Math.max(0,(n.count||5)-Math.floor((now-s0)*BALLOON_SPEED)),a:1}}}
+  let last=null;
+  for(const n of S.notes){const T=TYPES[n.type];
+    if(T.long&&T.long!=="balloon"&&t2s(n.end)<=now)last=n}
+  if(!last)return null;
+  const e=t2s(last.end);let stop=e+ROLL_HOLD_SEC,faded=true;
+  /* 次の区間(連打でも風船でも)が始まったらそこで消す。入れ替わり
+     なので薄くしない — 一瞬なので、かえって目につく。 */
+  for(const n of S.notes){const T=TYPES[n.type];if(!T.long)continue;
+    const s=t2s(n.t);if(s>e&&s<stop){stop=s;faded=false;break}}
+  if(now>=stop)return null;
+  let a=1;if(faded&&stop-now<ROLL_FADE_SEC)a=Math.max(0,(stop-now)/ROLL_FADE_SEC);
+  return{n:rollHits(e-t2s(last.t)),a}}
 const GOGO={ATT:.033,DEC:.267,REL:.10,SHAPE:.7,OPEN_MIN:.16,OPEN_HOLD:2/60,OPEN_RISE:5/60};
 function gogoSecs(){return spans("GOGOSTART","GOGOEND").map(([a,b])=>[t2s(a),b==null?Infinity:t2s(b)])}
 function gogoRegionAt(now){let r=null;for(const g of gogoSecs()){if(g[0]<=now)r=g;else break}return r}
@@ -587,7 +762,8 @@ function drawLite(){
   p.restore();
   const rc=V.playing?liveTopCount(now):null;
   if(rc!=null){p.save();p.translate(ox-CROP.x*L,oy-CROP.y*L);p.scale(L,L);p.fillStyle=LITE.roll;p.font="bold 30px "+FONT;p.textBaseline="middle";
-    p.fillText(String(rc),LITE.LANE_X+jx+LITE.RB+5+8,LITE.LANE_Y-28);p.restore()}
+    p.globalAlpha=rc.a;
+    p.fillText(String(rc.n),LITE.LANE_X+jx+LITE.RB+5+8,LITE.LANE_Y-28);p.restore()}
   // 「良」はレーンの上へはみ出して出す（JUDGE_BOTTOM = レーン上端 + 15）
   if(hit&&hit.age<.36){p.save();p.translate(ox-CROP.x*L,oy-CROP.y*L);p.scale(L,L);
     const a=hit.age/.36,y=LITE.LANE_Y+15-6*Math.min(1,a*3);p.globalAlpha=a<.7?1:1-(a-.7)/.3;
@@ -649,13 +825,21 @@ function closePicker(){if(picker){picker.remove();picker=null}}
 
 /* ===== 下の札 ===== */
 function buildPal(){const el=$("pal");el.textContent="";if(V.mode!=="preview")return buildLeft();
-  if(V.mode==="preview"){el.innerHTML=`<div class="nav">
+  if(V.mode==="preview"){
+    /* 縦2段では、小節番号とつまみをやめて**再生**を真ん中へ
+       (利用者の指定 2026-10-30)。 */
+    el.innerHTML=TVER?`<div class="nav">
+    <button class="chip" id="nFirst" aria-label="先頭へ">|◀</button><button class="chip" id="nPrev">◀ 前の小節</button>
+    <button class="chip" id="nPlay" aria-label="再生"></button>
+    <button class="chip" id="nNext">次の小節 ▶</button></div>`:`<div class="nav">
     <button class="chip" id="nFirst" aria-label="先頭へ">|◀</button><button class="chip" id="nPrev">◀ 前の小節</button>
     <span class="mno" id="nNo"></span>
     <button class="chip" id="nNext">次の小節 ▶</button>
     <input type="range" id="nBar" min="1" max="1" step="1" aria-label="小節を選ぶ"></div>`;
     $("nFirst").onclick=()=>gotoMeasure(0);$("nPrev").onclick=()=>stepMeasure(-1);$("nNext").onclick=()=>stepMeasure(1);
-    $("nBar").oninput=e=>gotoMeasure(+e.target.value-1);syncNav();return}
+    if($("nBar"))$("nBar").oninput=e=>gotoMeasure(+e.target.value-1);
+    if($("nPlay")){$("nPlay").onclick=()=>V.playing?stop():play();setPlayIcon(V.playing)}
+    syncNav();return}
 }
 
 /* ===== 道具 ===== */
@@ -669,7 +853,13 @@ const ICON={
   out:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>',
   in:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M4 19h16"/></svg>',
 };
-$("tPlay").innerHTML=ICON.play+"<small>再生</small>";
+/* 再生の札は上(.right)と小節送りの列の2か所にある。どちらも
+   まとめて付け替える(利用者の指定 2026-10-30)。 */
+function setPlayIcon(on){
+  const h=(on?ICON.stop:ICON.play)+"<small>"+(on?"停止":"再生")+"</small>";
+  for(const b of [$("tPlay"),$("nPlay")])if(b){
+    b.innerHTML=h;b.setAttribute("aria-label",on?"停止":"再生")}}
+setPlayIcon(false);
 
 ICON.mode='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="10" rx="1"/><circle cx="8" cy="12" r="2.5"/></svg>';
 ICON.cmd='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 4L7 20M17 4l-2 16M4 9h16M3 15h16"/></svg>';
@@ -724,6 +914,37 @@ function openCmdSheet(){stop();
   $("cClose").onclick=closeSheet;sync()}
 
 function undo(){if(coRO())return;if(!hist.length){toast("戻せる操作がありません");return}S=JSON.parse(hist.pop());V.pending=null;changed();buildLeft()}
+/* 新規作成。音源を選んでもらって、その名前から TITLE: と WAVE: を
+   書いたまっさらな本文を作る(利用者の指定 2026-10-30)。
+   本文は importTJA に通す — ZIP から読んだときと同じ道。
+   BPM と OFFSET は決めようがないので、ひな形の値のまま本文で
+   直してもらう。 */
+/* ひな形(利用者がくれた形 2026-10-30)。TITLE と WAVE だけ
+   選んだ音源から書き入れる。 */
+const NEW_TPL=["{mark}","TITLE:{title}","SUBTITLE:--","BPM:120","WAVE:{wave}",
+  "OFFSET:0.00","SONGVOL:100","SEVOL:100","DEMOSTART:0.00","",
+  "COURSE:oni","LEVEL:10","BALLOON:","SCOREINIT:","SCOREDIFF:","",
+  "#START","1111,","1111,","1111,","1111,","#END",""].join("\n");
+/* 1行目に入れる印。PC 版 constants.new_file_text と同じ形。 */
+function stampToday(){const d=new Date(),z=n=>String(n).padStart(2,"0");
+  return "// NeoTJAEditor "+d.getFullYear()+"/"+z(d.getMonth()+1)+"/"+z(d.getDate())}
+const MARK_RE=/^\/\/\s*NeoTJAEditor\b/i;
+async function newChart(f){
+  stop();closeSheet();
+  const name=f.name.replace(/\.[^.]+$/,"");
+  const tpl=NEW_TPL.replace("{mark}",stampToday())
+    .replace("{title}",name).replace("{wave}",f.name);
+  const r=importTJA(tpl);
+  if(!r){toast("ひな形を作れませんでした");return}
+  snapShot();
+  S=r.state;V.cur=0;V.view=-V.span*NEO.FOLLOW_FRAC;V.pending=null;
+  changed();buildLeft();
+  await reloadAudio(f);
+  /* 本文は**ひな形の字そのまま**。譜面へ通して書き戻すと、
+     まだ空の見出し(BPM: など)が勝手に埋まってしまう。
+     「プレビューに反映」を押した時点で整う。 */
+  txtFill(tpl);
+  toast("新しい譜面を作りました（BPM を入れてください）")}
 async function reloadAudio(f){closeSheet();toast("読み込み中…");
   try{const ab=await f.arrayBuffer();AUD.bytes=ab.slice(0);AUD.buf=await actx().decodeAudioData(ab);AUD.name=f.name;hdr().WAVE=f.name;buildPeaks();rememberAudio();save();draw();toast(f.name+" を読み込みました")}
   catch(e){toast("この形式は読めませんでした。ogg / mp3 / wav を試してください")}}
@@ -821,11 +1042,12 @@ $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu"
   ${CO.on?`<button class="btn" id="mPen">${coMine()?"編集権を返す":"編集権をもらう"}</button>
   ${coMine()?`<button class="btn" id="mGive">編集権を渡す</button>`:``}
   <button class="btn" id="mSync">同期し直す</button>`:`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>
-  <button class="btn" id="mSet">楽曲データ</button>`}
+  <button class="btn" id="mSet">楽曲データ</button>
+  <span class="btn filebtn" style="height:44px">新規作成（音源を選ぶ）<input id="mNew" type="file" accept="audio/*"></span>`}
   <!-- 書き出しは**部屋の中でも**出す。中に居るうちでなければ、ホストから
        元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
        詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 -->
-  <button class="btn" id="mText">本文を編集</button>
+  ${TVER?``:`<button class="btn" id="mText">本文を編集</button>`}
   <button class="btn" id="mZipOut">ZIP を書き出す</button>
   <span class="btn filebtn" style="height:44px">音源の再読み込み<input id="mAud" type="file" accept="audio/*"></span>
   <button class="btn" id="mVol">音量調整</button>
@@ -837,9 +1059,10 @@ $("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu"
   $("mPen").onclick=()=>{closeSheet();coMine()?coPenFree():coPenReq()};
   if($("mGive"))$("mGive").onclick=()=>coPenGive()}
   else{$("mSet").onclick=openSettings;
-  $("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)}}
+  $("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)};
+  $("mNew").onchange=e=>{const f=e.target.files[0];if(f)newChart(f)}}
   $("mZipOut").onclick=savePackage;
-  $("mText").onclick=()=>{closeSheet();openText()};
+  if($("mText"))$("mText").onclick=()=>{closeSheet();openText()};
   $("mVol").onclick=openVolume;$("mZoom").onclick=openZoom;
   $("mAud").onchange=e=>{const f=e.target.files[0];if(f)reloadAudio(f)};
 $("mClose").onclick=closeSheet};
@@ -906,6 +1129,7 @@ function openText(){
   const ta=$("tTxt");ta.value=exportTJA();txtDirty=false;
   $("txt").hidden=false;setTimeout(()=>ta.focus(),0)}
 function closeText(force){
+  if(TVER)return;            // 縦2段では出たまま
   if(!force&&txtDirty&&
      !confirm("保存していない変更があります。閉じますか？"))return;
   $("txt").hidden=true;draw()}
@@ -940,17 +1164,35 @@ function txtCmd(name){
   if(val){const a=ls+line.length-val.length;
     ta.setSelectionRange(a,a+val.length)}
   else ta.setSelectionRange(ls+line.length+1,ls+line.length+1);
-  ta.focus()}
+  ta.focus();hiSync()}
 function txtEdit(cmd){
   $("tTxt").focus();
   try{document.execCommand(cmd)}catch(e){}
-  txtDirty=true}
-$("tTxt").oninput=()=>{txtDirty=true};
+  txtDirty=true;hiSync()}
+$("tTxt").oninput=()=>{txtDirty=true;hiSync()};
+/* 下敷きも一緒に動かす。 */
+$("tTxt").addEventListener("scroll",()=>{const el=$("tHi");
+  if(el){el.scrollTop=$("tTxt").scrollTop;
+         el.scrollLeft=$("tTxt").scrollLeft}});
 $("tTabChart").onclick=()=>closeText(false);
 $("tTxtCancel").onclick=()=>closeText(false);
-$("tTxtSave").onclick=()=>{if(txtSave())closeText(true)};
+$("tTxtSave").onclick=()=>{if(txtSave())TVER||closeText(true)};
 $("tTxtUndo").onclick=()=>txtEdit("undo");
 $("tTxtRedo").onclick=()=>txtEdit("redo");
+/* 縦2段の札(利用者の指定 2026-10-30)。 */
+$("tTU").onclick=()=>txtEdit("undo");
+$("tTR").onclick=()=>txtEdit("redo");
+$("tCmd").onclick=openTxtCmdSheet;
+/* 入れる命令を選ぶ。入る場所は**今いる行の手前**(txtCmd と同じ)。 */
+function openTxtCmdSheet(){stop();
+  openSheet(`<h2>命令を入れる</h2>
+  <p class="note">本文の、いま文字を打っている行の手前に1行入れます。</p>
+  <div class="menu" id="tcGrid">${Object.entries(CMDS).map(([k,c])=>
+    `<button class="btn" data-k="${k}" style="height:auto;padding:8px 10px;text-align:left;line-height:1.5">#${k}<br><span class="note">${c.desc}</span></button>`).join("")}</div>
+  <div class="row"><button class="btn" id="tcClose">閉じる</button></div>`);
+  for(const b of $("tcGrid").querySelectorAll("button"))
+    b.onclick=()=>{closeSheet();txtCmd(b.dataset.k)};
+  $("tcClose").onclick=closeSheet}
 for(const b of document.querySelectorAll(".tcmd"))
   b.onclick=()=>txtCmd(b.dataset.k);
 
@@ -1090,7 +1332,8 @@ function exportTJA(){
   const trim=s=>String(s).replace(/\s+$/,"");
   const all=others.slice(0,at).map(o=>trim(o.text)).concat([out.join("\n")],
     others.slice(at).map(o=>trim(o.text))).filter(s=>s.length);
-  return head.join("\n")+"\n\n"+all.join("\n\n")+"\n";
+  /* 預かっていた印は1行目へ戻す(利用者の指定 2026-10-30)。 */
+  return (S.mark?S.mark+"\n":"")+head.join("\n")+"\n\n"+all.join("\n\n")+"\n";
 }
 /* ===== 本文をコースの塊に割る(ほかのコースを失わないため) =====
    利用者の報告 2026-10-23。単体で3コースの譜面を読むと、読まなかった
@@ -1194,6 +1437,11 @@ function importTJA(text,want,branch){
   const Hd=pick.head;
   const st={title:Hd.TITLE||"無題",bpm:parseFloat(Hd.BPM)||120,offset:parseFloat(Hd.OFFSET)||0,
     course:courseKeyOf(Hd.COURSE),level:parseInt(Hd.LEVEL)||1,notes:[],cmds:[],hdr:{},extra:[],own:[],others:[],at:0};
+  /* 1行目のウォーターマークを預かる(利用者の指定 2026-10-30)。
+     見出しではないので extra にも入らず、預からないと反映した
+     時点で消えてしまう。 */
+  {const first=(text.split("\n").find(l=>l.trim())||"").trim();
+   st.mark=MARK_RE.test(first)?first:""}
   const OWN=new Set(["TITLE","BPM","OFFSET","COURSE","LEVEL","BALLOON",...SONG_KEYS.map(k=>k[0])]);
   // コースだけに効く見出し(SCOREINIT ほか)は own へ。extra に混ぜると
   // 書き出しで譜面ぜんたいの見出しへ移ってしまう。
@@ -1256,21 +1504,44 @@ function gains(){const ac=actx();if(!GAIN.master){GAIN.master=ac.createGain();GA
   GAIN.master.gain.value=VOL.master/100;GAIN.se.gain.value=VOL.se/100;GAIN.song.gain.value=VOL.song/100;return GAIN}
 function hitSE(when,type){const ac=AUD.ctx,buf=type==="pop"?SE.pop:(TYPES[type].don?SE.don:SE.ka);if(!buf)return;
   const src=ac.createBufferSource();src.buffer=buf;src.connect(gains().se);src.start(when)}
+/* 鳴らす打音の一覧。PC 版 preview_dock.set_preview_data と
+   同じ作り方(利用者の指定 2026-10-30「すべて PC に合わせて」)。
+   ・音符はそのまま
+   ・連打/大連打は区間を打数で等分した所でドン(面だけ)
+   ・風船/くす玉は 1/秒速 ごとにドン。叩ききれる区間は最後の
+     1打をドンにせず、そこで割れる音を鳴らす。 */
+function hitQueue(sec0){
+  const q=[];
+  for(const n of S.notes){
+    const T=TYPES[n.type];
+    if(!T.long){q.push({s:t2s(n.t),type:n.type});continue}
+    const s0=t2s(n.t),s1=t2s(n.end);
+    if(T.long==="balloon"){
+      const need=n.count||5,te=Math.min(s1,s0+need/BALLOON_SPEED),
+            hits=Math.min(need,Math.floor((te-s0)*BALLOON_SPEED+1e-6)),
+            pops=hits>=need;
+      for(let i=0;i<(pops?hits-1:hits);i++)
+        q.push({s:s0+i/BALLOON_SPEED,type:"d"});
+      if(pops)q.push({s:te-1/BALLOON_SPEED,type:"pop"})}
+    else{
+      const hits=rollHits(s1-s0);if(hits<=0)continue;
+      const iv=(s1-s0)/hits;
+      for(let i=0;i<hits;i++)q.push({s:s0+i*iv,type:"d"})}}
+  return q.filter(x=>x.s>=sec0-1e-9).sort((a,b)=>a.s-b.s)}
 let PL=null;
 /* from(譜面の秒)を渡すと、カーソルではなくその所から流す。合作で
    「編集者と同じ所から」流すのに要る。 */
 function play(from){const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
   const sec0=(from==null?t2s(V.cur):+from),tick0=(from==null?V.cur:s2t(sec0)),start=ac.currentTime+.08;
-  PL={sec0,start,q:S.notes.filter(n=>!TYPES[n.type].long&&n.t>=tick0).map(n=>({s:t2s(n.t),type:n.type}))
-    .concat(S.notes.filter(n=>n.type==="b"&&n.end>=tick0).map(n=>({s:balloonPop(n),type:"pop"}))).sort((a,b)=>a.s-b.s),qi:0,end:t2s(lastTick())+1.5};
+  PL={sec0,start,q:hitQueue(sec0),qi:0,end:t2s(lastTick())+1.5};
   if(AUD.buf){const off=+S.offset||0,a=sec0-off,src=ac.createBufferSource();src.buffer=AUD.buf;src.connect(gains().song);
     if(a>=0)src.start(start,a);else src.start(start-a,0);AUD.src=src;PL.end=Math.max(PL.end,AUD.buf.duration+off)}
-  V.playing=true;V.pos=sec0;$("tPlay").innerHTML=ICON.stop+"<small>停止</small>";$("tPlay").setAttribute("aria-label","停止");
+  V.playing=true;V.pos=sec0;setPlayIcon(true);
   coPlaySend(true);requestAnimationFrame(tick)}
 function stop(){if(!V.playing)return;V.playing=false;if(AUD.src){try{AUD.src.stop()}catch(e){}AUD.src=null}
   // 止めたらカーソルを再生位置のグリッドへ（Neo と同じく切り捨て）
   const t=s2t(V.pos),m=mIndex(t);V.cur=slotTick(m,Math.floor((t-mStart(m))/mLen(m)*mGrid(m)+1e-6));
-  $("tPlay").innerHTML=ICON.play+"<small>再生</small>";$("tPlay").setAttribute("aria-label","再生");
+  setPlayIcon(false);
   coPlaySend(false);draw()}
 function tick(){if(!V.playing)return;const ac=AUD.ctx,now=PL.sec0+(ac.currentTime-PL.start);
   while(PL.qi<PL.q.length&&PL.q[PL.qi].s<now+.25){const q=PL.q[PL.qi++],w=PL.start+(q.s-PL.sec0);if(w>=ac.currentTime-.01)hitSE(Math.max(w,ac.currentTime),q.type)}
@@ -1476,8 +1747,7 @@ function coPlayTake(at,on){
     if(on){play(sec)}
     else{V.cur=curFromSec(sec);V.pos=sec;
       V.view=t2s(V.cur)-V.span*NEO.FOLLOW_FRAC;
-      $("tPlay").innerHTML=ICON.play+"<small>再生</small>";
-      $("tPlay").setAttribute("aria-label","再生");draw()}
+      setPlayIcon(false);draw()}
   }finally{coPlayApply=false}
   // 画面を一度も触っていない端末は音が出せない(ブラウザの決まり)。
   // 譜面は流れるので、音だけ出ないことをその場で言う。
@@ -1902,7 +2172,17 @@ function coBoot(){
 
 /* ===== 起動 ===== */
 try{const z=+localStorage.getItem("neotja-zoom");if(z>0)V.span=NEO.WINDOW/z}catch(e){}
-buildTempo();buildMeasures();buildPal();buildLeft();syncGrid();setMode("edit");fit();restoreAudio();coBoot();
+buildTempo();buildMeasures();buildPal();buildLeft();syncGrid();
+setMode(TVER?"preview":"edit");
+if(TVER){/* 本文は最初から出したまま。焦点は当てない —
+            開いた途端にキーボードが出ると帯が隠れる。 */
+  $("txt").hidden=false;txtFill();
+  /* 反映はやり直すの右へ移す(利用者の指定 2026-10-30)。
+     札そのものを動かすので、押したときの中身は今までどおり。 */
+  const sv=$("tTxtSave");sv.className="rb";
+  sv.innerHTML="反映<small>プレビュー</small>";
+  document.querySelector(".right").appendChild(sv)}
+fit();restoreAudio();coBoot();
 })();
 </script>
 
