@@ -450,7 +450,7 @@ function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.30.1";
+const WEB_VER="2026.10.30.2";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -1010,9 +1010,7 @@ function openPrefs(){const cur=NEO.WINDOW/V.span;
     <button class="btn" data-v="0" aria-pressed="${!PREF.measureNo}">非表示</button></div>
   <h3>シミュレーション</h3>
   <div class="zgrid" id="pFps">${FPS_CHOICES.map(f=>`<button class="btn" data-f="${f}" aria-pressed="${PREF.fps===f}">${f?f+"fps":"無制限"}</button>`).join("")}</div>
-  <h3>音</h3>
-  <div class="row"><button class="btn" id="pReset">音を鳴らし直す</button>
-  <span class="note" style="flex:1">録画中に音が割れるときに押してください。</span></div>
+
   <div class="row"><button class="btn pri" id="pClose">閉じる</button></div>`);
   for(const k of ["master","se","song"])$("v_"+k).oninput=e=>{VOL[k]=+e.target.value;$("vv_"+k).textContent=VOL[k];gains();try{localStorage.setItem("neotja-vol",JSON.stringify(VOL))}catch(_){}};
   $("vTest").onclick=()=>{const ac=actx();if(ac.state==="suspended")ac.resume();const t=ac.currentTime+.05;hitSE(t,"d");hitSE(t+.25,"k")};
@@ -1021,8 +1019,7 @@ function openPrefs(){const cur=NEO.WINDOW/V.span;
   if($("pZoom"))press("pZoom",b=>setZoom(+b.dataset.z));
   press("pNo",b=>{PREF.measureNo=b.dataset.v==="1";savePref();draw()});
   press("pFps",b=>{PREF.fps=+b.dataset.f;savePref()});
-  $("pReset").onclick=async()=>{stop();await rebuildAudio();
-    toast("音を鳴らし直しました（"+(AUD.ctx?Math.round(AUD.ctx.sampleRate):0)+"Hz）")};
+
   $("pClose").onclick=closeSheet}
 /* ===== 環境設定(利用者の指定 2026-10-30) =====
    音量と拡大倍率はここへまとめた。小節番号の出し入れと、絵を描き
@@ -1593,50 +1590,8 @@ function synthKa(ac){const sr=ac.sampleRate,n=Math.floor(sr*.05),b=ac.createBuff
   for(let i=0;i<n;i++){const t=i/sr,nz=Math.random()*2-1,hp=i?nz-prev:0;prev=nz;const tone=.25*Math.sin(2*Math.PI*950*t);
     d[i]=Math.tanh(((.9*hp+tone)*Math.exp(-t*85))*1.2)*.8}return b}
 function b64buf(s){const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer}
-/* 音をためておく量。既定(interactive)は数ミリ秒しか貯めないので、
-   画面録画のように端末が重くなる場面では間に合わず、途切れが
-   「ガリガリ」という音になる(利用者の報告 2026-10-30)。playback は
-   多めに貯める。そのぶん音は遅れて出るので、絵のほうを outputLatency
-   だけずらして合わせる(tick を参照)。 */
-function actx(){if(!AUD.ctx){const C=window.AudioContext||window.webkitAudioContext;
-  let ac;try{ac=new C({latencyHint:"playback"})}catch(e){ac=new C()}
-  AUD.ctx=ac;SE.don=synthDon(ac);SE.ka=synthKa(ac);
+function actx(){if(!AUD.ctx){const ac=AUD.ctx=new(window.AudioContext||window.webkitAudioContext)();SE.don=synthDon(ac);SE.ka=synthKa(ac);
   for(const k of ["don","ka","pop"])ac.decodeAudioData(b64buf(SE_DATA[k])).then(b=>{SE[k]=b}).catch(()=>{})}return AUD.ctx}
-/* ===== 録画を始めたときの作り直し(利用者の報告 2026-10-30) =====
-   画面録画を始めると、端末が音の通り道と動作周波数を切り替える
-   (44.1kHz→48kHz など)。先に作ってある AudioContext は古い周波数の
-   ままなので、出てくる音が速さの合わない波形になり「ガリガリ」
-   鳴り続ける(iPhone)。周波数が変わっていたら口ごと作り直す。
-
-   **確かめるのは、再生する直前と画面が戻ったときだけ。** 確かめる
-   のに使い捨ての口を1つ作るので、しょっちゅうやると iOS が新しい
-   口をくれなくなる。 */
-function deviceRate(){
-  try{const C=window.AudioContext||window.webkitAudioContext;
-    const probe=new C(),r=probe.sampleRate;
-    if(probe.close)probe.close();return r}catch(e){return 0}}
-/* 作り直した直後は見ない。見るたびに違う周波数が返ってくるような
-   端末だと、作り直しの堂々巡りになるため。 */
-let lastRebuild=0;
-function audioStale(){
-  if(!AUD.ctx)return false;
-  if(performance.now()-lastRebuild<1500)return false;
-  if(AUD.ctx.state==="interrupted")return true;
-  const r=deviceRate();return !!r&&r!==AUD.ctx.sampleRate}
-async function rebuildAudio(){
-  lastRebuild=performance.now();
-  const old=AUD.ctx;AUD.ctx=null;
-  for(const k of Object.keys(GAIN))delete GAIN[k];
-  for(const k of Object.keys(SE_LIVE))delete SE_LIVE[k];
-  SE.don=SE.ka=SE.pop=null;AUD.src=null;
-  try{if(old&&old.close)await old.close()}catch(e){}
-  const ac=actx();                     // 新しい口。打音も作り直る
-  if(AUD.bytes){try{AUD.buf=await ac.decodeAudioData(AUD.bytes.slice(0))}catch(e){}}
-  return ac}
-/* 画面が戻ったとき(録画を始めて戻ってきた直後など)も見る。 */
-document.addEventListener("visibilitychange",()=>{
-  if(document.hidden||V.playing)return;
-  if(audioStale())rebuildAudio()});
 const VOL=(()=>{try{return Object.assign({master:80,se:80,song:80},JSON.parse(localStorage.getItem("neotja-vol")||"{}"))}catch(e){return{master:80,se:80,song:80}}})();
 const GAIN={};
 function gains(){const ac=actx();if(!GAIN.master){GAIN.master=ac.createGain();
@@ -1698,10 +1653,7 @@ function hitQueue(sec0){
 let PL=null;
 /* from(譜面の秒)を渡すと、カーソルではなくその所から流す。合作で
    「編集者と同じ所から」流すのに要る。 */
-function play(from){
-  /* 録画が始まっていたら、鳴らす前に口を作り直す(上の説明)。 */
-  if(audioStale()){rebuildAudio().then(()=>play(from));return}
-  const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
+function play(from){const ac=actx();if(ac.state==="suspended")ac.resume();closePicker();V.pending=null;
   const sec0=(from==null?t2s(V.cur):+from),tick0=(from==null?V.cur:s2t(sec0)),start=ac.currentTime+.08;
   PL={sec0,start,q:hitQueue(sec0),qi:0,end:t2s(lastTick())+1.5};
   if(AUD.buf){const off=+S.offset||0,a=sec0-off,src=ac.createBufferSource();src.buffer=AUD.buf;src.connect(gains().song);
