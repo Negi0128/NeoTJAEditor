@@ -541,6 +541,7 @@ class TJACourseAnalyzer:
         # #BRANCHEND 以降の時刻が分岐区間の2倍ぶん先へずれていた
         # (実測: 最終小節が 121.7秒の譜面で 186.9秒と出ていた)。
         br_base_t = br_max_t = None
+        br_base_bpm, br_base_mv = curr_bpm, measure_val
 
         for idx in range(a, b + 1):
             if idx == a or idx == b:
@@ -558,11 +559,17 @@ class TJACourseAnalyzer:
                     if br_base_t is not None:
                         total_time = max(br_max_t, total_time)
                     br_base_t = br_max_t = total_time
+                    # 系統ごとの命令を持ち越さない。#N に書いた
+                    # #BPMCHANGE が #E にも効いて、分岐のあとが別の
+                    # 速さで進んでいた(利用者の報告 2026-10-31)。
+                    # どの系統も #BRANCHSTART の時点の値から始める。
+                    br_base_bpm, br_base_mv = curr_bpm, measure_val
                     cur_events = []
                     continue
                 if head in ("#N", "#E", "#M") and br_base_t is not None:
                     br_max_t = max(br_max_t, total_time)
                     total_time = br_base_t
+                    curr_bpm, measure_val = br_base_bpm, br_base_mv
                     cur_events = []
                     continue
                 if head == "#BRANCHEND" and br_base_t is not None:
@@ -656,6 +663,7 @@ class TJACourseAnalyzer:
             # measure_at_cursor / time_at_cursor の同じ箇所の説明。
             br_base_t = br_max_t = None
             br_base_m = br_max_m = None
+            br_base_bpm, br_base_mv = curr_bpm, measure_val
 
             for idx in range(a + 1, b):
                 raw = lines[idx - 1]
@@ -681,6 +689,11 @@ class TJACourseAnalyzer:
                             measure = max(br_max_m, measure)
                         br_base_t = br_max_t = total_time
                         br_base_m = br_max_m = measure
+                    # 系統ごとの命令を持ち越さない。#N に書いた
+                    # #BPMCHANGE が #E にも効いて、分岐のあとが別の
+                    # 速さで進んでいた(利用者の報告 2026-10-31)。
+                    # どの系統も #BRANCHSTART の時点の値から始める。
+                        br_base_bpm, br_base_mv = curr_bpm, measure_val
                         cur_events = []
                         continue
                     if head in ("#N", "#E", "#M") and br_base_t is not None:
@@ -688,6 +701,7 @@ class TJACourseAnalyzer:
                         br_max_m = max(br_max_m, measure)
                         total_time = br_base_t
                         measure = br_base_m
+                        curr_bpm, measure_val = br_base_bpm, br_base_mv
                         cur_events = []
                         continue
                     if head == "#BRANCHEND" and br_base_t is not None:
@@ -837,6 +851,7 @@ class TJACourseAnalyzer:
             # 同じなので、これで小節の頭は正しい位置に来る)。
             br_base_t = br_max_t = None
             br_base_clicks = None
+            br_base_bpm, br_base_mv = curr_bpm, measure_val
 
             for idx in range(a + 1, b):
                 s = lines[idx - 1].split("//")[0].strip()
@@ -849,11 +864,16 @@ class TJACourseAnalyzer:
                             total_time = max(br_max_t, total_time)
                         br_base_t = br_max_t = total_time
                         br_base_clicks = len(clicks)
+                        # 系統ごとの命令を持ち越さない(利用者の報告
+                        # 2026-10-31)。どの系統も #BRANCHSTART の時点の
+                        # 値から始める。
+                        br_base_bpm, br_base_mv = curr_bpm, measure_val
                         seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
                         continue
                     if head in ("#N", "#E", "#M") and br_base_t is not None:
                         br_max_t = max(br_max_t, total_time)
                         total_time = br_base_t
+                        curr_bpm, measure_val = br_base_bpm, br_base_mv
                         # 2系統目以降のクリックは捨てる(同じ位置に重なるだけ)。
                         del clicks[br_base_clicks:]
                         seg = []; cur_count = 0; cur_seg_bpm = curr_bpm
@@ -1283,18 +1303,26 @@ class TJACourseAnalyzer:
                         branch_start = None
                     chosen = None
             if blk in ("N", "E", "M", "?") and blk != chosen:
-                # 選ばれていない系統の小節。時間も音符も数えない。ただし
-                # #BPMCHANGE と #MEASURE だけは系統を問わず効かせる(この2つが
-                # 系統ごとに違うと譜面そのものが成立しないので、取りこぼしへの
-                # 保険。従来どおりの扱い)。
-                for t, v in m_events:
-                    if t == "BPMCHANGE":
-                        curr_bpm = v
-                        bpm_changes.append((total_time, curr_bpm))
-                    elif t == "MEASURE" and v[1] != 0:
-                        curr_num, curr_den = v
-                        measure_val = curr_num / curr_den
-                        measure_changes.append((total_time, curr_num, curr_den))
+                # 選ばれていない系統の小節。時間も音符も数えない。
+                # **命令も効かせない。** 系統ごとに #BPMCHANGE を書いてある
+                # 譜面で、流していない系統の BPM が残ったまま次の系統へ入り、
+                # そこから最後の BPM で進んでいた(利用者の報告 2026-10-31
+                # 「2小節目から BPM 300 で進行してしまう」。この譜面は
+                # #N の中にゴーゴーの #BPMCHANGE 300 があり、流すのは #E
+                # なのに 300 が残っていた)。本家も流していない系統の命令は
+                # 効かない。
+                #
+                # ただし #BRANCHSTART と #N/#E/#M のあいだ("?")は、どの系統
+                # にも属さない共通の所なので今までどおり効かせる。
+                if blk == "?":
+                    for t, v in m_events:
+                        if t == "BPMCHANGE":
+                            curr_bpm = v
+                            bpm_changes.append((total_time, curr_bpm))
+                        elif t == "MEASURE" and v[1] != 0:
+                            curr_num, curr_den = v
+                            measure_val = curr_num / curr_den
+                            measure_changes.append((total_time, curr_num, curr_den))
                 for t, v in tail_marks:
                     if t == "BRANCHEND":
                         if branch_start is not None:
