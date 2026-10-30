@@ -1798,6 +1798,10 @@ class PreviewDock(QDockWidget):
                 self._on_panel_selection_command)
             self.command_panel.selectionRegion.connect(
                 self._on_panel_selection_region)
+            # スクロールの「!」はハイスピ変換(利用者の指定 2026-10-31)。
+            # 作譜ペインの右クリックと同じ道を通す。
+            self.command_panel.highspeedRequested.connect(
+                lambda: self._run_chart_tool("highspeed"))
             # 「戻す / 進む」はキー(Ctrl+Z / Ctrl+Y)と同じ所へ。
             self.command_panel.undoRequested.connect(
                 lambda: self._do_undo(False))
@@ -3098,6 +3102,13 @@ class PreviewDock(QDockWidget):
         ce = getattr(self, "chart_edit", None)
         if ce is not None:
             ce.apply_selection_command(name, value)
+
+    def _run_chart_tool(self, name):
+        """作譜ペインの右クリックと同じ道具を呼ぶ(無ければ何もしない)。"""
+        ce = getattr(self, "chart_edit", None)
+        cb = getattr(ce, "_tool_cb", None) if ce is not None else None
+        if cb is not None:
+            cb(name)
 
     def _on_panel_selection_region(self, kind, button):
         """ゴーゴー / 小節線の「!」。付けるか外すかをボタンの下で選ぶ。"""

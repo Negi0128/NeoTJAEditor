@@ -1592,42 +1592,9 @@ class ChartEditWaveform(WaveformWidget):
         self._selection_menu(menu)
         if self._sel:
             menu.addSeparator()
-        for name in ("BPMCHANGE", "SCROLL"):
-            act = menu.addAction("%sを変える…" % self._COMMAND_LABELS[name])
-            act.setData(name)
-            act.triggered.connect(lambda _c=False, n=name: self.open_command_input(n))
-        menu.addSeparator()
-        # 開始・終了の命令。範囲ではなく、この位置に1つずつ置く(1小節ずつ書き
-        # 進めるとき、終わりの位置は後から決まるため)。その位置にもう同じ行が
-        # あれば「〜を消す」になる。
-        for kind in ("GOGO", "BARLINE"):
-            info = self._marker_info(kind) or {}
-            for which in ("on", "off"):
-                base = self._MARKER_LABELS[kind][which]
-                present = bool(info.get("here_" + which))
-                text = base + ("を消す" if present else "")
-                act = menu.addAction(text)
-                act.setData((kind, which))
-                # ゴーゴーの外に「終了」だけ置かせない。本文には残るのに
-                # 画面では何も変わらないので、置いたつもりで気づけない
-                # (利用者の指定 2026-10-24)。
-                if (kind == "GOGO" and which == "off" and not present
-                        and not info.get("before")):
-                    act.setEnabled(False)
-                if present:
-                    act.triggered.connect(
-                        lambda _c=False, k=kind, wh=which:
-                        self._run_op({"kind": "marker",
-                                      "a": self._cursor_addr(),
-                                      "region": k, "which": wh,
-                                      "present": False}))
-                else:
-                    # 置くほうは place_marker を通す — 音符を選んでいるときの
-                    # 「ゴーゴー開始」は選んだ範囲を覆う(2026-10-08)。
-                    act.triggered.connect(
-                        lambda _c=False, k=kind, wh=which:
-                        self.place_marker(k, wh))
-            menu.addSeparator()
+        # BPM / スクロール / ゴーゴー / 小節線 は**命令パネル**にあるので、
+        # 右クリックからは外した(利用者の指定 2026-10-31)。同じ物が2か所に
+        # あると、どちらを使えばいいのか分からなくなる。
         ins = menu.addAction("小節を挿入…")
         ins.triggered.connect(self.open_measure_insert)
         menu.addSeparator()
@@ -1651,10 +1618,10 @@ class ChartEditWaveform(WaveformWidget):
 
     #: 右クリックから呼べる、エディタの道具。(鍵, 見出し, 範囲が要るか)。
     #: ストロボ生成はカーソルの位置に作るので範囲は要らない。
+    # ノーツ間隔リサイズとストロボ生成は、ツールバーにあるのでここからは
+    # 外した(利用者の指定 2026-10-31)。
     CHART_TOOLS = (("highspeed", "ハイスピ変換…", True),
-                   ("resize", "ノーツ間隔リサイズ…", True),
-                   ("reverse", "あべこべ反転", True),
-                   ("strobe", "ストロボ生成…", False))
+                   ("reverse", "あべこべ反転", True))
     _tool_cb = None
 
     def set_tool_cb(self, cb):

@@ -32,6 +32,8 @@ class CommandPanel(QFrame):
     placeMarker = Signal(str, str)
     #: 譜面分岐の系統を選ぶ。("N"/"E"/"M")
     selectBranch = Signal(str)
+    #: スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定 2026-10-31)。
+    highspeedRequested = Signal()
     #: 欄ごとの「!」。その欄の値を**選んだ音符すべて**に付ける。(名前, 値)
     selectionCommand = Signal(str, object)
     #: 値の無い欄(ゴーゴー / 小節線)の「!」。付けるか外すかを選ぶ小メニューを
@@ -108,8 +110,10 @@ class CommandPanel(QFrame):
         self.sp_bpm.setRange(1.0, 9999.0)
         self.sp_bpm.setValue(120.0)
         self.sp_bpm.setFixedWidth(108)
+        # BPM の「!」は使い道が無いので出さない(利用者の指定 2026-10-31)。
         grid.addWidget(self._box("bpm", "BPM", [self.sp_bpm], "BPMCHANGE",
-                                 lambda: self.sp_bpm.value(), auto=True),
+                                 lambda: self.sp_bpm.value(), auto=True,
+                                 mark=None),
                        0, 0)
 
         # --- 拍子記号 ---
@@ -148,10 +152,12 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
             "ここを変えると倍率もそれに合わせて変わる。")
+        # スクロールの「!」は**ハイスピ変換**を開く(利用者の指定 2026-10-31)。
         grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
                                  lambda: self.sp_hs.value(), auto=True,
-                                 auto_on=[self.sp_hs]),
+                                 auto_on=[self.sp_hs],
+                                 mark=self._highspeed_mark),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
         self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
@@ -159,10 +165,10 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm.valueChanged.connect(self._on_hs_bpm_changed)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
+        # 小節線の「!」は使い道が無いので出さない(利用者の指定 2026-10-31)。
         grid.addWidget(self._pair_box("小節線の表示", "表示", "非表示",
                                       lambda: self.placeMarker.emit("BARLINE", "off"),
-                                      lambda: self.placeMarker.emit("BARLINE", "on"),
-                                      "BARLINE"),
+                                      lambda: self.placeMarker.emit("BARLINE", "on")),
                        1, 0)
         grid.addWidget(self._pair_box("ゴーゴータイム", "開始", "終了",
                                       lambda: self.placeMarker.emit("GOGO", "on"),
@@ -299,7 +305,7 @@ class CommandPanel(QFrame):
     AUTO_DELAY_MS = 0
 
     def _box(self, kind, title, widgets, name, get_value, auto=False,
-             auto_on=None):
+             auto_on=None, mark="selection"):
         """[見出し / 値の欄… (+ 追加(変更))] の枠。
 
         その位置に同じ命令が居るときは editCommand(新しく足すのではなく、
@@ -352,9 +358,17 @@ class CommandPanel(QFrame):
             btn.setFixedWidth(52)
             btn.clicked.connect(commit)
             row.addWidget(btn)
-        row.addWidget(self._mark_button(
-            "この値を、選んだ音符すべてに付けます",
-            lambda _n=name, _v=get_value: self.selectionCommand.emit(_n, _v())))
+        # 「!」は欄ごとに役目が違う(利用者の指定 2026-10-31)。
+        #   "selection" … この値を、選んだ音符すべてに付ける
+        #   (関数)       … その中身を呼ぶ(ハイスピ変換など)
+        #   None         … 「!」を出さない
+        if mark == "selection":
+            row.addWidget(self._mark_button(
+                "この値を、選んだ音符すべてに付けます",
+                lambda _n=name, _v=get_value:
+                self.selectionCommand.emit(_n, _v())))
+        elif callable(mark):
+            row.addWidget(mark())
         self._boxes[kind] = (box, btn)
         return box
 
@@ -397,6 +411,12 @@ class CommandPanel(QFrame):
             return
         self._auto_pending[kind] = get_value()
         timer.start()
+
+    def _highspeed_mark(self):
+        """スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定
+        2026-10-31)。音符を選んでいるときだけ押せるのは他の「!」と同じ。"""
+        return self._mark_button("選んだ音符をハイスピ変換します",
+                                 self.highspeedRequested.emit)
 
     def _mark_button(self, tip, fn):
         """欄ごとの「!」。選んだ音符へまとめて効かせる
