@@ -448,6 +448,9 @@ function slotTick(m,k){return mStart(m)+Math.round(k*mLen(m)/mGrid(m))}
 function known(){return mIndex(lastTick())+1}   // 既存の譜面の小節数
 /* 1小節目の手前(利用者の指定 2026-10-30)。OFFSET を合わせるとき、
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
+/* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
+   直したら必ず上げる。メニューと環境設定の見出しに出る。 */
+const WEB_VER="2026.10.30.1";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -996,7 +999,7 @@ async function reloadAudio(f){closeSheet();toast("読み込み中…");
   try{const ab=await f.arrayBuffer();AUD.bytes=ab.slice(0);AUD.buf=await actx().decodeAudioData(ab);AUD.name=f.name;hdr().WAVE=f.name;buildPeaks();rememberAudio();save();draw();toast(f.name+" を読み込みました")}
   catch(e){toast("この形式は読めませんでした。ogg / mp3 / wav を試してください")}}
 function openPrefs(){const cur=NEO.WINDOW/V.span;
-  openSheet(`<h2>環境設定</h2>
+  openSheet(`<h2>環境設定<span class="note" style="font-weight:normal;margin-left:8px">web ${WEB_VER}</span></h2>
   <h3>音量</h3>
   ${[["master","マスター"],["se","SE（打音）"],["song","楽曲の音源"]].map(([k,l])=>`<label class="vrow"><span>${l}</span><input type="range" id="v_${k}" min="0" max="100" step="1" value="${VOL[k]}"><b id="vv_${k}">${VOL[k]}</b></label>`).join("")}
   <div class="row"><button class="btn" id="vTest">ドン・カッで確認</button></div>
@@ -1007,6 +1010,9 @@ function openPrefs(){const cur=NEO.WINDOW/V.span;
     <button class="btn" data-v="0" aria-pressed="${!PREF.measureNo}">非表示</button></div>
   <h3>シミュレーション</h3>
   <div class="zgrid" id="pFps">${FPS_CHOICES.map(f=>`<button class="btn" data-f="${f}" aria-pressed="${PREF.fps===f}">${f?f+"fps":"無制限"}</button>`).join("")}</div>
+  <h3>音</h3>
+  <div class="row"><button class="btn" id="pReset">音を鳴らし直す</button>
+  <span class="note" style="flex:1">録画中に音が割れるときに押してください。</span></div>
   <div class="row"><button class="btn pri" id="pClose">閉じる</button></div>`);
   for(const k of ["master","se","song"])$("v_"+k).oninput=e=>{VOL[k]=+e.target.value;$("vv_"+k).textContent=VOL[k];gains();try{localStorage.setItem("neotja-vol",JSON.stringify(VOL))}catch(_){}};
   $("vTest").onclick=()=>{const ac=actx();if(ac.state==="suspended")ac.resume();const t=ac.currentTime+.05;hitSE(t,"d");hitSE(t+.25,"k")};
@@ -1015,6 +1021,8 @@ function openPrefs(){const cur=NEO.WINDOW/V.span;
   if($("pZoom"))press("pZoom",b=>setZoom(+b.dataset.z));
   press("pNo",b=>{PREF.measureNo=b.dataset.v==="1";savePref();draw()});
   press("pFps",b=>{PREF.fps=+b.dataset.f;savePref()});
+  $("pReset").onclick=async()=>{stop();await rebuildAudio();
+    toast("音を鳴らし直しました（"+(AUD.ctx?Math.round(AUD.ctx.sampleRate):0)+"Hz）")};
   $("pClose").onclick=closeSheet}
 /* ===== 環境設定(利用者の指定 2026-10-30) =====
    音量と拡大倍率はここへまとめた。小節番号の出し入れと、絵を描き
@@ -1138,7 +1146,7 @@ $("tMenu").onclick=()=>{stop();
   if(!TVER){if(!CO.on)items.push(`<button class="btn" id="mSet">楽曲データ</button>`);
     items.push(`<button class="btn" id="mText">本文を編集</button>`)}
   if(CO.on)items.push(`<button class="btn" id="mLeave">ルームから退出</button>`);
-  openSheet(`<h2>メニュー</h2><div class="menu">${items.join("")}</div>
+  openSheet(`<h2>メニュー<span class="note" style="font-weight:normal;margin-left:8px">web ${WEB_VER}</span></h2><div class="menu">${items.join("")}</div>
   <div class="row"><button class="btn" id="mClose">閉じる</button></div>`);
   if(CO.on){$("mLeave").onclick=()=>{closeSheet();coLeave()};
   $("mSync").onclick=()=>{closeSheet();coResync()};
