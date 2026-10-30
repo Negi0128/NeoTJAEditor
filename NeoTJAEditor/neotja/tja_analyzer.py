@@ -1188,9 +1188,24 @@ class TJACourseAnalyzer:
 
         for ev in events:
             if ev[0] == "BLOCK":
+                if not _only_marks(cur_m):
+                    # 前の系統の最後のカンマより後ろに書かれた命令
+                    # (#GOGOEND など)。そのままだと、この続きに来る
+                    # **次の系統の1小節目**まで前の系統の小節として
+                    # 数えてしまい、選んだ系統の1小節目が飛んで以降が
+                    # 丸ごとずれる(利用者の報告 2026-10-31
+                    # 「分岐すると最初の一小節だけ違う譜面が流れて
+                    # 全部ズレる」)。命令は前の系統の最後の小節へ
+                    # ぶら下げて、新しい系統は空から始める。
+                    marks = [e for e in cur_m
+                             if e[0] in ("BRANCHSTART", "BRANCHEND")]
+                    rest = [e for e in cur_m
+                            if e[0] not in ("BRANCHSTART", "BRANCHEND")]
+                    if measures and rest:
+                        measures[-1][1].extend(rest)
+                    cur_m = marks
                 cur_blk = ev[1]
-                if _only_marks(cur_m):
-                    blk_of_m = cur_blk
+                blk_of_m = cur_blk
                 continue
             if _only_marks(cur_m):
                 blk_of_m = cur_blk
