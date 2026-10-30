@@ -1038,30 +1038,44 @@ function repeatBtn(id,fn){const b=$(id);let t1=0,t2=0;
   b.addEventListener("click",e=>{if(e.detail===0)fn()})}
 repeatBtn("mPrev",()=>moveMeasure(-1));repeatBtn("mNext",()=>moveMeasure(1));
 $("gDn").onclick=()=>setGrid(-1);$("tUndo").onclick=undo;$("gUp").onclick=()=>setGrid(1);
-$("tMenu").onclick=()=>{stop();openSheet(`<h2>メニュー</h2><div class="menu">
-  ${CO.on?`<button class="btn" id="mPen">${coMine()?"編集権を返す":"編集権をもらう"}</button>
-  ${coMine()?`<button class="btn" id="mGive">編集権を渡す</button>`:``}
-  <button class="btn" id="mSync">同期し直す</button>`:`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>
-  <button class="btn" id="mSet">楽曲データ</button>
-  <span class="btn filebtn" style="height:44px">新規作成（音源を選ぶ）<input id="mNew" type="file" accept="audio/*"></span>`}
-  <!-- 書き出しは**部屋の中でも**出す。中に居るうちでなければ、ホストから
-       元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
-       詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 -->
-  ${TVER?``:`<button class="btn" id="mText">本文を編集</button>`}
-  <button class="btn" id="mZipOut">ZIP を書き出す</button>
-  <span class="btn filebtn" style="height:44px">音源の再読み込み<input id="mAud" type="file" accept="audio/*"></span>
-  <button class="btn" id="mVol">音量調整</button>
-  <button class="btn" id="mZoom">拡大倍率</button>
-  ${CO.on?`<button class="btn" id="mLeave">ルームから退出</button>`:``}</div>
+/* 音源を選ぶ口。accept を audio/* だけにすると、端末によっては
+   ogg が選べない(利用者の報告 2026-10-30)。拡張子も並べて書く。 */
+const AUDIO_ACCEPT="audio/*,.ogg,.oga,.mp3,.wav,.m4a,.aac,.flac,.opus,.webm";
+const audioPick=(id,label)=>`<span class="btn filebtn" style="height:44px">${label}<input id="${id}" type="file" accept="${AUDIO_ACCEPT}"></span>`;
+$("tMenu").onclick=()=>{stop();
+  /* 並びは利用者の指定 2026-10-30:
+       新規作成 / 音源の再読み込み
+       ZIP を読み込む / ZIP を書き出す
+       音量調整 / 拡大倍率 */
+  const items=[];
+  if(CO.on){
+    items.push(`<button class="btn" id="mPen">${coMine()?"編集権を返す":"編集権をもらう"}</button>`);
+    if(coMine())items.push(`<button class="btn" id="mGive">編集権を渡す</button>`);
+    items.push(`<button class="btn" id="mSync">同期し直す</button>`)}
+  else items.push(audioPick("mNew","新規作成"));
+  items.push(audioPick("mAud","音源の再読み込み"));
+  if(!CO.on)items.push(`<span class="btn filebtn" style="height:44px">ZIP を読み込む<input id="mZipIn" type="file" accept=".zip,.tja,application/zip"></span>`);
+  /* 書き出しは**部屋の中でも**出す。中に居るうちでなければ、ホストから
+     元の音源をもらえない(鳴らす用は作り直した m4a なので、そのまま
+     詰めると名前と中身が食い違う。利用者の指定 2026-10-24)。 */
+  items.push(`<button class="btn" id="mZipOut">ZIP を書き出す</button>`);
+  items.push(`<button class="btn" id="mVol">音量調整</button>`);
+  items.push(`<button class="btn" id="mZoom">拡大倍率</button>`);
+  /* 作譜の画面(?chart)だけに出す物。縦2段では本文がいつも出ているし、
+     見出しは本文で直すので要らない。 */
+  if(!TVER){if(!CO.on)items.push(`<button class="btn" id="mSet">楽曲データ</button>`);
+    items.push(`<button class="btn" id="mText">本文を編集</button>`)}
+  if(CO.on)items.push(`<button class="btn" id="mLeave">ルームから退出</button>`);
+  openSheet(`<h2>メニュー</h2><div class="menu">${items.join("")}</div>
   <div class="row"><button class="btn" id="mClose">閉じる</button></div>`);
   if(CO.on){$("mLeave").onclick=()=>{closeSheet();coLeave()};
   $("mSync").onclick=()=>{closeSheet();coResync()};
   $("mPen").onclick=()=>{closeSheet();coMine()?coPenFree():coPenReq()};
   if($("mGive"))$("mGive").onclick=()=>coPenGive()}
-  else{$("mSet").onclick=openSettings;
-  $("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)};
+  else{$("mZipIn").onchange=e=>{const f=e.target.files[0];if(f)loadPackage(f)};
   $("mNew").onchange=e=>{const f=e.target.files[0];if(f)newChart(f)}}
   $("mZipOut").onclick=savePackage;
+  if($("mSet"))$("mSet").onclick=openSettings;
   if($("mText"))$("mText").onclick=()=>{closeSheet();openText()};
   $("mVol").onclick=openVolume;$("mZoom").onclick=openZoom;
   $("mAud").onchange=e=>{const f=e.target.files[0];if(f)reloadAudio(f)};
