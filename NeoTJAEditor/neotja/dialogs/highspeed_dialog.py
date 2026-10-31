@@ -119,7 +119,11 @@ class HighSpeedDialog(QDialog):
         # **値はそのままで行の位置だけ**動かすもので、狙いが違っていた。
         self.cb_tail = QComboBox()
         self.cb_tail.addItems(["最後の音符に合わせる", "範囲の次に合わせる"])
-        self.cb_tail.setCurrentIndex(1)      # 既定は「範囲の次」
+        # 既定は「最後の音符に合わせる」。「範囲の次」を既定にしていた
+        # ところ、終わりの値の1行が余って見える・刻みが 1/N になるのが
+        # 分かりにくいという報告があったため戻した(利用者の指定
+        # 2026-10-31)。
+        self.cb_tail.setCurrentIndex(0)
         self.cb_tail.setToolTip(
             "1111, を 1 → 2 にしたとき\n"
             "  最後の音符に合わせる: 1 / 1.33 / 1.67 / 2.00\n"
@@ -249,10 +253,38 @@ class HighSpeedDialog(QDialog):
             return "#SCROLL %.*f" % (p, s + (e - s) * ratio(i))
 
         # 範囲の次に合わせるときは、最後の音符の後ろへ終わりの値を1本置く。
-        # そこが次の小節の頭なので、そこから e が効く。
-        tail_line = scroll_at(total) if tail_next else None
+        # そこが次の小節の頭なので、そこから e が効く。ただし後ろに譜面が
+        # 残っていないなら、何も効かない #SCROLL が末尾にぶら下がるだけ
+        # なので置かない(利用者の指摘 2026-10-31)。
+        tail_line = (scroll_at(total)
+                     if tail_next and self._has_after(parsed, marks[-1])
+                     else None)
         lines = self._render_marks(parsed, marks, scroll_at, tail_line)
         self.txt_after.setPlainText("\n".join(self._drop_same(lines, p)))
+
+    @staticmethod
+    def _has_after(parsed, last):
+        """最後に #SCROLL を置いた所より後ろに、まだ譜面が残っているか。
+
+        残っていなければ「範囲の次」に置くものが無い。
+        """
+        if not last:
+            return False
+        mi0, i0 = last
+        mi = -1
+        for item in parsed:
+            if item["type"] != "measure":
+                continue
+            mi += 1
+            if mi < mi0:
+                continue
+            notes = item["notes"]
+            if mi == mi0:
+                if notes[i0 + 1:]:
+                    return True
+            elif notes:
+                return True
+        return False
 
     def _drop_same(self, lines, prec):
         """直前と同じ値になる #SCROLL は置かない。
