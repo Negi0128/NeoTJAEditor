@@ -2717,6 +2717,13 @@ class PreviewDock(QDockWidget):
         h.addWidget(self.lbl_speed)
         # 譜面のヘッダ(曲名・BPM・OFFSET など)を直す窓。どのモードでも
         # 見える所に置く(利用者の指定 2026-10-31)。
+        # 作譜のキー一覧。押せば出る所が無いと、何を押せば音符が置けるか
+        # 分からなかった(利用者の指定 2026-10-31)。
+        self.btn_keys = QPushButton("キー")
+        self.btn_keys.setFocusPolicy(Qt.NoFocus)
+        self.btn_keys.setToolTip("作譜のキー一覧を出します。出したまま試せます。")
+        self.btn_keys.clicked.connect(self._on_key_help)
+        h.addWidget(self.btn_keys)
         self.btn_header = QPushButton("ヘッダ…")
         self.btn_header.setFocusPolicy(Qt.NoFocus)
         self.btn_header.setToolTip(
@@ -2724,6 +2731,15 @@ class PreviewDock(QDockWidget):
         self.btn_header.clicked.connect(self._on_header_edit)
         h.addWidget(self.btn_header)
         return row
+
+    #: キー一覧の窓(1つだけ作って使い回す)。
+    _key_help = None
+
+    def _on_key_help(self):
+        from neotja.dialogs.key_help import KeyHelpWindow
+        if self._key_help is None:
+            self._key_help = KeyHelpWindow(self.game_preview_window)
+        self._key_help.show_near(self.game_preview_window)
 
     def _on_header_edit(self):
         if self.header_edit_cb is not None:
