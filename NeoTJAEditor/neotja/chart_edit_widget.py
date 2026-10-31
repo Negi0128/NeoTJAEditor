@@ -269,8 +269,11 @@ class ChartEditWaveform(WaveformWidget):
             v = 0 if self._screen_uncoupled else self.REDRAW_FPS_COUPLED
         self._redraw_fps = v
 
-    def __init__(self, parent=None, toggle_play_cb=None):
-        super().__init__(parent, toggle_play_cb=toggle_play_cb, force_dark=True)
+    def __init__(self, parent=None, toggle_play_cb=None, show_demo=True,
+                 show_stereo=True):
+        super().__init__(parent, toggle_play_cb=toggle_play_cb,
+                         force_dark=True, show_demo=show_demo,
+                         show_stereo=show_stereo)
         self._grid = 16
         self._cur_measure = 0
         self._cur_slot = 0

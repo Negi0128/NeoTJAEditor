@@ -44,7 +44,7 @@ class WaveformWidget(QWidget):
     NUDGE_STEP_COARSE = 0.010
 
     def __init__(self, parent=None, toggle_play_cb=None, force_dark=False,
-                 show_demo=True):
+                 show_demo=True, show_stereo=True):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setMouseTracking(True)
@@ -131,6 +131,9 @@ class WaveformWidget(QWidget):
         self.btn_stereo.setFocusPolicy(Qt.NoFocus)
         self.btn_stereo.setToolTip("L/R 個別表示と 合成(モノラル)表示を切り替えます。")
         self.btn_stereo.toggled.connect(self._on_stereo_button)
+        # 作譜モードの波形には置かない(利用者の指定 2026-10-31)。
+        self._show_stereo = bool(show_stereo)
+        self.btn_stereo.setVisible(self._show_stereo)
 
         self.btn_offset = QPushButton("OFFSET調整", self)
         self.btn_offset.setCheckable(True)
@@ -482,7 +485,9 @@ class WaveformWidget(QWidget):
         # Size from the font's own metrics rather than hardcoded pixels: the
         # labels are Japanese and swap between ステレオ/合成, so a fixed width
         # clips the text on some fonts/DPI settings.
-        btns = [self.btn_stereo, self.btn_offset]
+        btns = [self.btn_offset]
+        if self._show_stereo:
+            btns.append(self.btn_stereo)
         if self._show_demo:
             btns.append(self.btn_demo)
         for btn in btns:
@@ -502,13 +507,14 @@ class WaveformWidget(QWidget):
             btn.resize(w, h)
         w = self.width()
         y = self._buttons_y()
-        self.btn_offset.move(w - self.btn_offset.width() - self.spx(6), y)
-        self.btn_stereo.move(
-            w - self.btn_offset.width() - self.btn_stereo.width() - self.spx(12), y)
-        if self._show_demo:
-            self.btn_demo.move(
-                w - self.btn_offset.width() - self.btn_stereo.width()
-                - self.btn_demo.width() - self.spx(18), y)
+        # 右から順に、出ているものだけを詰めて並べる。
+        x = w - self.spx(6)
+        for btn in (self.btn_offset, self.btn_stereo, self.btn_demo):
+            if not btn.isVisible() and btn is not self.btn_offset:
+                continue
+            x -= btn.width()
+            btn.move(x, y)
+            x -= self.spx(6)
 
     def _buttons_y(self):
         """ボタンを置く y。既定は左上(従来どおり)。"""

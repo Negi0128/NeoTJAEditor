@@ -2245,11 +2245,8 @@ class PreviewDock(QDockWidget):
 
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
-        # 作譜モードの波形には「ここを DEMOSTART に」は置かない
-        # (利用者の指定 2026-10-31)。
         self.game_waveform = WaveformWidget(
-            toggle_play_cb=self.audio.toggle_play_pause, force_dark=True,
-            show_demo=False)
+            toggle_play_cb=self.audio.toggle_play_pause, force_dark=True)
         # 作譜モードの波形はドックと独立: 合成(モノ)を既定にし、固定幅の窓を
         # 再生位置に追従スクロールさせる(スクロールする楽譜のような見え方)。
         self._wire_waveform(self.game_waveform, sync_stereo=False)
@@ -2526,7 +2523,11 @@ class PreviewDock(QDockWidget):
         v.setContentsMargins(10, 8, 10, 8)
         v.setSpacing(8)
 
-        self.chart_edit = ChartEditWaveform(toggle_play_cb=self.audio.toggle_play_pause)
+        # 作譜モードの波形には「ここを DEMOSTART に」と「合成」は置かない
+        # (利用者の指定 2026-10-31)。残すのは〔OFFSET調整〕だけ。
+        self.chart_edit = ChartEditWaveform(
+            toggle_play_cb=self.audio.toggle_play_pause,
+            show_demo=False, show_stereo=False)
         self._wire_waveform(self.chart_edit, sync_stereo=False)
         self.chart_edit.set_stereo_view(False)
         self.chart_edit.set_follow_window(self._waveform_window())
