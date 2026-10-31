@@ -455,7 +455,7 @@ function known(){return Math.max(mIndex(lastTick())+1,(S&&S.bars)||0)}
    曲の頭から鳴らして確かめたいので、2小節ぶんだけ前へ行ける。 */
 /* web 版の版(利用者の指定 2026-10-30「目に見える位置に」)。
    直したら必ず上げる。メニューと環境設定の見出しに出る。 */
-const WEB_VER="2026.10.31.3";
+const WEB_VER="2026.10.31.4";
 const LEAD_MEASURES=2;
 /* 曲の頭より前からも流せるように(利用者の指定 2026-10-30)。
    音源の0秒は譜面の OFFSET 秒の所。そこから3秒前まで下がれる。
@@ -1354,7 +1354,21 @@ for(const ev of ["pointerdown","touchend","keydown"])
 
 /* ===== ZIP（.tja と .ogg を同封） ===== */
 const AUDIO_RE=/\.(ogg|mp3|wav|m4a|opus)$/i;
-function decodeTJA(buf){try{return new TextDecoder("utf-8",{fatal:true}).decode(buf).replace(/^\uFEFF/,"")}catch(_){return new TextDecoder("shift_jis").decode(buf)}}
+/* .tja の字を読む。読めないと「#START がありません」になるので、
+   よくある書き方はひととおり受ける(利用者の報告 2026-10-31
+   「#START がスマホ版で認識されない」)。
+     ・UTF-16(BOM 付き)  ・UTF-8(BOM 付き/無し)  ・cp932
+     ・行頭の全角「＃」は半角へ直す */
+function tjaTidy(s){
+  return s.replace(/^\uFEFF/, "").replace(/^([ \t]*)＃/gm, "$1#")}
+function decodeTJA(buf){
+  const b=new Uint8Array(buf);
+  if(b.length>1&&b[0]===0xFF&&b[1]===0xFE)
+    return tjaTidy(new TextDecoder("utf-16le").decode(buf));
+  if(b.length>1&&b[0]===0xFE&&b[1]===0xFF)
+    return tjaTidy(new TextDecoder("utf-16be").decode(buf));
+  try{return tjaTidy(new TextDecoder("utf-8",{fatal:true}).decode(buf))}
+  catch(_){return tjaTidy(new TextDecoder("shift_jis").decode(buf))}}
 async function loadPackage(file){
   if(coRO())return;
   closeSheet();toast("読み込み中…");
