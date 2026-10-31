@@ -43,7 +43,8 @@ class WaveformWidget(QWidget):
     NUDGE_STEP = 0.001
     NUDGE_STEP_COARSE = 0.010
 
-    def __init__(self, parent=None, toggle_play_cb=None, force_dark=False):
+    def __init__(self, parent=None, toggle_play_cb=None, force_dark=False,
+                 show_demo=True):
         super().__init__(parent)
         self.setMinimumHeight(120)
         self.setMouseTracking(True)
@@ -142,7 +143,10 @@ class WaveformWidget(QWidget):
         # 試聴開始(DEMOSTART)。いまのカーソル位置をそのまま入れる。
         # これが無いと本文に手で秒数を打つしかなかった(利用者の指定
         # 2026-10-25)。スマホ側には前から同じ物がある。
+        # 作譜モードの波形には置かない(利用者の指定 2026-10-31)。
+        self._show_demo = bool(show_demo)
         self.btn_demo = QPushButton("ここを DEMOSTART に", self)
+        self.btn_demo.setVisible(self._show_demo)
         self.btn_demo.setFocusPolicy(Qt.NoFocus)
         self.btn_demo.setToolTip(
             "いまのカーソル位置を DEMOSTART: に入れます。\n"
@@ -478,7 +482,10 @@ class WaveformWidget(QWidget):
         # Size from the font's own metrics rather than hardcoded pixels: the
         # labels are Japanese and swap between ステレオ/合成, so a fixed width
         # clips the text on some fonts/DPI settings.
-        for btn in (self.btn_stereo, self.btn_offset, self.btn_demo):
+        btns = [self.btn_stereo, self.btn_offset]
+        if self._show_demo:
+            btns.append(self.btn_demo)
+        for btn in btns:
             hint = btn.sizeHint()
             w = hint.width() + 8
             h = max(22, hint.height())
@@ -498,9 +505,10 @@ class WaveformWidget(QWidget):
         self.btn_offset.move(w - self.btn_offset.width() - self.spx(6), y)
         self.btn_stereo.move(
             w - self.btn_offset.width() - self.btn_stereo.width() - self.spx(12), y)
-        self.btn_demo.move(
-            w - self.btn_offset.width() - self.btn_stereo.width()
-            - self.btn_demo.width() - self.spx(18), y)
+        if self._show_demo:
+            self.btn_demo.move(
+                w - self.btn_offset.width() - self.btn_stereo.width()
+                - self.btn_demo.width() - self.spx(18), y)
 
     def _buttons_y(self):
         """ボタンを置く y。既定は左上(従来どおり)。"""

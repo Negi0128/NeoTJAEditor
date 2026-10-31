@@ -710,6 +710,30 @@ class AudioEngine(QObject):
         return self.player.isPlaying()
 
 
+def ensure_silence_wav(seconds: float) -> str:
+    """まるごと無音の WAV を作って、その道筋を返す。
+
+    音源が無い(WAVE: が空・ファイルが見つからない)譜面でも再生できるように
+    するためのもの(利用者の指定 2026-10-31)。再生の仕組みは全部
+    QMediaPlayer の再生位置で動いているので、鳴らす中身だけ無音に
+    差し替えれば、譜面も打音もメトロノームもそのまま流れる。
+
+    長さは 10 秒単位に切り上げて使い回す(譜面ごとに作り直さない)。
+    """
+    sec = max(10, int(math.ceil(float(seconds) / 10.0) * 10))
+    path = os.path.join(tempfile.gettempdir(),
+                        "neotja_silence_%ds.wav" % sec)
+    if os.path.exists(path):
+        return path
+    sample_rate = 8000
+    with wave.open(path, "w") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sample_rate)
+        f.writeframes(bytes(2 * sample_rate * sec))
+    return path
+
+
 def ensure_click_wav() -> str:
     """Synthesizes a short decaying-sine click sound into a temp WAV (stdlib
     only: wave/struct/math) and returns its path, generating it once and

@@ -495,13 +495,13 @@ class GamePreviewWindow(QWidget):
     size matching the lane (no resize handles), rather than free-floating
     dead space around a fixed-size lane looking unbalanced.
 
-    Also auto-pauses playback when the window stops being the active one
-    (alt-tab away, click back to the main editor, etc.) so the song doesn't
-    keep playing - and hit sounds firing - in the background unattended."""
+    前面でなくなっても再生は止めない(利用者の指定 2026-10-31)。エディタを
+    触るたびに曲が止まると、流しながら直せないため。窓を閉じたときだけ
+    止める(PreviewDock._on_game_preview_closed)。"""
 
     closed = Signal()
 
-    def __init__(self, chart_preview, bottom_widget: QWidget, parent=None, pause_cb=None,
+    def __init__(self, chart_preview, bottom_widget: QWidget, parent=None,
                  lane_widget: ChartPreviewWidget = None):
         """chart_preview には、レーン単体(ChartPreviewWidget)でも本家レイアウト
         (GameScreenWidget)でも渡せる。後者のときは lane_widget に中のレーンを
@@ -518,7 +518,6 @@ class GamePreviewWindow(QWidget):
         # 自身のスタイルシートは app 全体の QSS より優先されるので、ライト
         # テーマに切り替えても速度スライダー・ラベル・ボタン等はダークのまま。
         self.setStyleSheet(theme.build_qss(theme.THEMES["dark"]))
-        self._pause_cb = pause_cb
         # 位置合わせの道具。環境設定で入れていなければ作らない(下の
         # _build_tuner がすぐ戻り、キーも割り当てられない)。
         self._tune_label = None
@@ -706,29 +705,12 @@ class GamePreviewWindow(QWidget):
         変わるので、外(preview_dock)から呼べるようにしてある。"""
         self._refit()
 
-    #: 窓を出してから、この時間は「前面でなくなったら止める」を効かせない(秒)。
-    SHOW_GRACE_SEC = 0.6
-
     def showEvent(self, event):
-        # 出した瞬間を覚えておく。下の _in_show_grace 参照。
-        import time as _time
-        self._shown_at = _time.monotonic()
         super().showEvent(event)
         # ゲーム画面が native な窓のときは、重ねたものを前へ出し直す
         # (ScaledHost.raise_overlays の説明を参照)。窓の実体ができてから
         # でないと効かないので、出たあとの手すきに回す。
         QTimer.singleShot(0, self.scaled_host.raise_overlays)
-
-    def _in_show_grace(self):
-        """出した直後かどうか。
-
-        窓を出すとフォーカスが何度か行き来し、そのあいだに「前面でなく
-        なった」が1回混ざる。そこで止めてしまうと、**出してすぐ自動で
-        再生する**のができない(実際に、始めた再生がその場で止められていた)。
-        利用者が自分で他の窓へ移ったときは、この時間はとっくに過ぎている。"""
-        import time as _time
-        return (_time.monotonic() - getattr(self, "_shown_at", 0.0)
-                < self.SHOW_GRACE_SEC)
 
     def set_pane_cb(self, cb):
         """窓の大きさを取り直す前に呼ぶ先(下のペインを画面の中へ入れる/戻す)。
@@ -1133,10 +1115,10 @@ class GamePreviewWindow(QWidget):
         if event.type() == QEvent.WindowStateChange and self.isMaximized():
             self.showNormal()
             return
-        if (event.type() == QEvent.ActivationChange
-                and not self.isActiveWindow() and self._pause_cb
-                and not self._in_show_grace()):
-            self._pause_cb()
+        # 前面でなくなっても止めない(利用者の指定 2026-10-31)。
+        # 以前はここで一時停止していたが、エディタ側を触るたびに曲が
+        # 止まってしまい、流しながら直せなかった。窓を閉じたときは
+        # _on_game_preview_closed で止める。
 
 
 def hit_notes_from_preview(preview_data):
@@ -1291,11 +1273,15 @@ class PreviewDock(QDockWidget):
                  chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
                  checkpoint_lines_cb=None, undo_cb=None, redo_cb=None,
-                 demostart_cb=None):
+                 demostart_cb=None, header_edit_cb=None):
         super().__init__("音源プレビュー", parent)
         self.apply_offset_cb = apply_offset_cb
         #: DEMOSTART を本文へ書く口(MainWindow が持つ)。
         self.demostart_cb = demostart_cb
+        #: ヘッダの窓を開く口(MainWindow が持つ)。譜面プレビューを見て
+        #: いるあいだはテキストが隠れているので、ここから直せるようにする
+        #: (利用者の指定 2026-10-31)。
+        self.header_edit_cb = header_edit_cb
         # 作譜モードで音符が置かれたときの書き戻し(MainWindow が持つ)。
         self.note_edit_cb = note_edit_cb
         # 作譜モードの PeepoDrumKit 式の操作(置く/消す/連打など)。
@@ -1409,6 +1395,11 @@ class PreviewDock(QDockWidget):
 
         self._wave_dir = None
         self._current_wave_path = None
+        #: 無音で再生しているときに出す一言。音源があるときは None。
+        self._silent_note = None
+        #: 譜面の時刻 0 が、音の何秒目に当たるか。無音で再生するときだけ
+        #: 前に助走を付ける(譜面が始まる前から流せるようにするため)。
+        self._lead_sec = 0.0
         #: 次の読み直しで「道筋が同じでも読む」合図。
         self._wave_reload = False
         # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
@@ -1483,7 +1474,7 @@ class PreviewDock(QDockWidget):
 
         self.chart_preview = ChartPreviewWidget(
             course_select_cb=self.course_select_cb,
-            seek_seconds_cb=lambda sec: self.audio.seek(max(0, int(sec * 1000))),
+            seek_seconds_cb=lambda sec: self.audio.seek(self._audio_ms(sec)),
             # Explicit play/pause (not just toggle) so the widget's own player
             # model can drive precise start-from-anchor / pause-in-place
             # transitions (机能1).
@@ -1615,7 +1606,7 @@ class PreviewDock(QDockWidget):
             self.chart_edit.set_screen_uncoupled(
                 bool(getattr(self.game_screen, "native_screen_window", False)))
         self.game_preview_window = GamePreviewWindow(
-            self.game_screen, self._bottom_panel, parent=self, pause_cb=self.audio.pause,
+            self.game_screen, self._bottom_panel, parent=self,
             lane_widget=self.chart_preview,
         )
         self.game_preview_window.set_pane_cb(self._update_pane_host)
@@ -2006,7 +1997,11 @@ class PreviewDock(QDockWidget):
             # レーンはゲーム画面へ畳んであり、キーはあちらが受けて渡す。
             self.game_screen.setFocus(Qt.OtherFocusReason)
         else:
+            # 閉じるときは止める。前面でなくなっただけでは止めなくなった
+            # ので(2026-10-31)、ボタンで閉じた経路もここで止めておかないと
+            # 窓だけ消えて音が残る。
             self.game_preview_window.hide()
+            self._on_game_preview_closed()
 
     def is_game_preview_visible(self) -> bool:
         return self.game_preview_window.isVisible()
@@ -2250,7 +2245,11 @@ class PreviewDock(QDockWidget):
 
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
-        self.game_waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause, force_dark=True)
+        # 作譜モードの波形には「ここを DEMOSTART に」は置かない
+        # (利用者の指定 2026-10-31)。
+        self.game_waveform = WaveformWidget(
+            toggle_play_cb=self.audio.toggle_play_pause, force_dark=True,
+            show_demo=False)
         # 作譜モードの波形はドックと独立: 合成(モノ)を既定にし、固定幅の窓を
         # 再生位置に追従スクロールさせる(スクロールする楽譜のような見え方)。
         self._wire_waveform(self.game_waveform, sync_stereo=False)
@@ -2715,7 +2714,19 @@ class PreviewDock(QDockWidget):
         h.addWidget(self.speed_slider, 1)
         self.lbl_speed = QLabel("×%.2f" % SPEED_DEFAULT)
         h.addWidget(self.lbl_speed)
+        # 譜面のヘッダ(曲名・BPM・OFFSET など)を直す窓。どのモードでも
+        # 見える所に置く(利用者の指定 2026-10-31)。
+        self.btn_header = QPushButton("ヘッダ…")
+        self.btn_header.setFocusPolicy(Qt.NoFocus)
+        self.btn_header.setToolTip(
+            "曲名・BPM・OFFSET などの譜面のヘッダを直します。")
+        self.btn_header.clicked.connect(self._on_header_edit)
+        h.addWidget(self.btn_header)
         return row
+
+    def _on_header_edit(self):
+        if self.header_edit_cb is not None:
+            self.header_edit_cb()
 
     def refresh_theme(self):
         """Called after apply_theme(): repaints the parts that don't restyle
@@ -3455,9 +3466,7 @@ class PreviewDock(QDockWidget):
         wave = headers["wave"]
         if not current_file or not wave:
             self._current_wave_path = None
-            self.status_label.setText("先にファイルを保存し、WAVE:に音源ファイルを指定してください。")
-            self.btn_play.setEnabled(False)
-            self.chart_preview.set_loading(False)
+            self._load_silent_track(headers)
             return
 
         wave_path = os.path.join(os.path.dirname(current_file), wave)
@@ -3480,16 +3489,62 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_offset(headers["offset"])
 
         if not os.path.exists(wave_path):
-            self.status_label.setText(f"音源ファイルが見つかりません: {wave}")
-            self.btn_play.setEnabled(False)
-            self.chart_preview.set_loading(False)
+            self._load_silent_track(headers, "音源ファイルが見つかりません: %s" % wave)
             return
 
+        self._silent_note = None
+        self._lead_sec = 0.0
         self.status_label.setText("音源を読み込み中...")
         self.btn_play.setEnabled(False)
         self.chart_preview.set_loading(True)
         self.audio.load(wave_path)
         self._start_waveform_decode(wave_path)
+
+    #: 無音で再生するとき、譜面の終わりの後ろに足しておく秒数。
+    _SILENT_TAIL_SEC = 10.0
+    #: 同じく、譜面が始まる**前**に足しておく秒数。音源が無いと
+    #: 1小節目より前へ戻れなかったので足した(利用者の指定 2026-10-31)。
+    _SILENT_LEAD_SEC = 3.0
+
+    def _load_silent_track(self, headers, note=None):
+        """音源が無い譜面を、無音の音源で再生できるようにする。
+
+        再生も打音もメトロノームも QMediaPlayer の再生位置で動いているので、
+        鳴らす中身を無音に差し替えるだけで譜面は普通に流れる(利用者の指定
+        2026-10-31)。
+        """
+        from neotja.audio_engine import ensure_silence_wav
+
+        self._silent_note = note or "音源がありません。無音で再生します。"
+        self._lead_sec = self._SILENT_LEAD_SEC
+        clicks = self._editor_metronome_clicks or []
+        # メトロノームの刻みは (時刻, 種類) のこともある。
+        times = [(c[0] if isinstance(c, (tuple, list)) else c) for c in clicks]
+        end = max(times) if times else 0.0
+        length = (float(end) + float(headers.get("offset") or 0.0)
+                  + self._SILENT_LEAD_SEC + self._SILENT_TAIL_SEC)
+        try:
+            path = ensure_silence_wav(length)
+        except Exception:
+            self.status_label.setText(self._silent_note)
+            self.btn_play.setEnabled(False)
+            self.chart_preview.set_loading(False)
+            return
+        off = float(headers["offset"]) + self._lead_sec
+        self.waveform.set_beat_grid(headers["bpm"], off,
+                                    self._editor_metronome_clicks)
+        self._set_game_grid(headers["bpm"], off)
+        self.metronome.set_schedule(self._editor_metronome_clicks, off)
+        self._apply_hit_schedule(off)
+        self.chart_preview.set_offset(off)
+        # 普通の音源とまったく同じ道を通す(読み込み → PCM をミキサーへ →
+        # 波形)。ミキサー経路は load() だけでは鳴らないため。
+        self._current_wave_path = path
+        self.status_label.setText(self._silent_note)
+        self.chart_preview.set_loading(True)
+        self.btn_play.setEnabled(False)
+        self.audio.load(path)
+        self._start_waveform_decode(path)
 
     def load_wave_only(self, wave_path):
         """譜面と切り離して、音源だけを読み込む。
@@ -3565,7 +3620,7 @@ class PreviewDock(QDockWidget):
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
         if self._mixer_active:
             self.audio.set_song_pcm(pcm, sr)
-        self.status_label.setText("")
+        self.status_label.setText(self._silent_note or "")
         # 知らせるのは**全部済ませてから**。ミキサーへ PCM を渡す前に出すと、
         # 受け取った側が play() を呼んでも鳴らない(実際にそうなっていた)。
         self.songReady.emit(path)
@@ -3722,15 +3777,21 @@ class PreviewDock(QDockWidget):
         elif status in (Status.LoadedMedia, Status.BufferedMedia, Status.EndOfMedia):
             self.btn_play.setEnabled(True)
             self.chart_preview.set_loading(False)
-            if self.status_label.text() == "音源を読み込み中...":
+            if self._silent_note:
+                self.status_label.setText(self._silent_note)
+            elif self.status_label.text() == "音源を読み込み中...":
                 self.status_label.setText("")
+
+    def _audio_ms(self, seconds):
+        """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
+        return max(0, int((float(seconds) + self._lead_sec) * 1000))
 
     def _on_stop(self):
         self.audio.stop()
-        self.audio.seek(0)
+        self.audio.seek(self._audio_ms(0))
 
     def _on_seek_requested(self, seconds):
-        self.audio.seek(int(seconds * 1000))
+        self.audio.seek(self._audio_ms(seconds))
 
     def _on_edit_cursor_moved(self, seconds):
         """作譜ペインで編集カーソルを動かした。音源をそこへシークし、停止中は
@@ -3740,9 +3801,9 @@ class PreviewDock(QDockWidget):
         **シーク前の位置** を positionChanged で出す(実測)。停止中はそのあと
         位置が届かないこともあり、レーンだけが1つ前の場所に取り残されていた。
         seek() の中で出た古い位置を、ここで正しい時刻で上書きする。"""
-        self.audio.seek(int(seconds * 1000))
+        self.audio.seek(self._audio_ms(seconds))
         if not self.audio.is_playing():
-            self.chart_preview.set_playback(seconds, False)
+            self.chart_preview.set_playback(seconds + self._lead_sec, False)
         # 命令パネルの値も、その位置で効いている値に合わせる。
         # ここはカーソルを動かすたびに通るので、続けて来るぶんはまとめる。
         self._queue_command_panel_sync()
@@ -3768,7 +3829,7 @@ class PreviewDock(QDockWidget):
         これを使う。鳴らしてしまうと、編集者が止めた直後に届いた
         「ここに居る」でこちらだけ再生が戻ってしまう(実測 2026-10-24:
         スマホが止めても PC が流れ続けた)。"""
-        self.audio.seek(max(0, int(seconds * 1000)))
+        self.audio.seek(self._audio_ms(seconds))
         if play:
             self.audio.play()
 
@@ -3880,13 +3941,13 @@ class PreviewDock(QDockWidget):
         で再生する。リード中(開始位置に達するまで)は打音(SE)を止め、譜面も
         隠す(隠すのは chart_preview 側)。開始位置に達したら _end_fadein で SE を
         元に戻す。音源はそのまま鳴らして「頭出しの助走」を聞かせる。"""
-        start = max(0.0, measure_time - lead)
+        start = max(-self._lead_sec, measure_time - lead)
         # リード中は「開始位置より前の打音だけ」を黙らせる。以前は打音エンジン
         # ごと enabled=False にして到達時に戻していたが、それだと開始位置
         # ちょうどの1打目まで消えていた(戻すのが間に合わない)。ここで先に
         # 境目を渡しておけば、助走ぶんだけ黙って1打目から鳴る。
         self._set_hit_mute_before(measure_time)
-        self.audio.seek(max(0, int(start * 1000)))
+        self.audio.seek(self._audio_ms(start))
         self.audio.play()
 
     def _end_fadein(self):

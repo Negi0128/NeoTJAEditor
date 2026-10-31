@@ -260,6 +260,8 @@ class MainWindow(QMainWindow):
         self._last_autosave_encode_warning = None
         # ゲーム風プレビューの素材の先読みを予約したか(paintEvent 参照)。
         self._skin_warm_armed = False
+        #: 起動したとき譜面プレビューを1回だけ開くための印。
+        self._preview_opened_on_start = False
 
         self._metronome_timer = QTimer(self)
         self._metronome_timer.setSingleShot(True)
@@ -485,6 +487,7 @@ class MainWindow(QMainWindow):
             lambda v: self.replace_header_line("OFFSET", v),
             self,
             demostart_cb=lambda v: self.set_header_line("DEMOSTART", v),
+            header_edit_cb=self.open_header_dialog,
             seek_cursor_cb=self._cursor_preview_seconds,
             volume_cb=self._save_preview_volume,
             duration_ready_cb=self._update_metronome_schedule,
@@ -693,6 +696,92 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
         cursor.insertText("%s%s:%s" % (chr(10), key, value))
         return True
+
+    #: 譜面プレビューから直せるヘッダ(曲ぜんたいのもの)。
+    #: LEVEL はコースごとなので別扱い(_set_course_level)。
+    PREVIEW_HEADERS = ("TITLE", "SUBTITLE", "BPM", "WAVE", "OFFSET",
+                       "DEMOSTART")
+
+    def _preview_course_key(self):
+        """いま譜面プレビューが見ているコースの鍵。"""
+        text = self.editor.toPlainText()
+        return (self._preview_course_override
+                or self._course_key_at_cursor(text))
+
+    def _course_level_block(self):
+        """いま見ているコースの LEVEL: の行(QTextBlock)。無ければ None と
+        「入れるならこの行の前」の #START の行を返す。"""
+        text = self.editor.toPlainText()
+        key = self._preview_course_key()
+        rng = self.analyzer.course_line_range(text, key) if key else None
+        doc = self.editor.document()
+        if rng is None:
+            return None, None
+        start_line = rng[0]                      # #START の行(1 始まり)
+        start_block = doc.findBlockByNumber(start_line - 1)
+        block = start_block.previous()
+        while block.isValid():
+            s = block.text().strip().upper()
+            if s.startswith("#END"):
+                break
+            if s.startswith("LEVEL:"):
+                return block, start_block
+            block = block.previous()
+        return None, start_block
+
+    def _set_course_level(self, value):
+        """いま見ているコースの LEVEL: を書く。無ければ #START の前に作る。"""
+        block, start_block = self._course_level_block()
+        if block is not None:
+            cursor = QTextCursor(block)
+            cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+            cursor.insertText("LEVEL:%s" % value)
+            return True
+        if start_block is None or not start_block.isValid():
+            return False
+        cursor = QTextCursor(start_block)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.insertText("LEVEL:%s%s" % (value, chr(10)))
+        return True
+
+    def header_values(self):
+        """いま本文に入っているヘッダの値。LEVEL は見ているコースのもの。"""
+        vals = {k: "" for k in self.PREVIEW_HEADERS}
+        for line in self.editor.toPlainText().split(chr(10)):
+            s = line.strip()
+            up = s.upper()
+            if up.startswith("#START") or up.startswith("COURSE:"):
+                break
+            for k in self.PREVIEW_HEADERS:
+                if up.startswith(k + ":"):
+                    vals[k] = s.split(":", 1)[1].strip()
+        block, _start = self._course_level_block()
+        vals["LEVEL"] = (block.text().split(":", 1)[1].strip()
+                         if block is not None else "")
+        return vals
+
+    def apply_header_values(self, values):
+        """ヘッダの窓から返ってきた「変えたものだけ」を本文へ書く。"""
+        if not values:
+            return
+        cursor = self.editor.textCursor()
+        cursor.beginEditBlock()
+        try:
+            for k in self.PREVIEW_HEADERS:
+                if k in values:
+                    self.set_header_line(k, values[k])
+            if "LEVEL" in values:
+                self._set_course_level(values["LEVEL"])
+        finally:
+            cursor.endEditBlock()
+        self.setWindowModified(True)
+        self._force_update()
+
+    def open_header_dialog(self):
+        """譜面プレビューの〔ヘッダ〕。"""
+        from neotja.dialogs.header_dialog import HeaderDialog
+        HeaderDialog(self.header_values(), self.apply_header_values,
+                     self).exec()
 
     def demostart_seconds(self):
         """いま本文に入っている DEMOSTART の秒。無ければ None。"""
@@ -1928,6 +2017,22 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             # 先読みは速さのためだけの仕掛けなので、ここで転んでも起動は
             # 続けさせる。必要になった時点で描画側が読み直す。
+            traceback.print_exc()
+        self._open_preview_on_start()
+
+    def _open_preview_on_start(self):
+        """起動したら譜面プレビューも一緒に開く(利用者の指定 2026-10-31)。
+
+        素材を読み終えたあとに1回だけ。開く手順は、利用者がボタンを押した
+        ときとまったく同じ道を通す。"""
+        if self._preview_opened_on_start:
+            return
+        self._preview_opened_on_start = True
+        try:
+            if not self.preview_dock.is_game_preview_visible():
+                self.preview_dock.set_game_preview_visible(True)
+                self.btn_game_preview_toggle.setChecked(True)
+        except Exception:  # noqa: BLE001
             traceback.print_exc()
 
     def eventFilter(self, obj, event):
