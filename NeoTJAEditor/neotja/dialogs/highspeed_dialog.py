@@ -290,25 +290,52 @@ class HighSpeedDialog(QDialog):
         """直前と同じ値になる #SCROLL は置かない。
 
         「開始点の数字が変わらないなら、その命令は意味をなさない」
-        (利用者の指定 2026-10-15)。丸めたあとの字面で比べる。範囲の手前で
-        効いていた値が分かっていれば、1本目もそれと比べる。
+        (利用者の指定 2026-10-15)。範囲の手前で効いていた値が分かって
+        いれば、1本目もそれと比べる。
+
+        lines は (行, 変換が入れた行か) の組。**元から譜面にあった行は
+        消さない** — 消していいのは変換が入れた行だけ(利用者の報告
+        2026-11-01「最初の SCROLL に吸われる」)。
+
+        比べるのは字面ではなく **数** 。`1.0` と `1.00` を別物と見て
+        いたため、同じ値の #SCROLL が二重に残っていた(同じ報告)。
         """
+        def val(line):
+            """#SCROLL の値。丸めた字面で返す。#SCROLL でなければ None。"""
+            c = _cmd_of(line)
+            if c is None or c[0] != "SCROLL":
+                return None
+            try:
+                return "%.*f" % (prec, float(c[1]))
+            except (TypeError, ValueError):
+                # 数として読めないものには触らない(そのまま通す)。
+                return None
+
         out = []
         cur = None
         if self._base_scroll is not None:
             cur = "%.*f" % (prec, self._base_scroll)
         n = len(lines)
-        for k, line in enumerate(lines):
-            c = _cmd_of(line)
-            if c is not None and c[0] == "SCROLL":
-                # 元からあった #SCROLL のすぐ後ろに新しいものが来るなら、
-                # 元のほうは**1音符も効かずに**上書きされる。残さない。
-                nxt = _cmd_of(lines[k + 1]) if k + 1 < n else None
-                if nxt is not None and nxt[0] == "SCROLL":
+        skip = set()
+        for k, (line, is_new) in enumerate(lines):
+            if k in skip:
+                continue
+            v = val(line)
+            if v is not None:
+                nxt = val(lines[k + 1][0]) if k + 1 < n else None
+                if nxt is not None:
+                    # #SCROLL が2本並んだら、後ろのほうしか効かない。
+                    #   値が同じ … 前の1本(譜面に元からある行)を残し、
+                    #               後ろの1本を外す。
+                    #   値が違う … 前の1本は1音符も効かないので外す。
+                    if nxt != v:
+                        continue
+                    skip.add(k + 1)
+                elif is_new and cur is not None and v == cur:
+                    # 変換が入れた行で、値が手前と同じ。意味が無いので
+                    # 置かない。元からある行はここでは消さない。
                     continue
-                if cur is not None and c[1] == cur:
-                    continue
-                cur = c[1]
+                cur = v
             out.append(line)
         return out
 
@@ -453,16 +480,36 @@ class HighSpeedDialog(QDialog):
 
         tail_line を渡すと、**範囲の最後の音符の後ろ**にその1行を足す。
         「範囲の次に合わせる」で、次の小節の頭から終わりの値を効かせるため。
+
+        戻りは (行, 変換が入れた行か) の組の並び。どちらが元の譜面の行か
+        _drop_same が知る必要がある(元の行は勝手に消さない)。
         """
         order = {pos: k for k, pos in enumerate(marks)}
+        first = marks[0] if marks else None
         last = marks[-1] if marks else None
         out = []
         buf = ""
 
+        def keep_break(mi, idx, line):
+            """元からあった命令行を残すか。#SCROLL 以外は必ず残す。
+
+            変換した範囲の中に元の #SCROLL が残っていると、新しい値を
+            置かない所(休符・連打の終端・小節の終わり)で加速を断ち切って
+            しまう(利用者の報告 2026-11-01)。範囲の**頭**の1本だけは
+            残して、_drop_same に元の行と新しい行のどちらを残すか
+            決めさせる。
+            """
+            c = _cmd_of(line)
+            if c is None or c[0] != "SCROLL":
+                return True
+            if first is None:
+                return True
+            return not (first < (mi, idx) <= last)
+
         def flush():
             nonlocal buf
             if buf:
-                out.append(buf)
+                out.append((buf, False))
                 buf = ""
 
         def append_tail(tail):
@@ -472,17 +519,17 @@ class HighSpeedDialog(QDialog):
                 buf += tail
                 return
             for j in range(len(out) - 1, -1, -1):
-                sj = out[j].strip()
+                sj = out[j][0].strip()
                 if sj and not sj.startswith("#") and not sj.startswith("//"):
-                    out[j] += tail
+                    out[j] = (out[j][0] + tail, out[j][1])
                     return
-            out.append(tail)
+            out.append((tail, False))
 
         mi = -1
         for item in parsed:
             if item["type"] == "keep":
                 flush()
-                out.append(item["text"])
+                out.append((item["text"], False))
                 continue
             mi += 1
             breaks = {}
@@ -492,33 +539,37 @@ class HighSpeedDialog(QDialog):
             empty_measure = not notes
             if empty_measure and (mi, 0) in order:
                 flush()
-                out.append(scroll_at(order[(mi, 0)]))
+                out.append((scroll_at(order[(mi, 0)]), True))
             for i, ch in enumerate(notes):
                 for line in breaks.get(i, ()):
+                    if not keep_break(mi, i, line):
+                        continue
                     flush()
-                    out.append(line)
+                    out.append((line, False))
                 k = order.get((mi, i))
                 if k is not None:
                     flush()
-                    out.append(scroll_at(k))
+                    out.append((scroll_at(k), True))
                     buf = ch
                 else:
                     buf += ch
                 if tail_line is not None and (mi, i) == last:
                     # 範囲の最後の音符の**次**から終わりの値を効かせる。
                     flush()
-                    out.append(tail_line)
+                    out.append((tail_line, True))
             for idx, line in item["breaks"]:
                 if idx >= len(notes):
+                    if not keep_break(mi, idx, line):
+                        continue
                     flush()
-                    out.append(line)
+                    out.append((line, False))
             tail = ("," if item["has_comma"] else "")
             if item["comment"]:
                 tail += (" " if tail else "") + item["comment"]
             if tail:
                 if empty_measure:
                     flush()
-                    out.append(tail)
+                    out.append((tail, False))
                 else:
                     append_tail(tail)
             flush()

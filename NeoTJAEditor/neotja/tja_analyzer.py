@@ -363,12 +363,17 @@ class TJACourseAnalyzer:
 
         # 平均密度。**最初の音符から最後の音符まで**で割る
         # (利用者の指定 2026-10-25)。前奏・後奏の長さに引きずられない。
+        #
+        # 割る数は音符の数ではなく **音符の数 - 1**(利用者の指定 2026-11-01)。
+        # 譜面とかWiki の数え方で、tja-tools
+        # (https://whmhammer.github.io/tja-tools/) もこれに揃えている。
+        # 間隔の数は音符の数より1つ少ないので、こちらが本来の「1秒あたり」。
         n_notes = don + ka + big_don + big_ka
         if first_note_t is None or last_note_t is None:
             note_span = 0.0
         else:
             note_span = float(last_note_t - first_note_t)
-        density = (n_notes / note_span) if note_span > 0 else 0.0
+        density = ((n_notes - 1) / note_span) if note_span > 0 else 0.0
 
         return {
             "notes": n_notes,
