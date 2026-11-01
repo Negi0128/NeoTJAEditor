@@ -1956,6 +1956,11 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
         self._clamp_cursor()
         self.update()
+        # 鳴っているあいだはシークしない。分割を変えるたびに再生位置が
+        # 少し巻き戻っていた(利用者の報告 2026-11-02)。再生中のカーソルは
+        # 再生位置に付いていくので、ここで合わせ直す必要もない。
+        if self._playing:
+            return
         # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
         # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
         # かったので、線の位置と打った音符の位置が食い違っていた
@@ -3152,6 +3157,11 @@ class ChartEditWaveform(WaveformWidget):
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
         self._clamp_cursor()
         self.update()
+        # 鳴っているあいだはシークしない。分割を変えるたびに再生位置が
+        # 少し巻き戻っていた(利用者の報告 2026-11-02)。再生中のカーソルは
+        # 再生位置に付いていくので、ここで合わせ直す必要もない。
+        if self._playing:
+            return
         # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
         # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
         # かったので、線の位置と打った音符の位置が食い違っていた
