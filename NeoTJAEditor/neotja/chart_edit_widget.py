@@ -879,6 +879,16 @@ class ChartEditWaveform(WaveformWidget):
         こちらの帯は1行しか無いので、時間の範囲だけを選ぶ)。
 
         左の行名の列(x < LANE_X0)は時間軸の外なので、何も起きない。"""
+        # マウスのサイドボタンで分割を変える(利用者の希望 2026-11-02)。
+        # ↑ ↓ と同じ向き — 進む(前)で細かく、戻る(後ろ)で粗く。帯の
+        # どこで押しても効くので、いちばん手前で見る。
+        if event.button() in (Qt.BackButton, Qt.ForwardButton):
+            if not self.offset_mode:
+                self.setFocus(Qt.MouseFocusReason)
+                self.change_grid(1 if event.button() == Qt.ForwardButton
+                                 else -1)
+            event.accept()
+            return
         if event.position().x() < self.LANE_X0 and not self.offset_mode:
             self.setFocus(Qt.MouseFocusReason)
             # 左上の「1/16」だけは押せる。分割を選ぶつまみが出る

@@ -2046,7 +2046,29 @@ class MainWindow(QMainWindow):
         # F10 での経路(F10 は Key_Alt ではない)にも影響しない。
         if event.type() in (QEvent.KeyPress, QEvent.KeyRelease) and event.key() == Qt.Key_Alt:
             return True
+        # マウスのサイドボタンで作譜の分割を変える(利用者の希望
+        # 2026-11-02)。「どこでも反応してほしい」とのことなので、作譜
+        # ペインの上だけでなくゲーム画面でもエディタでも効かせる。ここで
+        # 握りつぶすので、作譜ペイン自身の mousePressEvent までは届かない
+        # (二重に変わらない)。
+        if (event.type() == QEvent.MouseButtonPress
+                and event.button() in (Qt.BackButton, Qt.ForwardButton)
+                and self._grid_side_button(event.button())):
+            return True
         return super().eventFilter(obj, event)
+
+    def _grid_side_button(self, button):
+        """サイドボタンを作譜ペインの分割へ渡す。渡せたら True。
+
+        進む(前)で細かく、戻る(後ろ)で粗く — ↑ ↓ と同じ向き。
+        オフセット合わせ中だけは触らない(そのとき分割は使わない)。
+        """
+        dock = getattr(self, "preview_dock", None)
+        w = getattr(dock, "chart_edit", None) if dock is not None else None
+        if w is None or w.offset_mode:
+            return False
+        w.change_grid(1 if button == Qt.ForwardButton else -1)
+        return True
 
     def closeEvent(self, event):
         # _updating means the unsaved check already ran and the updater batch is
