@@ -607,6 +607,8 @@ class ChartEditWaveform(WaveformWidget):
             return self.view_start
         if self._note_drag is not None:
             return self.view_start
+        if not self._follow_now(seconds, span):
+            return self.view_start      # ホイールで送った景色のまま
         if self._playing:
             self._stop_view_anim()
             return super()._follow_view_start(seconds, span)
@@ -661,6 +663,9 @@ class ChartEditWaveform(WaveformWidget):
     def _cursor_changed(self):
         """カーソルを自分で動かしたあとの共通処理。赤い線と表示を先に合わせ、
         返ってくる位置(こだま)はしばらく無視してから、シークを頼む。"""
+        # 自分でカーソルを動かしたら、ホイールで送った景色は捨てて
+        # 追従に戻る(利用者の要望 2026-11-05)。
+        self._view_free = False
         self._own_seek_until = time.monotonic() + self.SEEK_ECHO_SEC
         self._pin_playhead_to_cursor()
         self.cursorMoved.emit(self.cursor_time())
@@ -2063,84 +2068,32 @@ class ChartEditWaveform(WaveformWidget):
     WHEEL_JUMP_MEASURES = 4
 
     def wheelEvent(self, event):
-        """ホイールは**小節ごとの移動**。上画面(レーン)と同じにそろえる。
+        """ホイールは**景色を1小節ぶん送るだけ**。赤い線は動かさない。
 
-        2026-10-03 の指定で、グリッド1つずつから小節ごとへ戻した。グリッド
-        1つずつ動かしたいときは十字キー、まとめて飛びたいときは
-        Shift + ホイールで 4小節ずつ。拡大縮小(修飾キー + ホイール)は
-        今までどおり親へ渡す。
+        以前はレーンの小節移動(= シーク)を呼んでいたので、先や後ろの音符を
+        見ようとすると曲のほうが飛んでいた。しかも1目盛で1小節動くため、
+        回しすぎると戻すのが大変だった。赤い線を動かすのはクリック・十字
+        キー・再生だけにする(利用者の要望 2026-11-05)。
 
-        **動き方はレーンの上で回したときと同じ**(滑らせる。利用者の指定
-        2026-09-28)。その場へ飛ぶと、どこへ動いたのか目で追えない。"""
+        Shift + ホイールは4小節ぶん。拡大縮小(修飾キー + ホイール)は
+        今までどおり親へ渡す。送った景色は、赤い線が窓の追従の線まで来たら
+        そのまま追従へ戻る(_follow_now)。"""
         if self.offset_mode or (event.modifiers() & self.ZOOM_MODIFIERS):
             super().wheelEvent(event)
             return
         d = 1 if event.angleDelta().y() > 0 else -1
         if event.modifiers() & Qt.ShiftModifier:
             d *= self.WHEEL_JUMP_MEASURES
+        step = d * self._wheel_view_step()
         if self._note_drag is not None:
             # 掴んでいるあいだは**景色だけ**動かす(利用者の指定 2026-10-08)。
-            # カーソルも再生位置も動かさない — 掴んだものを遠くへ運ぶために
-            # 景色を送るだけ。行き先は _drag_dx が送ったぶんを足して直す。
-            self.scroll_view_to(max(0.0, self.view_target()
-                                    + d * self._wheel_view_step()),
+            # 行き先は _drag_dx が送ったぶんを足して直すので、滑らせない。
+            self.scroll_view_to(max(0.0, self.view_target() + step),
                                 animate=False)
             event.accept()
             return
-        if self._measure_step_cb is not None:
-            self._measure_step_cb(d)
-        else:
-            # レーンに繋がっていないとき(ペイン単体)はグリッドで代用する。
-            self.grid_step(d)
+        self.scroll_view_free(step)
         event.accept()
-
-    # ホイールでの移動を「レーンと同じ速さで滑らせる」ための口。
-    #   _scroll_target_cb … いまの行き先(トゥイーン中はその目標)を返す
-    #   _scroll_to_cb     … その時刻へ滑らせて移る
-    # どちらも無ければ今までどおりその場へ飛ぶ(ペイン単体でも動くように)。
-    _scroll_target_cb = None
-    _scroll_to_cb = None
-
-    def set_scroll_cbs(self, target_cb, scroll_cb):
-        """レーンの「滑らせて移る」に繋ぐ(chart_preview の同名メソッド)。"""
-        self._scroll_target_cb = target_cb
-        self._scroll_to_cb = scroll_cb
-
-    def grid_step(self, direction):
-        """グリッド1つぶん先/手前へ、レーンと同じ速さで滑らせて移る。
-
-        続けて回したときは**行き先から足す**(回した回数ぶんきっちり進む)。
-        基準をいまの表示位置にすると、滑っている途中の位置から数え直して
-        しまい、速く回したぶんが取りこぼされる。
-        """
-        if self._scroll_to_cb is None or self._grid <= 0:
-            self.move_cursor(direction)          # 繋がっていなければ飛ぶ
-            return
-        base = (self._scroll_target_cb() if self._scroll_target_cb is not None
-                else self.position_sec)
-        addr = self._address_from_time(max(0.0, float(base)), nearest=True)
-        if addr is None:
-            self.move_cursor(direction)
-            return
-        count = self._measure_count()
-        m, s = addr[0], addr[1] + int(direction)
-        if s >= self._measure_grid(m):
-            if m + 1 < count:
-                m, s = m + 1, 0
-            else:
-                s = self._measure_grid(m) - 1
-        elif s < 0:
-            if m > 0:
-                m -= 1
-                s = self._measure_grid(m) - 1
-            else:
-                s = 0
-        t = self._address_time(m, s, self._measure_grid(m))
-        if t is None:
-            return
-        # カーソルはレーンのクロックに付いてくる(_follow_playhead)。ここで
-        # 先に動かすと、滑っている途中の位置に引き戻されて競り合う。
-        self._scroll_to_cb(t)
 
     def keyReleaseEvent(self, event):
         # 連打・風船のキーを離したところで置く。押しっぱなしの自動連射は
@@ -2502,10 +2455,9 @@ class ChartEditWaveform(WaveformWidget):
                              "present": True})
 
     def _wheel_view_step(self):
-        """掴んでいるあいだのホイール1目盛で動かす秒数(1小節ぶん)。
+        """ホイール1目盛で動かす秒数(1小節ぶん)。
 
-        ふだんのホイールと同じ「小節ごと」にそろえる。小節の長さが分からない
-        ときは表示幅の決まった割合で代用する。"""
+        小節の長さが分からないときは表示幅の決まった割合で代用する。"""
         base = self.view_target()
         addr = self._address_from_time(max(0.0, base))
         if addr is not None:
@@ -3082,6 +3034,11 @@ class ChartEditWaveform(WaveformWidget):
         if strip_off is None:
             self._draw_ruler(p, t0, t1)
         self._draw_row_labels(p, rows)
+        # 赤い線が画面の外にあるときは、その側の端に印(ホイールが景色だけを
+        # 動かすようになったため。利用者の指定 2026-11-05)。左の行名の列に
+        # 隠れないよう、列を描いたあとに、列より右へ出す。
+        self._draw_offscreen_mark(p, w, self.RULER_H, h - self.RULER_H,
+                                  t0, t1, x0=self.LANE_X0)
         self._draw_offset_mode(p, w, h)
 
     # ------------------------------------------------------------------

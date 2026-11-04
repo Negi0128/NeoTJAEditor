@@ -2256,9 +2256,6 @@ class PreviewDock(QDockWidget):
         self.game_waveform.set_follow_window(self._waveform_window())
         self.game_waveform.followWindowChanged.connect(
             self._on_waveform_window_changed)
-        # 素のホイールはレーンと同じ「小節移動」にする。向き(上=先へ)も、移動の
-        # トゥイーンも、レーンの上で回したときと完全に同じになる。
-        self.game_waveform.set_measure_step_cb(self.chart_preview.seek_relative_measure)
         # 波形の描画域(wh)は従来どおりにしつつ、命令帯を高くした分だけ全体を
         # 高くする(命令ラベルの見切れ対策)。下部パネルには余白があるので窓
         # サイズは変わらない。
@@ -2533,12 +2530,6 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_follow_window(self._waveform_window())
         # 作譜ペインで Alt+ホイールした幅も、音声波形と同じく次回の既定にする。
         self.chart_edit.followWindowChanged.connect(self._on_waveform_window_changed)
-        # ホイールはこちらも「小節移動」。音声波形ページと手触りをそろえる。
-        self.chart_edit.set_measure_step_cb(self.chart_preview.seek_relative_measure)
-        # ただし作譜ペインのホイールはグリッド1つぶん。動き方(滑らせ方)は
-        # レーンの上で回したときと同じにする(利用者の指定 2026-09-28)。
-        self.chart_edit.set_scroll_cbs(self.chart_preview.scroll_target_time,
-                                       self.chart_preview.scroll_to_seconds)
         # 作譜は行レイアウト(左に行の名前・上に小節番号)。7行ぶんの高さが要る
         # (利用者と決めた固定の高さ。行を広げたぶん 260 -> 300 2026-09-25)。
         self.chart_edit.setFixedHeight(300)

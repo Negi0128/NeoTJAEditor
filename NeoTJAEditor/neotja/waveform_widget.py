@@ -3,7 +3,9 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygon,
+)
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from neotja import theme
@@ -88,6 +90,10 @@ class WaveformWidget(QWidget):
         # として表示する。chart_preview から set_checkpoints で届く。
         self._checkpoint_audio = None
         self.position_sec = 0.0
+        # **自分でホイールを回して景色を送っているか。** 立っている間は
+        # 再生位置を追いかけない(流しながら先や後ろを見るため。利用者の
+        # 要望 2026-11-05)。赤い線が追い付いたら自分で下りる。
+        self._view_free = False
         self.zoom = 1.0
         self.view_start = 0.0
         # 表示を動かすときのトゥイーン(scroll_view_to)。飛ばすと目が位置を
@@ -106,10 +112,6 @@ class WaveformWidget(QWidget):
         self._follow_window = None
         # set_follow_window で渡された既定値。reset_zoom の戻り先。
         self._follow_window_default = None
-        # 素のホイールで呼ぶ「小節を1つ動かす」処理(レーンの seek_relative_measure)。
-        # 繋がっていればホイールはレーンと同じ小節移動になり、向きもトゥイーンも
-        # レーン側の実装をそのまま使う。None なら従来どおり秒数で表示を動かす。
-        self._measure_step_cb = None
 
         self.stereo_view = True
         self.offset_mode = False
@@ -293,10 +295,6 @@ class WaveformWidget(QWidget):
         self._follow_window_default = self._follow_window
         self.update()
 
-    def set_measure_step_cb(self, cb):
-        """素のホイールを「レーンの小節移動」に繋ぐ。cb は direction(+1/-1)。"""
-        self._measure_step_cb = cb
-
     def reset_zoom(self):
         """表示倍率(または追従窓の幅)を既定へ戻す。
 
@@ -369,11 +367,27 @@ class WaveformWidget(QWidget):
         vs = seconds - span * self.FOLLOW_FRAC
         return max(0.0, min(vs, max(0.0, self.duration - span)))
 
+    def _follow_now(self, seconds, span):
+        """追従して景色を動かすか。ホイールで送った間は動かさない。
+
+        赤い線が窓の中の「追従の線」(左から FOLLOW_FRAC)まで来たら、
+        そこから先は今までどおり追いかける。そこで戻すと景色が飛ばずに
+        そのまま流れ続ける。
+        """
+        if not self._view_free:
+            return True
+        if span > 0 and (self.view_start + span * self.FOLLOW_FRAC
+                         <= seconds <= self.view_start + span):
+            self._view_free = False
+            return True
+        return False
+
     def set_position(self, seconds: float):
         self.position_sec = seconds
         span = self._visible_span()
         if self._follow_window:
-            self.view_start = self._follow_view_start(seconds, span)
+            if self._follow_now(seconds, span):
+                self.view_start = self._follow_view_start(seconds, span)
         elif seconds < self.view_start or seconds > self.view_start + span:
             # 表示の外へ出たときだけ動かす。飛ばさず滑らせる。
             self.scroll_view_to(max(0.0, seconds - span * 0.1))
@@ -395,7 +409,8 @@ class WaveformWidget(QWidget):
         self.position_sec = seconds
         span = self._visible_span()
         if self._follow_window:
-            self.view_start = self._follow_view_start(seconds, span)
+            if self._follow_now(seconds, span):
+                self.view_start = self._follow_view_start(seconds, span)
         elif seconds < self.view_start or seconds > self.view_start + span:
             self.scroll_view_to(max(0.0, seconds - span * 0.1))
         self.update()
@@ -616,6 +631,29 @@ class WaveformWidget(QWidget):
     # (フォントサイズ)とは別ウィジェットなので衝突しない。
     ZOOM_MODIFIERS = Qt.AltModifier | Qt.ControlModifier
 
+    #: Shift + ホイールで何目盛ぶん飛ばすか。
+    WHEEL_JUMP_MEASURES = 4
+
+    def _wheel_view_step(self):
+        """ホイール1目盛で動かす秒数。作譜ペインは1小節ぶんに差し替える。"""
+        return max(0.05, self._visible_span() * self.SCROLL_FRAC)
+
+    def scroll_view_free(self, step, span=None):
+        """景色だけを step 秒ぶん送る(赤い線は動かさない)。
+
+        追従表示のときは、送ったあとに追い掛け直されると送った意味が
+        無いので、_view_free を立てて追従を止める。赤い線が窓の追従の線
+        まで来たら _follow_now が勝手に下ろす。
+        """
+        if span is None:
+            span = self._visible_span()
+        hi = (max(0.0, self.duration - span) if self.duration > 0
+              else self.view_target() + step)
+        self.scroll_view_to(max(0.0, min(self.view_target() + step, hi)))
+        if self._follow_window:
+            self._view_free = True
+        self.update()
+
     def wheelEvent(self, event):
         """ホイール = 移動、Alt(または Ctrl)+ホイール = 拡大縮小。
 
@@ -629,23 +667,16 @@ class WaveformWidget(QWidget):
             # レーンと繋がっているとき(作譜モードの波形)は、レーンの小節移動を
             # そのまま呼ぶ。向きもトゥイーンもレーンと完全に同じになる — 秒数で
             # シークしていた頃は、シークのたびに表示が飛んでかくかく動いていた。
-            if self._measure_step_cb is not None:
-                self._measure_step_cb(1 if up else -1)
-                event.accept()
-                return
+            # **動かすのは景色だけ。赤い線(再生位置)は動かさない。**
+            # 以前はレーンの小節移動(= シーク)を呼んでいたので、先や
+            # 後ろを見るのに曲のほうが飛んでいた。しかも1目盛で1小節
+            # 動くため、回しすぎると戻すのが大変だった(利用者の要望
+            # 2026-11-05「赤い線を動かすのはクリックだけでいい」)。
             span = self._visible_span()
-            step = span * self.SCROLL_FRAC * (1 if up else -1)
-            if self._follow_window:
-                # 追従モードの view_start は再生位置から決まるので、動かすのは
-                # 再生位置そのもの(= シーク)。
-                self.seekRequested.emit(
-                    max(0.0, min(self.position_sec + step,
-                                 self.duration if self.duration > 0 else self.position_sec + step)))
-            else:
-                # 回したぶんを滑らせて動かす。続けて回したときは、いまの位置では
-                # なく行き先から足す(回した回数ぶんきっちり進む)。
-                self.scroll_view_to(max(0.0, min(self.view_target() + step,
-                                                 max(0.0, self.duration - span))))
+            step = self._wheel_view_step() * (1 if up else -1)
+            if event.modifiers() & Qt.ShiftModifier:
+                step *= self.WHEEL_JUMP_MEASURES
+            self.scroll_view_free(step, span)
             event.accept()
             return
 
@@ -928,6 +959,8 @@ class WaveformWidget(QWidget):
         x = self._sec_to_x(self.position_sec)
         painter.drawLine(x, 0, x, h)
 
+        self._draw_offscreen_mark(painter, w, 0, h)
+
         if self.offset_mode:
             # モードが有効なのが一目で分かるよう、枠を強調色で囲って読み値を出す。
             painter.setPen(self._pen("accent2", 2))
@@ -936,6 +969,32 @@ class WaveformWidget(QWidget):
                 painter.setPen(QColor(self._pal["bg"]))
                 painter.fillRect(6, h - 24, 240, 18, QColor(self._pal["accent2"]))
                 painter.drawText(10, h - 10, self._readout)
+
+    def _draw_offscreen_mark(self, p, w, y, h, t0=None, t1=None, x0=0):
+        """赤い線が画面の外にあるとき、その側の端に三角を出す。
+
+        ホイールが景色だけを動かすようになったので、送りすぎると赤い線が
+        見えなくなる。どちら側にあるかだけ分かればよいので、字は出さずに
+        印だけ(利用者の指定 2026-11-05)。
+        """
+        t = self.position_sec
+        if t0 is None:
+            t0 = self.view_start
+        if t1 is None:
+            t1 = t0 + self._visible_span()
+        if t0 <= t <= t1:
+            return
+        left = t < t0
+        cy = y + h // 2
+        s = max(5, min(9, h // 6))
+        x = x0 + 3 if left else w - 4
+        tip = QPolygon([QPoint(x, cy), QPoint(x + (s if left else -s), cy - s),
+                        QPoint(x + (s if left else -s), cy + s)])
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(self._pal["err"]))
+        p.drawPolygon(tip)
+        p.restore()
 
     def _lane_qcolor(self):
         """波形の色。派生クラスが変えられるようにする。"""
