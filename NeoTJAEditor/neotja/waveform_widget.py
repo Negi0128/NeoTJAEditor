@@ -94,6 +94,11 @@ class WaveformWidget(QWidget):
         # 再生位置を追いかけない(流しながら先や後ろを見るため。利用者の
         # 要望 2026-11-05)。赤い線が追い付いたら自分で下りる。
         self._view_free = False
+        # 送ったとき赤い線が「追従の線」より手前にいたか。前へ送ったとき
+        # だけ真で、流れて線まで来たら勝手に追従へ戻る。後ろへ送ったとき
+        # は偽 — 戻すと見に行った先から引き剥がされる(利用者の報告
+        # 2026-11-05「再生中ホイール操作できない」)。
+        self._view_catchup = False
         self.zoom = 1.0
         self.view_start = 0.0
         # 表示を動かすときのトゥイーン(scroll_view_to)。飛ばすと目が位置を
@@ -370,15 +375,19 @@ class WaveformWidget(QWidget):
     def _follow_now(self, seconds, span):
         """追従して景色を動かすか。ホイールで送った間は動かさない。
 
-        赤い線が窓の中の「追従の線」(左から FOLLOW_FRAC)まで来たら、
-        そこから先は今までどおり追いかける。そこで戻すと景色が飛ばずに
-        そのまま流れ続ける。
+        **前へ送ったときだけ**、赤い線が窓の中の「追従の線」(左から
+        FOLLOW_FRAC)まで来たところで追いかけ直す。そこで戻せば景色が
+        飛ばずにそのまま流れ続ける。後ろへ送ったときは戻らない —
+        赤い線は初めから線より先にいるので、戻すと一瞬で引き剥がされる
+        (利用者の報告 2026-11-05)。
         """
         if not self._view_free:
             return True
-        if span > 0 and (self.view_start + span * self.FOLLOW_FRAC
-                         <= seconds <= self.view_start + span):
+        if (self._view_catchup and span > 0
+                and (self.view_start + span * self.FOLLOW_FRAC
+                     <= seconds <= self.view_start + span)):
             self._view_free = False
+            self._view_catchup = False
             return True
         return False
 
@@ -642,16 +651,22 @@ class WaveformWidget(QWidget):
         """景色だけを step 秒ぶん送る(赤い線は動かさない)。
 
         追従表示のときは、送ったあとに追い掛け直されると送った意味が
-        無いので、_view_free を立てて追従を止める。赤い線が窓の追従の線
-        まで来たら _follow_now が勝手に下ろす。
+        無いので、_view_free を立てて追従を止める。**前へ送ったとき** だけ、
+        赤い線が窓の追従の線まで来た所で _follow_now が勝手に下ろす。
         """
         if span is None:
             span = self._visible_span()
         hi = (max(0.0, self.duration - span) if self.duration > 0
               else self.view_target() + step)
-        self.scroll_view_to(max(0.0, min(self.view_target() + step, hi)))
+        dest = max(0.0, min(self.view_target() + step, hi))
         if self._follow_window:
+            # 送った先で、赤い線が追従の線より**手前**にいるか。手前なら
+            # 流れてくるのを待てばよいので、来た所で追従へ戻す。先に
+            # いるなら(= 後ろを見に行った)自分では戻らない。
+            self._view_catchup = (self.position_sec
+                                  < dest + span * self.FOLLOW_FRAC)
             self._view_free = True
+        self.scroll_view_to(dest)
         self.update()
 
     def wheelEvent(self, event):
