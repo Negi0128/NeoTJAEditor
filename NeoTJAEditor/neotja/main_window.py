@@ -427,6 +427,10 @@ class MainWindow(QMainWindow):
         self._toolbar_button(self.toolbar_top, "元に戻す", self.editor.undo)
         self._toolbar_button(self.toolbar_top, "やり直す", self.editor.redo)
         self._toolbar_button(self.toolbar_top, "譜面画像生成", self.open_image_exporter)
+        # 密度グラフ(利用者の希望 2026-11-04)。譜面画像生成の隣に置く
+        # — どちらも「いま見ているコースを別窓で眺める」道具なので。
+        self._toolbar_button(self.toolbar_top, "密度グラフ",
+                             self.open_density_graph)
         self._toolbar_button(self.toolbar_top, "ヘルプ", self.open_help)
 
         spacer = QWidget()
@@ -4134,6 +4138,26 @@ class MainWindow(QMainWindow):
             self.setWindowModified(True)
             self._force_update()
         MeasureConvertDialog(self, txt, apply).exec()
+
+    def open_density_graph(self):
+        """密度グラフ。見せるのは「いまプレビューで見ているコース」
+        (譜面画像生成と同じ選び方)。窓の中でコースを切り替えられる。"""
+        content = self.editor.toPlainText()
+        if not self.courses_info:
+            QMessageBox.warning(self, "警告", "有効なコースが見つかりません。")
+            return
+        cursor_line = self.editor.textCursor().blockNumber() + 1
+        key = None
+        try:
+            data = self.analyzer.build_preview_timeline(
+                content, cursor_line, self._preview_course_override,
+                branch_level=self._preview_branch_level,
+            )
+            key = data.get("course_key")
+        except Exception:  # noqa: BLE001
+            key = None
+        from neotja.dialogs.density_dialog import DensityGraphDialog
+        DensityGraphDialog(self, content, key).exec()
 
     def open_image_exporter(self):
         """譜面画像生成。書き出す対象は「いまプレビューで見ているコース」
