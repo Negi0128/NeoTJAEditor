@@ -3451,6 +3451,10 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_spans(*self._preview_spans)
         self.chart_edit.set_commands(*self._preview_commands)
         if preview_data is not None:
+            # ゴーゴー・小節線の札は「結果の範囲」ではなく命令そのものから
+            # 作る(利用者の報告 2026-11-05)。
+            self.chart_edit.set_region_marks(
+                preview_data.get("region_marks", []))
             self.chart_edit.set_open_spans(preview_data.get("open_spans", []))
             # 小節時刻が無いと編集カーソルの住所が決まらない。preview_data が
             # 来ていないときは前回の値を残す(消すとカーソルが死ぬ)。
@@ -3920,6 +3924,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_spans(*self._preview_spans)
         self.chart_edit.set_open_spans(data.get("open_spans", []))
         self.chart_edit.set_commands(*self._preview_commands)
+        self.chart_edit.set_region_marks(data.get("region_marks", []))
         self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。

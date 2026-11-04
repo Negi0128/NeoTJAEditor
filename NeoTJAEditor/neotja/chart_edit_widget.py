@@ -282,6 +282,10 @@ class ChartEditWaveform(WaveformWidget):
         # 「小節線」の行に出す、隠れている区間。譜面時間と音源時間。
         self._barline_raw = None
         self._barline_audio = None
+        # 範囲の命令そのもの [(譜面時刻, 名前)]。解析の region_marks。
+        # 札はこちらから作る(_objects / _draw_cmd_marks)。
+        self._region_raw = None
+        self._region_audio = None
         # 命令を種類ごとに分けた列(_rebuild_cmd_kinds)。
         self._cmd_by_kind = None
         self._cmd_kind_times = None
@@ -399,6 +403,20 @@ class ChartEditWaveform(WaveformWidget):
         self._clamp_cursor()
         self.update()
 
+    def set_region_marks(self, marks):
+        """範囲の命令 [(譜面時刻, 名前)] を受け取る。
+
+        ゴーゴー・小節線の札は、今まで「結果としてこうなった範囲」から
+        作っていた。範囲は小節の境目でしか測れないので、小節の途中へ
+        動かした命令が元の所へ戻って見え、同じ命令が2本あると後ろの1本が
+        札として出ず、選べない=消せなかった(利用者の報告 2026-11-05)。
+        命令そのものを受け取って、1本ずつ札にする。
+        """
+        self._region_raw = ([(float(t0), str(n)) for t0, n in marks]
+                            if marks is not None else None)
+        self._rebuild_bar_times()
+        self.update()
+
     def _rebuild_cmd_kinds(self):
         """命令を種類ごとに分けて持つ(行ごとの描画用)。"""
         by = {}
@@ -481,6 +499,9 @@ class ChartEditWaveform(WaveformWidget):
         raw = getattr(self, "_barline_raw", None)
         self._barline_audio = ([(s - self.offset, e - self.offset) for s, e in raw]
                                if raw else None)
+        rm = getattr(self, "_region_raw", None)
+        self._region_audio = ([(t0 - self.offset, n) for t0, n in rm]
+                              if rm is not None else None)
 
     def _apply_offset_local(self, offset):
         super()._apply_offset_local(offset)
@@ -1108,13 +1129,21 @@ class ChartEditWaveform(WaveformWidget):
             p = self._pos_of_time(item[0])
             if name and p is not None:
                 out.append((("cmd", name, p), item[3], item[0], 16))
-        for spans, names, row in ((self._gogo_audio, ("GOGOSTART", "GOGOEND"), "gogo"),
-                                  (self._barline_audio, ("BARLINEOFF", "BARLINEON"), "barline")):
-            for st, e in (spans or []):
-                for t, name in ((st, names[0]), (e, names[1])):
-                    p = self._pos_of_time(t)
-                    if p is not None:
-                        out.append((("cmd", name, p), row, t, 8))
+        if self._region_audio is not None:
+            # **命令そのもの**から札を作る(重なった2本目も出る)。
+            for t, name in self._region_audio:
+                p = self._pos_of_time(t)
+                if p is not None:
+                    out.append((("cmd", name, p),
+                                self._CMD_ROW.get(name, "barline"), t, 8))
+        else:
+            for spans, names, row in ((self._gogo_audio, ("GOGOSTART", "GOGOEND"), "gogo"),
+                                      (self._barline_audio, ("BARLINEOFF", "BARLINEON"), "barline")):
+                for st, e in (spans or []):
+                    for t, name in ((st, names[0]), (e, names[1])):
+                        p = self._pos_of_time(t)
+                        if p is not None:
+                            out.append((("cmd", name, p), row, t, 8))
         return out
 
     def _object_at(self, x, y):
@@ -1142,6 +1171,12 @@ class ChartEditWaveform(WaveformWidget):
         return best
 
     #: 帯の行 → (開始の命令名, 終了の命令名)。_objects と同じ組み合わせ。
+    #: 範囲の命令の名前 → どの行に出すか / 札の字。
+    _CMD_ROW = {"GOGOSTART": "gogo", "GOGOEND": "gogo",
+                "BARLINEOFF": "barline", "BARLINEON": "barline"}
+    _CMD_LABEL = {"GOGOSTART": "開始", "GOGOEND": "終了",
+                  "BARLINEOFF": "OFF", "BARLINEON": "ON"}
+
     _SPAN_ROWS = {"gogo": ("GOGOSTART", "GOGOEND"),
                   "barline": ("BARLINEOFF", "BARLINEON")}
 
@@ -3003,12 +3038,21 @@ class ChartEditWaveform(WaveformWidget):
         self._draw_pending(p, note_top, upper_h)
         # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
         # 指定 2026-09-26)。
-        self._draw_marker_row(p, rows["barline"], self._barline_audio,
-                              ("BARLINEOFF", "BARLINEON"), ("OFF", "ON"), t0, t1)
+        if self._region_audio is not None:
+            self._draw_cmd_marks(p, rows["barline"], "barline", t0, t1)
+        else:
+            self._draw_marker_row(p, rows["barline"], self._barline_audio,
+                                  ("BARLINEOFF", "BARLINEON"), ("OFF", "ON"),
+                                  t0, t1)
         # GOGO は帯のまま(長さが目で分かるように)。端をつかんでいる間は、
         # その端が付いてきて帯が伸び縮みする。
         self._draw_span_row(p, rows["gogo"], self._gogo_audio,
                             self.ROW_CONTENT_COLOR, t0, t1)
+        # 帯の上に、#GOGOSTART / #GOGOEND を**1本ずつ**札で出す。帯だけだと
+        # 重なった2本目が見えず、選べない=消せなかった(利用者の報告
+        # 2026-11-05)。
+        if self._region_audio is not None:
+            self._draw_cmd_marks(p, rows["gogo"], "gogo", t0, t1)
 
         # --- 行の区切り線 ---
         p.setPen(QPen(QColor(pal["border"])))
@@ -3442,6 +3486,35 @@ class ChartEditWaveform(WaveformWidget):
         if self._row_width_cache is None:
             self._row_width_cache = {}
         return self._row_width_cache
+
+    def _draw_cmd_marks(self, p, rect, row, t0, t1):
+        """範囲の命令を**1本ずつ**札で出す(_region_audio から)。
+        同じ所に重なった2本目も、ずれた分だけ右へ出して見えるようにする。"""
+        y, rh = rect
+        marks = [(t, n) for t, n in (self._region_audio or [])
+                 if self._CMD_ROW.get(n) == row and t0 <= t <= t1]
+        if not marks:
+            return
+        p.setFont(self._row_font())
+        col = QColor(self.ROW_CONTENT_COLOR)
+        p.setPen(QPen(col, 1))
+        fm = p.fontMetrics()
+        widths = self._row_text_widths(fm)
+        last_x = None
+        for t, name in sorted(marks):
+            text = self._CMD_LABEL.get(name, name)
+            tw = widths.get(text)
+            if tw is None:
+                tw = widths[text] = fm.horizontalAdvance(text)
+            x = self._sec_to_x(t) + self._drag_dx_for(name, t)
+            p.drawLine(x, y + 1, x, y + rh - 1)
+            # 字だけは重ならない所まで右へ逃がす(線は本当の位置のまま)。
+            tx = x + 3
+            if last_x is not None and tx < last_x:
+                tx = last_x
+            p.drawText(tx, y, tw + 6, rh,
+                       Qt.AlignVCenter | Qt.AlignLeft, text)
+            last_x = tx + tw + 4
 
     def _draw_marker_row(self, p, rect, spans, names, labels, t0, t1):
         """小節線のような「ここから / ここまで」の印。札で出す。

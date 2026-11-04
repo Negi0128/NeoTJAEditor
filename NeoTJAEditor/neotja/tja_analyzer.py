@@ -1059,7 +1059,7 @@ class TJACourseAnalyzer:
                 start = None
 
         empty = {
-            "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [],
+            "notes": [], "rolls": [], "balloons": [], "kusudamas": [], "gogo_regions": [], "region_marks": [],
             "lyrics": [],
             "branch_regions": [], "branch_path": [], "bar_times": [],
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
@@ -1275,6 +1275,13 @@ class TJACourseAnalyzer:
         bar_lines = []
         curr_line = a + 1
         gogo_regions = []
+        # #GOGOSTART/#GOGOEND/#BARLINEOFF/#BARLINEON を **書いてある順に
+        # 1本残らず** [(譜面時刻, 名前)] で持つ。gogo_regions と bar_times の
+        # 「見えているか」の旗は“結果としてこうなった範囲”なので、重なった
+        # 命令や小節の途中の命令はそこから戻せない。作譜ペインの札はこちらを
+        # 見る(利用者の報告 2026-11-05「#BARLINEON だけ移動できない」
+        # 「重複する命令の後ろのほうが消える」)。
+        region_marks = []
         #: [(譜面時刻, 歌詞)] 。空文字は消去の合図。
         lyrics = []
         bpm_changes = [(Decimal(0), bpm)]
@@ -1402,17 +1409,21 @@ class TJACourseAnalyzer:
                     # 次の #LYRIC が来るまで出し続ける。空なら消去。
                     lyrics.append((total_time, v))
                 elif t == "GOGOSTART":
+                    region_marks.append((total_time, "GOGOSTART"))
                     if gogo_start is None:
                         gogo_start = total_time
                 elif t == "GOGOEND":
+                    region_marks.append((total_time, "GOGOEND"))
                     if gogo_start is not None:
                         gogo_regions.append((gogo_start, total_time))
                         gogo_start = None
                 elif t in ("BRANCHSTART", "BRANCHEND"):
                     continue        # 上の「先に効かせる」で処理済み
                 elif t == "BARLINEOFF":
+                    region_marks.append((total_time, "BARLINEOFF"))
                     curr_bar_visible = False
                 elif t == "BARLINEON":
+                    region_marks.append((total_time, "BARLINEON"))
                     curr_bar_visible = True
                 elif t == "NOTE":
                     time_per_note = Decimal(240) * measure_val / curr_bpm / n_len if (n_len > 0 and curr_bpm > 0) else Decimal("0")
@@ -1537,6 +1548,8 @@ class TJACourseAnalyzer:
             "kusudamas": out_kusudamas,
             "open_spans": open_spans,
             "gogo_regions": [(float(s0), float(e0)) for s0, e0 in gogo_regions],
+            # 範囲の命令そのもの(重なったものも小節の途中のものも全部)。
+            "region_marks": [(float(t0), n) for t0, n in region_marks],
             # #LYRIC。[(譜面時刻, 歌詞)]。空文字はそこで消す合図。
             "lyrics": [(float(t0), txt) for t0, txt in lyrics],
             "branch_regions": [(float(s0), float(e0), lv) for s0, e0, lv in branch_regions],
