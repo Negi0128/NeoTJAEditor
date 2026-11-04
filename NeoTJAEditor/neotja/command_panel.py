@@ -71,7 +71,7 @@ class CommandPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 種類 → (枠, ボタン)。「追加」と「変更」を切り替えるために持つ。
-        # 値をいじるだけで入る欄(BPM / スクロール)にはボタンが無く、None。
+        # 値をいじるだけで入る欄(BPM)にはボタンが無く、None。
         self._boxes = {}
         # 値をいじってから入れるまでの待ち。種類 → QTimer。
         self._auto_timers = {}
@@ -147,14 +147,17 @@ class CommandPanel(QFrame):
         self.sp_hs.setRange(-100.0, 100.0)
         self.sp_hs.setSingleStep(0.05)
         self.sp_hs.setValue(1.0)
-        self.sp_hs.setFixedWidth(80)
+        # 80 -> 64 / 62。「追加」ボタンを足したぶん、2つの欄を詰める
+        # (利用者の報告 2026-11-04 への対応)。枠の幅(BOX_W=214)は動かせない
+        # — 3つ並べて 672 におさめる決まりなので、はみ出すと右が切れる。
+        self.sp_hs.setFixedWidth(64)
         self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。")
         self.sp_hs_bpm = QDoubleSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
         self.sp_hs_bpm.setSingleStep(5.0)
         self.sp_hs_bpm.setValue(120.0)
-        self.sp_hs_bpm.setFixedWidth(80)
+        self.sp_hs_bpm.setFixedWidth(62)
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
             "ここを変えると倍率もそれに合わせて変わる。")
@@ -162,8 +165,8 @@ class CommandPanel(QFrame):
         grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
                                  lambda: self.sp_hs.value(), auto=True,
-                                 auto_on=[self.sp_hs],
-                                 mark=self._highspeed_mark),
+                                 auto_on=[self.sp_hs], button=True,
+                                 btn_w=36, mark=self._highspeed_mark),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
         self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
@@ -311,15 +314,21 @@ class CommandPanel(QFrame):
     AUTO_DELAY_MS = 0
 
     def _box(self, kind, title, widgets, name, get_value, auto=False,
-             auto_on=None, mark="selection"):
+             auto_on=None, mark="selection", button=None, btn_w=52):
         """[見出し / 値の欄… (+ 追加(変更))] の枠。
 
         その位置に同じ命令が居るときは editCommand(新しく足すのではなく、
         その行の値を書き換える)、居なければ placeCommand。
 
         auto=True の欄は**値をいじっただけで入る**(利用者の指定 2026-10-08)。
-        ボタンは置かない。カーソルに合わせて欄を書き換えるとき(set_values)は
-        入れない — 動かすたびに命令が増えてしまうため。"""
+        カーソルに合わせて欄を書き換えるとき(set_values)は入れない —
+        動かすたびに命令が増えてしまうため。
+
+        button は「追加」ボタンを出すか。既定(None)は auto の裏返しで、
+        auto の欄には出さない。**auto と両立する** — スクロールは値をいじれば
+        入るが、それだと「いまと同じ倍率をもう一か所へ置く」手が無かった
+        (利用者の報告 2026-11-04「SCROLLを変更するかコピペしないとつかない」)。
+        同じ値でも押せば置けるように、auto のままボタンも出す。"""
         box, row = self._new_box(title)
         for wdg in widgets:
             row.addWidget(wdg)
@@ -338,6 +347,8 @@ class CommandPanel(QFrame):
                 self.placeCommand.emit(_n, val)
 
         btn = None
+        if button is None:
+            button = not auto
         if auto:
             timer = QTimer(self)
             timer.setSingleShot(True)
@@ -359,9 +370,9 @@ class CommandPanel(QFrame):
                     continue
                 sig.connect(lambda *_a, _k=kind, _t=timer, _v=get_value:
                             self._auto_changed(_k, _t, _v))
-        else:
+        if button:
             btn = QPushButton("追加")
-            btn.setFixedWidth(52)
+            btn.setFixedWidth(btn_w)
             btn.clicked.connect(commit)
             row.addWidget(btn)
         # 「!」は欄ごとに役目が違う(利用者の指定 2026-10-31)。
@@ -609,8 +620,8 @@ class CommandPanel(QFrame):
         その位置に同じ命令が置いてある枠だけ、ボタンが「変更」に変わり、枠の
         線が明るくなる。欄の値は set_values でその命令自身の値になっている。
 
-        ボタンの無い欄(BPM / スクロール)は枠の線だけで示す — そちらは値を
-        いじった時点で、置いてあればその行を書き換え、無ければ足す。"""
+        ボタンの無い欄(BPM)は枠の線だけで示す — そちらは値をいじった時点で、
+        置いてあればその行を書き換え、無ければ足す。"""
         kinds = set(kinds or ())
         if kinds == self._editing:
             return

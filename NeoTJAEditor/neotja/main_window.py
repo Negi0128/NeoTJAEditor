@@ -2531,7 +2531,12 @@ class MainWindow(QMainWindow):
             # ハイスピ変換だけは「選んだ音符だけ」にかける(利用者の指定
             # 2026-10-01)。小節まるごとの本文を渡したうえで、その中のどこから
             # どこまでが対象かを割合で添える。
-            fn(span=self._pane_span(got))
+            # **HS の札を選んでいるときは札のほうが相手**(利用者の報告
+            # 2026-11-04)。音符ではなく、その札の値だけを刻み直す。
+            ce = getattr(self.preview_dock, "chart_edit", None)
+            getter = getattr(ce, "selection_scroll_positions", None)
+            on_scrolls = bool(getter()) if getter is not None else False
+            fn(span=self._pane_span(got), on_scrolls=on_scrolls)
         else:
             fn()
 
@@ -2554,8 +2559,15 @@ class MainWindow(QMainWindow):
         if ce is None:
             return None
         m0 = measures[0]
-        sel = (ce.selection_pos_span()
-               if hasattr(ce, "selection_pos_span") else None)
+        # HS の札を選んでいるなら、**その札の端から端まで**が範囲。音符しか
+        # 見ていなかったので、札を選んでも下の帯(右ドラッグで張った時間の帯)に
+        # 落ちていた(利用者の報告 2026-11-04)。
+        getter = getattr(ce, "selection_scroll_positions", None)
+        sp = getter() if getter is not None else []
+        sel = (sp[0], sp[-1]) if sp else None
+        if sel is None:
+            sel = (ce.selection_pos_span()
+                   if hasattr(ce, "selection_pos_span") else None)
         if sel is not None:
             a, b = sel
             am, bm = int(a), int(b)
@@ -2587,11 +2599,17 @@ class MainWindow(QMainWindow):
         if rng is None:
             self.statusBar().showMessage("作譜: 編集対象のコースが見つかりません", 4000)
             return None
-        # 相手は「選んだ音符 → 時間の帯 → カーソルの小節」の順。音符を
-        # クリックで選んだときは帯が張られないので、帯だけを見ていると
-        # カーソルの1小節しか渡らなかった(利用者の報告 2026-10-08)。
-        sel = (ce.selection_pos_span()
-               if hasattr(ce, "selection_pos_span") else None)
+        # 相手は「選んだ HS の札 → 選んだ音符 → 時間の帯 → カーソルの小節」の
+        # 順。音符をクリックで選んだときは帯が張られないので、帯だけを見て
+        # いるとカーソルの1小節しか渡らなかった(利用者の報告 2026-10-08)。
+        # 札も同じで、選んでも音符として数えられず1小節しか渡らなかった
+        # (利用者の報告 2026-11-04)。
+        getter = getattr(ce, "selection_scroll_positions", None)
+        sp = getter() if getter is not None else []
+        sel = (sp[0], sp[-1]) if sp else None
+        if sel is None:
+            sel = (ce.selection_pos_span()
+                   if hasattr(ce, "selection_pos_span") else None)
         addrs = ce._range_addresses()
         if sel is not None:
             m0, m1 = int(sel[0]), int(sel[1])
@@ -3065,7 +3083,7 @@ class MainWindow(QMainWindow):
         if dlg is not None:
             dlg.deleteLater()
 
-    def open_scroll_splitter(self, span=None):
+    def open_scroll_splitter(self, span=None, on_scrolls=False):
         # ツールバーのボタンとメニューからは clicked(bool) / triggered(bool) が
         # 第1引数に来る。範囲の指定と取り違えないよう、形で弾く。
         if not isinstance(span, (tuple, list)):
@@ -3087,7 +3105,8 @@ class MainWindow(QMainWindow):
         # 分からない)。利用者の指定 2026-10-15。
         bpm, meter, scroll = self._state_before(cursor.selectionStart())
         HighSpeedDialog(self, txt, apply, span=span, base_bpm=bpm,
-                        base_meter=meter, base_scroll=scroll).exec()
+                        base_meter=meter, base_scroll=scroll,
+                        on_scrolls=on_scrolls).exec()
 
     #: ヘッダの BPM を探す行。
     _HDR_BPM = "BPM:"

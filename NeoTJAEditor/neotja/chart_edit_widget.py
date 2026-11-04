@@ -1412,11 +1412,25 @@ class ChartEditWaveform(WaveformWidget):
             return None
         return (min(ps), max(ps))
 
+    def selection_scroll_positions(self):
+        """選んでいる #SCROLL の札の位置(分数)。早い順。1つも無ければ空。
+
+        ハイスピ変換は「範囲の中の音符すべてに #SCROLL を付ける」道具なので、
+        HS の札を選んで呼ぶと**帯に入った音符ぜんぶ**に付いていた(利用者の
+        報告 2026-11-04「選択したSCROLL以外にもSCROLLがついてしまう」)。
+        selection_pos_span が音符しか見ていないので、札を選んでも帯のほうに
+        落ちていたのが元。札を選んでいるときは、その札の所だけを相手にする。
+        """
+        return sorted(k[-1] for k in self._sel
+                      if k[0] == "cmd" and k[1] == "SCROLL")
+
     def has_tool_target(self):
         """道具(ハイスピ変換など)を効かせる相手があるか。
 
-        時間の帯か、選んだ音符のどちらかがあればよい。"""
-        return self.has_range() or self.selection_pos_span() is not None
+        時間の帯か、選んだ音符か、選んだ #SCROLL の札のどれかがあればよい
+        (札は利用者の報告 2026-11-04 で足した)。"""
+        return (self.has_range() or self.selection_pos_span() is not None
+                or bool(self.selection_scroll_positions()))
 
     # ------------------------------------------------------------------
     # PeepoDrumKit 式の操作

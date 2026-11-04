@@ -56,17 +56,23 @@ def _meter_of(line):
 class HighSpeedDialog(QDialog):
     def __init__(self, main_window, initial_text, apply_cb, parent=None,
                  span=None, base_bpm=None, base_meter=None,
-                 base_scroll=None):
+                 base_scroll=None, on_scrolls=False):
         """span を渡すと、その範囲に入っている音符だけに #SCROLL を入れる。
 
         形は ((小節の番号, 小節内の割合), (小節の番号, 割合))。小節の番号は
         **渡した本文の中での** 0 始まり、割合は 0.0〜1.0。作譜ペインで選んだ
         音符をそのまま渡せるよう、文字数ではなく割合で受ける(小節の分割数と
         画面のグリッドが違っても、同じ所を指せる)。
+
+        on_scrolls=True は「作譜ペインで **HS の札** を選んで呼んだ」の意味。
+        音符ではなく、範囲に入っている**元からの #SCROLL 行**の所だけに値を
+        刻む(利用者の報告 2026-11-04「選択したSCROLL以外にもSCROLLが
+        ついてしまう」)。札を選んだのに帯の中の音符ぜんぶに付いていた。
         """
         super().__init__(parent or main_window)
         self.apply_cb = apply_cb
         self._span = span
+        self._on_scrolls = bool(on_scrolls)
         # 範囲の**手前**で効いている値。本文(選んだ小節)だけでは分からない
         # ので、呼ぶ側が渡す。なめらかハイスピが「時間」で刻むのに要る
         # (利用者の指定 2026-10-15)。
@@ -92,7 +98,14 @@ class HighSpeedDialog(QDialog):
 
         # 開始は**範囲の手前で効いている値**を初期値にする。そこから
         # 動かさないなら命令を置く意味が無いので、同じ値なら置かない。
-        self.ed_start = QLineEdit(_fmt_scroll(self._base_scroll))
+        #
+        # ただし**札モードでは1本目の印が既にある #SCROLL そのもの**。
+        # 手前の値を初期値にすると、その1本が「1個前の値」に書き換わり、
+        # しかも手前と同じ値なので消され、以降が丸ごと1個ずれる
+        # (利用者の報告 2026-11-05)。札モードは1本目の札の値から。
+        self.ed_start = QLineEdit(
+            self._first_scroll_text(initial_text)
+            if self._on_scrolls else _fmt_scroll(self._base_scroll))
         form.addRow("開始 SCROLL", self.ed_start)
         # 終了は空欄で始める(どこまで持っていくかは毎回ちがうため)。
         self.ed_end = QLineEdit("")
@@ -166,6 +179,19 @@ class HighSpeedDialog(QDialog):
 
         self._on_mode_change()
 
+    def _first_scroll_text(self, raw):
+        """範囲に入っている1本目の #SCROLL の値の字面。無ければ手前の値。"""
+        try:
+            marks = self._scroll_marks(parse_measure_lines(raw.strip()))
+        except Exception:
+            marks = []
+        for _mi, _i, v in marks:
+            try:
+                return _fmt_scroll(float(v))
+            except (TypeError, ValueError):
+                continue
+        return _fmt_scroll(self._base_scroll)
+
     def _on_mode_change(self, *_):
         mode = self.cb_mode.currentText()
         self.row_interval.setVisible("特定間隔" in mode)
@@ -223,6 +249,11 @@ class HighSpeedDialog(QDialog):
             # 範囲の終わり(span)は最後の音符そのものを指しているので、
             # 最後の間隔ぶん伸ばした所を終わりとみなす。等間隔の譜面なら
             # 今までの 1 / 1.25 / 1.5 / 1.75 → 次が 2.0 と同じになる。
+            if self._on_scrolls and at:
+                # 1本目の印は札そのもの。範囲の端に持たせた余裕
+                # (±1/384)が混ざると、1本目が開始値きっかりに
+                # ならない(利用者の報告 2026-11-05)。
+                t0 = at[0]
             if tail_next:
                 if len(at) >= 2:
                     goal = at[-1] + (at[-1] - at[-2])
@@ -432,11 +463,61 @@ class HighSpeedDialog(QDialog):
             return False
         return True
 
+    def _scroll_marks(self, parsed):
+        """元からある #SCROLL の所 [(小節の番号, 何文字目, 値の字面)]。
+
+        札モード(_on_scrolls)専用。印の位置だけでなく **元の値** も返す。
+        開始の初期値に「選んだ1本目の札の値」を使うため(利用者の報告
+        2026-11-05「1個前の値に吸われる」)。
+        """
+        marks = []
+        seen = set()
+        mi = -1
+        # **元からある #SCROLL の所だけ。** 印は音符と同じ
+        # (小節の番号, 小節内の何文字目)で表せるので、_render_marks は
+        # そのまま使える。
+        #
+        # 元の #SCROLL は2通りの形で来る:
+        #   ・小節と小節のあいだの行(keep) … **次の小節の頭**に効く
+        #   ・小節の中の行(breaks)         … その小節の何文字目かに効く
+        pending = False          # 手前の行に #SCROLL があった
+        pend_val = None          # その #SCROLL の値
+        for item in parsed:
+            if item["type"] != "measure":
+                c = _cmd_of(item.get("text", ""))
+                if c is not None and c[0] == "SCROLL":
+                    pending = True
+                    pend_val = c[1]
+                continue
+            mi += 1
+            notes = item["notes"]
+            if not notes:
+                # 音符の無い小節には入れ直す場所が無い。次の小節へ持ち越す。
+                continue
+            if pending and self._in_span(mi, 0, len(notes)):
+                marks.append((mi, 0, pend_val))
+                seen.add((mi, 0))
+            pending = False
+            for idx, line in item["breaks"]:
+                c = _cmd_of(line)
+                if c is None or c[0] != "SCROLL":
+                    continue
+                # 小節の終わりにぶら下がっている行は、入れ直す場所が
+                # 無い(最後の音符の後ろ)。最後の音符の所とみなす。
+                i = min(idx, len(notes) - 1)
+                if self._in_span(mi, i, len(notes)) and (mi, i) not in seen:
+                    marks.append((mi, i, c[1]))
+                    seen.add((mi, i))
+        marks.sort()
+        return marks
+
     def _marks_for(self, parsed, mode):
         """#SCROLL を入れる所 [(小節の番号, 小節内の何文字目)] を順に。
 
         3つのモードの違いはここだけ。描き出しは _render_marks に一本化した。
         """
+        if self._on_scrolls:
+            return [(mi, i) for mi, i, _v in self._scroll_marks(parsed)]
         marks = []
         mi = -1
         if "特定間隔" in mode:
