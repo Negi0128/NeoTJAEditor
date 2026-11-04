@@ -286,6 +286,9 @@ class TJACourseAnalyzer:
         total_time = Decimal("0")
         curr_bpm = bpm
         measure_val = Decimal("1")
+        # BPM の幅(利用者の希望 2026-11-04)。#BPMCHANGE で通った値を全部見る
+        # — 音符が無い所の変化も曲の速さには違いないので数える。
+        bpm_seen = [float(bpm)] if bpm else []
 
         don = 0
         ka = 0
@@ -307,6 +310,8 @@ class TJACourseAnalyzer:
             for ev in m_events:
                 if ev[0] == "#BPMCHANGE":
                     curr_bpm = ev[1]
+                    if curr_bpm:
+                        bpm_seen.append(float(curr_bpm))
                 elif ev[0] == "#MEASURE":
                     measure_val = ev[1]
                 elif ev[0] == "#DELAY":
@@ -379,8 +384,13 @@ class TJACourseAnalyzer:
             "notes": n_notes,
             "density": density,
             "note_span": note_span,
+            # ドン/カッは**大音符も含めた数**(tja-tools の Don+DON / Ka+KA と
+            # 同じ数え方)。大音符だけの数は別に出す(利用者の希望 2026-11-04)。
             "don_count": don + big_don,
             "ka_count": ka + big_ka,
+            "big_count": big_don + big_ka,
+            "bpm_min": (min(bpm_seen) if bpm_seen else 0.0),
+            "bpm_max": (max(bpm_seen) if bpm_seen else 0.0),
             "measures": len(measures),
             "time": time_str,
             "rolls_info": rolls_info,

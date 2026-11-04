@@ -113,13 +113,22 @@ class CourseCard(QFrame):
 
         self.lbl_time = QLabel()
         self.lbl_notes = QLabel()
+        # 音符の内訳と BPM の幅(利用者の希望 2026-11-04。tja-tools に
+        # あるものを入れてほしい、という要望から)。
+        self.lbl_breakdown = QLabel()
+        self.lbl_breakdown.setToolTip(
+            "ドン/カッは大音符もそれぞれに数えています"
+            "(tja-tools の Don+DON / Ka+KA と同じ数え方)。" + chr(10) +
+            "括弧はドン:カッの割合です。連打と風船は数に入れません。")
+        self.lbl_bpm = QLabel()
         self.lbl_density = QLabel()
         self.lbl_density.setToolTip(
             "最初の音符から最後の音符までで割った、音符の詰まり具合。\n"
             "連打と風船は数に入れません(上の「ノーツ」と同じ数え方)。")
         self.lbl_measures = QLabel()
         self.lbl_roll = QLabel()
-        for lbl in (self.lbl_time, self.lbl_notes, self.lbl_density,
+        for lbl in (self.lbl_time, self.lbl_notes, self.lbl_breakdown,
+                    self.lbl_bpm, self.lbl_density,
                     self.lbl_measures, self.lbl_roll):
             body_layout.addWidget(lbl)
 
@@ -161,6 +170,36 @@ class CourseCard(QFrame):
     def update_course(self, course):
         self.lbl_time.setText(f"時間: {course['time']}")
         self.lbl_notes.setText(f"ノーツ: {course['notes']}")
+
+        # 内訳と、ドン:カッの割合(利用者の指定 2026-11-04)。音符が1つも
+        # 無いコースでは出さない(「0 / 0」は読む意味が無い)。大音符の数は
+        # 出さない — ドン/カッそれぞれに数え込んである。
+        don = course.get("don_count") or 0
+        ka = course.get("ka_count") or 0
+        if don or ka:
+            tot = float(don + ka)
+            self.lbl_breakdown.setText(
+                f"　ドン {don} / カッ {ka}"
+                f"　({don / tot * 100:.2f}% : {ka / tot * 100:.2f}%)")
+            self.lbl_breakdown.setVisible(True)
+        else:
+            self.lbl_breakdown.setVisible(False)
+
+        # BPM の幅。変わらない曲は1つだけ出す。
+        b0 = course.get("bpm_min") or 0.0
+        b1 = course.get("bpm_max") or 0.0
+
+        def _bpm(v):
+            # 150.0 は 150 と出す。小数が要るものだけ小数で。
+            return f"{v:.3f}".rstrip("0").rstrip(".")
+
+        if b1 > 0:
+            self.lbl_bpm.setText("BPM: " + (_bpm(b0) if abs(b1 - b0) < 1e-9
+                                            else f"{_bpm(b0)}〜{_bpm(b1)}"))
+            self.lbl_bpm.setVisible(True)
+        else:
+            self.lbl_bpm.setVisible(False)
+
         dens = course.get("density") or 0.0
         self.lbl_density.setText(
             f"平均密度: {dens:.2f} 打/秒" if dens > 0 else "平均密度: ―")
