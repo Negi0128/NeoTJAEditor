@@ -3131,6 +3131,18 @@ class MainWindow(QMainWindow):
         # 第1引数に来る。範囲の指定と取り違えないよう、形で弾く。
         if not isinstance(span, (tuple, list)):
             span = None
+        if span is None:
+            # 範囲を渡されずに来た = ツールバーかメニューから。作譜ペインで
+            # **HS の札を選んでいるなら、そちらが相手**。この入口は札を
+            # 一切見ていなかったので、札を選んでボタンを押すと古い道
+            # (音符ぜんぶに #SCROLL、開始は範囲の手前の値)へ落ちていた
+            # (利用者の報告 2026-11-05「開始SCROLLが1個前 / 終了が最後に
+            # 反映されない / 選択した最初のSCROLLが消える」)。
+            ce = getattr(self.preview_dock, 'chart_edit', None)
+            getter = getattr(ce, 'selection_scroll_positions', None)
+            if getter is not None and getter():
+                self.run_chart_tool('highspeed')
+                return
         cursor, txt = self._get_selection()
         if txt is None:
             return
