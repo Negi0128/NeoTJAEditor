@@ -184,7 +184,16 @@ class SettingsDialog(QDialog):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(edit, 1)
         browse_btn = QPushButton("参照...")
-        browse_btn.clicked.connect(on_browse)
+        # **押された状態(bool)は捨てる。** clicked は「押されているか」を1つ
+        # 渡してくるので、引数を受け取れる形の on_browse にはそれが入って
+        # しまう。F2・F3 のパスは `def browse(edit=path_edit)` と書いて欄を
+        # 持たせていたため、edit に False が入って AttributeError になり、
+        # ファイルを選んでも欄が空のままだった(利用者の報告 2026-11-04
+        # 「環境設定でTNDEを選択してもパスが登録されない」)。例外は Qt が
+        # 握りつぶすので、exe では何も出ずに「押しても反応しない」に見える。
+        # 呼ぶ側ではなくここで断つ — 参照ボタンは6か所あり、同じ書き方を
+        # した誰かがまた踏む。
+        browse_btn.clicked.connect(lambda *_: on_browse())
         row_layout.addWidget(browse_btn)
         if with_clear:
             clear_btn = QPushButton("クリア")
