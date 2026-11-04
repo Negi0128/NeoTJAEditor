@@ -983,12 +983,17 @@ class ChartEditWaveform(WaveformWidget):
                     self.set_selection(band)
                 self._move_cursor_to_x(x)
                 return
-            # 何も無い所 = 選択を外してカーソルを置く(押したまま引っぱると
-            # カーソルが付いてくる)。囲って選ぶのは右ドラッグだけ
-            # (利用者の指定 2026-09-26)。
+            # 何も無い所 = 選択を外してカーソルを置く。囲って選ぶのは
+            # 右ドラッグだけ(利用者の指定 2026-09-26)。
+            #
+            # **擦って赤い線を運べるのは上の目盛りの帯だけ。** 帯の本体でも
+            # 付いてくる作りだったので、1/16 の目盛が数 px しかない所では
+            # 手の揺れだけで隣へ飛び、再生中は景色が流れているぶん大きく
+            # 飛んでいた(利用者の報告 2026-11-05)。PeepoDrumKit も
+            # 目盛りの三角でだけ運ぶ。
             if not ctrl:
                 self.clear_selection()
-            self._dragging = True
+            self._dragging = y < self.RULER_H
             self._move_cursor_to_x(x)
             return
         super().mousePressEvent(event)
@@ -1016,7 +1021,7 @@ class ChartEditWaveform(WaveformWidget):
         if not (event.buttons() & (Qt.LeftButton | Qt.RightButton)):
             hit = self._object_at(event.position().x(), event.position().y())
             self.setCursor(Qt.SizeHorCursor if hit is not None else Qt.ArrowCursor)
-        # ドラッグでシークするあいだ、編集カーソルも一緒に付いていく
+        # 目盛りの帯を擦っているあいだ、編集カーソルも一緒に付いていく
         # (シークはカーソルがグリッドの位置で出す)。
         if self._dragging and not self.offset_mode:
             if event.buttons() & Qt.LeftButton:
