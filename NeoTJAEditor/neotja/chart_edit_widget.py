@@ -929,7 +929,11 @@ class ChartEditWaveform(WaveformWidget):
             self.setFocus(Qt.MouseFocusReason)
             x, y = event.position().x(), event.position().y()
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
-            self._band = {"x0": x, "y0": y, "x1": x, "y1": y,
+            # 始点は px ではなく**時刻**で持つ。引いている最中にホイールで
+            # 景色を送ると、px のままでは始点が譜面と一緒に流れてしまい、
+            # 1画面より広い範囲が囲えなかった(利用者の報告 2026-11-05)。
+            self._band = {"t0": self._x_to_sec(x), "y0": y,
+                          "x1": x, "y1": y,
                           "add": set(self._sel) if ctrl else set(),
                           "ctrl": ctrl, "cleared": False}
             # 押した時点では選択を外さない。引かずに離せばただの右クリック
@@ -1011,7 +1015,7 @@ class ChartEditWaveform(WaveformWidget):
             # 四角が動き出した所で、前の選択を外す(Ctrl なら足すので残す)。
             # 離すときの「引いたかどうか」と同じ 4px で判断する。
             if (not bd["ctrl"] and not bd["cleared"]
-                    and (abs(bd["x1"] - bd["x0"]) >= 4
+                    and (abs(bd["x1"] - self._band_x0(bd)) >= 4
                          or abs(bd["y1"] - bd["y0"]) >= 4)):
                 bd["cleared"] = True
                 self.clear_selection()
@@ -1035,7 +1039,8 @@ class ChartEditWaveform(WaveformWidget):
             return
         if event.button() == Qt.RightButton and self._band is not None:
             bd, self._band = self._band, None
-            if abs(bd["x1"] - bd["x0"]) >= 4 or abs(bd["y1"] - bd["y0"]) >= 4:
+            if (abs(bd["x1"] - self._band_x0(bd)) >= 4
+                    or abs(bd["y1"] - bd["y0"]) >= 4):
                 self._select_band(bd)
             else:
                 # 引かずに離した = ただの右クリック。作譜メニューを出す
@@ -1310,11 +1315,16 @@ class ChartEditWaveform(WaveformWidget):
     def clear_selection(self):
         self.set_selection(())
 
+    def _band_x0(self, bd):
+        """四角の始点のいまの画面位置。控えてある時刻から出し直す。"""
+        return self._sec_to_x(bd["t0"])
+
     def _select_band(self, bd):
         """囲った四角の中のものを選び、時間の帯も張る。"""
-        hit = self._objects_in_rect(bd["x0"], bd["y0"], bd["x1"], bd["y1"])
+        x0 = self._band_x0(bd)
+        hit = self._objects_in_rect(x0, bd["y0"], bd["x1"], bd["y1"])
         self.set_selection(set(bd["add"]) | hit)
-        lo_x, hi_x = sorted((bd["x0"], bd["x1"]))
+        lo_x, hi_x = sorted((x0, bd["x1"]))
         a0 = self._address_from_time(max(0.0, self._x_to_sec(lo_x)))
         a1 = self._address_from_time(max(0.0, self._x_to_sec(hi_x)))
         if a0 is not None and a1 is not None:
@@ -2721,7 +2731,7 @@ class ChartEditWaveform(WaveformWidget):
                     p.drawRect(x0, ry + 2, x1 - x0, rh - 4)
         if self._band is not None:
             bd = self._band
-            lo_x, hi_x = sorted((bd["x0"], bd["x1"]))
+            lo_x, hi_x = sorted((self._band_x0(bd), bd["x1"]))
             lo_y, hi_y = sorted((bd["y0"], bd["y1"]))
             p.fillRect(int(lo_x), int(lo_y), int(hi_x - lo_x), int(hi_y - lo_y),
                        QColor(r, g, b, 30))
