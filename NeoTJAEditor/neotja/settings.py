@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sys
@@ -462,7 +463,12 @@ def load_settings() -> dict:
         except Exception:
             pass
     if _BASELINE is None:
-        _BASELINE = dict(data)
+        # **深いコピー。** run_config と custom_shortcuts は入れ子の辞書で、
+        # 浅いコピーだと控えと本体が同じ物を指す。F2 のパスを入れると控えも
+        # 一緒に変わり、_merge_for_save が「自分では変えていない」と見て
+        # ファイル側(古い空のパス)を書き戻していた(利用者の報告 2026-11-05
+        # 「一回保存して戻ると消える」)。
+        _BASELINE = copy.deepcopy(data)
     return data
 
 
@@ -562,7 +568,7 @@ def save_settings(config_data: dict) -> bool:
         ok = _write_settings(fallback, config_data)
     if ok:
         # 書けたぶんが「いまファイルに載っている値」になる。
-        _BASELINE = dict(config_data)
+        _BASELINE = copy.deepcopy(config_data)
     return ok
 
 
