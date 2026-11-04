@@ -79,6 +79,18 @@ class _ImagePreviewBase(QDialog):
         self.style_combo.addItem("本家風", "honke")
         self.style_combo.currentIndexChanged.connect(self._request_regen)
         top.addWidget(self.style_combo)
+        # 倍率(利用者の指定 2026-11-04)。1倍が tja-tools とまったく同じ寸法で、
+        # 細かい譜面を読みたいときに上げる。**拡大ではなく描き直し**なので
+        # 字も線もぼけない。
+        top.addWidget(QLabel("倍率:"))
+        self.scale_combo = QComboBox()
+        for lbl, v in (("1倍", 1.0), ("2倍", 2.0), ("3倍", 3.0)):
+            self.scale_combo.addItem(lbl, v)
+        self.scale_combo.setToolTip(
+            "1倍は tja-tools と同じ大きさです。" + chr(10)
+            + "読みづらいときに上げてください(拡大ではないのでぼけません)。")
+        self.scale_combo.currentIndexChanged.connect(self._request_regen)
+        top.addWidget(self.scale_combo)
         top.addStretch()                      # ← これで派生側の行は右寄せになる
         self._build_options_row(top)
         layout.addLayout(top)
@@ -122,6 +134,10 @@ class _ImagePreviewBase(QDialog):
 
     def _render_image(self, style, sprites):
         raise NotImplementedError
+
+    def _scale(self):
+        v = self.scale_combo.currentData() if hasattr(self, "scale_combo") else 1.0
+        return float(v or 1.0)
 
     # --- 共通処理 ---
     def _request_regen(self, *_a):
@@ -267,6 +283,7 @@ class TJAImagePreviewDialog(_ImagePreviewBase):
             self.content, self.selected_label, courses, sprites, style=style,
             measure_from=None if full else m_from,
             measure_to=None if full else m_to,
+            scale=self._scale(),
         )
         title = next((l[6:].strip() for l in self.content.split('\n')
                       if l.startswith("TITLE:")), "No Title")
@@ -335,4 +352,5 @@ class FreeChartImageDialog(_ImagePreviewBase):
         if not courses:
             raise ValueError("譜面を読み取れませんでした。本文を確認してください。")
         self._save_basename = "譜面画像"
-        return generate_chart_image(content, courses[0]["label"], courses, sprites, style=style)
+        return generate_chart_image(content, courses[0]["label"], courses,
+                                    sprites, style=style, scale=self._scale())
