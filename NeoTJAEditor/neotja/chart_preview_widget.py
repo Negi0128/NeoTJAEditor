@@ -2034,7 +2034,13 @@ class ChartPreviewWidget(QWidget):
         # (利用者の報告 2026-10-25「黄色い連打の音符が短く描写される」)。
         # 素材が無いときの帯(_draw_roll_bar)は前から x1 を中心に丸を置いて
         # いて、2つの描き方が食い違っていた。こちらを合わせる。
-        total = max(cap_dst, (x1 + r) - x0)
+        # **尻尾の絵の幅を下限にしない。** cap_dst は帯の高さと同じ(素材を
+        # 正方形で切り出しているため)= 音符の直径なので、ここを下限にすると
+        # どれだけ短い連打も直径1個ぶんの長さで止まっていた。192分でも
+        # 2000分でも同じ長さに見えるのはこれが理由(利用者の報告 2026-11-04
+        # 「めっちゃ短い連打を置いたら特定の短さに固定される」)。本家は
+        # 尻尾を終点に置くだけで、短ければ頭と重なる。
+        total = max(0.0, (x1 + r) - x0)
         mid_dst = max(0.0, total - cap_dst)
         # head は丸い顔で、x0-r〜x0+r の外接矩形をいっぱいには塗っていない
         # (素材を alpha でタイトクロップした結果、正方形より少し細い)。
@@ -2062,7 +2068,11 @@ class ChartPreviewWidget(QWidget):
                                        QRegion.Ellipse))
         painter.setClipRegion(region, Qt.IntersectClip)
         body_rect = QRectF(x0 - r, cy - r, mid_dst + r, d)
-        cap_rect = QRectF(x0 + mid_dst, cy - r, cap_dst, d)
+        # 尻尾は**右端が終点(x1+r)**に来るように置く。mid_dst を足していた
+        # ころは total が cap_dst で底上げされている前提だったので、下限を
+        # 外した今は右端が合わない。短い連打では頭の上へ潜り込むが、下の
+        # クリップで頭の丸の中に収まるので輪郭からは出ない。
+        cap_rect = QRectF(x0 + total - cap_dst, cy - r, cap_dst, d)
         painter.drawPixmap(body_rect, mid, QRectF(0, 0, mid.width(), mid.height()))
         painter.drawPixmap(cap_rect, cap, QRectF(0, 0, cap.width(), cap.height()))
         if heat > 0.0:
