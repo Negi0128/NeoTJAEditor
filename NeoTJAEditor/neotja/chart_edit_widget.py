@@ -1875,6 +1875,16 @@ class ChartEditWaveform(WaveformWidget):
         clr.setEnabled(self.has_range())
         clr.triggered.connect(self.clear_range)
 
+    def _delete_selected_measures(self):
+        """上の目盛りで選んだ小節を消してもらう(Delete と右クリックの両方)。"""
+        if not self._sel_measures:
+            return False
+        ms = self.selected_measures()
+        self._sel_measures = set()
+        self.update()
+        self.measuresDeleteRequested.emit(ms)
+        return True
+
     def _measure_menu(self, menu):
         """小節を選んでいるときの右クリックメニュー。
 
@@ -1891,6 +1901,10 @@ class ChartEditWaveform(WaveformWidget):
         ins = menu.addAction("小節を前に挿入…")
         ins.setData("measure_insert")
         ins.triggered.connect(self.open_measure_insert)
+        # 消すのは Delete と同じ所へ(利用者の指定 2026-11-05)。
+        dele = menu.addAction("小節を削除	Delete")
+        dele.setData("measure_delete")
+        dele.triggered.connect(self._delete_selected_measures)
         menu.addSeparator()
         clr = menu.addAction("選択を解除")
         clr.setData("measure_clear")
@@ -2419,10 +2433,7 @@ class ChartEditWaveform(WaveformWidget):
             # 上の目盛りで小節を選んでいれば、その小節をまるごと消す
             # (利用者の希望 2026-11-05)。本文を触るのは窓のほう。
             if self._sel_measures:
-                ms = self.selected_measures()
-                self._sel_measures = set()
-                self.update()
-                self.measuresDeleteRequested.emit(ms)
+                self._delete_selected_measures()
                 return
         if key == Qt.Key_Delete:
             # 範囲があれば範囲を、無ければカーソルの音符を消す。長い音符は
