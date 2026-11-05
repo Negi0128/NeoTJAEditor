@@ -18,7 +18,8 @@ import time
 from fractions import Fraction
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import (QBrush, QColor, QPainter, QPen, QPixmap,
+                           QPolygon)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QSlider, QVBoxLayout,
                                QWidget)  # noqa: F401  (QWidget は型注釈用)
@@ -2904,7 +2905,18 @@ class ChartEditWaveform(WaveformWidget):
                     p.drawRect(x0 - 3, cy - hh, (x1 - x0) + 6, 2 * hh)
                 else:
                     ry, rh = rect
+                    # 囲みは**次の命令の手前まで**。札の幅は決め打ち(48px)
+                    # なので、命令が詰まっている所では隣へはみ出して、
+                    # 選んだものが1つの塊に見えていた(利用者の報告
+                    # 2026-11-05: SCROLL が大量に並ぶ譜面)。
+                    x1 = min(x1, self._cmd_next_x(orow, t, x0))
                     p.drawRect(x0, ry + 2, x1 - x0, rh - 4)
+                    # 命令が詰まっている所では、細い四角だけではどれを
+                    # 選んだのか見えない(利用者の報告 2026-11-05:
+                    # SCROLL が大量に並ぶ譜面)。その命令の縦線そのものを
+                    # 太く塗って、行の上に三角の印を出す。
+                    self._draw_cmd_pick(p, x0 + 2, ry, rh)
+                    p.setPen(QPen(QColor(r, g, b, 235), 2))
         if self._band is not None:
             bd = self._band
             lo_x, hi_x = sorted((self._band_x0(bd), bd["x1"]))
@@ -2915,6 +2927,37 @@ class ChartEditWaveform(WaveformWidget):
             pen.setStyle(Qt.DashLine)
             p.setPen(pen)
             p.drawRect(int(lo_x), int(lo_y), int(hi_x - lo_x), int(hi_y - lo_y))
+
+    #: 選んだ命令を指す印。縦線の太さと、行の上に出す三角の大きさ(px)。
+    CMD_PICK_W = 3
+    CMD_PICK_TRI = 5
+
+    def _cmd_next_x(self, kind, t, x0):
+        """同じ行の次の命令の1つ手前の x。次が無ければ上限なし。"""
+        times = (self._cmd_kind_times or {}).get(kind) or []
+        i = bisect.bisect_right(times, t + 1e-9)
+        if i >= len(times):
+            return float("inf")
+        return max(x0 + 3, self._sec_to_x(times[i]) - 1)
+
+    def _draw_cmd_pick(self, p, x, ry, rh):
+        """選んだ命令の位置に、太い縦線と三角の印を出す。
+
+        命令が 1px 間隔で並ぶ譜面でも「どれを選んでいるか」が見えるように
+        するためのもの(利用者の報告 2026-11-05)。札の文字は細い縦線で
+        位置を示すだけなので、選んだ印も**その線の所**へ重ねる。"""
+        r, g, b = self.RANGE_COLOR
+        col = QColor(r, g, b, 235)
+        x = int(x)
+        w = self.spx(self.CMD_PICK_W)
+        p.fillRect(x - w // 2, int(ry) + 2, max(1, w), int(rh) - 4, col)
+        s = self.spx(self.CMD_PICK_TRI)
+        tri = QPolygon([QPoint(x - s, int(ry)), QPoint(x + s, int(ry)),
+                        QPoint(x, int(ry) + s)])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(col))
+        p.drawPolygon(tri)
+        p.setBrush(Qt.NoBrush)
 
     def _draw_note_drag(self, p, top, strip, note_cy=None):
         """つかんで動かしている最中の見せ方。選んだものを掴んだぶんだけ横へ
