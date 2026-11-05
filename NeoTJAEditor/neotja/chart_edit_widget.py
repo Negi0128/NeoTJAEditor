@@ -1187,8 +1187,14 @@ class ChartEditWaveform(WaveformWidget):
     #: 範囲の命令の名前 → どの行に出すか / 札の字。
     _CMD_ROW = {"GOGOSTART": "gogo", "GOGOEND": "gogo",
                 "BARLINEOFF": "barline", "BARLINEON": "barline"}
+    #: 札の字。**入りきるときだけ**出す(_draw_cmd_marks)。短いゴーゴーが
+    #: 並ぶと「開始 終了 開始 終了…」の壁になって、どこが区間なのか
+    #: 読めなくなっていた(利用者の報告 2026-11-05)。
     _CMD_LABEL = {"GOGOSTART": "開始", "GOGOEND": "終了",
                   "BARLINEOFF": "OFF", "BARLINEON": "ON"}
+    #: 字が入らないときに代わりに出す印。向きで開始/終了が分かる。
+    _CMD_GLYPH = {"GOGOSTART": "▶", "GOGOEND": "◀",
+                  "BARLINEOFF": "▶", "BARLINEON": "◀"}
 
     _SPAN_ROWS = {"gogo": ("GOGOSTART", "GOGOEND"),
                   "barline": ("BARLINEOFF", "BARLINEON")}
@@ -2312,6 +2318,8 @@ class ChartEditWaveform(WaveformWidget):
     #: 行の中身の色。区間の行(小節線・ゴーゴー)は同じ灰色にそろえる
     #: (利用者の指定 2026-09-25: 色が増えると認識しにくい)。
     ROW_CONTENT_COLOR = "#c8c8c8"
+    #: 小節線を隠している区間の帯。ゴーゴーの帯と見分けが付く色にする。
+    BARLINE_BAND_COLOR = "#6f7fa0"
 
     #: 表示倍率で掛け直す px の定数(WaveformWidget.set_ui_scale 参照)。
     SCALED_PX = WaveformWidget.SCALED_PX + (
@@ -3004,6 +3012,11 @@ class ChartEditWaveform(WaveformWidget):
         # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
         # 指定 2026-09-26)。
         if self._region_audio is not None:
+            # 小節線を隠している区間も帯で見せる(ゴーゴーと同じ読み方)。
+            # 字をやめたので、隠れているかどうかは帯の有無で読む。
+            self._draw_span_row(p, rows["barline"], self._barline_audio,
+                                self.BARLINE_BAND_COLOR, t0, t1,
+                                ("BARLINEOFF", "BARLINEON"))
             self._draw_cmd_marks(p, rows["barline"], "barline", t0, t1)
         else:
             self._draw_marker_row(p, rows["barline"], self._barline_audio,
@@ -3420,8 +3433,13 @@ class ChartEditWaveform(WaveformWidget):
             return int(self._drag_dx())
         return self._sec_to_x(gt) - self._sec_to_x(t)
 
-    def _draw_span_row(self, p, rect, spans, color, t0, t1):
-        """ゴーゴーの帯。端をつかんでいる間は、その端だけが付いてくる。"""
+    def _draw_span_row(self, p, rect, spans, color, t0, t1,
+                       names=("GOGOSTART", "GOGOEND")):
+        """区間の帯。端をつかんでいる間は、その端だけが付いてくる。
+
+        names は端の命令の名前(つかんで動かしているぶんを足すのに要る)。
+        小節線の行にも同じ帯を出すので、行ごとに差し替えられるようにした。
+        """
         y, rh = rect
         if not spans:
             return
@@ -3431,8 +3449,10 @@ class ChartEditWaveform(WaveformWidget):
         for s_t, e_t in spans:
             if e_t < t0 or s_t > t1:
                 continue
-            xs = self._sec_to_x(s_t) + self._drag_dx_for("GOGOSTART", s_t, snap=True)
-            xe = self._sec_to_x(e_t) + self._drag_dx_for("GOGOEND", e_t, snap=True)
+            xs = self._sec_to_x(s_t) + self._drag_dx_for(names[0], s_t,
+                                                        snap=True)
+            xe = self._sec_to_x(e_t) + self._drag_dx_for(names[1], e_t,
+                                                        snap=True)
             lo, hi = sorted((xs, xe))
             p.fillRect(lo, y + 3, max(2, hi - lo), rh - 6, fill)
             p.setPen(QPen(col, 1))
@@ -3458,33 +3478,24 @@ class ChartEditWaveform(WaveformWidget):
         return self._row_width_cache
 
     def _draw_cmd_marks(self, p, rect, row, t0, t1):
-        """範囲の命令を**1本ずつ**札で出す(_region_audio から)。
-        同じ所に重なった2本目も、ずれた分だけ右へ出して見えるようにする。"""
+        """範囲の命令を**1本ずつ**印で出す(_region_audio から)。
+
+        **字は出さない。** 「開始/終了」と書いていたころは、短いゴーゴーが
+        並ぶと字が隣へ逃げて壁になり、どこが区間なのかも読めなくなって
+        いた(利用者の報告 2026-11-05「文字みたくない。情報量が増える」)。
+        区間は帯の色で読み、ここは「命令がここに1本ある」ことだけを
+        2px の縦線で示す。同じ所に2本あれば線も2本出るので、余分な1本を
+        選んで消せる。
+        """
         y, rh = rect
         marks = [(t, n) for t, n in (self._region_audio or [])
                  if self._CMD_ROW.get(n) == row and t0 <= t <= t1]
         if not marks:
             return
-        p.setFont(self._row_font())
-        col = QColor(self.ROW_CONTENT_COLOR)
-        p.setPen(QPen(col, 1))
-        fm = p.fontMetrics()
-        widths = self._row_text_widths(fm)
-        last_x = None
-        for t, name in sorted(marks):
-            text = self._CMD_LABEL.get(name, name)
-            tw = widths.get(text)
-            if tw is None:
-                tw = widths[text] = fm.horizontalAdvance(text)
+        p.setPen(QPen(QColor(self.ROW_CONTENT_COLOR), 2))
+        for t, name in marks:
             x = self._sec_to_x(t) + self._drag_dx_for(name, t)
-            p.drawLine(x, y + 1, x, y + rh - 1)
-            # 字だけは重ならない所まで右へ逃がす(線は本当の位置のまま)。
-            tx = x + 3
-            if last_x is not None and tx < last_x:
-                tx = last_x
-            p.drawText(tx, y, tw + 6, rh,
-                       Qt.AlignVCenter | Qt.AlignLeft, text)
-            last_x = tx + tw + 4
+            p.drawLine(x, y + 2, x, y + rh - 2)
 
     def _draw_marker_row(self, p, rect, spans, names, labels, t0, t1):
         """小節線のような「ここから / ここまで」の印。札で出す。
