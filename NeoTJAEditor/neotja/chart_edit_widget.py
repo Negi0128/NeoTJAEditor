@@ -988,6 +988,15 @@ class ChartEditWaveform(WaveformWidget):
                 self._dragging = True
                 return
             obj = self._object_at(x, y)
+            if obj is None and self.near_playhead(x, y):
+                # 赤い線そのものをつかんで運ぶ(利用者の指定 2026-11-05
+                # 「シークバー(赤い線)まだつかめない」)。音符や命令の上は
+                # そちらが優先 — 線は上に重なって描かれているだけなので、
+                # つかめるのは**何も無い所**に限る。
+                self._dragging = True
+                self.setCursor(Qt.SizeHorCursor)
+                event.accept()
+                return
             if obj is not None:
                 # オブジェクトを押した = 選ぶ(Ctrl なら足し引き)。そのまま
                 # 横へ引っぱると、選んだものをまとめて動かせる。
@@ -1064,8 +1073,10 @@ class ChartEditWaveform(WaveformWidget):
             return
         # オブジェクトの上ではカーソルの形を変える(つかめることが分かる)。
         if not (event.buttons() & (Qt.LeftButton | Qt.RightButton)):
-            hit = self._object_at(event.position().x(), event.position().y())
-            self.setCursor(Qt.SizeHorCursor if hit is not None else Qt.ArrowCursor)
+            hx, hy = event.position().x(), event.position().y()
+            hit = self._object_at(hx, hy)
+            grab = hit is not None or self.near_playhead(hx, hy)
+            self.setCursor(Qt.SizeHorCursor if grab else Qt.ArrowCursor)
         # 目盛りの帯を擦っているあいだ、編集カーソルも一緒に付いていく
         # (シークはカーソルがグリッドの位置で出す)。
         if self._dragging and not self.offset_mode:
@@ -1088,6 +1099,11 @@ class ChartEditWaveform(WaveformWidget):
             self._dragging = False
             self._pick_measure(mm, ctrl)
             return
+        if event.button() == Qt.LeftButton and self._dragging:
+            # 目盛りを擦っていた/赤い線をつかんでいた、のどちらも here で終い。
+            self._dragging = False
+            self.setCursor(Qt.ArrowCursor)
+            return
         if event.button() == Qt.LeftButton and self._note_drag is not None:
             self._finish_note_drag()
             return
@@ -1106,6 +1122,20 @@ class ChartEditWaveform(WaveformWidget):
             self.update()
             return
         super().mouseReleaseEvent(event)
+
+    #: 赤い線をつかめる幅(px)。線の左右それぞれにこのぶん。
+    PLAYHEAD_GRAB_PX = 6
+
+    def near_playhead(self, x, y=None):
+        """赤い線をつかめる所か(利用者の指定 2026-11-05)。
+
+        目盛りの帯は小節を選ぶ所なので、つかめるのはその下だけ。"""
+        if y is not None and y < self.RULER_H:
+            return False
+        if self._visible_span() <= 0:
+            return False
+        return (abs(float(x) - self._sec_to_x(self.position_sec))
+                <= self.spx(self.PLAYHEAD_GRAB_PX))
 
     def _free_seek(self, t):
         """グリッドに合わせず、その時刻へ赤い線を置いてシークを頼む。
