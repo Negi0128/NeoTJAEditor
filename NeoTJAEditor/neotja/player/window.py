@@ -267,7 +267,8 @@ class PlayerWindow(QMainWindow):
         layout = "wave" if pd.bottom_stack.currentIndex() == pd.MODE_WAVE else "game"
         from neotja.dialogs.record_dialog import RecordDialog
         dlg = RecordDialog(self, preview, pd.spin_offset.value(), wave,
-                           pd.duration_seconds(), out_dir, layout=layout)
+                           pd.song_duration_seconds(), out_dir,
+                           layout=layout)
         dlg.finished.connect(self._on_record_dialog_finished)
         self._record_dialog = dlg
         dlg.show()

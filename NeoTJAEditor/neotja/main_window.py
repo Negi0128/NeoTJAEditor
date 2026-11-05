@@ -3212,7 +3212,7 @@ class MainWindow(QMainWindow):
             layout = "multi"
         dlg = RecordDialog(
             self, preview_data, pd.spin_offset.value(), wave,
-            pd.duration_seconds(), out_dir, layout=layout,
+            pd.song_duration_seconds(), out_dir, layout=layout,
             multi_previews=multi_previews,
         )
         # 閉じられたら参照を手放す。持ったままだと画面外の描画用ウィジェット

@@ -2445,7 +2445,9 @@ class PreviewDock(QDockWidget):
             # ここへは来ない(set_bottom_mode が can_multi で先に弾く)。
             # 来てしまったときは、画面だけ差し替えずに何もしない。
             return
-        offset = self.spin_offset.value()
+        # 頭に足した助走ぶんも渡す。素の OFFSET のままだと、同時再生の帯だけ
+        # 曲と打音から助走ぶんずれる(利用者の報告 2026-11-06)。
+        offset = self._grid_offset()
         screens = [make_band_screen(d, offset, self._se_text_enabled)
                    for d in previews]
         if self._multi_screen is None:
@@ -2643,13 +2645,13 @@ class PreviewDock(QDockWidget):
                 break
         if best is None:
             return None
-        return max(0.0, best - self.spin_offset.value())
+        return max(0.0, best - self._grid_offset())
 
     def _audio_time_to_line(self, t_audio):
         """音源時刻がどの小節にあたるかを見て、その小節の開始行を返す。"""
         if not self._bar_lines:
             return None
-        tc = t_audio + self.spin_offset.value()
+        tc = t_audio + self._grid_offset()
         best = None
         for t, ln in zip(self._bar_times_chart, self._bar_lines):
             # 小節頭ちょうどを拾いたいので、丸め誤差ぶんだけ甘く見る。
@@ -3842,7 +3844,15 @@ class PreviewDock(QDockWidget):
             self.duration_ready_cb()
 
     def duration_seconds(self) -> float:
+        """ミキサーに渡した音の長さ。頭に足した助走ぶんを**含む**。"""
         return self._duration_ms / 1000.0
+
+    def song_duration_seconds(self) -> float:
+        """音源そのものの長さ(助走を含まない)。
+
+        「曲の長さ」が要る所(録画の尺など)はこちら。録画は元の音源ファイルを
+        そのまま使うので、助走ぶん長い値を渡すと後ろに空白が付く。"""
+        return max(0.0, self.duration_seconds() - self._lead_sec)
 
     def wave_path(self):
         """いま読み込んでいる音源(WAVE)のフルパス。未読込なら None。
