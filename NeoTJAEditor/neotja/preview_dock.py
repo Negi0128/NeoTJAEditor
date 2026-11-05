@@ -2173,6 +2173,28 @@ class PreviewDock(QDockWidget):
             return self.game_waveform
         return None
 
+    def focus_preview(self):
+        """プレビュー側へフォーカスを移す(ファイルを開いた直後など)。
+
+        開いた直後はツールバーの「開く」ボタンにフォーカスが残っていて、
+        そのまま Space を押すとファイル選択の窓が開いていた(利用者の報告
+        2026-11-05「ひらいてすぐ再生しようとするとエクスプローラー開いちゃう」)。
+        再生の Space を受けるのはペインかレーンなので、そちらへ渡しておく。
+
+        渡し先は**いま出ているモードのペイン**(作譜 / 音声波形)、無ければ
+        レーン。どちらも出ていなければ何もしない(本文エディタのままにする —
+        プレビューを閉じているときに Space を奪うと、文字が打てなくなる)。
+        フォーカスを受け取った部品を返す。"""
+        here = self._pane_for_mode(self.bottom_stack.currentIndex())
+        for w in (here, self.chart_preview, self.game_waveform):
+            if w is None or not w.isVisible():
+                continue
+            if w.focusPolicy() == Qt.NoFocus:
+                continue
+            w.setFocus(Qt.OtherFocusReason)
+            return w
+        return None
+
     def _update_pane_host(self):
         """ペインを画面の中へ入れるか、下部パネルへ戻すかを決め直す。
 

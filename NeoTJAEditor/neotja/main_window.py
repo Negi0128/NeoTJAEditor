@@ -1839,6 +1839,10 @@ class MainWindow(QMainWindow):
             self._push_recent(path)
             self._set_preview_content(content)
             self._force_update()
+            # 開いた直後は「開く」ボタンにフォーカスが残っていて、そのまま
+            # Space を押すとファイル選択の窓が開いていた(利用者の報告
+            # 2026-11-05)。再生の Space を受ける側へ渡しておく。
+            self.preview_dock.focus_preview()
         finally:
             self._end_loading()
 
