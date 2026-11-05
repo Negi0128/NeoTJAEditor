@@ -337,13 +337,20 @@ class CommandPanel(QFrame):
             row.addWidget(wdg)
         row.addStretch()
 
-        def commit(_c=False, _k=kind, _n=name, _v=get_value):
+        def commit(_c=False, _k=kind, _n=name, _v=get_value, _sel=False):
             # 待っているあいだに set_values で欄が書き戻されることがあるので、
             # **いじった時点の値**を控えてあればそちらを使う。欄を読み直すと
             # 書き戻されたほうの値が入ってしまう。
             val = self._auto_pending.pop(_k, None)
             if val is None:
                 val = _v()
+            # 音符を選んでいるときの「追加」は、**選んだ全部に付ける**
+            # (利用者の指定 2026-11-05)。欄をいじっただけ(auto)のほうは
+            # 今までどおりカーソルの所だけ — 矢印を1つ押すたびに選んだ
+            # ぶん全部が書き換わると、戻すのが大変なため。
+            if _sel and self._marks_on:
+                self.selectionCommand.emit(_n, val)
+                return
             if _k in self._editing:
                 self.editCommand.emit(_n, val)
             else:
@@ -376,7 +383,14 @@ class CommandPanel(QFrame):
         if button:
             btn = QPushButton("追加")
             btn.setFixedWidth(btn_w)
-            btn.clicked.connect(commit)
+            # 音符を選んでいれば選んだ全部へ。**スクロールだけ**
+            # (利用者の指定 2026-11-05)。拍子は小節のものなので音符ごとには
+            # 付けない。BPM の箱には「追加」ボタンがもともと無い。
+            to_sel = name == "SCROLL"
+            btn.setToolTip("カーソルの位置に置きます。"
+                           + (chr(10) + "音符を選んでいるときは、"
+                              "選んだ全部に付けます。" if to_sel else ""))
+            btn.clicked.connect(lambda _c=False, _s=to_sel: commit(_sel=_s))
             row.addWidget(btn)
         # 「!」は欄ごとに役目が違う(利用者の指定 2026-10-31)。
         #   "selection" … この値を、選んだ音符すべてに付ける
