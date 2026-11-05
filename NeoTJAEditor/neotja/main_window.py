@@ -2226,7 +2226,8 @@ class MainWindow(QMainWindow):
         if at > 0.5:
             args += ["--at", "%.3f" % at]
         try:
-            subprocess.Popen(args, env=child_env())
+            subprocess.Popen(args, env=child_env(),
+                             cwd=self._exe_dir(exe[0]) if exe else None)
         except OSError as exc:
             QMessageBox.warning(self, "NeoTJAPlayer",
                                 "起動できませんでした:\n%s" % exc)
@@ -2330,10 +2331,29 @@ class MainWindow(QMainWindow):
             return [exe] if os.path.exists(exe) else []
         return [sys.executable, "-m", "neotja.player"]
 
+    @staticmethod
+    def _exe_dir(path):
+        """その exe のフォルダ。渡せないときは None。
+
+        外のプログラムは**カレントが自分のフォルダ**である前提で、必要な
+        ものを相対パスで探すことがある。TNDE は avcodec-59.dll などを
+        `dll` サブフォルダに置いていて、そこを相対で見に行くので、カレントが
+        別の場所のままだと「avcodec-59.dll が存在しません」で止まっていた
+        (利用者の報告 2026-11-06「Neo から TNDE を開こうとする時だけ」)。
+        ダブルクリックしたときと同じ条件にする。"""
+        if not path:
+            return None
+        try:
+            d = os.path.dirname(os.path.abspath(path))
+        except (TypeError, ValueError):
+            return None
+        return d if d and os.path.isdir(d) else None
+
     def run_simulator(self, key):
         path = self.config_data["run_config"][key]["path"]
         if path and os.path.exists(path):
-            subprocess.Popen([path], env=child_env())
+            subprocess.Popen([path], env=child_env(),
+                             cwd=self._exe_dir(path))
         else:
             QMessageBox.warning(
                 self, "警告",
