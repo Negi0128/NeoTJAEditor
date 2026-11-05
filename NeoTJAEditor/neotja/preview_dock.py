@@ -8,8 +8,66 @@ from PySide6.QtGui import (QKeySequence, QMouseEvent, QPainter,
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFrame,
     QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QStyle, QStyleOptionSlider, QVBoxLayout, QWidget,
 )
+
+class _SeekSlider(QSlider):
+    """押した所へ飛ぶシークバー。
+
+    素の QSlider は、つまみの外を押しても**1ページぶん**しか進まない。
+    つまみを掴まないと目的の場所へ行けないのが不便、という声
+    (利用者の指定 2026-11-05「シークバー自体をクリックして移動できる
+    ようにしてほしい」)。押した所の値へ移してから、そのまま掴んだ状態に
+    するので、押して横へ滑らせれば擦り続けられる。
+
+    値が動いたことは sliderMoved で知らせる — つまみを掴んだときと同じ
+    合図なので、受け取る側(audio.seek)は何も変えなくていい。"""
+
+    def _value_at(self, x):
+        """横位置 x の値。つまみの幅ぶんを除いた溝の長さで割る。"""
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        st = self.style()
+        groove = st.subControlRect(QStyle.CC_Slider, opt,
+                                   QStyle.SC_SliderGroove, self)
+        handle = st.subControlRect(QStyle.CC_Slider, opt,
+                                   QStyle.SC_SliderHandle, self)
+        span = max(1, groove.width() - handle.width())
+        pos = int(x) - groove.x() - handle.width() // 2
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(), pos, span)
+
+    def _jump_to(self, x):
+        if self.maximum() <= self.minimum():
+            return
+        v = self._value_at(x)
+        if v != self.value():
+            self.setValue(v)
+        self.sliderMoved.emit(v)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setSliderDown(True)       # 掴んだ扱い(位置の上書きを止める)
+            self._jump_to(event.position().x())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton and self.isSliderDown():
+            self._jump_to(event.position().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isSliderDown():
+            self._jump_to(event.position().x())
+            self.setSliderDown(False)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 #: Qt の「上限なし」。setFixedSize で入った上下限を外すのに使う。
 _QWIDGETSIZE_MAX = 16777215
@@ -1815,7 +1873,7 @@ class PreviewDock(QDockWidget):
         # 前回の再生速度(4 段階のいずれか)へ戻す。
         self._restore_speed()
 
-        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider = _SeekSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
         self.seek_slider.sliderMoved.connect(lambda ms: self.audio.seek(ms))
         layout.addWidget(self.seek_slider)
