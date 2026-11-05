@@ -389,14 +389,48 @@ class WaveformWidget(QWidget):
         vs = seconds - span * self.FOLLOW_FRAC
         return max(0.0, min(vs, max(0.0, self.duration - span)))
 
+    #: ホイールで送ったあと、赤い線が窓のここ(左からの割合)まで戻ってきたら
+    #: 追従へ戻る。利用者の指定 2026-11-06:
+    #:   「また赤い線を合わせても追尾してくれない」
+    #:   「作譜レーンの左側35%くらいに赤いバーが来たらまた追従するように」
+    FOLLOW_RESUME_FRAC = 0.35
+    #: 赤い線が定位置の手前(窓の外も含む)に居るか。追いついてきたのを
+    #: 拾うための目印。
+    _follow_catchup = False
+
     def _follow_now(self, seconds, span):
         """追従して景色を動かすか。ホイールで送った間は動かさない。
 
-        **一度ホイールで送ったら、勝手には追従へ戻らない。** 戻るのは
-        再生を始め直したときだけ(set_playing)。流しながら好きな所を見る
-        ための決まり(利用者の指定 2026-11-05)。
+        ホイールで送ったら一度切れる(流しながら先や後ろを見るため)。
+        **赤い線が窓の左 FOLLOW_RESUME_FRAC まで戻ってきたら、そこで
+        追い直す。** 先へ送ったときは線が追いついてきた所で自然に戻り、
+        先を見ているあいだ(線がまだ窓の外か、右のほう)は戻らない。
         """
-        return not self._view_free
+        if not self._view_free:
+            return True
+        if span <= 0:
+            return False
+        # **定位置(FOLLOW_FRAC)まで追いついた所**で戻す。窓へ入った瞬間
+        # (左端)で戻すと、線を定位置へ置き直すぶん景色が 3割ぶん飛んで、
+        # せっかく見ていた所が流れてしまう。
+        lo = min(self.FOLLOW_FRAC, self.FOLLOW_RESUME_FRAC)
+        rel = (float(seconds) - self.view_start) / span
+        # ちょうど境目のときに丸めで「まだ手前」にならないよう、わずかに甘く。
+        if rel < lo - 1e-9:
+            # まだ定位置の手前。**追いついてくる途中**だと覚えておく。
+            self._follow_catchup = True
+            return False
+        if self._follow_catchup and rel <= 1.0:
+            # 手前から定位置を越えた = 追いついた。コマの間隔が粗くて
+            # 帯(定位置〜上限)を飛び越えても、ここで拾える。
+            self._follow_catchup = False
+            self._view_free = False
+            return True
+        if rel <= self.FOLLOW_RESUME_FRAC:
+            # 送った所がもう定位置のあたり。そのまま戻してよい。
+            self._view_free = False
+            return True
+        return False
 
     def set_position(self, seconds: float):
         self.position_sec = seconds
@@ -699,6 +733,9 @@ class WaveformWidget(QWidget):
         dest = max(0.0, min(self.view_target() + step, hi))
         if self._follow_window:
             self._view_free = True
+            # 送り直したら、追いつき待ちも数え直す(前の送りの名残で
+            # すぐ戻ってしまわないように)。
+            self._follow_catchup = False
         self.scroll_view_to(dest)
         self.update()
 
