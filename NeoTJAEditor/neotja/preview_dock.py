@@ -1613,7 +1613,6 @@ class PreviewDock(QDockWidget):
             lane_widget=self.chart_preview,
         )
         self.game_preview_window.set_pane_cb(self._update_pane_host)
-        self._build_undo_keys()
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
         # 全画面でボタン類と下部パネルを隠すのは通常再生のときだけ
         # (利用者の指定 2026-10-05: 「通常モード以外はフルスクリーンで
@@ -2150,20 +2149,11 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # 作譜モードの操作は再生ウィンドウの中で行うが、取り消し履歴を持って
     # いるのはエディタ(本文の QPlainTextEdit)。あちらは別の窓なので、
-    # そのままでは Ctrl+Z がどこにも届かない(利用者の報告 2026-09-28
-    # 「ctrlZ が使えない」)。窓ごとにショートカットを張って、エディタの
-    # 取り消しを呼ぶ。
-    def _build_undo_keys(self):
-        # QKeySequence.Redo は Windows では Ctrl+Y。**同じキーを二重に張ると
-        # Qt が「どちらか分からない」として両方止める**ので、標準の並びに
-        # 無いもの(Ctrl+Shift+Z)だけを足す。
-        for seq, cb in ((QKeySequence.Undo, lambda: self._do_undo(False)),
-                        (QKeySequence.Redo, lambda: self._do_undo(True)),
-                        (QKeySequence("Ctrl+Shift+Z"), lambda: self._do_undo(True))):
-            sc = QShortcut(seq, self.game_preview_window)
-            sc.setContext(Qt.WindowShortcut)
-            sc.activated.connect(cb)
-
+    # Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z のキーは **MainWindow が
+    # アプリ全体に1組だけ**張っている(2026-11-05)。以前はこの窓にも
+    # 別に張っていたが、同じキーが2本同時に当てはまると Qt は
+    # 「どちらか分からない」として両方止めるため、こちらは外した。
+    # ここに残るのは命令パネルの「戻す / 進む」ボタンの行き先。
     def _do_undo(self, redo):
         cb = self.redo_cb if redo else self.undo_cb
         if cb is None:

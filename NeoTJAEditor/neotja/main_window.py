@@ -11,7 +11,8 @@ from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QProgressDialog, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolBar,
+    QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QSplitter, QToolBar,
     QVBoxLayout, QWidget,
 )
 
@@ -1011,9 +1012,24 @@ class MainWindow(QMainWindow):
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda c=cmd: ins_nl(c))
 
+        # 上書き保存は**どこにフォーカスがあっても**効かせる。本文エディタの
+        # 中だけだったので、作譜ペインや波形、別窓のプレビューを触っている
+        # あいだは Ctrl+S がどこにも届いていなかった(利用者の報告
+        # 2026-11-05)。F1 と同じ ApplicationShortcut なら別窓にも届く。
         sc_save = QShortcut(QKeySequence("Ctrl+S"), self.editor)
-        sc_save.setContext(Qt.WidgetWithChildrenShortcut)
+        sc_save.setContext(Qt.ApplicationShortcut)
         sc_save.activated.connect(self.save_file)
+
+        # 取り消し / やり直しも同じ理由で届いていなかった。別窓のプレビューに
+        # だけ手当てがあった(2026-09-28 の報告)ので、ここで**アプリ全体**に
+        # 1組だけ張る。本体の窓(作譜ペイン・波形・レーン)でも別窓でも同じ
+        # ものが効く。別窓に張ってあったぶんは外した — 同じキーが2本同時に
+        # 当てはまると、Qt は「どちらか分からない」として両方止めるため。
+        for _seq, _redo in (("Ctrl+Z", False), ("Ctrl+Y", True),
+                            ("Ctrl+Shift+Z", True)):
+            sc_un = QShortcut(QKeySequence(_seq), self)
+            sc_un.setContext(Qt.ApplicationShortcut)
+            sc_un.activated.connect(lambda r=_redo: self._undo_here(r))
 
         sc_cut = QShortcut(QKeySequence("Ctrl+T"), self.editor)
         sc_cut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -2367,6 +2383,18 @@ class MainWindow(QMainWindow):
         "del": measure_edit.op_delete,
         "ins": measure_edit.op_insert_after,
     }
+
+    def _undo_here(self, redo=False):
+        """取り消し / やり直し。
+
+        入力欄(命令の値を入れる小さな欄や、検索の欄)に居るときは**その欄**の
+        ものを先に効かせる。窓ぜんたいのショートカットにしたぶん、そうしないと
+        欄の打ち間違いを戻したいのに本文が巻き戻ってしまう。"""
+        fw = QApplication.focusWidget()
+        if isinstance(fw, QLineEdit) and fw.isEnabled() and not fw.isReadOnly():
+            (fw.redo if redo else fw.undo)()
+            return
+        (self.editor.redo if redo else self.editor.undo)()
 
     def _measure_op(self, op, arg=None, pos=None):
         """小節まるごとの操作(複製/削除/空を1つ)。
