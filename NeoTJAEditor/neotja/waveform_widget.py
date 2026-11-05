@@ -588,10 +588,11 @@ class WaveformWidget(QWidget):
     def _raw_offset(self, value):
         """見せる/外へ出す OFFSET(ヘッダの素の値)。
 
-        内部の offset は音の時刻で測るので、頭に足した助走ぶんを含んでいる。
-        OFFSET 調整の読み値と offsetPreview / offsetCommitted は TJA に書く
-        値そのものでないといけないので、ここで助走ぶんを引いて戻す。"""
-        return float(value) - self._wave_lead
+        内部の offset は「音の時刻 = 譜面の時刻 - offset」の offset で、頭へ
+        助走を足したぶんだけ**引いて**ある。OFFSET 調整の読み値と
+        offsetPreview / offsetCommitted は TJA に書く値そのものでないと
+        いけないので、ここで助走ぶんを足して戻す。"""
+        return float(value) + self._wave_lead
 
     def begin_offset_drag(self, x: float):
         self._offset_drag = (float(x), self.offset)

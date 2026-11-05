@@ -534,15 +534,6 @@ class ChartEditWaveform(WaveformWidget):
     #: これを拾うとカーソルが元の場所や1つ手前へ引き戻される。
     SEEK_ECHO_SEC = 0.8
 
-    def _raw_offset(self, value):
-        """素の OFFSET(ヘッダに書く値)へ戻す。
-
-        このペインの offset は向きが逆 — 音の時刻 = 譜面の時刻 - offset で、
-        頭に足した助走ぶんを**引いて**ある。元に戻すには足す(音声波形の
-        ほうは足してあるので引く)。OFFSET 調整の読み値と、外へ出す
-        offsetPreview / offsetCommitted がこれを通る。"""
-        return float(value) + self._wave_lead
-
     def set_position(self, seconds: float):
         """停止中/シーク時の位置(preview_dock._on_position_changed から)。"""
         if self._echo_active():

@@ -3596,9 +3596,8 @@ class PreviewDock(QDockWidget):
     def _apply_offsets(self, bpm, offset):
         """助走を決めたあとで、OFFSET を要る所すべてへ配り直す。
 
-        音の時刻で動くもの(波形・レーン・メトロノーム・打音)には助走を足した
-        値、作譜ペインには向きが逆なので引いた値が行く。読み込みの入口で素の
-        OFFSET を配ってから助走を決めるので、ここで上書きしておく。"""
+        渡す値はどれも「素の OFFSET - 助走」。読み込みの入口で素の OFFSET を
+        配ってから助走を決めるので、ここで上書きしておく。"""
         self.waveform.set_beat_grid(bpm, self._grid_offset(offset),
                                     self._editor_metronome_clicks)
         self._set_game_grid(bpm, offset)
@@ -3860,13 +3859,21 @@ class PreviewDock(QDockWidget):
     def _grid_offset(self, offset=None):
         """波形・レーン・メトロノーム・打音へ渡す OFFSET。
 
-        これらは「音の時刻」で動いているので、頭に足した助走のぶんだけ譜面が
-        後ろへずれる = 足す。引数が無ければ OFFSET 欄の今の値を使う。"""
-        v = self.spin_offset.value() if offset is None else float(offset)
-        return v + self._lead_sec
+        渡す先はどれも同じ約束で動いている —
+        **音の時刻 = 譜面の時刻 - offset**(WaveformWidget._apply_offset_local /
+        ChartPreview._current_chart_time / MetronomeEngine.set_schedule /
+        HitSoundEngine.set_schedule のどれもこの式)。頭へ助走を足すと音の
+        時刻だけが後ろへずれるので、offset は**引く**。作譜ペインと同じ値
+        (_edit_offset)になる。
+
+        無音の譜面のときから**足して**いたが、それだと向きが逆だった
+        (実測 2026-11-05: レーンが譜面の 0秒を音の -2秒だと思っていた)。
+        作譜ペインだけは ①③ の直しで引く側へ回っていたので、ペインの
+        赤い線だけが合っていた。"""
+        return self._edit_offset(offset)
 
     def _edit_offset(self, offset=None):
-        """作譜ペインへ渡す OFFSET。頭に足した助走ぶんを引く。
+        """譜面の時刻を音の時刻へ直すための OFFSET。助走ぶんを引く。
 
         音源が無い譜面は無音の音源を作って鳴らすが、その頭に助走
         (_SILENT_LEAD_SEC)を足してある。_on_position_changed がペインへ
@@ -4232,8 +4239,8 @@ class PreviewDock(QDockWidget):
         """作譜波形のグリッドを bar_times 由来のクリックで引き直す。データが
         まだ無ければメトロノーム用にフォールバック(空譜面/読み込み前)。
 
-        offset は**素の OFFSET**(ヘッダの値)。助走ぶんは中で足し引きする —
-        音声波形は音の時刻(足す)、作譜ペインは向きが逆(引く)。"""
+        offset は**素の OFFSET**(ヘッダの値)。助走ぶんは中で引く
+        (音声波形も作譜ペインも同じ約束 — _grid_offset を参照)。"""
         clicks = self._game_grid_clicks or self._editor_metronome_clicks
         self.game_waveform.set_beat_grid(bpm, self._grid_offset(offset), clicks)
         # 作譜モードの編集ペインにも同じものを渡す。ここを飛ばすと編集ペインの
