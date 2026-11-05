@@ -1116,8 +1116,9 @@ class ChartEditWaveform(WaveformWidget):
                 # 引かずに離した = ただの右クリック。作譜メニューを出す
                 # (利用者の指定 2026-10-01)。囲って選ぶほうは今までどおり。
                 self.update()
-                self._exec_menu(self._build_command_menu(),
-                                event.globalPosition().toPoint())
+                self._exec_menu(
+                    self._build_command_menu(self._band_x0(bd)),
+                    event.globalPosition().toPoint())
                 return
             self.update()
             return
@@ -1839,13 +1840,13 @@ class ChartEditWaveform(WaveformWidget):
     #: 命令 → メニューと入力欄の見出し
     _COMMAND_LABELS = {"BPMCHANGE": "BPM", "SCROLL": "スクロール(HS)"}
 
-    def _build_command_menu(self):
+    def _build_command_menu(self, at_x=None):
         """右クリックのメニュー(と、窓の「作譜」メニューの中身)。"""
         menu = QMenu(self)
-        self.populate_command_menu(menu)
+        self.populate_command_menu(menu, at_x)
         return menu
 
-    def populate_command_menu(self, menu):
+    def populate_command_menu(self, menu, at_x=None):
         """命令の項目を menu へ足す。カーソルの位置で内容が変わるので、
         窓のメニュー側は出す直前に clear() して呼び直す。
 
@@ -1881,6 +1882,18 @@ class ChartEditWaveform(WaveformWidget):
         # あると、どちらを使えばいいのか分からなくなる。
         ins = menu.addAction("小節を前に挿入…")
         ins.triggered.connect(self.open_measure_insert)
+        # 押した所までを譜面の終わりにする(利用者の希望 2026-11-06
+        # 「自分で終了位置を決めて小節を敷き詰めたい」
+        #  「クリックしたところを終了地点にした方がわかりやすい」)。
+        t_end = self._x_to_sec(at_x) if at_x is not None else None
+        need = self.measures_to_time(t_end)
+        fill = menu.addAction("終了位置の設定（あと%d小節）" % need
+                              if need else "終了位置の設定")
+        fill.setData("fill_measures")
+        fill.setEnabled(need > 0)
+        fill.setToolTip("押した所まで、空の小節を敷き詰めます。")
+        fill.triggered.connect(
+            lambda _c=False, _t=t_end: self.fill_measures_to_time(_t))
         menu.addSeparator()
         # 波形の縦の倍率(見るためのものなので、譜面は1文字も変わらない)。
         self._wave_gain_menu(menu)
@@ -1947,6 +1960,45 @@ class ChartEditWaveform(WaveformWidget):
     def set_tool_cb(self, cb):
         """エディタの道具を呼ぶ出口。cb(鍵) を呼ぶ。"""
         self._tool_cb = cb
+
+    def measures_to_time(self, t_end=None):
+        """その時刻まで敷き詰めるのに、あと何小節要るか。
+
+        その時刻を**含む**小節まで足す(そこで終わる譜面にしたい、という
+        指定)。もう先まであるなら 0。小節が1つも無いときは数えられないので
+        0(足す先が決まらない)。t_end を渡さなければ赤い線の所。"""
+        n = self._measure_count()
+        if n <= 0:
+            return 0
+        t_end = (float(self.position_sec) if t_end is None
+                 else float(t_end))
+        last = self._bar_time(n)          # 最後の小節の終わり(= n番目の頭)
+        if last is None:
+            return 0
+        if t_end <= last + 1e-6:
+            return 0                      # もう足りている
+        step = self._measure_len()
+        if step is None or step <= 0:
+            return 0
+        # 線を含む小節まで。端にぴったり乗ったときは増やさない。
+        need = int(math.ceil((t_end - last) / step - 1e-9))
+        return max(0, need)
+
+    def fill_measures_to_time(self, t_end=None):
+        """その時刻まで空の小節を敷き詰める(利用者の希望 2026-11-06)。
+
+        終わりにしたい所は**右クリックで押した所**(利用者の指定 2026-11-06
+        「クリックしたところを終了地点にした方がわかりやすい」)。窓の
+        「作譜」メニューから呼んだときは押した所が無いので赤い線を使う。
+
+        足したかどうかを返す。すでに先まで譜面があるときは何もしない —
+        勝手に消さない。"""
+        need = self.measures_to_time(t_end)
+        if need <= 0:
+            return False
+        self._run_op({"kind": "append_measures", "count": need,
+                      "grid": self._measure_grid(self._cur_measure)})
+        return True
 
     def open_measure_insert(self):
         """カーソルの小節の手前に、長さを指定した空の小節を1つ入れる。

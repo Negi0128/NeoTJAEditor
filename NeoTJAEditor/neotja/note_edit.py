@@ -1408,6 +1408,36 @@ def op_transform(text, course_range, a, b, grid, mode):
     return _result(text, new, sound=sound, visual=visual, reparse=not visual)
 
 
+def append_measures(text, course_range, count, grid=16):
+    """譜面の末尾に、空の小節を count 個足す(利用者の希望 2026-11-06)。
+
+    「終了位置の設定」= 赤い線の所まで敷き詰める、の中身。足す小節の
+    分割は、いまの最後の小節に合わせる — 16分で書いてきた譜面に 4分の
+    小節が混ざると、あとで打ち込むときに割り直しが要るため。
+
+    count が 0 以下なら何もしない(None)。
+    """
+    count = int(count)
+    if count <= 0:
+        return None
+    body = course_body_span(text, course_range)
+    if body is None:
+        return None
+    spans = measure_spans(text, body)
+    if not spans:
+        return None
+    # 分割は**中身のある最後の小節**に合わせる。末尾の塊が #END だけ、の
+    # ように音符の無い所を掴むと、呼ばれたときの grid へ落ちてしまう。
+    g = int(grid)
+    for sp in reversed(spans):
+        notes = _measure_notes(text, sp)
+        if notes:
+            g = len(notes)
+            break
+    new, _n = _append_empty_measures(text, body, spans, count, g)
+    return new if new != text else None
+
+
 def ensure_trailing_measure(text, course_range, grid=16):
     """譜面の末尾に、空の小節を**常に1つ**用意しておく(利用者の指定
     2026-10-04)。
@@ -1710,6 +1740,10 @@ def run_op(text, course_range, op):
     if kind == "tail_items":
         return op_tail_items(text, course_range, op.get("items") or [],
                              int(op.get("steps", 0)), g)
+    if kind == "append_measures":
+        new = append_measures(text, course_range, op.get("count", 0),
+                              int(op.get("grid", 16)))
+        return None if new is None else {"text": new, "reparse": True}
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
     if kind == "paste_items":
