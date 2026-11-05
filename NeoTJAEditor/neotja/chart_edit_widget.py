@@ -1827,6 +1827,11 @@ class ChartEditWaveform(WaveformWidget):
         命令はキーではなくメニューから置く(利用者の希望 2026-09-25)。以前は
         B/S/G/L のキーも受けていて、項目の右に "\\t B" のようにキーを出して
         いたが、覚えるキーを増やさない方針にしたのでキーは外した。"""
+        if self._sel_measures:
+            # 小節を選んでいるときは、小節に効くものだけ(利用者の指定
+            # 2026-11-05)。音符や命令の話は混ぜない。
+            self._measure_menu(menu)
+            return
         m, s = self._cursor_addr()
         head = menu.addAction("%d小節目  %d/%d"
                               % (m + 1, s, self._measure_grid(m)))
@@ -1849,7 +1854,7 @@ class ChartEditWaveform(WaveformWidget):
         # BPM / スクロール / ゴーゴー / 小節線 は**命令パネル**にあるので、
         # 右クリックからは外した(利用者の指定 2026-10-31)。同じ物が2か所に
         # あると、どちらを使えばいいのか分からなくなる。
-        ins = menu.addAction("小節を挿入…")
+        ins = menu.addAction("小節を前に挿入…")
         ins.triggered.connect(self.open_measure_insert)
         menu.addSeparator()
         # 波形の縦の倍率(見るためのものなので、譜面は1文字も変わらない)。
@@ -1870,6 +1875,28 @@ class ChartEditWaveform(WaveformWidget):
         clr.setEnabled(self.has_range())
         clr.triggered.connect(self.clear_range)
 
+    def _measure_menu(self, menu):
+        """小節を選んでいるときの右クリックメニュー。
+
+        出すのは「どの小節か」「小節を前に挿入」「選択を解除」の3つだけ
+        (利用者の指定 2026-11-05)。"""
+        ms = self.selected_measures()
+        if len(ms) == 1:
+            label = "%d小節目" % (ms[0] + 1)
+        else:
+            label = "%d〜%d小節目  %d個" % (ms[0] + 1, ms[-1] + 1, len(ms))
+        head = menu.addAction(label)
+        head.setEnabled(False)
+        menu.addSeparator()
+        ins = menu.addAction("小節を前に挿入…")
+        ins.setData("measure_insert")
+        ins.triggered.connect(self.open_measure_insert)
+        menu.addSeparator()
+        clr = menu.addAction("選択を解除")
+        clr.setData("measure_clear")
+        clr.triggered.connect(lambda: self.set_selected_measures([]))
+        return menu
+
     #: 右クリックから呼べる、エディタの道具。(鍵, 見出し, 範囲が要るか)。
     #: ストロボ生成はカーソルの位置に作るので範囲は要らない。
     # ノーツ間隔リサイズとストロボ生成は、ツールバーにあるのでここからは
@@ -1886,8 +1913,12 @@ class ChartEditWaveform(WaveformWidget):
         """カーソルの小節の手前に、長さを指定した空の小節を1つ入れる。
 
         長さは拍子記号と同じ「分子/分母」で打ち込む(利用者の指定 2026-10-01)。
-        入れた小節の後ろで元の拍子へ戻すので、2小節目以降は動かない。"""
-        m, _s = self._cursor_addr()
+        入れた小節の後ろで元の拍子へ戻すので、2小節目以降は動かない。
+
+        上の目盛りで小節を選んでいるときは、**選んだ最初の小節**の手前へ
+        (利用者の指定 2026-11-05)。選んでいなければカーソルの小節の手前。"""
+        ms = self.selected_measures()
+        m = ms[0] if ms else self._cursor_addr()[0]
 
 
         def accept(txt):

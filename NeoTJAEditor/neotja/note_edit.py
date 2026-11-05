@@ -2311,7 +2311,7 @@ def op_measure_insert(text, course_range, m, value):
     書くので、2小節目以降の長さも、そこに置いてある音符の位置もそのまま
     (元の拍子と同じ長さを入れるときは #MEASURE そのものを書かない)。
 
-    右クリックの「小節を挿入…」から呼ぶ(利用者の指定 2026-10-01)。
+    右クリックの「小節を前に挿入…」から呼ぶ(利用者の指定 2026-10-01)。
     """
     body = course_body_span(text, course_range)
     if body is None:
