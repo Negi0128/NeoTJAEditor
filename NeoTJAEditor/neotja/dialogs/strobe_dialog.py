@@ -10,6 +10,17 @@ from neotja.easing import curve_value
 CURVES = ("直線 (Linear)", "徐々に加速 (Ease-In)", "徐々に減速 (Ease-Out)", "S字 (Ease-In-Out)")
 
 
+def _same_scroll(a, b):
+    """2つの #SCROLL の値が同じか。字づらが違っても数として同じなら同じ
+    ("1" と "1.000" など)。読めない物は違う扱いにする(書いておく)。"""
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
 class StrobeGeneratorDialog(QDialog):
     def __init__(self, main_window, initial_bpm, apply_cb, parent=None,
                  restore_measure="4/4", restore_scroll="1.000"):
@@ -123,18 +134,26 @@ class StrobeGeneratorDialog(QDialog):
         out.append(f"// --- ストロボ開始 (BPM{bpm:g}, {fps}fps) ---")
         out.append(f"#MEASURE {frame_len.numerator}/{frame_len.denominator}")
 
+        # **同じ値が続くときは書かない**(利用者の指定 2026-11-05
+        # 「SCROLLの値を固定するストロボを作るとき、同じ値が大量に並ぶ」)。
+        # #SCROLL は書いた所から効き続けるので、落としても見え方は同じ。
+        last = None
         for i in range(lines_count):
             if rem and i == lines_count - 1:
                 out.append(f"#MEASURE {rem.numerator}/{rem.denominator}")
             t = i / (lines_count - 1) if lines_count > 1 else 0.0
             y = curve_value(t, curve)
             val = f"{s + (e - s) * y:.{p}f}"
-            out.append(f"#SCROLL {val}")
+            if val != last:
+                out.append(f"#SCROLL {val}")
+                last = val
             out.append("0,")
 
         out.append("// --- ストロボ終了 ---")
         out.append(f"#MEASURE {self._restore_measure}")
-        out.append(f"#SCROLL {self._restore_scroll}")
+        # 元へ戻す1本も、最後に書いた値と同じなら要らない。
+        if not _same_scroll(last, self._restore_scroll):
+            out.append(f"#SCROLL {self._restore_scroll}")
 
         self.txt_after.setPlainText("\n".join(out))
 
