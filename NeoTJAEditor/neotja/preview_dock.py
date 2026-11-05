@@ -3448,7 +3448,7 @@ class PreviewDock(QDockWidget):
             # 小節時刻が無いと編集カーソルの住所が決まらない。preview_data が
             # 来ていないときは前回の値を残す(消すとカーソルが死ぬ)。
             self.chart_edit.set_bar_times(preview_data.get("bar_times", []),
-                                          self.spin_offset.value())
+                                          self._edit_offset())
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
@@ -3547,6 +3547,10 @@ class PreviewDock(QDockWidget):
         self.metronome.set_schedule(self._editor_metronome_clicks, off)
         self._apply_hit_schedule(off)
         self.chart_preview.set_offset(off)
+        # 作譜ペインにも助走ぶんを渡す。ここを飛ばすとペインだけずれる
+        # (ペインは向きが逆なので引く)。
+        self.chart_edit.set_time_offset(float(headers["offset"])
+                                        - self._lead_sec)
         # 普通の音源とまったく同じ道を通す(読み込み → PCM をミキサーへ →
         # 波形)。ミキサー経路は load() だけでは鳴らないため。
         self._current_wave_path = path
@@ -3792,6 +3796,22 @@ class PreviewDock(QDockWidget):
             elif self.status_label.text() == "音源を読み込み中...":
                 self.status_label.setText("")
 
+    def _edit_offset(self):
+        """作譜ペインへ渡す OFFSET。無音で再生するときの助走ぶんを引く。
+
+        音源が無い譜面は無音の音源を作って鳴らすが、その頭に助走
+        (_SILENT_LEAD_SEC)を足してある。_on_position_changed がペインへ
+        渡す位置は**助走ぶん進んだ音の時刻**なのに、ペインの目盛りは
+        素の OFFSET のままだったので、赤い線だけが助走ぶん先に立って
+        いた。1小節目から再生できない・押した位置に関係なく先へ行く・
+        手前を押しても戻らない、は全部これ(利用者の報告 2026-11-05)。
+
+        ペインの約束は「音の時刻 = 譜面の時刻 - offset」。音のほうが
+        助走ぶん後ろへずれるので**引く**。音源がある譜面では助走は 0 なので
+        今までと同じ値になる。
+        """
+        return self.spin_offset.value() - self._lead_sec
+
     def _audio_ms(self, seconds):
         """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
         return max(0, int((float(seconds) + self._lead_sec) * 1000))
@@ -3811,9 +3831,12 @@ class PreviewDock(QDockWidget):
         **シーク前の位置** を positionChanged で出す(実測)。停止中はそのあと
         位置が届かないこともあり、レーンだけが1つ前の場所に取り残されていた。
         seek() の中で出た古い位置を、ここで正しい時刻で上書きする。"""
-        self.audio.seek(self._audio_ms(seconds))
+        # **ここへ来る seconds は作譜ペインの時刻 = 音の時刻**
+        # (_edit_offset が助走ぶんを織り込んである)。_audio_ms を通すと
+        # 助走を二重に足してしまう(利用者の報告 2026-11-05)。
+        self.audio.seek(max(0, int(float(seconds) * 1000)))
         if not self.audio.is_playing():
-            self.chart_preview.set_playback(seconds + self._lead_sec, False)
+            self.chart_preview.set_playback(seconds, False)
         # 命令パネルの値も、その位置で効いている値に合わせる。
         # ここはカーソルを動かすたびに通るので、続けて来るぶんはまとめる。
         self._queue_command_panel_sync()
@@ -3914,7 +3937,8 @@ class PreviewDock(QDockWidget):
         self.chart_edit.set_open_spans(data.get("open_spans", []))
         self.chart_edit.set_commands(*self._preview_commands)
         self.chart_edit.set_region_marks(data.get("region_marks", []))
-        self.chart_edit.set_bar_times(data.get("bar_times", []), self.spin_offset.value())
+        self.chart_edit.set_bar_times(data.get("bar_times", []),
+                                      self._edit_offset())
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()

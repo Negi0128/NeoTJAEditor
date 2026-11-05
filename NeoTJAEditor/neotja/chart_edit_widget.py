@@ -417,6 +417,21 @@ class ChartEditWaveform(WaveformWidget):
         self._rebuild_bar_times()
         self.update()
 
+    def set_time_offset(self, offset):
+        """譜面の時刻 ↔ 音の位置の OFFSET だけを差し替える。
+
+        音源が無い譜面は「無音の音源」の頭に助走を足して鳴らすので、
+        その助走ぶんを含んだ値がここへ来る。入れ忘れると、届く再生位置は
+        助走ぶん進んでいるのにペインの目盛りは素のままで、赤い線が
+        助走ぶん先に立つ(利用者の報告 2026-11-05)。
+        """
+        try:
+            offset = float(offset)
+        except (TypeError, ValueError):
+            return
+        if offset != self.offset:
+            self._apply_offset_local(offset)
+
     def _rebuild_cmd_kinds(self):
         """命令を種類ごとに分けて持つ(行ごとの描画用)。"""
         by = {}
