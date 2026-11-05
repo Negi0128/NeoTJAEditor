@@ -1791,8 +1791,6 @@ class PreviewDock(QDockWidget):
                 self._on_panel_selection_region)
             # スクロールの「!」はハイスピ変換(利用者の指定 2026-10-31)。
             # 作譜ペインの右クリックと同じ道を通す。
-            self.command_panel.highspeedRequested.connect(
-                lambda: self._run_chart_tool("highspeed"))
             # 拍子の「!」は、選んだ音符ごとに小節線を付ける。
             self.command_panel.meterSplitRequested.connect(
                 self._on_panel_meter_split)

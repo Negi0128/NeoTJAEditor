@@ -36,7 +36,6 @@ class CommandPanel(QFrame):
     #: (利用者の指定 2026-10-31)。
     meterSplitRequested = Signal()
     #: スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定 2026-10-31)。
-    highspeedRequested = Signal()
     #: 欄ごとの「!」。その欄の値を**選んだ音符すべて**に付ける。(名前, 値)
     selectionCommand = Signal(str, object)
     #: 値の無い欄(ゴーゴー / 小節線)の「!」。付けるか外すかを選ぶ小メニューを
@@ -161,12 +160,14 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
             "ここを変えると倍率もそれに合わせて変わる。")
-        # スクロールの「!」は**ハイスピ変換**を開く(利用者の指定 2026-10-31)。
+        # スクロールの「!」(ハイスピ変換)は外した。「追加」を足したぶん
+        # 欄が狭く、同じことはツールバーの「ハイスピ変換」と右クリックの
+        # メニューからできる(利用者の指定 2026-11-05)。
         grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
                                  lambda: self.sp_hs.value(), auto=True,
                                  auto_on=[self.sp_hs], button=True,
-                                 btn_w=36, mark=self._highspeed_mark),
+                                 btn_w=36, mark=None),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
         self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
@@ -435,12 +436,6 @@ class CommandPanel(QFrame):
         return self._mark_button(
             "選んだ音符それぞれに小節線が付くように拍子を変えます",
             self.meterSplitRequested.emit)
-
-    def _highspeed_mark(self):
-        """スクロールの「!」。ハイスピ変換の窓を開く(利用者の指定
-        2026-10-31)。音符を選んでいるときだけ押せるのは他の「!」と同じ。"""
-        return self._mark_button("選んだ音符をハイスピ変換します",
-                                 self.highspeedRequested.emit)
 
     def _mark_button(self, tip, fn):
         """欄ごとの「!」。選んだ音符へまとめて効かせる
