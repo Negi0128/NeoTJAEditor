@@ -864,6 +864,9 @@ TITLE_COLOR = "#ffffff"
 # 出るのはその半分。
 TITLE_OUTLINE = "#000000"
 TITLE_OUTLINE_W = 10.0
+#: 縁取りの細さの下限。字をいくら小さくしても、これより細くはしない
+#: (細すぎると背景に負けて読めなくなる)。
+TITLE_OUTLINE_W_MIN = 3.0
 
 # --- スコアの加算表示 ----------------------------------------------------
 # 音符を叩くたびに、入った点をスコアの上へ浮かべて消す。
@@ -2207,6 +2210,7 @@ class _GameScreenBase:
         else:
             x, y, w, h = TITLE_RECT
             size = TITLE_SIZE
+        base_size = size            # 縮める前の大きさ(縁取りの割り出しに使う)
         f = QFont(self._title_family) if self._title_family else QFont()
         f.setPixelSize(size)
         p.setFont(f)
@@ -2242,19 +2246,24 @@ class _GameScreenBase:
         tw = fm.horizontalAdvance(text)
         bx = max(float(left), right - tw)
         by = y + (h + fm.ascent() - fm.descent()) / 2.0
+        # 縁取りの太さも字の大きさに付いてくる(利用者の指定 2026-11-05
+        # 「文字の輪郭は維持されている　倍率に合わせて輪郭も細くしてほしい」)。
+        # 縮めていないときは今までとまったく同じ太さになる。
+        ow = max(TITLE_OUTLINE_W_MIN,
+                 TITLE_OUTLINE_W * float(size) / float(base_size))
         path = QPainterPath()
         path.addText(QPointF(bx, by), f, text)
         # 先に黒でなぞってから白で塗る絵を1枚焼いて、次からはそれを貼る
         # (塗りと線を同時に出すと線が内側へも太って、勘亭流の細い所が
         # 黒く埋まってしまうので、なぞってから塗る順は変えない)。
         baked = bake_text(p, self._text_cache,
-                          ("title", text, bx, by, size),
-                                 path, TITLE_OUTLINE, TITLE_OUTLINE_W,
+                          ("title", text, bx, by, size, round(ow, 2)),
+                                 path, TITLE_OUTLINE, ow,
                                  TITLE_COLOR)
         if baked is None:
             p.save()
             p.setRenderHint(QPainter.Antialiasing, True)
-            p.strokePath(path, QPen(QColor(TITLE_OUTLINE), TITLE_OUTLINE_W,
+            p.strokePath(path, QPen(QColor(TITLE_OUTLINE), ow,
                                     Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.fillPath(path, QColor(TITLE_COLOR))
             p.restore()
