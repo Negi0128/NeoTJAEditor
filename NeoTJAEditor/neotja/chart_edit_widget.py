@@ -3504,14 +3504,18 @@ class ChartEditWaveform(WaveformWidget):
     MEASURE_SEL_COLOR = "#ffd23c"
 
     def _draw_measure_sel(self, p, h):
-        """上の目盛りで選んだ小節を、薄い帯で覆って見せる。"""
+        """上の目盛りで選んだ小節を、薄い帯で覆って見せる。
+
+        **範囲を切るのは時刻ではなく画面の x。** 焼いた帯を貼っている間は
+        view_start が帯の起点(半画面ぶん左)に差し替わっているので、それを
+        画面の左端だと思って時刻で切ると、画面の右半分にある小節が「外」と
+        見なされて描かれなかった(利用者の報告 2026-11-06「左に送ったら
+        選択した表示になった」)。_sec_to_x は帯のずれ(_x_shift)を織り込んで
+        あるので、x で比べれば貼り方に関係なく正しい。"""
         if not self._sel_measures:
             return
-        span = self._visible_span()
-        if span <= 0:
+        if self._visible_span() <= 0:
             return
-        t0 = self.view_start
-        t1 = t0 + span
         col = QColor(self.MEASURE_SEL_COLOR)
         fill = QColor(col)
         fill.setAlpha(38)
@@ -3519,22 +3523,23 @@ class ChartEditWaveform(WaveformWidget):
         edge.setAlpha(170)
         band = QColor(col)
         band.setAlpha(90)
+        right = self.width()
         p.save()
-        p.setClipRect(self.LANE_X0, 0, max(0, self.width() - self.LANE_X0), h)
+        p.setClipRect(self.LANE_X0, 0, max(0, right - self.LANE_X0), h)
         for m in sorted(self._sel_measures):
             a = self._bar_time(m)
-            b = self._bar_time(m + 1)
             if a is None:
                 continue
-            if b is None:
+            b = self._bar_time(m + 1)
+            if b is None or b <= a:
                 b = a + self._measure_len()
-            if b < t0 or a > t1:
-                continue
             x0 = self._sec_to_x(a)
             x1 = self._sec_to_x(b)
-            p.fillRect(int(x0), self.RULER_H, max(1, int(x1 - x0)),
-                       h - self.RULER_H, fill)
-            p.fillRect(int(x0), 0, max(1, int(x1 - x0)), self.RULER_H, band)
+            if x1 < self.LANE_X0 or x0 > right:
+                continue                    # 画面の外
+            w = max(1, int(x1 - x0))
+            p.fillRect(int(x0), self.RULER_H, w, h - self.RULER_H, fill)
+            p.fillRect(int(x0), 0, w, self.RULER_H, band)
             p.setPen(QPen(edge, 2))
             p.drawLine(int(x0), 0, int(x0), h)
             p.drawLine(int(x1), 0, int(x1), h)
