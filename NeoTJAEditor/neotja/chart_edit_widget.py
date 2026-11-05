@@ -1083,7 +1083,8 @@ class ChartEditWaveform(WaveformWidget):
             if event.buttons() & Qt.LeftButton:
                 pm = self._pending_measure
                 if pm is not None:
-                    if abs(event.position().x() - pm[1]) < 4:
+                    if (abs(event.position().x() - pm[1])
+                            < self.spx(self.MEASURE_PICK_SLOP)):
                         return          # まだ押しただけ(選ぶかもしれない)
                     # 引き始めた = 擦るほう。小節の選択は外す。
                     self._pending_measure = None
@@ -1912,6 +1913,11 @@ class ChartEditWaveform(WaveformWidget):
         clr = menu.addAction("範囲を解除")
         clr.setEnabled(self.has_range())
         clr.triggered.connect(self.clear_range)
+
+    #: 目盛りを押したとき、「押しただけ」と見なす手ブレの幅(px)。
+    #: 4px では手が少し動いただけで擦り扱いになり、小節を選べたり選べ
+    #: なかったりした(利用者の報告 2026-11-06「押せるの押せないのあるよ」)。
+    MEASURE_PICK_SLOP = 10
 
     def _delete_selected_measures(self):
         """上の目盛りで選んだ小節を消してもらう(Delete と右クリックの両方)。"""
