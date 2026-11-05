@@ -672,7 +672,10 @@ def _bake_art(bg, out_h):
         return got
     ah = max(8, int(round(out_h * bg.art_pct / 100.0)))
     e = int(bg.art_edge)
-    vf = "scale=-2:%d" % ah
+    # **真ん中から取れる一番大きい正方形**にしてから縮める(利用者の希望
+    # 2026-11-06)。crop は既定で中央を取る。横長・縦長のジャケットでも
+    # 正方形で出るので、置き場所の計算も縦横おなじで済む。
+    vf = "crop='min(iw,ih)':'min(iw,ih)',scale=%d:%d" % (ah, ah)
     if e > 0:
         vf += (",pad=iw+%d:ih+%d:%d:%d:color=%s"
                % (e * 2, e * 2, e, e, bg.art_edge_color))
@@ -790,7 +793,8 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
             # もう出来上がりの大きさで焼いてある。触らずに重ねるだけ。
             art_chain = "[%d:v]null" % art_idx
         else:
-            art_chain = "[%d:v]scale=-2:%d" % (art_idx, ah)
+            art_chain = ("[%d:v]crop='min(iw,ih)':'min(iw,ih)',"
+                         "scale=%d:%d" % (art_idx, ah, ah))
             if e > 0:
                 art_chain += (",pad=iw+%d:ih+%d:%d:%d:color=%s"
                               % (e * 2, e * 2, e, e, bg.art_edge_color))

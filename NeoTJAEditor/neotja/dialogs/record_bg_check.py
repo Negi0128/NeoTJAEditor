@@ -114,7 +114,13 @@ def _baked_art(bg, h):
     src = QImage(path)
     if src.isNull():
         return None
-    img = src.scaledToHeight(ah, Qt.SmoothTransformation)
+    # **真ん中から取れる一番大きい正方形**にしてから縮める(利用者の希望
+    # 2026-11-06)。録画側(recorder._bake_art の crop)と同じ切り方。
+    side = min(src.width(), src.height())
+    if side > 0 and (src.width() != side or src.height() != side):
+        src = src.copy((src.width() - side) // 2,
+                       (src.height() - side) // 2, side, side)
+    img = src.scaled(ah, ah, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
     if e > 0:
         out = QImage(img.width() + e * 2, img.height() + e * 2,
                      QImage.Format_ARGB32_Premultiplied)
