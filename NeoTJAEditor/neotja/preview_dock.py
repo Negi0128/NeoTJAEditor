@@ -3361,11 +3361,17 @@ class PreviewDock(QDockWidget):
             self.save_settings_cb()
 
     def _restore_bottom_mode(self):
-        """起動時に、前回終了時のモードへ戻す。"""
-        name = self.config_data.get("preview_bottom_mode")
-        try:
-            idx = self._mode_names.index(name)
-        except ValueError:
+        """起動時のモード。**かならず「作譜」で開く**。
+
+        前は前回終了時のモードへ戻していたが、「最初に開いた画面は作譜
+        ペインにして」との指定(2026-11-05)。通常再生や軽量を見たあとで
+        閉じても、次に開くときは作譜から始まる。作譜が並びに無いとき
+        (実験的機能を切っているとき)だけ通常再生へ落ちる。
+
+        覚えるほう(_save_bottom_mode)は残してある — settings.json に最後の
+        モードは書かれ続けるので、戻したくなったらここを差し替えるだけ。"""
+        idx = self.MODE_EDIT
+        if idx is None or not (0 <= idx < len(self._mode_names)):
             idx = self.MODE_TITLE
         self._restoring_mode = True
         try:
