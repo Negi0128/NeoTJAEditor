@@ -585,39 +585,33 @@ class ChartEditWaveform(WaveformWidget):
     def _echo_active(self):
         return time.monotonic() < self._own_seek_until
 
-    #: 停止中、カーソルが左右それぞれこの割合まで寄ったら表示を動かす。
-    #: 真ん中に貼り付けていた頃は、1グリッド動かすたびに景色のほうが流れて
-    #: 目が落ち着かなかった(利用者の指摘 2026-09-25)。
-    VIEW_MARGIN_FRAC = 0.25
-
     def _follow_view_start(self, seconds, span):
         """追従表示の左端。
 
-        再生中は今までどおり、再生位置を窓の中の一定の場所に保って流す。
-        停止中(カーソルで動かしているとき)は、真ん中の帯にいるあいだは動かさず、
-        端(左右 VIEW_MARGIN_FRAC)まで寄ったときだけ真ん中へ戻すように滑らせる。
-        曲の終わりより先へもカーソルを出せるよう、duration ではクランプしない。
+        **景色が動くのは2つだけ** — ホイールと、再生中の追従。
+        カーソルや赤い線を動かしても景色は動かさない。端や画面の外へ
+        出ても動かさない(どこに居るかは端の赤い三角で分かる)。
+        以前は停止中に「カーソルが端へ寄ったら真ん中へ戻す」をやって
+        いたが、見ている所が勝手に変わるのが邪魔だった(利用者の指定
+        2026-11-05「ホイール以外では見てる範囲を遷移しない」)。
 
-        **オブジェクトを掴んでいるあいだは動かさない**(利用者の指定
-        2026-10-08)。掴んだまま右へ運ぶと、カーソルが端へ寄ったぶんの
-        「寄せ直し」で景色が滑り、掴んだものと指先がずれていった。掴んで
-        いるあいだに景色を動かせるのはホイールだけ(wheelEvent が自分で
-        scroll_view_to を呼ぶ)。"""
+        追従は再生を始めたところで入り(set_playing)、途中でホイールを
+        回したら切れて、もう勝手には戻らない。
+
+        **オブジェクトを掴んでいるあいだも動かさない**(利用者の指定
+        2026-10-08)。掴んだまま右へ運ぶと、寄せ直しで景色が滑って
+        掴んだものと指先がずれていった。
+        """
         if span <= 0:
             return self.view_start
         if self._note_drag is not None:
             return self.view_start
+        if not self._playing:
+            return self.view_start      # 停止中は追従しない
         if not self._follow_now(seconds, span):
             return self.view_start      # ホイールで送った景色のまま
-        if self._playing:
-            self._stop_view_anim()
-            return super()._follow_view_start(seconds, span)
-        left = self.view_target() + span * self.VIEW_MARGIN_FRAC
-        right = self.view_target() + span * (1.0 - self.VIEW_MARGIN_FRAC)
-        if left <= seconds <= right:
-            return self.view_start          # 帯の中 = 景色は動かさない
-        self.scroll_view_to(max(0.0, seconds - span * self.FOLLOW_FRAC))
-        return self.view_start              # 行き先はトゥイーンが書き込む
+        self._stop_view_anim()
+        return super()._follow_view_start(seconds, span)
 
     def _pin_playhead_to_cursor(self):
         """赤い線と表示をカーソルの位置へ直接合わせる(音源の返事を待たない)。"""
@@ -648,10 +642,17 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
 
     def set_playing(self, playing):
-        """再生中かどうか。再生中は黄色いカーソルを出さない(赤い線だけ)。"""
+        """再生中かどうか。再生中は黄色いカーソルを出さない(赤い線だけ)。
+
+        **再生を始めたところで追従に戻す。** ホイールで景色を送ると追従は
+        切れるが、もう一度再生を始めれば入り直す — それが唯一の戻り道
+        (利用者の指定 2026-11-05)。
+        """
         playing = bool(playing)
         if playing != self._playing:
             self._playing = playing
+            if playing:
+                self._view_free = False
             self.update()
 
     def set_cursor_address(self, m, slot):
@@ -663,9 +664,6 @@ class ChartEditWaveform(WaveformWidget):
     def _cursor_changed(self):
         """カーソルを自分で動かしたあとの共通処理。赤い線と表示を先に合わせ、
         返ってくる位置(こだま)はしばらく無視してから、シークを頼む。"""
-        # 自分でカーソルを動かしたら、ホイールで送った景色は捨てて
-        # 追従に戻る(利用者の要望 2026-11-05)。
-        self._view_free = False
         self._own_seek_until = time.monotonic() + self.SEEK_ECHO_SEC
         self._pin_playhead_to_cursor()
         self.cursorMoved.emit(self.cursor_time())
