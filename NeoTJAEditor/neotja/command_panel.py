@@ -146,17 +146,19 @@ class CommandPanel(QFrame):
         self.sp_hs.setRange(-100.0, 100.0)
         self.sp_hs.setSingleStep(0.05)
         self.sp_hs.setValue(1.0)
-        # 80 -> 64 / 62。「追加」ボタンを足したぶん、2つの欄を詰める
-        # (利用者の報告 2026-11-04 への対応)。枠の幅(BOX_W=214)は動かせない
-        # — 3つ並べて 672 におさめる決まりなので、はみ出すと右が切れる。
-        self.sp_hs.setFixedWidth(64)
+        # 枠の中(198px)をちょうど埋める幅にする: 70 + 4 + 68 + 4 + 52。
+        # 「!」を外したあと 64/62/36 のままだったので、真ん中に 32px の
+        # すき間が空いて「追加」だけ右へ浮いていた(利用者の報告
+        # 2026-11-05「SCROLLパネル微妙にレイアウト崩れてる」)。
+        # 枠の幅(BOX_W=214)は動かせない — 3つ並べて 672 におさめる決まり。
+        self.sp_hs.setFixedWidth(70)
         self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。")
         self.sp_hs_bpm = QDoubleSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
         self.sp_hs_bpm.setSingleStep(5.0)
         self.sp_hs_bpm.setValue(120.0)
-        self.sp_hs_bpm.setFixedWidth(62)
+        self.sp_hs_bpm.setFixedWidth(68)
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
             "ここを変えると倍率もそれに合わせて変わる。")
@@ -167,7 +169,7 @@ class CommandPanel(QFrame):
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
                                  lambda: self.sp_hs.value(), auto=True,
                                  auto_on=[self.sp_hs], button=True,
-                                 btn_w=36, mark=None),
+                                 mark=None),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
         self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
