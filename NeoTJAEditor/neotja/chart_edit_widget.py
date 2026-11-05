@@ -1122,37 +1122,32 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
         self.cursorMoved.emit(t)
 
-    #: 小節番号の当たり判定の幅(px)。小節がこれより狭いときは小節の幅まで。
-    RULER_NUM_HIT_W = 34
-
     def ruler_measure_at(self, x, y=None):
-        """上の目盛りの小節番号を押したか。その小節番号(0 始まり)か None。
+        """上の目盛りの、どの小節の所を押したか。小節番号(0 始まり)か None。
 
-        番号が出ている所だけが相手(数字が入らないほど詰まっている小節は
-        選べない)。番号より右の帯は今までどおり、擦って赤い線を運ぶ所。"""
+        当たりは**その小節の区間ぜんぶ**(小節線から次の小節線まで)。前は
+        番号の文字の幅(34px)だけだったので、帯の大半が「擦る」側のままで、
+        たまたま番号の上を押したときしか選べなかった(利用者の報告
+        2026-11-05「いろんなとこクリックすると選択できることもある」)。
+
+        押しただけなら選ぶ・引いたら擦る、は mousePressEvent 側で分ける。
+        1小節目より前(頭の助走)と、譜面の終わりより先は None。"""
         if y is not None and y >= self.RULER_H:
             return None
-        if x < self.LANE_X0:
+        if x < self.LANE_X0 or self._visible_span() <= 0:
             return None
-        span = self._visible_span()
-        if span <= 0:
+        t = self._x_to_sec(x)
+        t0 = self._bar_time(0)
+        if t0 is None or t < t0:
             return None
-        t0 = self.view_start
-        t1 = t0 + span
-        lo, hi = self._measure_range(t0, t1)
-        for m in range(lo, hi):
-            a = self._bar_time(m)
-            if a is None or a > t1:
-                break
-            b = self._bar_time(m + 1)
-            x0 = self._sec_to_x(a)
-            room = (self._sec_to_x(b) - x0) if b is not None else 999
-            if room < self.RULER_NUM_MIN_ROOM:
-                continue
-            w = min(float(room), float(self.spx(self.RULER_NUM_HIT_W)))
-            if x0 <= x < x0 + w:
-                return m
-        return None
+        addr = self._address_from_time(t)
+        if addr is None:
+            return None
+        m = int(addr[0])
+        n = self._measure_count()
+        if m < 0 or (n > 0 and m >= n):
+            return None
+        return m
 
     def selected_measures(self):
         """上の目盛りで選んでいる小節(小節番号の昇順)。"""
