@@ -109,6 +109,41 @@ class TJACourseAnalyzer:
     def __init__(self, config_data: dict):
         self.config_data = config_data
 
+    @staticmethod
+    def _parse_balloon_line(s):
+        """BALLOON: の行 → 打数のリスト。"""
+        return [int(x.strip()) for x in s.split(":", 1)[1].split(",")
+                if x.strip().isdigit()]
+
+    @classmethod
+    def balloon_defs_for(cls, lines, start_idx):
+        """その譜面に効く BALLOON: の値(start_idx = #START の行番号、0始まり)。
+
+        **コースごとに別の BALLOON: を持てる**(鬼表と鬼裏など)。#START から
+        上へたどり、ひとつ前の #END より上へは行かない。そこに無ければ、
+        最初の COURSE: より上に書いてある BALLOON:(1コースだけのファイルで
+        よくある形)を使う。
+
+        前はファイル全体から最初の1本を拾っていたので、2つ目以降のコースが
+        1つ目の打数を使っていた(利用者の報告 2026-11-06「鬼裏の風船が鬼表の
+        風船打数に吸われている」)。
+        """
+        i = min(int(start_idx), len(lines)) - 1
+        while i >= 0:
+            s = lines[i].split("//", 1)[0].strip()
+            if s.startswith("#END"):
+                break                      # ここより上は別のコース
+            if s.upper().startswith("BALLOON:"):
+                return cls._parse_balloon_line(s)
+            i -= 1
+        for l in lines[:max(0, int(start_idx))]:
+            s = l.split("//", 1)[0].strip()
+            if s.upper().startswith("COURSE:"):
+                break                      # コースが始まったら、そこまで
+            if s.upper().startswith("BALLOON:"):
+                return cls._parse_balloon_line(s)
+        return []
+
     def parse_courses(self, content):
         lines = content.split('\n')
         result = []
@@ -116,16 +151,20 @@ class TJACourseAnalyzer:
         cname = "Oni"
         in_score = False
 
-        for line in lines:
+        start_idx = 0
+        starts = []
+        for idx, line in enumerate(lines):
             s = line.strip()
             if s.startswith("COURSE:"):
                 if buffer:
                     result.append({"key": cname, "data": buffer})
+                    starts.append(start_idx)
                 cname = self.DIFF.get(s[7:].strip(), "Oni")
                 buffer = []
                 in_score = False
             elif s.startswith("#START"):
                 in_score = True
+                start_idx = idx
                 buffer.append(s)
             elif s.startswith("#END"):
                 buffer.append(s)
@@ -134,10 +173,12 @@ class TJACourseAnalyzer:
                 buffer.append(s)
         if buffer:
             result.append({"key": cname, "data": buffer})
+            starts.append(start_idx)
 
         out = []
-        for c in result:
-            stats = self._analyze(c["data"], lines)
+        for c, st in zip(result, starts):
+            stats = self._analyze(c["data"], lines,
+                                  balloon_defs=self.balloon_defs_for(lines, st))
             out.append({
                 "key": c["key"],
                 "label": self.DIFF_LABEL.get(c["key"], c["key"]),
@@ -207,9 +248,13 @@ class TJACourseAnalyzer:
             return max(1, int(duration * rs))
         return max(1, int(duration * rs))
 
-    def _analyze(self, data, all_lines, branch_level: str = "M"):
+    def _analyze(self, data, all_lines, branch_level: str = "M",
+                 balloon_defs=None):
         bpm = Decimal("120")
-        balloon_defs = []
+        # BALLOON: は**そのコースのもの**を外から渡してもらう(渡されなければ
+        # ファイル全体から拾う従来の読み方)。鬼表と鬼裏のように同じ譜面に
+        # 2つ以上あるとき、全体から拾うと後ろのコースが前のを使ってしまう。
+        balloon_defs = list(balloon_defs) if balloon_defs else []
 
         for l in all_lines:
             if l.startswith("BPM:"):
@@ -217,8 +262,8 @@ class TJACourseAnalyzer:
                     bpm = Decimal(l[4:].strip())
                 except Exception:
                     pass
-            elif l.startswith("BALLOON:"):
-                balloon_defs = [int(x.strip()) for x in l[8:].split(',') if x.strip().isdigit()]
+            elif l.startswith("BALLOON:") and not balloon_defs:
+                balloon_defs = self._parse_balloon_line(l.strip())
 
         events = []
         # Same branch handling as build_preview_timeline() (see its
@@ -1101,11 +1146,8 @@ class TJACourseAnalyzer:
                     pass
                 break
 
-        balloon_defs = []
-        for l in lines:
-            if l.startswith("BALLOON:"):
-                balloon_defs = [int(x.strip()) for x in l[8:].split(',') if x.strip().isdigit()]
-                break
+        # **選んだコースの** BALLOON: を使う(鬼表と鬼裏で別々に持てる)。
+        balloon_defs = self.balloon_defs_for(lines, a - 1)
 
         # Pre-split into measures via COMMA (like _analyze()) instead of a
         # single streaming pass, so a command that lands mid-measure - most
