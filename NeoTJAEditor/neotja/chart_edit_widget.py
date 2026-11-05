@@ -2063,7 +2063,7 @@ class ChartEditWaveform(WaveformWidget):
     _OWN_KEYS = frozenset((
         Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Home, Qt.Key_End,
         Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
-        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_G,
+        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_G, Qt.Key_S,
     )) | frozenset(_PLAIN_KEYS) | frozenset(_PEEPO_NOTE_KEYS) | frozenset(_PEEPO_LONG_KEYS)
 
     def event(self, e):
@@ -2191,7 +2191,16 @@ class ChartEditWaveform(WaveformWidget):
             if not event.isAutoRepeat():
                 self.toggle_gogo_at_cursor()
             return
-        # ほかの命令(BPM / HS / 小節線)はキーでは置かない。右クリックの
+        # 小節線を隠す/出すもキーで置く(利用者の希望 2026-11-05)。
+        # ゴーゴーの G と同じで、隠すか出すかは**今の状態**で決まる。
+        # Ctrl+S は上書き保存なので取らない。
+        if (key == Qt.Key_S and not mods & (Qt.ControlModifier
+                                            | Qt.AltModifier
+                                            | Qt.MetaModifier)):
+            if not event.isAutoRepeat():
+                self.toggle_barline_at_cursor()
+            return
+        # ほかの命令(BPM / HS)はキーでは置かない。右クリックの
         # メニューか、窓の「作譜」メニューから置く(利用者の希望 2026-09-25)。
         if key == Qt.Key_Home:
             self.jump_to_edge(False)
@@ -2468,13 +2477,27 @@ class ChartEditWaveform(WaveformWidget):
 
         音符と同じ気持ちで打てるように(利用者の指定 2026-10-24)。
         音符を選んでいるときの「開始」は、今までどおり選んだ範囲を覆う。"""
-        info = self._marker_info("GOGO") or {}
+        return self._toggle_marker_at_cursor("GOGO")
+
+    def toggle_barline_at_cursor(self):
+        """S。小節線を隠す/出すを、**今の状態に合わせて**置く。
+
+        ゴーゴーの G と同じ考え方(利用者の希望 2026-11-05)。
+        ・小節線が出ている → #BARLINEOFF(隠す)を置く
+        ・隠れている → #BARLINEON(出す)を置く
+        ・その位置にもう命令がある → それを消す"""
+        return self._toggle_marker_at_cursor("BARLINE")
+
+    def _toggle_marker_at_cursor(self, kind):
+        """G / S の中身。帯の外なら開始、中なら終了、その場にあれば消す。"""
+        kind = str(kind).upper()
+        info = self._marker_info(kind) or {}
         if info.get("here_on") or info.get("here_off"):
             which = "on" if info.get("here_on") else "off"
             return self._run_op({"kind": "marker", "a": self._cursor_addr(),
-                                 "region": "GOGO", "which": which,
+                                 "region": kind, "which": which,
                                  "present": False})
-        return self.place_marker("GOGO", "off" if info.get("before") else "on")
+        return self.place_marker(kind, "off" if info.get("before") else "on")
 
     def place_marker(self, kind, which):
         """カーソルの位置に開始/終了の印を置く(命令パネルのボタンから)。
