@@ -2299,7 +2299,7 @@ class ChartEditWaveform(WaveformWidget):
         if self.offset_mode or (event.modifiers() & self.ZOOM_MODIFIERS):
             super().wheelEvent(event)
             return
-        d = 1 if event.angleDelta().y() > 0 else -1
+        d = self._wheel_notches(event)
         if event.modifiers() & Qt.ShiftModifier:
             d *= self.WHEEL_JUMP_MEASURES
         step = d * self._wheel_view_step()
@@ -2707,7 +2707,7 @@ class ChartEditWaveform(WaveformWidget):
                              "present": True})
 
     def _wheel_view_step(self):
-        """ホイール1目盛で動かす秒数(1小節ぶん)。
+        """ホイール1目盛で動かす秒数(1小節ぶんの WHEEL_STEP_FRAC 倍)。
 
         小節の長さが分からないときは表示幅の決まった割合で代用する。"""
         base = self.view_target()
@@ -2716,7 +2716,7 @@ class ChartEditWaveform(WaveformWidget):
             a = self._bar_time(addr[0])
             b = self._bar_time(addr[0] + 1)
             if a is not None and b is not None and b > a:
-                return b - a
+                return (b - a) * self.WHEEL_STEP_FRAC
         return max(0.05, self._visible_span() * self.SCROLL_FRAC)
 
     def _drag_dx(self, dr=None):

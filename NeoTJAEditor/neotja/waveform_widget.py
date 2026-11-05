@@ -659,9 +659,31 @@ class WaveformWidget(QWidget):
     #: Shift + ホイールで何目盛ぶん飛ばすか。
     WHEEL_JUMP_MEASURES = 4
 
+    #: ホイール1目盛で動かす量。1小節(または表示幅の決まった割合)の何倍か。
+    #: 1.0 だときっちり1小節ぶん動いて行き過ぎる、という声で 0.7 にした
+    #: (利用者の指定 2026-11-05)。
+    WHEEL_STEP_FRAC = 0.7
+
     def _wheel_view_step(self):
         """ホイール1目盛で動かす秒数。作譜ペインは1小節ぶんに差し替える。"""
-        return max(0.05, self._visible_span() * self.SCROLL_FRAC)
+        return max(0.05, self._visible_span() * self.SCROLL_FRAC
+                   * self.WHEEL_STEP_FRAC)
+
+    def _wheel_notches(self, event):
+        """そのホイール操作が何目盛ぶんか。
+
+        1目盛 = 120。高分解能のホイールやタッチパッドは**もっと細かい値**で
+        刻んで送ってくるので、端数のまま使う — 1イベント=1目盛に丸めると、
+        少し回しただけで1小節飛んで「滑らかでない」(利用者の指定
+        2026-11-05)。向きはそのまま符号で入る。"""
+        d = float(event.angleDelta().y())
+        if d == 0.0:
+            return 0.0
+        n = d / 120.0
+        # 取りこぼし防止: どんなに小さくても 1/8 目盛ぶんは動かす。
+        if abs(n) < 0.125:
+            n = 0.125 if n > 0 else -0.125
+        return n
 
     def scroll_view_free(self, step, span=None):
         """景色だけを step 秒ぶん送る(赤い線は動かさない)。
@@ -699,7 +721,7 @@ class WaveformWidget(QWidget):
             # 動くため、回しすぎると戻すのが大変だった(利用者の要望
             # 2026-11-05「赤い線を動かすのはクリックだけでいい」)。
             span = self._visible_span()
-            step = self._wheel_view_step() * (1 if up else -1)
+            step = self._wheel_view_step() * self._wheel_notches(event)
             if event.modifiers() & Qt.ShiftModifier:
                 step *= self.WHEEL_JUMP_MEASURES
             self.scroll_view_free(step, span)
