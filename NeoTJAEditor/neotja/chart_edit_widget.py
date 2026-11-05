@@ -1412,14 +1412,43 @@ class ChartEditWaveform(WaveformWidget):
         """そのオブジェクトが占める横の範囲 (左, 右)。
 
         命令の札は右へ伸びて描かれる。つかめる場所も**描いてある四角と同じ**に
-        する(利用者の指定 2026-09-26: 右側に判定が無くて動かしにくい)。"""
+        する(利用者の指定 2026-09-26: 右側に判定が無くて動かしにくい)。
+
+        **隣と重なるほど詰まっている所では、隣とのまんなかで切る**
+        (利用者の指定 2026-11-05)。札の幅も音符の丸も決め打ちなので、
+        16分で並ぶような所では隣の上まで伸びていた。そのせいで
+          ・押した所と選ばれるものがずれる
+          ・選んだ囲みが隣へはみ出して、ひと塊に見える
+        の両方が起きていた。見えている幅・つかめる幅・囲みの幅は同じにする。"""
         x = self._sec_to_x(t)
-        if orow == "note":
-            return (x - half, x + half)
         if orow == "gogo":
             # 帯の端。左右どちらからでもつまめるよう、中心に幅を取る。
             return (x - 8, x + 8)
-        return (x - 2, x - 2 + half * 3)
+        if orow == "note":
+            x0, x1 = x - half, x + half
+            lo, hi = self._note_neighbors(t)
+            if lo is not None:
+                x0 = max(x0, (self._sec_to_x(lo) + x) * 0.5)
+            if hi is not None:
+                x1 = min(x1, (self._sec_to_x(hi) + x) * 0.5)
+            return (x0, max(x0 + 2, x1))
+        x0 = x - 2
+        return (x0, min(x0 + half * 3, self._cmd_next_x(orow, t, x0)))
+
+    #: 音符の隣を探すときの同時刻とみなす幅(秒)。
+    _NEIGHBOR_EPS = 1e-6
+
+    def _note_neighbors(self, t):
+        """その時刻の前後にある音符の時刻 (手前, 先)。無ければ None。"""
+        times = getattr(self, "_note_time_list", None)
+        if not times:
+            return (None, None)
+        eps = self._NEIGHBOR_EPS
+        i = bisect.bisect_left(times, t - eps)
+        j = bisect.bisect_right(times, t + eps)
+        lo = times[i - 1] if i > 0 else None
+        hi = times[j] if j < len(times) else None
+        return (lo, hi)
 
     def _object_vrange(self, orow, half):
         """そのオブジェクトが描かれている縦の範囲 (上, 下)。"""
@@ -2905,11 +2934,6 @@ class ChartEditWaveform(WaveformWidget):
                     p.drawRect(x0 - 3, cy - hh, (x1 - x0) + 6, 2 * hh)
                 else:
                     ry, rh = rect
-                    # 囲みは**次の命令の手前まで**。札の幅は決め打ち(48px)
-                    # なので、命令が詰まっている所では隣へはみ出して、
-                    # 選んだものが1つの塊に見えていた(利用者の報告
-                    # 2026-11-05: SCROLL が大量に並ぶ譜面)。
-                    x1 = min(x1, self._cmd_next_x(orow, t, x0))
                     p.drawRect(x0, ry + 2, x1 - x0, rh - 4)
                     # 命令が詰まっている所では、細い四角だけではどれを
                     # 選んだのか見えない(利用者の報告 2026-11-05:
