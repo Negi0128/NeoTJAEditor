@@ -71,14 +71,11 @@ class _ImagePreviewBase(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # --- 上部の行: 左にスタイル、右に派生側のオプション ---
+        # --- 上部の行: 左に倍率、右に派生側のオプション ---
+        # 「スタイル」の選びは外した。本家風をやめて tja-tools に合わせた
+        # 描き方だけにしたので、選ぶものが無い(利用者の指定 2026-11-05
+        # 「譜面画像の本家風は削除してかまわない」)。
         top = QHBoxLayout()
-        top.addWidget(QLabel("スタイル:"))
-        self.style_combo = QComboBox()
-        self.style_combo.addItem("デフォルト", "default")
-        self.style_combo.addItem("本家風", "honke")
-        self.style_combo.currentIndexChanged.connect(self._request_regen)
-        top.addWidget(self.style_combo)
         # 倍率(利用者の指定 2026-11-04)。1倍が tja-tools とまったく同じ寸法で、
         # 細かい譜面を読みたいときに上げる。**拡大ではなく描き直し**なので
         # 字も線もぼけない。
@@ -132,7 +129,7 @@ class _ImagePreviewBase(QDialog):
     def _build_footer(self, row):
         pass
 
-    def _render_image(self, style, sprites):
+    def _render_image(self, sprites):
         raise NotImplementedError
 
     def _scale(self):
@@ -149,9 +146,8 @@ class _ImagePreviewBase(QDialog):
 
     def _generate_and_show(self):
         try:
-            style = self.style_combo.currentData()
             sprites = load_sprites(settings_mod.notes_png_path())
-            self.img = self._render_image(style, sprites)
+            self.img = self._render_image(sprites)
             pixmap = QPixmap.fromImage(ImageQt(self.img))
             self.scene.clear()
             self.scene.addPixmap(pixmap)
@@ -273,14 +269,14 @@ class TJAImagePreviewDialog(_ImagePreviewBase):
         dlg = FreeChartImageDialog(self.main_window, parent=self)
         dlg.show()          # モーダルにせず別ウィンドウとして開く
 
-    def _render_image(self, style, sprites):
+    def _render_image(self, sprites):
         courses = self.main_window.analyzer.parse_courses(self.content)
         m_from = self.spin_from.value()
         m_to = self.spin_to.value()
         n = self.spin_to.maximum()
         full = (m_from <= 1 and m_to >= n)      # 全体ならフィルタを掛けない
         img = generate_chart_image(
-            self.content, self.selected_label, courses, sprites, style=style,
+            self.content, self.selected_label, courses, sprites,
             measure_from=None if full else m_from,
             measure_to=None if full else m_to,
             scale=self._scale(),
@@ -346,11 +342,11 @@ class FreeChartImageDialog(_ImagePreviewBase):
         meas = f"#MEASURE {self.spin_num.value()}/{self.spin_den.value()}"
         return "\n".join(head + [meas] + lines + ["#END"]) + "\n"
 
-    def _render_image(self, style, sprites):
+    def _render_image(self, sprites):
         content = self._free_content()
         courses = self.main_window.analyzer.parse_courses(content)
         if not courses:
             raise ValueError("譜面を読み取れませんでした。本文を確認してください。")
         self._save_basename = "譜面画像"
         return generate_chart_image(content, courses[0]["label"], courses,
-                                    sprites, style=style, scale=self._scale())
+                                    sprites, scale=self._scale())

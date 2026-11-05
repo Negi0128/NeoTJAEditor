@@ -263,87 +263,15 @@ def load_sprites(notes_png_path) -> dict:
     return sprites
 
 
-def load_skin_sprites_pil() -> dict:
-    """本家風エクスポート用に skin/Notes.png(OpenTaiko系。3行構成、中央行を
-    使い、不透明な列スパンで各スプライトを検出)を PIL で切り出す。プレビュー
-    (chart_preview_widget)の切り出しと同じ規約:
-    [1]ドン [2]カ [3]大ドン [4]大カ [5]連打頭 [7]大連打頭 [9]風船。
-    generate_chart_image の sprites 辞書と同じキー('1'..'4','5_head','6_head',
-    '7','9')で返す。skin が無い/失敗なら {}。"""
-    from neotja import settings as settings_mod
-    path = str(settings_mod.skin_notes_path())
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        import numpy as np
-        sheet = Image.open(path).convert("RGBA")
-        w, h = sheet.size
-        row_h = h // 3
-        y0 = row_h                      # middle animation frame
-        band = np.asarray(sheet)[y0:y0 + row_h, :, 3]
-        col = band.max(axis=0) > 16
-        spans, start = [], None
-        for x in range(w):
-            if col[x] and start is None:
-                start = x
-            elif not col[x] and start is not None:
-                spans.append((start, x - 1)); start = None
-        if start is not None:
-            spans.append((start, w - 1))
-        if len(spans) < 10:
-            return {}
-
-        def cell(sp):
-            c = sheet.crop((sp[0], y0, sp[1] + 1, y0 + row_h))
-            ca = np.asarray(c)[:, :, 3]
-            ys, xs = np.where(ca > 16)
-            if len(xs) == 0:
-                return None
-            return c.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
-
-        out = {}
-        for key, idx in (("1", 1), ("2", 2), ("3", 3), ("4", 4),
-                         ("5_head", 5), ("6_head", 7), ("7", 9), ("9", 9)):
-            c = cell(spans[idx])
-            if c is not None:
-                out[key] = c
-        return out
-    except Exception:
-        return {}
-
-
-def _draw_hits_above(draw, x, y, note_r, hits, font):
-    """本家風: 風船の打数を音符に重ねず、音符の**上**に白い角丸チップで描く。
-    顔(スプライト)が隠れないようにするため。"""
-    label = str(hits)
-    try:
-        tw = draw.textlength(label, font=font)
-    except Exception:
-        tw = len(label) * 7
-    pad = 4
-    bw = tw + pad * 2
-    bh = 16
-    bx = x - bw / 2
-    by = y - note_r - bh - 4          # 音符の上へ
-    try:
-        draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=4,
-                               fill="#ffffff", outline="#000000", width=1)
-    except Exception:                  # 古い Pillow に rounded_rectangle が無い場合
-        draw.rectangle([bx, by, bx + bw, by + bh], fill="#ffffff", outline="#000000", width=1)
-    draw.text((bx + pad, by + 1), label, fill="#000000", font=font)
-
-
 def generate_chart_image(content: str, selected_label: str, courses: list,
-                         sprites: dict = None, style: str = "default",
+                         sprites: dict = None,
                          measure_from: int = None, measure_to: int = None,
                          scale: float = 1.0) -> Image.Image:
     """Renders a static timeline/score-sheet PNG for one course of a TJA file.
 
     `courses` is the output of TJACourseAnalyzer.parse_courses(content).
-    `style`: "default" または "honke"(本家風。skin/Notes.png のスプライトを
-    使い、レーンを暗くしてゲーム画面に近い見た目にする)。
 
-    "default" は **tja-tools (https://whmhammer.github.io/tja-tools/) と同じ
+    描き方は **tja-tools (https://whmhammer.github.io/tja-tools/) と同じ
     寸法**で描く(利用者の指定 2026-11-04「見た目も寄せたい」)。向こうの
     src/js/drawChart.js に書いてある数字をそのまま使っているので、1倍なら
     画の大きさも位置も一致する。音符の絵だけは向こうの素材を持ってきて
@@ -353,17 +281,11 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     2.0 / 3.0 と上げる。寸法も字の大きさも丸ごと掛ける(拡大ではないので
     ぼけない)。
     """
-    honke = (style == "honke")
-    if honke:
-        skin = load_skin_sprites_pil()
-        if skin:
-            sprites = skin
     sprites = sprites or {}
-    # レーン(帯)の色。本家風は暗色でゲーム画面に近づける。
-    # tja-tools の ROW_COLOR['N'] / LINE_COLOR。真ん中の薄い線は向こうには
-    # 無いので、tja-tools 風では引かない(None)。
-    lane_fill = "#3c3c46" if honke else "#808080"
-    lane_mid = "#5a5a66" if honke else None
+    # レーン(帯)の色。tja-tools の ROW_COLOR['N'] / LINE_COLOR。
+    # 真ん中の薄い線は向こうには無いので引かない(None)。
+    lane_fill = "#808080"
+    lane_mid = None
     ROW_BEATS = 16.0       # 1行に入る最大拍数 (4/4小節が4つ分 = 16拍)
     target_course = next((c for c in courses if c["label"] == selected_label), None)
     if target_course is None:
@@ -620,18 +542,13 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
 
     # -------------------------------------------------------------
     # 1b. 小節ごとの行(row)割り当て
-    #     4/4(=4拍)以下の長さの小節は行の途中で分割しない(収まらなければ
-    #     丸ごと次の行へ送る)。5/4以上の長い小節はこれまで通り複数行に
-    #     またがって改行してよい。
     # -------------------------------------------------------------
-    PROTECT_MAX_BEATS = 4.0
     _EPS = 1e-6
     # tja-tools 風では**どんな長さの小節も行の途中で割らない**。
     # 入らなければ丸ごと次の行へ送る(向こうの drawChart.js の
     # 「whole-measure wrap」。1行に入りきらない小節だけが割れる)。
     # そのぶん行数は増えるが、8/4 の小節が行の端で切れなくなる。
-    # 本家風は今までどおり「4拍以下だけ守る」。
-    _protect = float("inf") if not honke else PROTECT_MAX_BEATS
+    _protect = float("inf")
     # 向こうの判定は `>= ttRowBeat + 1/BEAT_WIDTH`。ちょうど収まる小節を
     # 送ってしまわないための遊び(1px ぶん)。
     _wrap_tol = 1.0 / 48.0
@@ -677,17 +594,16 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     events_roll = []
     active_rolls = {}          # branch(None/'N'/'E'/'M') -> 進行中の連打
 
-    # 曲頭の BPM。tja-tools は1小節目にも出すので揃える(本家風は今までどおり
-    # 変化した所だけ)。ヘッダの BPM: をそのまま使う。
-    if not honke:
-        _b0 = next((l[4:].strip() for l in content.split(chr(10))
-                    if l.startswith("BPM:")), "")
-        try:
-            events_cmd.append({'beat': 0.0,
-                               'text': "BPM%g" % float(_b0),
-                               'color': "#0088ff"})
-        except ValueError:
-            pass
+    # 曲頭の BPM。tja-tools は1小節目にも出すので揃える。
+    # ヘッダの BPM: をそのまま使う。
+    _b0 = next((l[4:].strip() for l in content.split(chr(10))
+                if l.startswith("BPM:")), "")
+    try:
+        events_cmd.append({'beat': 0.0,
+                           'text': "BPM%g" % float(_b0),
+                           'color': "#0088ff"})
+    except ValueError:
+        pass
 
     for m in parsed_measures:
         m_start = m['start_beat']
@@ -748,42 +664,30 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     # 3. 描画設定と画像生成
     # -------------------------------------------------------------
     sc = max(0.25, float(scale or 1.0))
-    if honke:
-        BEAT_WIDTH = 340 / 4   # 4分音符1つぶんの幅(340px の 4/4 小節が基準)
-        LANE_HEIGHT = 46
-        ROW_SPACING = 130
-        MARGIN_X = 60
-        MARGIN_Y = 170
-        GOGO_BAND_HEIGHT = 20
-        ROW_BOTTOM_TRIM = 0
-        BG_COLOR = "#dbdbdb"
-        GOGO_COLOR = "#ffc2c2"
-        GRID_LIGHT, GRID_DARK = "#aaaaaa", "#888888"
-    else:
-        # tja-tools の drawChart.js の数字そのもの。
-        #   BEAT_WIDTH 48 / ROW_HEIGHT_NOTE 32 / ROW_HEIGHT_INFO 18
-        #   ROW_MARGIN_BOTTOM 14 / ROW_LEADING,TRAILING 24
-        #   CHART_PADDING_TOP 62 / CHART_PADDING_BOTTOM -14
-        #   CHART_BG #cccccc / ROW_COLOR['N'] #808080 / COLOR_GOGO #ffc0c0
-        # 16拍 × 48 + 24 + 24 = 816px。向こうの出力と同じ幅になる。
-        BEAT_WIDTH = 48
-        LANE_HEIGHT = 32
-        GOGO_BAND_HEIGHT = 18          # ROW_HEIGHT_INFO
-        ROW_SPACING = LANE_HEIGHT + GOGO_BAND_HEIGHT + 14
-        MARGIN_X = 24
-        # tja-tools の CHART_PADDING_TOP(最低 62)。サブタイトルがある曲は
-        # その行のぶんだけ伸びる。
-        #
-        # 向こうの GET_ROW_Y は「行の上端(= 帯の上端)」を指すが、こちらの
-        # MARGIN_Y / row_tops は **レーンの上端** を指す。帯のぶん(18)を
-        # 足して、同じ所にレーンが来るようにする。
-        MARGIN_Y = 62 + 18 + (21 if _has_subtitle else 0)
-        # 最後の行の下は、帯(18)と行間(14)のぶんを削る。向こうの
-        # CHART_PADDING_BOTTOM -14 と合わせると同じ高さになる。
-        ROW_BOTTOM_TRIM = 18 + 14
-        BG_COLOR = "#cccccc"
-        GOGO_COLOR = "#ffc0c0"
-        GRID_LIGHT, GRID_DARK = "#b4b4b4", "#9a9a9a"
+    # tja-tools の drawChart.js の数字そのもの。
+    #   BEAT_WIDTH 48 / ROW_HEIGHT_NOTE 32 / ROW_HEIGHT_INFO 18
+    #   ROW_MARGIN_BOTTOM 14 / ROW_LEADING,TRAILING 24
+    #   CHART_PADDING_TOP 62 / CHART_PADDING_BOTTOM -14
+    #   CHART_BG #cccccc / ROW_COLOR['N'] #808080 / COLOR_GOGO #ffc0c0
+    # 16拍 × 48 + 24 + 24 = 816px。向こうの出力と同じ幅になる。
+    BEAT_WIDTH = 48
+    LANE_HEIGHT = 32
+    GOGO_BAND_HEIGHT = 18          # ROW_HEIGHT_INFO
+    ROW_SPACING = LANE_HEIGHT + GOGO_BAND_HEIGHT + 14
+    MARGIN_X = 24
+    # tja-tools の CHART_PADDING_TOP(最低 62)。サブタイトルがある曲は
+    # その行のぶんだけ伸びる。
+    #
+    # 向こうの GET_ROW_Y は「行の上端(= 帯の上端)」を指すが、こちらの
+    # MARGIN_Y / row_tops は **レーンの上端** を指す。帯のぶん(18)を
+    # 足して、同じ所にレーンが来るようにする。
+    MARGIN_Y = 62 + 18 + (21 if _has_subtitle else 0)
+    # 最後の行の下は、帯(18)と行間(14)のぶんを削る。向こうの
+    # CHART_PADDING_BOTTOM -14 と合わせると同じ高さになる。
+    ROW_BOTTOM_TRIM = 18 + 14
+    BG_COLOR = "#cccccc"
+    GOGO_COLOR = "#ffc0c0"
+    GRID_LIGHT, GRID_DARK = "#b4b4b4", "#9a9a9a"
     BEAT_WIDTH *= sc
     LANE_HEIGHT = int(round(LANE_HEIGHT * sc))
     ROW_SPACING = int(round(ROW_SPACING * sc))
@@ -801,8 +705,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     BRANCH_ORDER = ('N', 'E', 'M')
     BRANCH_LABEL = {'N': '普通', 'E': '玄人', 'M': '達人'}
     # tja-tools の ROW_COLOR。普通/玄人/達人 でレーンの色が変わる。
-    BRANCH_TINT = ({'N': "#9e9e9e", 'E': "#4f9a94", 'M': "#b5545c"} if honke
-                   else {'N': "#808080", 'E': "#609f9f", 'M': "#9f6060"})
+    BRANCH_TINT = {'N': "#808080", 'E': "#609f9f", 'M': "#9f6060"}
     row_branch = [False] * (total_rows + 1)
     for m in parsed_measures:
         if m.get('is_branch'):
@@ -852,37 +755,28 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     if subtitle[:2] in ("--", "++"):
         subtitle = subtitle[2:]
 
-    if honke:
-        font_cmd = _f(12)
-        font_num = _f(13)
-        font_balloon = _f(12)
-        draw.text((MARGIN_X, int(20 * sc)), title, fill="#000000", font=_f(40))
-        draw.text((MARGIN_X, int(65 * sc)),
-                  "%s %s" % (selected_label, "★" * level),
-                  fill=target_course["color"], font=_f(24))
-    else:
-        # tja-tools の見出し。大きさと位置は向こうの src/js/font/font.js の
-        # Windows の設定そのもの(利用者の希望 2026-11-04「フォントも
-        # 合わせて」):
-        #   題名   bold 21px Arial / MS UI Gothic   x=11  y=10
-        #   副題   bold 17px 同上                   x=11  y=36
-        #   難易度 bold 17px 同上                   x=10  y=62(副題あり)
-        #                                                 41(副題なし)
-        # この積み上げが CHART_PADDING_TOP 62/83 の正体でもある。
-        font_cmd = font_num = font_balloon = _f(7, False)
-        lv = max(0, min(10, level))
-        stars = "★" * lv + "☆" * (10 - lv)
+    # tja-tools の見出し。大きさと位置は向こうの src/js/font/font.js の
+    # Windows の設定そのもの(利用者の希望 2026-11-04「フォントも
+    # 合わせて」):
+    #   題名   bold 21px Arial / MS UI Gothic   x=11  y=10
+    #   副題   bold 17px 同上                   x=11  y=36
+    #   難易度 bold 17px 同上                   x=10  y=62(副題あり)
+    #                                                 41(副題なし)
+    # この積み上げが CHART_PADDING_TOP 62/83 の正体でもある。
+    font_cmd = font_balloon = _f(7, False)
+    lv = max(0, min(10, level))
+    stars = "★" * lv + "☆" * (10 - lv)
 
-        def _px(v):
-            return int(round(v * sc))
+    def _px(v):
+        return int(round(v * sc))
 
-        draw_header_text(draw, _px(11), _px(10), title, "#000000", 21 * sc)
-        if subtitle:
-            draw_header_text(draw, _px(11), _px(36), subtitle, "#000000",
-                             17 * sc)
-        draw_header_text(draw, _px(10), _px(62 if subtitle else 41),
-                         "%s %s Lv.%d" % (selected_label, stars, level),
-                         "#000000", 17 * sc)
+    draw_header_text(draw, _px(11), _px(10), title, "#000000", 21 * sc)
+    if subtitle:
+        draw_header_text(draw, _px(11), _px(36), subtitle, "#000000",
+                         17 * sc)
+    draw_header_text(draw, _px(10), _px(62 if subtitle else 41),
+                     "%s %s Lv.%d" % (selected_label, stars, level),
+                     "#000000", 17 * sc)
 
     # -------------------------------------------------------------
     # 4. 描画ユーティリティ
@@ -916,10 +810,7 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     LANE_EDGE = ((2, "#000000"), (2, "#ffffff"), (1, "#d4d4d4"), (1, "#aaaaaa"))
 
     def draw_lane(ly, fill):
-        """レーンを1本。tja-tools 風は縁取り付き、本家風はべた塗り。"""
-        if honke:
-            draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT], fill=fill)
-            return
+        """レーンを1本(縁取り付き)。"""
         # PIL の rectangle は**両端を含む**。ちょうど LANE_HEIGHT px に
         # するため下端を1つ手前で止める(でないと1px はみ出す)。
         draw.rectangle([0, ly, img_width, ly + LANE_HEIGHT - 1], fill=fill)
@@ -994,54 +885,34 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
 
     for r in range(total_rows):
         cmds = sorted(row_cmds[r], key=lambda c: c[0])
-        last_end_x = [0, 0, 0]
         ly = row_tops[r] if r < len(row_tops) else MARGIN_Y
-        if not honke:
-            # tja-tools と同じ積み方。**横にはずらさない。** 同じ位置に
-            # 重なったぶんだけ上へ 6px ずつ積む(向こうの scrollCount)。
-            # BPM は BPM の段、それ以外は HS の段。
-            stack = {}
-            for x, text, _color in cmds:
-                key = int(round(x))
-                is_bpm = text.startswith("BPM")
-                band = BAND_BPM if is_bpm else BAND_HS
-                up = stack.get((key, band), 0)
-                stack[(key, band)] = up + 1
-                y0 = band_y(band, up)
-                # 命令の縦線は、いちばん上に積んだ字の高さまで伸ばす。
-                draw.line([x, y0, x, ly + row_height(r)],
-                          fill="#444444", width=max(1, int(round(sc))))
-                draw_pix_text(draw, x, y0, text,
-                              PIX_COLOR_BPM if is_bpm else PIX_COLOR_HS, sc)
-            continue
-        for x, text, color in cmds:
-            try:
-                tw = draw.textlength(text, font=font_cmd)
-            except Exception:
-                tw = len(text) * 7
-
-            level = 0
-            if x < last_end_x[0] + 8:
-                level = 1
-                if x < last_end_x[1] + 8:
-                    level = 2
-
-            last_end_x[level] = x + 2 + tw
-            cmd_y = ly - 36 - level * 14
-            draw.line([x, cmd_y + 6, x, ly + row_height(r)],
-                      fill="#333333", width=2)
-            draw.text((x + 2, cmd_y), text, fill=color, font=font_cmd)
+        # tja-tools と同じ積み方。**横にはずらさない。** 同じ位置に
+        # 重なったぶんだけ上へ 6px ずつ積む(向こうの scrollCount)。
+        # BPM は BPM の段、それ以外は HS の段。
+        stack = {}
+        for x, text, _color in cmds:
+            key = int(round(x))
+            is_bpm = text.startswith("BPM")
+            band = BAND_BPM if is_bpm else BAND_HS
+            up = stack.get((key, band), 0)
+            stack[(key, band)] = up + 1
+            y0 = band_y(band, up)
+            # 命令の縦線は、いちばん上に積んだ字の高さまで伸ばす。
+            draw.line([x, y0, x, ly + row_height(r)],
+                      fill="#444444", width=max(1, int(round(sc))))
+            draw_pix_text(draw, x, y0, text,
+                          PIX_COLOR_BPM if is_bpm else PIX_COLOR_HS, sc)
 
     # --- E. 小節線（白太線） ---
     #: 小節線の太さ。tja-tools は 2px で、**線の中心が x** に来る
     #: (canvas の drawLine と同じ)。PIL の line は x から右へ伸びるので、
     #: 半分ぶん左へ寄せないと1px ずれる。
-    BAR_W = 3 if honke else max(1, int(round(2 * sc)))
+    BAR_W = max(1, int(round(2 * sc)))
 
     def draw_barline(x, ly, h):
         # **先に丸めてから寄せる。** 切り捨てだと 1/24 や 1/32 の小節で
         # 1px 手前に出て、tja-tools とずれる。
-        x0 = x if honke else int(round(x)) - BAR_W // 2
+        x0 = int(round(x)) - BAR_W // 2
         draw.line([x0, ly, x0, ly + h], fill="#ffffff", width=BAR_W)
 
     for _mi, m in enumerate(parsed_measures):
@@ -1053,13 +924,9 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         # (tja-tools も番号だけは出す)。
         if m.get('barline', True):
             draw_barline(x, ly, row_height(r))
-        if honke:
-            draw.text((x + 4, ly - 18), str(m['idx'] + 1),
-                      fill="#000000", font=font_num)
-        else:
-            # 帯のいちばん下の段(tja-tools の ROW_HEIGHT_INFO - 6)。
-            ny = ly - int(round(BAND_NUM * sc))
-            draw_pix_text(draw, x, ny, str(m['idx'] + 1), PIX_COLOR_NUM, sc)
+        # 帯のいちばん下の段(tja-tools の ROW_HEIGHT_INFO - 6)。
+        ny = ly - int(round(BAND_NUM * sc))
+        draw_pix_text(draw, x, ny, str(m['idx'] + 1), PIX_COLOR_NUM, sc)
 
         # **行の終わりを閉じる線。** 次の小節が別の行へ送られたときは、
         # この行の末尾にも小節線が要る(tja-tools も引いている)。前は
@@ -1088,47 +955,21 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
     def draw_roll(r, sx, ex, ly, is_first, is_last, color, thick, branch=None):
         # 分岐行では系統ごとのレーンへ(ly は行の上端なのでレーン分だけ下げる)。
         cy = lane_y(r, branch) + LANE_HEIGHT / 2
-        if not honke:
-            # tja-tools の連打は**音符と同じ2重の縁**が付いた帯。
-            # 行をまたぐ側は丸めずに済むよう、画像の外へはみ出させる。
-            x0 = (sx - thick / 2.0) if is_first else (sx - thick)
-            x1 = (ex + thick / 2.0) if is_last else (ex + thick)
-            tile = tjat_capsule(x1 - x0, thick, color,
-                                max(1, int(round(sc))))
-            img.paste(tile, (int(round(x0)), int(round(cy - thick / 2.0))),
-                      tile)
-            return
-        draw.line([sx, cy, ex, cy], fill=color, width=thick)
-        if is_first:
-            draw.ellipse([sx - thick / 2, cy - thick / 2, sx + thick / 2, cy + thick / 2], fill=color)
-        if is_last:
-            draw.ellipse([ex - thick / 2, cy - thick / 2, ex + thick / 2, cy + thick / 2], fill=color)
-        # 帯の上下の縁。本家風は黒。tja-tools 風では縁を引かない — 向こうの
-        # 連打はただの丸い黄色い帯で、黒い線が横切って見えるのが目立つため
-        # (利用者の指定 2026-11-04「見た目も寄せたい」)。
-        if honke:
-            draw.line([sx, cy - thick / 2, ex, cy - thick / 2],
-                      fill="#000000", width=1)
-            draw.line([sx, cy + thick / 2, ex, cy + thick / 2],
-                      fill="#000000", width=1)
+        # tja-tools の連打は**音符と同じ2重の縁**が付いた帯。
+        # 行をまたぐ側は丸めずに済むよう、画像の外へはみ出させる。
+        # 帯の上下に黒い線は引かない — 向こうの連打はただの丸い黄色い帯で、
+        # 線が横切って見えるのが目立つため(利用者の指定 2026-11-04)。
+        x0 = (sx - thick / 2.0) if is_first else (sx - thick)
+        x1 = (ex + thick / 2.0) if is_last else (ex + thick)
+        tile = tjat_capsule(x1 - x0, thick, color, max(1, int(round(sc))))
+        img.paste(tile, (int(round(x0)), int(round(cy - thick / 2.0))), tile)
 
     for roll in events_roll:
-        # 本家風では風船/くす玉(7/9)の長さ(帯)は描かない。風船スプライトだけを
-        # 置く(要望)。連打(5/6)の帯は本家風でも従来どおり描く。
-        if honke and roll['r_type'] in '79':
-            continue
-        if honke:
-            color = "#fcdb38" if roll['r_type'] in '56' else "#ffb74d"
-        else:
-            # 向こうの notes-rollMiddle.png / notes-spRollMiddle.png の色。
-            color = TJAT_ROLL if roll['r_type'] in '56' else TJAT_BALLOON
-        # 帯の太さ。tja-tools 風では音符の直径に合わせる(倍率にも付いていく)。
-        if honke:
-            thick = 34 if roll['r_type'] == '6' else 24
-        else:
-            # 大連打と風船・くす玉は大音符と同じ太さ(24)、ふつうの連打は
-            # 音符と同じ(18)。向こうの素材の高さそのもの。
-            thick = int(round((18 if roll['r_type'] == '5' else 24) * sc))
+        # 向こうの notes-rollMiddle.png / notes-spRollMiddle.png の色。
+        color = TJAT_ROLL if roll['r_type'] in '56' else TJAT_BALLOON
+        # 帯の太さは音符の直径に合わせる(倍率にも付いていく)。大連打と
+        # 風船・くす玉は大音符と同じ(24)、ふつうの連打は音符と同じ(18)。
+        thick = int(round((18 if roll['r_type'] == '5' else 24) * sc))
         _br = roll.get('branch')
         draw_band(row_units(roll['start_beat']), row_units(roll['end_beat']),
                   lambda r, sx, ex, ly, first, last, _c=color, _t=thick, _b=_br:
@@ -1142,85 +983,55 @@ def generate_chart_image(content: str, selected_label: str, courses: list,
         # tja-tools の NOTE_RADIUS は 9。大音符はその 1.44 倍ぐらい。
         # tja-tools の素材は小音符が直径18、**大音符は直径24**(半径12)。
         # 13 にしていたので大音符だけ一回り太かった。
-        r_sm, r_bg = ((12, 17) if honke
-                      else (max(2, int(round(9 * sc))),
-                            max(3, int(round(12 * sc)))))
+        r_sm, r_bg = (max(2, int(round(9 * sc))),
+                      max(3, int(round(12 * sc))))
 
         if nt in sprites or (nt in '56' and f"{nt}_head" in sprites):
             spr = sprites.get(f"{nt}_head" if nt in '56' else nt)
             target_w = (r_bg * 2 + 4 if nt in '3469' else r_sm * 2 + 4)
             if nt in '79':
-                if honke:
-                    # 本家風の風船/くす玉スプライトは「丸い顔 + 右へ伸びる袋」の
-                    # 横長画像。中心を音符位置に合わせると顔がずれ、袋が連打帯に
-                    # 覆いかぶさって重なって見えていた。高さを音符の直径に合わせ、
-                    # **顔の中心**を音符位置に置く(袋は右へ伸びる=本家と同じ)。
-                    scale = (r_sm * 2 + 4) / spr.height
-                    spr = spr.resize((max(1, int(spr.width * scale)),
-                                      max(1, int(spr.height * scale))), Image.Resampling.LANCZOS)
-                    face_r = spr.height / 2.0     # 顔はほぼ正円(直径=画像の高さ)
-                    img.paste(spr, (int(x - face_r), int(y - spr.height / 2)), spr)
-                else:
-                    target_w = int(target_w * 1.5)
-                    spr = spr.resize((target_w, int(target_w * 0.8)), Image.Resampling.LANCZOS)
-                    img.paste(spr, (int(x - spr.width / 2), int(y - spr.height / 2)), spr)
+                target_w = int(target_w * 1.5)
+                spr = spr.resize((target_w, int(target_w * 0.8)),
+                                 Image.Resampling.LANCZOS)
+                img.paste(spr, (int(x - spr.width / 2),
+                                int(y - spr.height / 2)), spr)
             else:
                 spr = spr.resize((target_w, target_w), Image.Resampling.LANCZOS)
                 img.paste(spr, (int(x - spr.width / 2), int(y - spr.height / 2)), spr)
             if nt == '7' and n.get('hits', 0) > 0:
                 hits = n['hits']
-                if honke:
-                    # 本家風のみ、打数は音符に重ねず**上**に出す(顔が見えるように)。
-                    _draw_hits_above(draw, x, y, r_sm, hits, font_balloon)
-                else:
-                    _hr = 10 if honke else max(5, int(round(10 * sc)))
-                    draw.ellipse([x - _hr, y - _hr, x + _hr, y + _hr],
-                                 fill="#ffffff", outline="#000000",
-                                 width=max(1, int(round(sc))))
-                    draw.text((x, y), str(hits), fill="#000000",
-                              font=font_balloon, anchor="mm")
+                _hr = max(5, int(round(10 * sc)))
+                draw.ellipse([x - _hr, y - _hr, x + _hr, y + _hr],
+                             fill="#ffffff", outline="#000000",
+                             width=max(1, int(round(sc))))
+                draw.text((x, y), str(hits), fill="#000000",
+                          font=font_balloon, anchor="mm")
         else:
             if nt in '12345679':
                 r_radius = r_bg if nt in '3469' else r_sm
-                ring_w = 2 if honke else max(1, int(round(sc)))
-                if honke:
-                    fill_c = {"1": "#f44336", "2": "#29b6f6", "3": "#f44336",
-                              "4": "#29b6f6", "5": "#fcdb38", "6": "#fcdb38",
-                              "7": "#ff9800", "9": "#9c27b0"}[nt]
-                    draw.ellipse([x - r_radius, y - r_radius,
-                                  x + r_radius, y + r_radius],
-                                 fill=fill_c, outline="#fbf3e0", width=ring_w)
+                ring_w = max(1, int(round(sc)))
+                # tja-tools の音符。**白フチではなく外が黒・内が灰**の
+                # 2重の縁(利用者の報告 2026-11-04「音符の見た目が
+                # おかしい」)。色も向こうの素材から取った。
+                if nt in '79':
+                    # 風船・くす玉の玉は大音符と同じ大きさ(直径24)。
+                    tile = tjat_balloon_tile(int(round(24 * sc)), ring_w)
                 else:
-                    # tja-tools の音符。**白フチではなく外が黒・内が灰**の
-                    # 2重の縁(利用者の報告 2026-11-04「音符の見た目が
-                    # おかしい」)。色も向こうの素材から取った。
-                    if nt in '79':
-                        # 風船・くす玉の玉は大音符と同じ大きさ(直径24)。
-                        tile = tjat_balloon_tile(int(round(24 * sc)), ring_w)
-                    else:
-                        fill_c = {"1": TJAT_DON, "2": TJAT_KA, "3": TJAT_DON,
-                                  "4": TJAT_KA, "5": TJAT_ROLL,
-                                  "6": TJAT_ROLL}[nt]
-                        tile = tjat_note_tile(r_radius * 2, fill_c, ring_w)
-                    img.paste(tile,
-                              (int(round(x - tile.width / 2.0)),
-                               int(round(y - tile.height / 2.0))), tile)
+                    fill_c = {"1": TJAT_DON, "2": TJAT_KA, "3": TJAT_DON,
+                              "4": TJAT_KA, "5": TJAT_ROLL,
+                              "6": TJAT_ROLL}[nt]
+                    tile = tjat_note_tile(r_radius * 2, fill_c, ring_w)
+                img.paste(tile,
+                          (int(round(x - tile.width / 2.0)),
+                           int(round(y - tile.height / 2.0))), tile)
                 if nt == '7' and n.get('hits', 0) > 0:
                     hits = str(n['hits'])
-                    if honke:
-                        _hr = 10
-                        draw.ellipse([x - _hr, y - _hr, x + _hr, y + _hr],
-                                     fill="#ffffff", outline="#000000",
-                                     width=1)
-                        draw.text((x, y), hits, fill="#000000",
-                                  font=font_balloon, anchor="mm")
-                    else:
-                        # 向こうは白丸を敷かず、玉の上に黒い点字で打数を
-                        # 置くだけ(drawBalloonSprite 参照)。
-                        draw_pix_text(draw,
-                                      int(round(x - pix_text_width(hits, sc)
-                                                / 2.0)),
-                                      int(round(y - 3 * sc)),
-                                      hits, PIX_COLOR_NUM, sc)
+                    # 向こうは白丸を敷かず、玉の上に黒い点字で打数を
+                    # 置くだけ(drawBalloonSprite 参照)。
+                    draw_pix_text(draw,
+                                  int(round(x - pix_text_width(hits, sc)
+                                            / 2.0)),
+                                  int(round(y - 3 * sc)),
+                                  hits, PIX_COLOR_NUM, sc)
 
     return img
