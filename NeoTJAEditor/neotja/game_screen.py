@@ -844,6 +844,10 @@ TITLE_RECT = (603, 31, 640, 52)   # 右詰めの基準枠 (x, y, w, h)
 TITLE_SIZE = 39                   # 大きさは曲名の長さによらず一定(34の1.2倍を5%詰めた)
 # 長い曲名は縮めず、右端を揃えたまま左へはみ出させる。左はここまで。
 TITLE_LEFT_LIMIT = 8
+#: 収まらない曲名を小さくするときの下限(px)。本家と同じで、長い曲名は
+#: 字の形はそのままに小さくして枠へ収める。ここまで小さくしても溢れる
+#: ぶんは末尾を「…」にする。
+TITLE_MIN_SIZE = 16
 #: 作譜・軽量(compact)のときの置き場。あの画面には上の背景が無く、
 #: 右上は命令パネル(上端 8 〜 140)が占めているので、その下・レーンの
 #: 枠の手前の空きへ右詰めで出す(利用者の指定 2026-10-17)。
@@ -2183,7 +2187,13 @@ class _GameScreenBase:
 
     def _draw_title(self, p):
         """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
-        大きさは一定。長い曲名は縮めず、右端を揃えたまま左へ伸ばす。"""
+
+        収まる曲名の見え方は今までと同じ。入りきらないときだけ**字を
+        小さくして**枠へ収める(本家と同じ。形は変えず大きさだけ下げる)。
+        TITLE_MIN_SIZE まで下げても溢れるぶんは、末尾を「…」にする。
+        以前は縮めずに左へ伸ばしていたので、長い曲名は左端で止まった
+        まま右へはみ出して画面の外へ出ていた(利用者の意見 2026-11-05)。
+        """
         if not self._title:
             return
         if self._compact:
@@ -2201,16 +2211,37 @@ class _GameScreenBase:
         # 縁取りは文字の輪郭を線でなぞる。drawText では出せないので、
         # 文字を図形(パス)にしてから「線=黒 / 塗り=白」で1回で描く。
         # 右詰めなので、文字幅を測って右端から逆算して置く。
+        right = float(x + w)
+        avail = right - float(left)
+        text = self._title
         fm = QFontMetricsF(f)
-        tw = fm.horizontalAdvance(self._title)
-        bx = max(float(left), x + w - tw)
+        if fm.horizontalAdvance(text) > avail:
+            # 入る大きさまで下げる。幅は大きさにほぼ比例するので、まず
+            # 比で当たりを付けてから、1px ずつ詰めて確かめる。
+            guess = int(size * avail / max(1.0, fm.horizontalAdvance(text)))
+            size = max(TITLE_MIN_SIZE, min(size, guess + 1))
+            while size > TITLE_MIN_SIZE:
+                f.setPixelSize(size)
+                fm = QFontMetricsF(f)
+                if fm.horizontalAdvance(text) <= avail:
+                    break
+                size -= 1
+            f.setPixelSize(size)
+            p.setFont(f)
+            fm = QFontMetricsF(f)
+            if fm.horizontalAdvance(text) > avail:
+                # いちばん小さくしても入らない。末尾を「…」にする。
+                text = fm.elidedText(text, Qt.ElideRight, avail)
+        tw = fm.horizontalAdvance(text)
+        bx = max(float(left), right - tw)
         by = y + (h + fm.ascent() - fm.descent()) / 2.0
         path = QPainterPath()
-        path.addText(QPointF(bx, by), f, self._title)
+        path.addText(QPointF(bx, by), f, text)
         # 先に黒でなぞってから白で塗る絵を1枚焼いて、次からはそれを貼る
         # (塗りと線を同時に出すと線が内側へも太って、勘亭流の細い所が
         # 黒く埋まってしまうので、なぞってから塗る順は変えない)。
-        baked = bake_text(p, self._text_cache, ("title", self._title, bx, by),
+        baked = bake_text(p, self._text_cache,
+                          ("title", text, bx, by, size),
                                  path, TITLE_OUTLINE, TITLE_OUTLINE_W,
                                  TITLE_COLOR)
         if baked is None:
