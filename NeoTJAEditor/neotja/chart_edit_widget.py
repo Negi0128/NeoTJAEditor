@@ -187,6 +187,8 @@ class ChartEditWaveform(WaveformWidget):
     noteEdited = Signal(int, int, int, str)
     # カーソルが動いたときに時刻を通知(上位がシークするかは上位の判断)。
     cursorMoved = Signal(float)
+    #: 上の目盛りで選んだ小節を消してほしい(小節番号の一覧)。
+    measuresDeleteRequested = Signal(list)
     # 凡例の表示を「ユーザーが」切り替えたときだけ飛ぶ。設定へ覚えさせるため。
     # set_legend_visible() では出さない(起動時の復元で保存を呼び返さないよう)。
     legendToggled = Signal(bool)
@@ -293,6 +295,12 @@ class ChartEditWaveform(WaveformWidget):
         self._note_drag = None
         # 選んだオブジェクトの鍵(エクスプローラー式の選択)。
         self._sel = set()
+        # 上の目盛りの小節番号を押して選んだ小節。音符や命令の選択
+        # (_sel)とは別に持つ — 消す以外のことはしないので、_sel の
+        # 道(まとめて動かす・コピー)へ混ぜない。
+        self._sel_measures = set()
+        # 目盛りの番号を押した直後。引かずに離せばその小節を選ぶ。
+        self._pending_measure = None
         # 何も無い所を左ドラッグして囲っている最中の四角。
         self._band = None
         # 小節が1つも無いとき/末尾より先を外挿するときの1小節の長さ。
@@ -967,6 +975,17 @@ class ChartEditWaveform(WaveformWidget):
             self.setFocus(Qt.MouseFocusReason)
             x, y = event.position().x(), event.position().y()
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            # 上の目盛りの小節番号 = その小節をまるごと選ぶ(利用者の希望
+            # 2026-11-05)。Delete で消せる。赤い線は動かさない — 番号より
+            # 右の帯は今までどおり擦って運べる。
+            mm = self.ruler_measure_at(x, y)
+            if mm is not None:
+                # **押しただけなら選ぶ、引いたら今までどおり擦る。**
+                # 番号の所でも帯を擦れないと、小節が短い譜面では目盛りの
+                # かなりの幅で赤い線を運べなくなる。
+                self._pending_measure = (mm, x, ctrl)
+                self._dragging = True
+                return
             obj = self._object_at(x, y)
             if obj is not None:
                 # オブジェクトを押した = 選ぶ(Ctrl なら足し引き)。そのまま
@@ -1050,11 +1069,24 @@ class ChartEditWaveform(WaveformWidget):
         # (シークはカーソルがグリッドの位置で出す)。
         if self._dragging and not self.offset_mode:
             if event.buttons() & Qt.LeftButton:
+                pm = self._pending_measure
+                if pm is not None:
+                    if abs(event.position().x() - pm[1]) < 4:
+                        return          # まだ押しただけ(選ぶかもしれない)
+                    # 引き始めた = 擦るほう。小節の選択は外す。
+                    self._pending_measure = None
+                    self.clear_selection()
                 self._move_cursor_to_x(event.position().x())
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._pending_measure is not None:
+            mm, _x, ctrl = self._pending_measure
+            self._pending_measure = None
+            self._dragging = False
+            self._pick_measure(mm, ctrl)
+            return
         if event.button() == Qt.LeftButton and self._note_drag is not None:
             self._finish_note_drag()
             return
@@ -1088,6 +1120,62 @@ class ChartEditWaveform(WaveformWidget):
         self.position_sec = t
         self.update()
         self.cursorMoved.emit(t)
+
+    #: 小節番号の当たり判定の幅(px)。小節がこれより狭いときは小節の幅まで。
+    RULER_NUM_HIT_W = 34
+
+    def ruler_measure_at(self, x, y=None):
+        """上の目盛りの小節番号を押したか。その小節番号(0 始まり)か None。
+
+        番号が出ている所だけが相手(数字が入らないほど詰まっている小節は
+        選べない)。番号より右の帯は今までどおり、擦って赤い線を運ぶ所。"""
+        if y is not None and y >= self.RULER_H:
+            return None
+        if x < self.LANE_X0:
+            return None
+        span = self._visible_span()
+        if span <= 0:
+            return None
+        t0 = self.view_start
+        t1 = t0 + span
+        lo, hi = self._measure_range(t0, t1)
+        for m in range(lo, hi):
+            a = self._bar_time(m)
+            if a is None or a > t1:
+                break
+            b = self._bar_time(m + 1)
+            x0 = self._sec_to_x(a)
+            room = (self._sec_to_x(b) - x0) if b is not None else 999
+            if room < self.RULER_NUM_MIN_ROOM:
+                continue
+            w = min(float(room), float(self.spx(self.RULER_NUM_HIT_W)))
+            if x0 <= x < x0 + w:
+                return m
+        return None
+
+    def selected_measures(self):
+        """上の目盛りで選んでいる小節(小節番号の昇順)。"""
+        return sorted(self._sel_measures)
+
+    def set_selected_measures(self, measures):
+        ms = {int(m) for m in (measures or []) if int(m) >= 0}
+        if ms == self._sel_measures:
+            return False
+        self._sel_measures = ms
+        self.update()
+        return True
+
+    def _pick_measure(self, m, ctrl):
+        """小節番号を押した。Ctrl なら足し引き。"""
+        ms = set(self._sel_measures) if ctrl else set()
+        if ctrl and m in ms:
+            ms.discard(m)
+        else:
+            ms.add(m)
+        self._sel_measures = ms
+        if not ctrl:
+            self.clear_selection(keep_measures=True)
+        self.update()
 
     def _move_cursor_to_x(self, x):
         t = self._x_to_sec(x)
@@ -1359,7 +1447,14 @@ class ChartEditWaveform(WaveformWidget):
         self.update()
         self.selectionChanged.emit()
 
-    def clear_selection(self):
+    def clear_selection(self, keep_measures=False):
+        """選択を外す。小節(上の目盛りで選んだぶん)も一緒に外す。
+
+        keep_measures=True は「小節を選んだ直後」に、音符や命令の選択だけを
+        外すためのもの。"""
+        if not keep_measures and self._sel_measures:
+            self._sel_measures = set()
+            self.update()
         self.set_selection(())
 
     def _band_x0(self, bd):
@@ -2259,6 +2354,15 @@ class ChartEditWaveform(WaveformWidget):
             self.set_legend_visible(not self._show_legend)
             self.legendToggled.emit(self._show_legend)
             return
+        if key == Qt.Key_Delete or key == Qt.Key_Backspace:
+            # 上の目盛りで小節を選んでいれば、その小節をまるごと消す
+            # (利用者の希望 2026-11-05)。本文を触るのは窓のほう。
+            if self._sel_measures:
+                ms = self.selected_measures()
+                self._sel_measures = set()
+                self.update()
+                self.measuresDeleteRequested.emit(ms)
+                return
         if key == Qt.Key_Delete:
             # 範囲があれば範囲を、無ければカーソルの音符を消す。長い音符は
             # 終端ごと消える(数字の 0 と違って終端 8 が取り残されない)。
@@ -3125,6 +3229,7 @@ class ChartEditWaveform(WaveformWidget):
         # --- 目盛りと左の列は最後(左の列は目盛りの帯にも掛かる) ---
         if strip_off is None:
             self._draw_ruler(p, t0, t1)
+        self._draw_measure_sel(p, h)
         self._draw_row_labels(p, rows)
         # 赤い線が画面の外にあるときは、その側の端に印(ホイールが景色だけを
         # 動かすようになったため。利用者の指定 2026-11-05)。左の行名の列に
@@ -3200,6 +3305,46 @@ class ChartEditWaveform(WaveformWidget):
             p.setPen(QColor(self._pal["bg"]))
             p.fillRect(6, h - 24, 240, 18, QColor(self._pal["accent2"]))
             p.drawText(10, h - 10, self._readout)
+
+    #: 選んだ小節を覆う色。薄い帯で覆うだけ(利用者と決めた見せ方)。
+    MEASURE_SEL_COLOR = "#ffd23c"
+
+    def _draw_measure_sel(self, p, h):
+        """上の目盛りで選んだ小節を、薄い帯で覆って見せる。"""
+        if not self._sel_measures:
+            return
+        span = self._visible_span()
+        if span <= 0:
+            return
+        t0 = self.view_start
+        t1 = t0 + span
+        col = QColor(self.MEASURE_SEL_COLOR)
+        fill = QColor(col)
+        fill.setAlpha(38)
+        edge = QColor(col)
+        edge.setAlpha(170)
+        band = QColor(col)
+        band.setAlpha(90)
+        p.save()
+        p.setClipRect(self.LANE_X0, 0, max(0, self.width() - self.LANE_X0), h)
+        for m in sorted(self._sel_measures):
+            a = self._bar_time(m)
+            b = self._bar_time(m + 1)
+            if a is None:
+                continue
+            if b is None:
+                b = a + self._measure_len()
+            if b < t0 or a > t1:
+                continue
+            x0 = self._sec_to_x(a)
+            x1 = self._sec_to_x(b)
+            p.fillRect(int(x0), self.RULER_H, max(1, int(x1 - x0)),
+                       h - self.RULER_H, fill)
+            p.fillRect(int(x0), 0, max(1, int(x1 - x0)), self.RULER_H, band)
+            p.setPen(QPen(edge, 2))
+            p.drawLine(int(x0), 0, int(x0), h)
+            p.drawLine(int(x1), 0, int(x1), h)
+        p.restore()
 
     def _draw_row_labels(self, p, rows):
         """左の列に行の名前を並べる。

@@ -566,6 +566,8 @@ class MainWindow(QMainWindow):
         _ce = getattr(self.preview_dock, "chart_edit", None)
         if _ce is not None:
             _ce.set_tool_cb(self.run_chart_tool)
+            # 上の目盛りで選んだ小節を Delete で消す(利用者の希望 2026-11-05)。
+            _ce.measuresDeleteRequested.connect(self.delete_pane_measures)
         # マスターが先。曲/SE はマスターに対する「比率」なので、マスターを
         # 決めてから比率を入れたほうが途中の一瞬だけ音量が飛ぶことがない。
         self.preview_dock.set_master_volume(self.config_data.get("master_volume", 1.0))
@@ -2395,6 +2397,52 @@ class MainWindow(QMainWindow):
         self.editor.modified_lines.add(nc.blockNumber() + 1)
         self.setWindowModified(True)
         self._force_update()
+
+    def _measure_text_pos(self, m):
+        """作譜ペインの小節番号 → 本文のその小節の先頭。無ければ None。
+
+        _select_pane_measures と同じ道で小節の切れ目を出す(表示している
+        コース・系統の中での 0 始まりの番号)。"""
+        text = self.editor.toPlainText()
+        course_key = (self._preview_course_override
+                      or self._course_key_at_cursor(text))
+        rng = (self.analyzer.course_line_range(text, course_key)
+               if course_key else None)
+        if rng is None:
+            return None
+        with note_edit.editing_branch(self._preview_branch_level,
+                                      self._preview_branch_path):
+            body = note_edit.course_body_span(text, rng)
+            spans = note_edit.measure_spans(text, body)
+        if not spans or not (0 <= int(m) < len(spans)):
+            return None
+        return spans[int(m)][0]
+
+    def delete_pane_measures(self, measures):
+        """作譜ペインの上の目盛りで選んだ小節を、本文からまるごと消す。
+
+        消すのは既存の「小節を削除」(Ctrl+Shift+D)とまったく同じ道具。
+        **後ろから消す** — 前を消すと後ろの小節番号がずれる。"""
+        ms = sorted({int(m) for m in (measures or [])}, reverse=True)
+        if not ms:
+            return
+        done = 0
+        for m in ms:
+            pos = self._measure_text_pos(m)
+            if pos is None:
+                continue
+            before = self.editor.toPlainText()
+            self._measure_op("del", pos=pos)
+            if self.editor.toPlainText() != before:
+                done += 1
+        ce = getattr(self.preview_dock, "chart_edit", None)
+        if ce is not None and hasattr(ce, "set_selected_measures"):
+            ce.set_selected_measures([])
+        if done:
+            self.statusBar().showMessage(
+                "%d 小節を削除しました" % done, 3000)
+        else:
+            self.statusBar().showMessage("小節を削除できませんでした", 4000)
 
     def _apply_note_edit(self, m_index, slot, grid, char):
         """作譜モードで音符が置かれた。テキストへ書き戻す。
