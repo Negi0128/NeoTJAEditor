@@ -534,6 +534,15 @@ class ChartEditWaveform(WaveformWidget):
     #: これを拾うとカーソルが元の場所や1つ手前へ引き戻される。
     SEEK_ECHO_SEC = 0.8
 
+    def _raw_offset(self, value):
+        """素の OFFSET(ヘッダに書く値)へ戻す。
+
+        このペインの offset は向きが逆 — 音の時刻 = 譜面の時刻 - offset で、
+        頭に足した助走ぶんを**引いて**ある。元に戻すには足す(音声波形の
+        ほうは足してあるので引く)。OFFSET 調整の読み値と、外へ出す
+        offsetPreview / offsetCommitted がこれを通る。"""
+        return float(value) + self._wave_lead
+
     def set_position(self, seconds: float):
         """停止中/シーク時の位置(preview_dock._on_position_changed から)。"""
         if self._echo_active():
@@ -628,9 +637,15 @@ class ChartEditWaveform(WaveformWidget):
         self._stop_view_anim()
         return super()._follow_view_start(seconds, span)
 
+    #: 1小節目より前(頭の助走の中)に置いた赤い線の時刻。小節もグリッドも
+    #: 無いのでカーソルの住所では表せない。置いていなければ None。
+    _free_time = None
+
     def _pin_playhead_to_cursor(self):
-        """赤い線と表示をカーソルの位置へ直接合わせる(音源の返事を待たない)。"""
-        t = self.cursor_time()
+        """赤い線と表示をカーソルの位置へ直接合わせる(音源の返事を待たない)。
+
+        助走の中に置いた線は、カーソル(1小節目の頭)ではなくその時刻へ。"""
+        t = self.cursor_time() if self._free_time is None else self._free_time
         self.position_sec = t
         span = self._visible_span()
         if self._follow_window and span > 0:
@@ -647,6 +662,7 @@ class ChartEditWaveform(WaveformWidget):
                                   手前で届くので、切り捨てると1つ手前へ落ちる。"""
         if getattr(self, "_grid", 0) <= 0 or getattr(self, "_bar_times_raw", None) is None:
             return
+        self._free_time = None
         if abs(t - self.cursor_time()) < self.SYNC_TOLERANCE_SEC:
             return
         addr = self._address_from_time(max(0.0, t), nearest=nearest)
@@ -679,6 +695,7 @@ class ChartEditWaveform(WaveformWidget):
     def _cursor_changed(self):
         """カーソルを自分で動かしたあとの共通処理。赤い線と表示を先に合わせ、
         返ってくる位置(こだま)はしばらく無視してから、シークを頼む。"""
+        self._free_time = None
         self._own_seek_until = time.monotonic() + self.SEEK_ECHO_SEC
         self._pin_playhead_to_cursor()
         self.cursorMoved.emit(self.cursor_time())
@@ -1066,10 +1083,30 @@ class ChartEditWaveform(WaveformWidget):
             return
         super().mouseReleaseEvent(event)
 
+    def _free_seek(self, t):
+        """グリッドに合わせず、その時刻へ赤い線を置いてシークを頼む。
+
+        1小節目より前(音源の頭に足した助走の中)には小節もグリッドも無いので、
+        押した所へそのまま置く(利用者の希望 2026-11-05「普通にどこでも
+        再生できるようにして欲しい」)。編集カーソルは1小節目の頭に置いておく —
+        そこへ音符を置けるわけではないので、住所は持たせない。"""
+        t = max(0.0, float(t))
+        self._cur_measure, self._cur_slot = 0, 0
+        self._free_time = t
+        self._own_seek_until = time.monotonic() + self.SEEK_ECHO_SEC
+        self.position_sec = t
+        self.update()
+        self.cursorMoved.emit(t)
+
     def _move_cursor_to_x(self, x):
+        t = self._x_to_sec(x)
+        t0 = self._bar_time(0)
+        if t0 is not None and t < t0 - 1e-6:
+            self._free_seek(t)
+            return
         # 一番近いグリッドへ合わせる(利用者の指定 2026-09-25)。切り捨てだと
         # 音符の少し右を押したときに1つ手前へ落ちて、置く場所がずれる。
-        addr = self._address_from_time(max(0.0, self._x_to_sec(x)), nearest=True)
+        addr = self._address_from_time(max(0.0, t), nearest=True)
         if addr is None:
             return
         if addr == (self._cur_measure, self._cur_slot):

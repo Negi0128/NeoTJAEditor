@@ -1397,9 +1397,12 @@ class PreviewDock(QDockWidget):
         self._current_wave_path = None
         #: 無音で再生しているときに出す一言。音源があるときは None。
         self._silent_note = None
-        #: 譜面の時刻 0 が、音の何秒目に当たるか。無音で再生するときだけ
-        #: 前に助走を付ける(譜面が始まる前から流せるようにするため)。
+        #: 譜面の時刻 0 が、音の何秒目に当たるか。どの譜面にも助走を
+        #: 付ける(音源が始まる前・1小節目より前から流せるようにするため)。
         self._lead_sec = 0.0
+        #: そのうち、ミキサーへ渡す PCM の頭へ足すぶん。無音 WAV に助走を
+        #: 焼いてあるレガシー経路では 0(二重に足さないため)。
+        self._pcm_lead_sec = 0.0
         #: 次の読み直しで「道筋が同じでも読む」合図。
         self._wave_reload = False
         # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
@@ -2359,7 +2362,7 @@ class PreviewDock(QDockWidget):
             if self._multi_notes is not None:
                 self._multi_notes = None
                 self._multi_count = 1
-                self._apply_hit_schedule(self.spin_offset.value())
+                self._apply_hit_schedule(self._grid_offset())
                 self._apply_sfx_volume()
                 # コースのボタンを元の表示へ戻す。
                 lab, col = self._course_label_last
@@ -2440,7 +2443,7 @@ class PreviewDock(QDockWidget):
         merged.sort(key=lambda n: n[0])
         self._multi_notes = merged
         self._multi_count = max(1, live)
-        self._apply_hit_schedule(self.spin_offset.value())
+        self._apply_hit_schedule(self._grid_offset())
         self._apply_sfx_volume()
 
     def _on_course_button(self):
@@ -3375,9 +3378,9 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_play_state(state)
         try:
             if state is not None:
-                self.hit_sounds.set_schedule([], self.spin_offset.value())
+                self.hit_sounds.set_schedule([], self._grid_offset())
             else:
-                self._apply_hit_schedule(self.spin_offset.value())
+                self._apply_hit_schedule(self._grid_offset())
         except Exception:  # noqa: BLE001
             pass
 
@@ -3429,7 +3432,8 @@ class PreviewDock(QDockWidget):
                                       list(preview_data.get("gogo_regions", [])))
             self._game_grid_clicks = self._bar_grid_clicks(preview_data.get("bar_times", []))
 
-        self.waveform.set_beat_grid(headers["bpm"], self.spin_offset.value(), self._editor_metronome_clicks)
+        self.waveform.set_beat_grid(headers["bpm"], self._grid_offset(),
+                                    self._editor_metronome_clicks)
         self._set_game_grid(headers["bpm"], self.spin_offset.value())
         self.game_waveform.set_notes(self._preview_notes)  # 音声波形: 波形の下に譜面
         self.game_waveform.set_spans(*self._preview_spans)
@@ -3452,9 +3456,10 @@ class PreviewDock(QDockWidget):
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
-        self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
-        self._apply_hit_schedule(self.spin_offset.value())
-        self.chart_preview.set_offset(self.spin_offset.value())
+        self.metronome.set_schedule(self._editor_metronome_clicks,
+                                    self._grid_offset())
+        self._apply_hit_schedule(self._grid_offset())
+        self.chart_preview.set_offset(self._grid_offset())
         self._take_bar_lines(preview_data)
         if preview_data is not None:
             self.chart_preview.set_preview_data(preview_data)
@@ -3492,18 +3497,18 @@ class PreviewDock(QDockWidget):
         self.spin_offset.blockSignals(True)
         self.spin_offset.setValue(headers["offset"])
         self.spin_offset.blockSignals(False)
-        self.waveform.set_beat_grid(headers["bpm"], headers["offset"], self._editor_metronome_clicks)
-        self._set_game_grid(headers["bpm"], headers["offset"])
-        self.metronome.set_schedule(self._editor_metronome_clicks, headers["offset"])
-        self._apply_hit_schedule(headers["offset"])
-        self.chart_preview.set_offset(headers["offset"])
 
         if not os.path.exists(wave_path):
             self._load_silent_track(headers, "音源ファイルが見つかりません: %s" % wave)
             return
 
         self._silent_note = None
-        self._lead_sec = 0.0
+        # 音源が始まる前からも赤い線を置けるように、頭へ無音を足す
+        # (利用者の希望 2026-11-05)。足すのはデコード済み PCM の頭
+        # (_on_decoded)。波形の元データは触らず、描くときにずらす。
+        self._lead_sec = self._lead_for(headers["offset"])
+        self._pcm_lead_sec = self._lead_sec
+        self._apply_offsets(headers["bpm"], headers["offset"])
         self.status_label.setText("音源を読み込み中...")
         self.btn_play.setEnabled(False)
         self.chart_preview.set_loading(True)
@@ -3526,13 +3531,16 @@ class PreviewDock(QDockWidget):
         from neotja.audio_engine import ensure_silence_wav
 
         self._silent_note = note or "音源がありません。無音で再生します。"
-        self._lead_sec = self._SILENT_LEAD_SEC
+        self._lead_sec = self._lead_for(headers.get("offset"), silent=True)
+        # ミキサー経路なら本物の音源と同じく PCM の頭へ足す。レガシー経路は
+        # PCM を触れないので、無音 WAV そのものに助走ぶんを含めておく。
+        self._pcm_lead_sec = self._lead_sec if self._mixer_active else 0.0
         clicks = self._editor_metronome_clicks or []
         # メトロノームの刻みは (時刻, 種類) のこともある。
         times = [(c[0] if isinstance(c, (tuple, list)) else c) for c in clicks]
         end = max(times) if times else 0.0
         length = (float(end) + float(headers.get("offset") or 0.0)
-                  + self._SILENT_LEAD_SEC + self._SILENT_TAIL_SEC)
+                  + self._lead_sec + self._SILENT_TAIL_SEC)
         try:
             path = ensure_silence_wav(length)
         except Exception:
@@ -3540,17 +3548,7 @@ class PreviewDock(QDockWidget):
             self.btn_play.setEnabled(False)
             self.chart_preview.set_loading(False)
             return
-        off = float(headers["offset"]) + self._lead_sec
-        self.waveform.set_beat_grid(headers["bpm"], off,
-                                    self._editor_metronome_clicks)
-        self._set_game_grid(headers["bpm"], off)
-        self.metronome.set_schedule(self._editor_metronome_clicks, off)
-        self._apply_hit_schedule(off)
-        self.chart_preview.set_offset(off)
-        # 作譜ペインにも助走ぶんを渡す。ここを飛ばすとペインだけずれる
-        # (ペインは向きが逆なので引く)。
-        self.chart_edit.set_time_offset(float(headers["offset"])
-                                        - self._lead_sec)
+        self._apply_offsets(headers["bpm"], headers["offset"])
         # 普通の音源とまったく同じ道を通す(読み込み → PCM をミキサーへ →
         # 波形)。ミキサー経路は load() だけでは鳴らないため。
         self._current_wave_path = path
@@ -3595,6 +3593,36 @@ class PreviewDock(QDockWidget):
             return False
         return wave_path is None or cur == wave_path
 
+    def _apply_offsets(self, bpm, offset):
+        """助走を決めたあとで、OFFSET を要る所すべてへ配り直す。
+
+        音の時刻で動くもの(波形・レーン・メトロノーム・打音)には助走を足した
+        値、作譜ペインには向きが逆なので引いた値が行く。読み込みの入口で素の
+        OFFSET を配ってから助走を決めるので、ここで上書きしておく。"""
+        self.waveform.set_beat_grid(bpm, self._grid_offset(offset),
+                                    self._editor_metronome_clicks)
+        self._set_game_grid(bpm, offset)
+        self.metronome.set_schedule(self._editor_metronome_clicks,
+                                    self._grid_offset(offset))
+        self._apply_hit_schedule(self._grid_offset(offset))
+        self.chart_preview.set_offset(self._grid_offset(offset))
+        self.chart_edit.set_time_offset(self._edit_offset(offset))
+
+    def _with_lead(self, pcm, sr, path):
+        """ミキサーへ渡す PCM の頭に助走ぶんの無音を足す。
+
+        選曲画面の試聴/BGM(load_wave_only)には足さない — 譜面と関係なく
+        音だけ鳴らすので、助走は意味を持たない。"""
+        lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
+        if pcm is None or lead <= 0 or not sr:
+            return pcm
+        import numpy as np
+        n = int(round(float(lead) * float(sr)))
+        if n <= 0:
+            return pcm
+        pad = np.zeros((n,) + tuple(pcm.shape[1:]), dtype=pcm.dtype)
+        return np.concatenate((pad, pcm), axis=0)
+
     def _start_waveform_decode(self, wave_path):
         self._decoding_path = wave_path
         # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
@@ -3628,12 +3656,20 @@ class PreviewDock(QDockWidget):
         # 3つの波形すべてに同じミップチェインを配る(コピーはしない)。
         # 渡し忘れると duration が 0 のままになり、波形が出ないだけでなく
         # 追従表示の view_start が曲頭にクランプされて位置が動かなくなる。
+        lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
         for wf in self._waveforms():
+            if wf is None:
+                continue
+            wf.set_wave_lead(lead)
             wf.set_mips(mips)
         # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
         if self._mixer_active:
-            self.audio.set_song_pcm(pcm, sr)
+            self.audio.set_song_pcm(self._with_lead(pcm, sr, path), sr)
+            # 頭に助走を足したぶん、開いた直後の赤い線は**音源の頭**へ
+            # 置き直す(そうしないと助走の先頭に立って、譜面が右の外)。
+            if lead > 0 and self.audio.position() <= 0:
+                self.audio.seek(self._audio_ms(0))
         self.status_label.setText(self._silent_note or "")
         # 知らせるのは**全部済ませてから**。ミキサーへ PCM を渡す前に出すと、
         # 受け取った側が play() を呼んでも鳴らない(実際にそうなっていた)。
@@ -3713,7 +3749,12 @@ class PreviewDock(QDockWidget):
             if now2 - getattr(self, "_last_panel_sync", 0.0) >= 0.12:
                 self._last_panel_sync = now2
                 self._sync_command_panel()
-        self.time_label.setText(f"{_fmt_time(ms)} / {_fmt_time(self._duration_ms)}")
+        # 表示する時刻は**音源の頭を 0:00**にする。頭へ足した助走ぶんは
+        # 引いて見せるので、曲の長さも今までと同じ数字になる。
+        lead_ms = int(self._lead_sec * 1000)
+        self.time_label.setText(
+            "%s / %s" % (_fmt_time(ms - lead_ms),
+                         _fmt_time(self._duration_ms - lead_ms)))
         if not self.seek_slider.isSliderDown():
             self.seek_slider.blockSignals(True)
             self.seek_slider.setValue(ms)
@@ -3796,8 +3837,36 @@ class PreviewDock(QDockWidget):
             elif self.status_label.text() == "音源を読み込み中...":
                 self.status_label.setText("")
 
-    def _edit_offset(self):
-        """作譜ペインへ渡す OFFSET。無音で再生するときの助走ぶんを引く。
+    #: 譜面が始まる前に足しておく無音(助走)の秒数。
+    #: これを足すと、音源が始まる前・1小節目より前にも赤い線を置ける
+    #: (利用者の希望 2026-11-05「普通にどこでも再生できるようにして欲しい」)。
+    _PREROLL_SEC = 3.0
+
+    def _lead_for(self, offset, silent=False):
+        """その譜面に足す助走の秒数。
+
+        OFFSET が正だと1小節目が音源の頭より前に来るので、そのぶん余分に
+        足す。ミキサー経路でないとき(sounddevice が開けずレガシーへ落ちた
+        とき)はデコード済み PCM を触れないので、本物の音源には助走を足さない
+        (無音のほうは WAV そのものに焼いてある)。"""
+        try:
+            off = float(offset or 0.0)
+        except (TypeError, ValueError):
+            off = 0.0
+        if not silent and not self._mixer_active:
+            return 0.0
+        return self._PREROLL_SEC + max(0.0, off)
+
+    def _grid_offset(self, offset=None):
+        """波形・レーン・メトロノーム・打音へ渡す OFFSET。
+
+        これらは「音の時刻」で動いているので、頭に足した助走のぶんだけ譜面が
+        後ろへずれる = 足す。引数が無ければ OFFSET 欄の今の値を使う。"""
+        v = self.spin_offset.value() if offset is None else float(offset)
+        return v + self._lead_sec
+
+    def _edit_offset(self, offset=None):
+        """作譜ペインへ渡す OFFSET。頭に足した助走ぶんを引く。
 
         音源が無い譜面は無音の音源を作って鳴らすが、その頭に助走
         (_SILENT_LEAD_SEC)を足してある。_on_position_changed がペインへ
@@ -3810,7 +3879,8 @@ class PreviewDock(QDockWidget):
         助走ぶん後ろへずれるので**引く**。音源がある譜面では助走は 0 なので
         今までと同じ値になる。
         """
-        return self.spin_offset.value() - self._lead_sec
+        v = self.spin_offset.value() if offset is None else float(offset)
+        return v - self._lead_sec
 
     def _audio_ms(self, seconds):
         """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
@@ -3905,8 +3975,10 @@ class PreviewDock(QDockWidget):
 
     def set_metronome_clicks(self, clicks):
         self._editor_metronome_clicks = clicks or []
-        self.metronome.set_schedule(self._editor_metronome_clicks, self.spin_offset.value())
-        self.waveform.set_beat_grid(self._editor_bpm, self.spin_offset.value(), self._editor_metronome_clicks)
+        self.metronome.set_schedule(self._editor_metronome_clicks,
+                                    self._grid_offset())
+        self.waveform.set_beat_grid(self._editor_bpm, self._grid_offset(),
+                                    self._editor_metronome_clicks)
         self._set_game_grid(self._editor_bpm, self.spin_offset.value())
 
     def set_preview_data(self, data, course_stats=None):
@@ -3942,7 +4014,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
-        self._apply_hit_schedule(self.spin_offset.value())
+        self._apply_hit_schedule(self._grid_offset())
         self._take_bar_lines(data)
         self.chart_preview.set_preview_data(data)
         self.info_bar.set_course_info(data.get("course_label"), data.get("course_color"), data.get("level"))
@@ -4158,13 +4230,16 @@ class PreviewDock(QDockWidget):
 
     def _set_game_grid(self, bpm, offset):
         """作譜波形のグリッドを bar_times 由来のクリックで引き直す。データが
-        まだ無ければメトロノーム用にフォールバック(空譜面/読み込み前)。"""
+        まだ無ければメトロノーム用にフォールバック(空譜面/読み込み前)。
+
+        offset は**素の OFFSET**(ヘッダの値)。助走ぶんは中で足し引きする —
+        音声波形は音の時刻(足す)、作譜ペインは向きが逆(引く)。"""
         clicks = self._game_grid_clicks or self._editor_metronome_clicks
-        self.game_waveform.set_beat_grid(bpm, offset, clicks)
+        self.game_waveform.set_beat_grid(bpm, self._grid_offset(offset), clicks)
         # 作譜モードの編集ペインにも同じものを渡す。ここを飛ばすと編集ペインの
         # offset が 0 のままになり、親が描く音符(譜面時刻 - offset)と編集
         # グリッド/カーソルが OFFSET のぶんだけ食い違う。
-        self.chart_edit.set_beat_grid(bpm, offset, clicks)
+        self.chart_edit.set_beat_grid(bpm, self._edit_offset(offset), clicks)
 
     def _wire_waveform(self, wf: WaveformWidget, sync_stereo: bool = True):
         """ドック側/ゲーム窓側の2つの WaveformWidget を同じ配線にする。
@@ -4246,7 +4321,8 @@ class PreviewDock(QDockWidget):
     def _on_waveform_offset_preview(self, value: float):
         """ドラッグ中の未確定 OFFSET: グリッド表示だけ両方の波形に反映し、
         TJA ヘッダには書かない(確定は offsetCommitted 側)。"""
-        self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self.waveform.set_beat_grid(self._editor_bpm, self._grid_offset(value),
+                                    self._editor_metronome_clicks)
         self._set_game_grid(self._editor_bpm, value)  # 作譜波形は bar_times 由来グリッド
         self.status_label.setText(f"OFFSET調整中: {value:+.3f} 秒")
 
@@ -4259,11 +4335,13 @@ class PreviewDock(QDockWidget):
         self.status_label.setText(f"OFFSET を {self.spin_offset.value():+.3f} 秒に設定しました。")
 
     def _on_offset_value_changed(self, value):
-        self.waveform.set_beat_grid(self._editor_bpm, value, self._editor_metronome_clicks)
+        self.waveform.set_beat_grid(self._editor_bpm, self._grid_offset(value),
+                                    self._editor_metronome_clicks)
         self._set_game_grid(self._editor_bpm, value)
-        self.metronome.set_schedule(self._editor_metronome_clicks, value)
-        self._apply_hit_schedule(value)
-        self.chart_preview.set_offset(value)
+        self.metronome.set_schedule(self._editor_metronome_clicks,
+                                    self._grid_offset(value))
+        self._apply_hit_schedule(self._grid_offset(value))
+        self.chart_preview.set_offset(self._grid_offset(value))
         # Auto-synced into the TJA's own OFFSET: line as the user adjusts it
         # (not just on button click) - this only fires for user-driven
         # changes since the "load a new/same wave" paths above set the

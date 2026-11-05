@@ -163,12 +163,34 @@ class WaveformWidget(QWidget):
     # ------------------------------------------------------------------
     # Data in
     # ------------------------------------------------------------------
+    #: 音源の頭に足した無音(助走)の秒数。preview_dock が入れる。
+    #: 測るときの約束は「画面の時刻 t → 音源ファイルの t - 助走」。
+    _wave_lead = 0.0
+
+    def set_wave_lead(self, sec):
+        """音源の頭に足した無音の秒数を決める。
+
+        音源が始まる前からも赤い線を置けるようにするため、
+        ミキサーへ渡す PCM の頭に無音を足してある(利用者の希望
+        2026-11-05)。波形の元データ(ミップ)は足す前のままなので、
+        描くときにこの秒数を引いて測る。長さもそのぶん伸びる。"""
+        sec = max(0.0, float(sec or 0.0))
+        if abs(sec - self._wave_lead) < 1e-9:
+            return
+        self._wave_lead = sec
+        if self.mips is not None:
+            self.duration = max(0.0, self.mips.duration + sec)
+        self.update()
+
     def set_mips(self, mips: WaveformMips):
         """両方の波形インスタンス(ドック側とゲーム窓側)で同じ WaveformMips を
         共有する前提。ここでは参照を持つだけでコピーはしない。"""
         self.mips = mips
-        self.duration = max(0.0, mips.duration if mips else 0.0)
-        self.view_start = 0.0
+        self.duration = max(0.0, (mips.duration + self._wave_lead)
+                            if mips else 0.0)
+        # 開いたときは**音源の頭**から見せる。頭に足した助走は左へ
+        # 置いておく(左へ送れば出てくる)。
+        self.view_start = self._wave_lead
         self.zoom = 1.0
         self._update_stereo_button_state()
         self.update()
@@ -557,15 +579,23 @@ class WaveformWidget(QWidget):
             self.cancel_offset_drag()
             self._readout = ""
         else:
-            self._readout = f"OFFSET: {self.offset:+.3f}"
+            self._readout = f"OFFSET: {self._raw_offset(self.offset):+.3f}"
         self.setCursor(Qt.SizeHorCursor if on else Qt.ArrowCursor)
         self.offsetModeToggled.emit(on)
         self.update()
 
     # 以下3つはテストから直接呼べるよう、マウスイベントから分離してある。
+    def _raw_offset(self, value):
+        """見せる/外へ出す OFFSET(ヘッダの素の値)。
+
+        内部の offset は音の時刻で測るので、頭に足した助走ぶんを含んでいる。
+        OFFSET 調整の読み値と offsetPreview / offsetCommitted は TJA に書く
+        値そのものでないといけないので、ここで助走ぶんを引いて戻す。"""
+        return float(value) - self._wave_lead
+
     def begin_offset_drag(self, x: float):
         self._offset_drag = (float(x), self.offset)
-        self._readout = f"OFFSET: {self.offset:+.3f} (Δ+0.000)"
+        self._readout = (f"OFFSET: {self._raw_offset(self.offset):+.3f} (Δ+0.000)")
         self.update()
 
     def update_offset_drag(self, x: float) -> float:
@@ -577,8 +607,8 @@ class WaveformWidget(QWidget):
         delta = (float(x) - start_x) * self._seconds_per_pixel()
         value = base - delta
         self._apply_offset_local(value)
-        self._readout = f"OFFSET: {value:+.3f} (Δ{value - base:+.3f})"
-        self.offsetPreview.emit(value)
+        self._readout = (f"OFFSET: {self._raw_offset(value):+.3f} (Δ{value - base:+.3f})")
+        self.offsetPreview.emit(self._raw_offset(value))
         self.update()
         return value
 
@@ -588,8 +618,8 @@ class WaveformWidget(QWidget):
         base = self._offset_drag[1]
         value = self.offset
         self._offset_drag = None
-        self._readout = f"OFFSET: {value:+.3f} (Δ{value - base:+.3f})"
-        self.offsetCommitted.emit(value)
+        self._readout = (f"OFFSET: {self._raw_offset(value):+.3f} (Δ{value - base:+.3f})")
+        self.offsetCommitted.emit(self._raw_offset(value))
         self.update()
         return value
 
@@ -600,16 +630,16 @@ class WaveformWidget(QWidget):
         base = self._offset_drag[1]
         self._offset_drag = None
         self._apply_offset_local(base)
-        self._readout = f"OFFSET: {base:+.3f} (取消)"
-        self.offsetPreview.emit(base)
+        self._readout = f"OFFSET: {self._raw_offset(base):+.3f} (取消)"
+        self.offsetPreview.emit(self._raw_offset(base))
         self.update()
         return True
 
     def nudge_offset(self, delta: float) -> float:
         value = self.offset + delta
         self._apply_offset_local(value)
-        self._readout = f"OFFSET: {value:+.3f} (Δ{delta:+.3f})"
-        self.offsetCommitted.emit(value)
+        self._readout = (f"OFFSET: {self._raw_offset(value):+.3f} (Δ{delta:+.3f})")
+        self.offsetCommitted.emit(self._raw_offset(value))
         self.update()
         return value
 
@@ -1023,7 +1053,10 @@ class WaveformWidget(QWidget):
         if self._lane_color is None:
             self._lane_color = np.uint32(self._lane_qcolor().rgba())
 
-        _mins, maxs = self.mips.peaks(channel, t0, t1, w)
+        # 音源の頭に足した無音のぶん、元データでは手前を読む。
+        # 範囲の外(= 助走の中)は mips が 0 を返すので、そのまま平らになる。
+        lead = self._wave_lead
+        _mins, maxs = self.mips.peaks(channel, t0 - lead, t1 - lead, w)
         mid = (lane_h - 1) / 2.0
         # LANE_GAIN で縦に伸ばす(作譜ペインは行が高いので、素の倍率だと
         # 真ん中に細い帯が見えるだけになる)。はみ出しは行の高さで頭打ち。
