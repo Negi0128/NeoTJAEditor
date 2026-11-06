@@ -1037,6 +1037,55 @@ def _head_pos(it):
 _CMD_POS_TOL = Fraction(1, 384)
 
 
+#: 選んだ**音符**の位置を照合するときの許容(_CMD_POS_TOL と同じ幅)。
+#:
+#: 画面側は音符の位置も 1/192 に丸めて持つ(chart_edit_widget.POS_DEN)。
+#: 本文側は「その小節の文字数」で割った分数なので、文字数が 192 の約数
+#: でない小節(20分割など)では食い違う — 20分割なら i/20 が 1/192 で
+#: 表せるのは i=0,5,10,15 の4つだけ。完全一致で照合していたので、残りの
+#: 音符は**選んでいるのに操作が効かない**状態だった(利用者の報告
+#: 2026-11-07「範囲設定後、Delete を押しても一部消えないノーツがある。
+#: 2回押すと消える」。2回目は帯のほうの処理に落ちるので当たる)。
+_NOTE_POS_TOL = Fraction(1, 384)
+
+
+def _snap_wants(all_items, want, get=None):
+    """選んだ位置の集合を、本文の音符の位置へ寄せ直す。
+
+    許容(_NOTE_POS_TOL)の中でいちばん近いものを1つずつ取る。1つの音符が
+    2つの選択に取られないよう、採ったものは候補から外す。当たらなかった
+    位置はそのまま残す(選んだものがもう無い、など)。
+    """
+    if not want:
+        return want
+    get = get or _head_pos
+    rest = []
+    for it in all_items:
+        try:
+            q = get(it)
+        except (TypeError, KeyError):
+            q = None
+        if q is not None:
+            rest.append(q)
+    out = set()
+    for pos in sorted(want):
+        if pos in rest:
+            rest.remove(pos)
+            out.add(pos)
+            continue
+        best, bd = None, None
+        for q in rest:
+            d = abs(q - pos)
+            if d <= _NOTE_POS_TOL and (bd is None or d < bd):
+                best, bd = q, d
+        if best is None:
+            out.add(pos)
+        else:
+            rest.remove(best)
+            out.add(best)
+    return out
+
+
 def _match_cmds(cmds, want_cmds, keep=None):
     """本文の命令行 cmds のうち、選ばれた (名前, 位置) に当たるものを拾う。
 
@@ -1086,10 +1135,11 @@ def op_move_items(text, course_range, items, steps, grid=16):
         1/12 の音符を 1/16 のグリッドで動かすと端数が残り、どの目盛にも
         乗らなかったため。"""
         return G.shift(Fraction(p), steps, snap=True)
-    want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
     all_items = chart_items(text, body)
+    want_notes = _snap_wants(
+        all_items, {_item_pos(i) for i in items if i.get("kind") == "note"})
     sel = [it for it in all_items if _head_pos(it) in want_notes]
     if any(dest_note(_head_pos(it)) is None for it in sel):
         return None                     # 譜面の頭より前へは出せない
@@ -1170,6 +1220,7 @@ def op_tail_items(text, course_range, items, steps, grid=16):
     if not want:
         return None
     all_items = chart_items(text, body)
+    want = _snap_wants(all_items, want, _tail_pos)
     sel = [it for it in all_items if _tail_pos(it) in want]
     if not sel:
         return None
@@ -1200,13 +1251,16 @@ def op_delete_items(text, course_range, items):
     body = course_body_span(text, course_range)
     if body is None or not items:
         return None
-    want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
+    all_items = chart_items(text, body)
+    want_notes = _snap_wants(
+        all_items, {_item_pos(i) for i in items if i.get("kind") == "note"})
     # 終端(8)だけを選んで消したときは、その連打・風船まるごと消す。終端だけ
     # 消えると終わらない連打になってしまう(利用者の要望 2026-10-08)。
-    want_tails = {_item_pos(i) for i in items if i.get("kind") == "tail"}
-    all_items = chart_items(text, body)
+    want_tails = _snap_wants(
+        all_items, {_item_pos(i) for i in items if i.get("kind") == "tail"},
+        _tail_pos)
     sel = [it for it in all_items
            if _head_pos(it) in want_notes or _tail_pos(it) in want_tails]
     new = text
@@ -1275,7 +1329,9 @@ def copy_items(text, course_range, items=None, a=None, b=None, grid=16,
     cmds = command_items(text, body)
     vals = balloon_values(text, course_range)
     if items:
-        want_notes = {_item_pos(i) for i in items if i.get("kind") == "note"}
+        want_notes = _snap_wants(
+            all_items,
+            {_item_pos(i) for i in items if i.get("kind") == "note"})
         want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                      for i in items if i.get("kind") == "cmd"}
         notes = [it for it in all_items if _head_pos(it) in want_notes]
@@ -1475,9 +1531,11 @@ def _runs_of_items(text, body, items):
     want = {_item_pos(i) for i in items if i.get("kind") == "note"}
     if not want:
         return []
+    all_items = chart_items(text, body)
+    want = _snap_wants(all_items, want)
     runs = []
     cur = None
-    for it in chart_items(text, body):
+    for it in all_items:
         if _head_pos(it) not in want:
             continue
         tail = it["tail"] or it["head"]
@@ -1505,8 +1563,10 @@ def _picked_notes(text, body, items):
     want = {_item_pos(i) for i in items if i.get("kind") == "note"}
     if not want:
         return []
+    all_items = chart_items(text, body)
+    want = _snap_wants(all_items, want)
     out = []
-    for it in chart_items(text, body):
+    for it in all_items:
         if _head_pos(it) in want:
             out.append((it["head"], it["tail"] or it["head"]))
     return out
@@ -1641,7 +1701,9 @@ def op_command_items(text, course_range, items, name, value):
     want = {_item_pos(i) for i in items if i.get("kind") == "note"}
     if not want:
         return None
-    targets = [it["head"] for it in chart_items(text, body)
+    all_items = chart_items(text, body)
+    want = _snap_wants(all_items, want)
+    targets = [it["head"] for it in all_items
                if _head_pos(it) in want]
     if not targets:
         return None
@@ -2273,10 +2335,16 @@ def op_meter_split(text, course_range, items):
     body = course_body_span(text, course_range)
     if body is None or not items:
         return None
-    want = sorted({_item_pos(i) for i in items
-                   if i.get("kind") in ("note", "tail")})
+    want = {_item_pos(i) for i in items
+            if i.get("kind") in ("note", "tail")}
     if not want:
         return None
+    # 画面側の 1/192 丸めを本文の音符へ寄せ直す(_snap_wants)。頭でも
+    # 終端でも当たればよいので、両方を候補にする。
+    _all = chart_items(text, body)
+    want = sorted(_snap_wants(
+        _all + [{"head": it["tail"], "tail": None} for it in _all
+                if it.get("tail") is not None], want))
     spans = measure_spans(text, body)
     if not spans:
         return None
