@@ -163,6 +163,13 @@ class HighSpeedDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_apply)
         layout.addLayout(btn_row)
+        # 終了値を入れてすぐ Enter で適用できるように(利用者の要望
+        # 2026-11-07)。本文の欄(QPlainTextEdit)の中では今までどおり
+        # 改行が入る。
+        from neotja.dialogs import set_default_button
+        set_default_button(self, btn_apply)
+        for ed in (self.ed_start, self.ed_end, self.ed_interval):
+            ed.returnPressed.connect(self._apply)
 
         self.txt_before.textChanged.connect(self._preview)
         self.cb_mode.currentTextChanged.connect(self._on_mode_change)

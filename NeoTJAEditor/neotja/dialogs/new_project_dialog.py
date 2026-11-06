@@ -166,10 +166,27 @@ class NewProjectDialog(QDialog):
         btn_row.addWidget(self.btn_cancel)
         btn_row.addWidget(self.btn_ok)
         layout.addLayout(btn_row)
+        # Enter を受けるボタンを決める(利用者の要望 2026-11-07)。開いた
+        # 直後は「ダウンロード開始」。ボタンが出そろったここで1回呼ぶ。
+        self._sync_default_button()
 
     # ------------------------------------------------------------------
     # Mode switching
     # ------------------------------------------------------------------
+    def _sync_default_button(self):
+        """Enter で押されるボタンを、いまの状態に合わせて決める。
+
+        利用者の要望 2026-11-07「URL張る→enterでDL→DL後enterでそのまま
+        新規作成できるようにしてほしい」。まだ落としていないあいだは
+        「ダウンロード開始」、落とし終わったら「作成」。
+        """
+        from neotja.dialogs import set_default_button
+        want = self.btn_ok
+        if (self.mode == "youtube" and not self.result_wave_path
+                and self._worker is None):
+            want = self.btn_download
+        set_default_button(self, want)
+
     def _set_mode(self, mode):
         if self._worker is not None:
             return  # don't allow switching mid-download
@@ -177,6 +194,7 @@ class NewProjectDialog(QDialog):
         self.btn_blank.setChecked(mode == "blank")
         self.btn_youtube.setChecked(mode == "youtube")
         self.stack.setCurrentIndex(0 if mode == "blank" else 1)
+        self._sync_default_button()
 
     def _build_blank_page(self):
         w = QWidget()
@@ -211,6 +229,9 @@ class NewProjectDialog(QDialog):
         url_row.addWidget(self.btn_open_soundcloud)
         # 入力の変化に合わせて両方のラベル/ツールチップを切り替える。
         self.ed_url.textChanged.connect(self._update_open_buttons)
+        # URL を貼って Enter でそのまま落とし始める(利用者の要望
+        # 2026-11-07)。
+        self.ed_url.returnPressed.connect(self._start_download)
         self._update_open_buttons()
         v.addLayout(url_row)
 
@@ -404,6 +425,7 @@ class NewProjectDialog(QDialog):
         self.ed_url.setEnabled(False)
         self.ed_folder.setEnabled(False)
         self.status_label.setText("ダウンロードを開始しています...")
+        self._sync_default_button()
 
         # Start indeterminate ("busy") until yt-dlp reports a real percentage,
         # so the user can tell work is happening even before numbers arrive.
@@ -477,6 +499,7 @@ class NewProjectDialog(QDialog):
         self.btn_download.clicked.connect(self._start_download)
         self.ed_url.setEnabled(True)
         self.ed_folder.setEnabled(True)
+        self._sync_default_button()
 
     def _on_download_ok(self, ogg_path, title, uploader, thumbnail_url):
         if self._download_done:
@@ -488,6 +511,8 @@ class NewProjectDialog(QDialog):
         if not self.ed_title.text().strip():
             self.ed_title.setText(title)
         self.status_label.setText(f"完了: {os.path.basename(ogg_path)}")
+        # 落とし終わったら Enter は「作成」へ(利用者の要望 2026-11-07)。
+        self._sync_default_button()
 
         self.lbl_video_title.setText(title)
         # SoundCloudだと「チャンネル」ではなく投稿者/アーティストなので、

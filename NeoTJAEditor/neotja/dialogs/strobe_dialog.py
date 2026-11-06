@@ -79,6 +79,12 @@ class StrobeGeneratorDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_apply)
         layout.addLayout(btn_row)
+        # 値を入れてすぐ Enter で挿入できるように(利用者の要望
+        # 2026-11-07。ハイスピ変換と同じ)。
+        from neotja.dialogs import set_default_button
+        set_default_button(self, btn_apply)
+        for ed in (self.ed_bpm, self.ed_start, self.ed_end):
+            ed.returnPressed.connect(self._apply)
 
         for w, sig in (
             (self.cb_fps, self.cb_fps.currentTextChanged),
