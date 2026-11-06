@@ -405,6 +405,14 @@ class WaveformWidget(QWidget):
         **赤い線が窓の左 FOLLOW_RESUME_FRAC まで戻ってきたら、そこで
         追い直す。** 先へ送ったときは線が追いついてきた所で自然に戻り、
         先を見ているあいだ(線がまだ窓の外か、右のほう)は戻らない。
+
+        線の位置は**送った行き先**(view_target)で見る。景色はホイールで
+        送ってもその場で飛ばず滑るので、いまの view_start で見ると回した
+        直後はまだ定位置(FOLLOW_FRAC)のまま。戻る線(FOLLOW_RESUME_FRAC)が
+        それより右にあるので「もう定位置のあたり」と見なされ、次のコマで
+        追従へ戻って滑りが止まり、**下へ回したぶんが毎回消えていた**
+        (利用者の報告 2026-11-07「再生中マウスホイールを下に回すと下に
+        行かない」)。
         """
         if not self._view_free:
             return True
@@ -414,7 +422,7 @@ class WaveformWidget(QWidget):
         # (左端)で戻すと、線を定位置へ置き直すぶん景色が 3割ぶん飛んで、
         # せっかく見ていた所が流れてしまう。
         lo = min(self.FOLLOW_FRAC, self.FOLLOW_RESUME_FRAC)
-        rel = (float(seconds) - self.view_start) / span
+        rel = (float(seconds) - self.view_target()) / span
         # ちょうど境目のときに丸めで「まだ手前」にならないよう、わずかに甘く。
         if rel < lo - 1e-9:
             # まだ定位置の手前。**追いついてくる途中**だと覚えておく。
@@ -425,10 +433,12 @@ class WaveformWidget(QWidget):
             # 帯(定位置〜上限)を飛び越えても、ここで拾える。
             self._follow_catchup = False
             self._view_free = False
+            self._stop_view_anim()      # 送りの途中なら、そこで打ち切る
             return True
         if rel <= self.FOLLOW_RESUME_FRAC:
             # 送った所がもう定位置のあたり。そのまま戻してよい。
             self._view_free = False
+            self._stop_view_anim()
             return True
         return False
 
