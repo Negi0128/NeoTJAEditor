@@ -103,9 +103,7 @@ class HighSpeedDialog(QDialog):
         # 手前の値を初期値にすると、その1本が「1個前の値」に書き換わり、
         # しかも手前と同じ値なので消され、以降が丸ごと1個ずれる
         # (利用者の報告 2026-11-05)。札モードは1本目の札の値から。
-        self.ed_start = QLineEdit(
-            self._first_scroll_text(initial_text)
-            if self._on_scrolls else _fmt_scroll(self._base_scroll))
+        self.ed_start = QLineEdit(self._start_default_text(initial_text))
         form.addRow("開始 SCROLL", self.ed_start)
         # 終了は空欄で始める(どこまで持っていくかは毎回ちがうため)。
         self.ed_end = QLineEdit("")
@@ -191,6 +189,66 @@ class HighSpeedDialog(QDialog):
             except (TypeError, ValueError):
                 continue
         return _fmt_scroll(self._base_scroll)
+
+    def _scroll_positions(self, parsed):
+        """範囲の中にある #SCROLL の所と値 [(小節, 何文字目, 値の字面)]。
+
+        span では切らない(範囲の中ぜんぶ)。開始の初期値を決めるのに使う。
+        小節と小節のあいだの行は **次の小節の頭** に効く。
+        """
+        out = []
+        mi = -1
+        pend = None
+        for item in parsed:
+            if item["type"] != "measure":
+                c = _cmd_of(item.get("text", ""))
+                if c is not None and c[0] == "SCROLL":
+                    pend = c[1]
+                continue
+            mi += 1
+            notes = item["notes"]
+            if not notes:
+                continue
+            if pend is not None:
+                out.append((mi, 0, pend))
+                pend = None
+            for idx, line in item["breaks"]:
+                c = _cmd_of(line)
+                if c is not None and c[0] == "SCROLL":
+                    out.append((mi, min(idx, len(notes) - 1), c[1]))
+        out.sort(key=lambda v: (v[0], v[1]))
+        return out
+
+    def _start_default_text(self, raw):
+        """開始 SCROLL の初期値の字面。
+
+        **1本目の印の所で効いている値**を使う。呼ぶ側が渡す手前の値
+        (base_scroll)は「選んだ範囲のひとつ前」の値なので、小節の頭に
+        #SCROLL が書いてあると1個前に戻ってしまう。その #SCROLL の所へ
+        1本目の印が置かれ、元の値が消える(= 吸われる)。
+        札モードは 2026-11-05 に直したが、**音符を選んで変換する道**が
+        同じ形で残っていた(利用者の報告 2026-11-07)。
+        """
+        if self._on_scrolls:
+            return self._first_scroll_text(raw)
+        try:
+            parsed = parse_measure_lines(raw.strip())
+            marks = self._marks_for(parsed, self.cb_mode.currentText())
+        except Exception:
+            return _fmt_scroll(self._base_scroll)
+        if not marks:
+            return _fmt_scroll(self._base_scroll)
+        head = (marks[0][0], marks[0][1])
+        val = None
+        for mi, i, v in self._scroll_positions(parsed):
+            if (mi, i) <= head:
+                val = v
+        if val is None:
+            return _fmt_scroll(self._base_scroll)
+        try:
+            return _fmt_scroll(float(val))
+        except (TypeError, ValueError):
+            return _fmt_scroll(self._base_scroll)
 
     def _on_mode_change(self, *_):
         mode = self.cb_mode.currentText()
