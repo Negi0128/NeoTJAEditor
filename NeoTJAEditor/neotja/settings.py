@@ -17,7 +17,6 @@ _SETTINGS_KEYS = (
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
     "preview_show_fps", "preview_modes_legacy", "command_panel_follow",
     "chart_edit_tail_measure", "chart_edit_wave_gain",
-    "chart_move_scale",
     "collab_name",
     "preview_bottom_mode",
     "peepo_edit_redraw_fps",
@@ -290,8 +289,6 @@ def default_settings() -> dict:
         # 既定はオン。打つ場所が見えていないと続きを書き始められない
         # (利用者の指定 2026-10-04)。
         "chart_edit_tail_measure": True,
-        # 作譜ペインのホイール1目盛で動く量の倍率(左上の「×1.0」)。
-        "chart_move_scale": 1.0,
         # 作譜ペインの波形の縦の倍率(1.0 = 既定の見え方 = 素の 3倍。
         # 0.25〜8.0)。
         # 右クリック →「波形の高さ」で変える。音が小さい曲だと
