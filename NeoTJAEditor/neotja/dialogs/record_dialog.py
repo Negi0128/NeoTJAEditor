@@ -373,6 +373,10 @@ class RecordDialog(QDialog):
             wave_pct=cfg0.get("rec_bg_wave_pct", 15.0),
             wave_color=cfg0.get("rec_bg_wave_color", "#ffb300"),
             wave_alpha=cfg0.get("rec_bg_wave_alpha", 70))
+        # 「既定にする」で覚えた見た目があれば、そちらを上から当てる
+        # (利用者の指定 2026-11-06)。絵の道はそのまま。
+        self._bg = recorder.bg_with_defaults(
+            self._bg, cfg0.get("rec_bg_default"))
         bg_row = QHBoxLayout()
         self.ed_bg = QLineEdit(self._bg.path)
         self.ed_bg.setReadOnly(True)      # 触るのは窓のほう

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from neotja import recorder
+from neotja import settings as settings_mod
 from neotja.dialogs.record_bg_check import _bg_frame, compose_check_frame
 
 #: 見本を焼き直すまでの間合い(ms)。つまみを動かしているあいだは焼かない。
@@ -253,7 +254,27 @@ class RecordBackgroundDialog(QDialog):
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
+        # 「既定にする」= いまの**見た目**を覚えて、次に開いたときの
+        # 始まりにする(利用者の指定 2026-11-06)。絵の道は覚えない —
+        # 曲ごとに選び直すもの。
+        self.btn_def = QPushButton("既定にする")
+        self.btn_def.setToolTip(
+            "いまの暗さ・レーンの濃さ・フェード・ジャケットの大きさと"
+            + chr(10) + "位置を、次に開いたときの始まりにします。"
+            + chr(10) + "背景の動画とジャケットの絵は覚えません。")
+        self.btn_def.clicked.connect(self._save_default)
+        self.btn_def_clear = QPushButton("既定を消す")
+        self.btn_def_clear.setToolTip("覚えた既定を忘れて、元の初期値に戻します。")
+        self.btn_def_clear.clicked.connect(self._clear_default)
+        self.lbl_def = QLabel("")
+        box.addButton(self.btn_def, QDialogButtonBox.ResetRole)
+        box.addButton(self.btn_def_clear, QDialogButtonBox.ResetRole)
+        row_def = QHBoxLayout()
+        row_def.addWidget(self.lbl_def)
+        row_def.addStretch()
+        lay.addLayout(row_def)
         lay.addWidget(box)
+        self._sync_default_buttons()
 
         # 窓の大きさが変わったら見本も焼き直す(収まる大きさが変わるため)。
         self.view.installEventFilter(self)
@@ -269,6 +290,29 @@ class RecordBackgroundDialog(QDialog):
         if obj is self.view and ev.type() == QEvent.Resize:
             self._timer.start(PREVIEW_MS)
         return super().eventFilter(obj, ev)
+
+    # ------------------------------------------------------------------
+    # 既定(利用者の指定 2026-11-06「デフォルト設定を自分で作れるように」)
+    # ------------------------------------------------------------------
+    def _sync_default_buttons(self):
+        cfg = settings_mod.load_settings()
+        has = isinstance(cfg.get("rec_bg_default"), dict) and             bool(cfg.get("rec_bg_default"))
+        self.btn_def_clear.setEnabled(has)
+        self.lbl_def.setText("既定を覚えています。" if has else "")
+
+    def _save_default(self):
+        cfg = settings_mod.load_settings()
+        cfg["rec_bg_default"] = recorder.bg_defaults(self.background())
+        settings_mod.save_settings(cfg)
+        self._sync_default_buttons()
+        self.lbl_def.setText("いまの設定を既定にしました。")
+
+    def _clear_default(self):
+        cfg = settings_mod.load_settings()
+        cfg.pop("rec_bg_default", None)
+        settings_mod.save_settings(cfg)
+        self._sync_default_buttons()
+        self.lbl_def.setText("既定を消しました。")
 
     def background(self):
         """いま欄に入っている背景。path が空なら「背景なし」。"""

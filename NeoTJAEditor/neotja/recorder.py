@@ -511,6 +511,14 @@ class RecordBackground:
     tail は動画が先に終わったときに "loop"(頭から繰り返す)か
     "hold"(最後のコマで止める)か。"""
 
+    #: 「既定にする」で覚える項目。**絵の道(path / art)と、その動画の
+    #: 開始位置(offset)は入れない** — 曲ごとに選び直すもの
+    #: (利用者の指定 2026-11-06「絵は選びなおしでよい」)。
+    DEFAULT_KEYS = ("dim", "lane", "fade_in", "fade_out", "fade_target",
+                    "art_pct", "art_pad", "art_x", "art_y",
+                    "art_edge", "art_edge_color",
+                    "wave", "wave_pct", "wave_color", "wave_alpha")
+
     def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
                  fade_in=0.0, fade_out=0.0, fade_target="all",
                  art="", art_pct=30.0, art_pad=24,
@@ -644,6 +652,26 @@ def _bg_out_size(canvas, src_w, src_h):
     if canvas is None:
         return src_w + (src_w & 1), src_h + (src_h & 1)
     return canvas
+
+
+def bg_defaults(bg):
+    """その背景の**見た目**を、既定として覚える形(dict)にする。"""
+    return {k: getattr(bg, k) for k in RecordBackground.DEFAULT_KEYS
+            if hasattr(bg, k)}
+
+
+def bg_with_defaults(bg, saved):
+    """覚えた既定を重ねた背景を作って返す。
+
+    絵の道(path / art)と動画の開始位置(offset)は bg のまま — 既定には
+    入れていないので、曲ごとに選んだものがそのまま残る。"""
+    if not isinstance(saved, dict) or not saved:
+        return bg
+    kw = bg_defaults(bg)
+    for k in RecordBackground.DEFAULT_KEYS:
+        if k in saved:
+            kw[k] = saved[k]
+    return RecordBackground(path=bg.path, offset=bg.offset, art=bg.art, **kw)
 
 
 def art_total_h(bg, out_h):

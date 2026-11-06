@@ -32,6 +32,10 @@ _SETTINGS_KEYS = (
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
     "record_output_dir", "record_last_dir",
+    # 録画の背景の「既定にする」で覚えた見た目(絵の道は入れない)。
+    # 一覧と default_settings() の**両方**に要る — 片方だけだと
+    # 次の起動で読み戻せない(上の record_output_dir が実際にそうなっていた)。
+    "rec_bg_default",
     # 利用者が用意した TNDE の System フォルダ。ここと default_settings() の
     # 両方に書くこと(片方だけだと再起動のたびに空へ戻る。上の
     # record_output_dir が実際にそうなっていた)。
@@ -62,6 +66,8 @@ def default_settings() -> dict:
         # 動画書き出しの保存先。ユーザーが環境設定で決める既定で、書き出しても
         # 勝手には変わらない(空 = 前回使った場所 / TJA と同じフォルダ)。
         "record_output_dir": "",
+        # 録画の背景の既定(「既定にする」で入る)。空なら覚えていない。
+        "rec_bg_default": {},
         # 動画書き出しで最後に実際に使った場所。録画のたびに書き換わる履歴で、
         # 上の record_output_dir(ユーザーの指定)とは別に持つ。一緒にしていた
         # ころは、環境設定で保存先を決めても一度別の場所へ書き出すだけで
