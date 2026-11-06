@@ -2756,13 +2756,32 @@ class PreviewDock(QDockWidget):
         self._tp_subtitle.setVisible(bool(subtitle))
 
     def _build_speed_row(self) -> QWidget:
-        """再生速度スライダー(×0.25 / ×0.50 / ×0.75 / ×1.00 の 4 段階)。
+        """下の段: 時刻 / 譜面つきシークバー / 曲の長さ / 速度 / ヘッダ / キー。
+
+        利用者の要望 2026-11-07「再生速度の欄を削って、ここにシークバーが
+        あるといいかも。シークバーの右に再生速度 x1 / ヘッダ / キーで」。
+        速度はスライダーをやめて**押すたび循環するボタン**にした
+        (×1 → ×0.75 → ×0.5 → ×0.25 → ×1)。
+
         作譜モード専用ではなく、下部パネルのどのモードでも常に見えるよう、
         モードスタックの外に置く。"""
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
-        h.addWidget(QLabel("再生速度:"))
+        h.setSpacing(8)
+        self.lbl_mm_now = QLabel("0:00.000")
+        self.lbl_mm_now.setFocusPolicy(Qt.NoFocus)
+        h.addWidget(self.lbl_mm_now)
+        from neotja.minimap_widget import ChartMinimap
+        self.minimap = ChartMinimap()
+        self.minimap.seekRequested.connect(self._on_minimap_seek)
+        h.addWidget(self.minimap, 1)
+        self.lbl_mm_all = QLabel("0:00.000")
+        self.lbl_mm_all.setFocusPolicy(Qt.NoFocus)
+        h.addWidget(self.lbl_mm_all)
+        # 速度は**値の持ち主をスライダーのまま**にして、見た目だけボタンへ
+        # 差し替える。キーからの set_playback_speed や設定の復元が、今まで
+        # どおりスライダー1つを動かすだけで済む。
         self.speed_slider = _ClickOnlySlider(Qt.Horizontal)
         # スライダーの値 = SPEED_STEPS の番号。倍率(%)を直に持たせると
         # つまみが段階の間で止まってしまうので、段階そのものをレンジにする。
@@ -2777,9 +2796,13 @@ class PreviewDock(QDockWidget):
         # Space/Tab/Z/C をレーンに残すためスライダーはフォーカスを取らない。
         self.speed_slider.setFocusPolicy(Qt.NoFocus)
         self.speed_slider.valueChanged.connect(self._on_speed_slider_changed)
-        h.addWidget(self.speed_slider, 1)
-        self.lbl_speed = QLabel("×%.2f" % SPEED_DEFAULT)
-        h.addWidget(self.lbl_speed)
+        self.speed_slider.setVisible(False)      # 値の持ち主。表には出さない
+        self.btn_speed = QPushButton("×%.2f" % SPEED_DEFAULT)
+        self.btn_speed.setFocusPolicy(Qt.NoFocus)
+        self.btn_speed.setToolTip(
+            "再生速度。押すたび ×1 → ×0.75 → ×0.5 → ×0.25 → ×1 と回ります。")
+        self.btn_speed.clicked.connect(self._cycle_speed)
+        h.addWidget(self.btn_speed)
         # 譜面のヘッダ(曲名・BPM・OFFSET など)を直す窓。どのモードでも
         # 見える所に置く(利用者の指定 2026-10-31)。
         # 作譜のキー一覧。押せば出る所が無いと、何を押せば音符が置けるか
@@ -2788,14 +2811,57 @@ class PreviewDock(QDockWidget):
         self.btn_keys.setFocusPolicy(Qt.NoFocus)
         self.btn_keys.setToolTip("作譜のキー一覧を出します。出したまま試せます。")
         self.btn_keys.clicked.connect(self._on_key_help)
-        h.addWidget(self.btn_keys)
         self.btn_header = QPushButton("ヘッダ…")
         self.btn_header.setFocusPolicy(Qt.NoFocus)
         self.btn_header.setToolTip(
             "曲名・BPM・OFFSET などの譜面のヘッダを直します。")
         self.btn_header.clicked.connect(self._on_header_edit)
+        # 並びは利用者の指定 2026-11-07「シークバーの右に再生速度 x1 /
+        # ヘッダ / キーで」。
         h.addWidget(self.btn_header)
+        h.addWidget(self.btn_keys)
         return row
+
+    def _cycle_speed(self):
+        """押すたび ×1 → ×0.75 → ×0.5 → ×0.25 → ×1(利用者の指定
+        2026-11-07)。SPEED_STEPS は小さい順なので、1つ**下げて**回す。"""
+        i = self.speed_slider.value()
+        self.speed_slider.setValue((i - 1) % len(SPEED_STEPS))
+
+    def _push_minimap_chart(self):
+        """シークバー(曲まるごとの帯)へ、いまの譜面を渡す。"""
+        mm = getattr(self, "minimap", None)
+        if mm is None:
+            return
+        mm.set_chart(self._preview_notes, self._preview_spans,
+                     self._grid_offset(), self.duration_seconds())
+
+    def _on_minimap_seek(self, seconds):
+        """シークバーを押した/引いた。**助走こみの音源の時刻**で来る。"""
+        self._seek_padded(seconds)
+
+    def _sync_minimap(self, ms=None):
+        """シークバーの赤い線と「いま見えている範囲」を合わせる。"""
+        mm = getattr(self, "minimap", None)
+        if mm is None:
+            return
+        if ms is not None:
+            mm.set_position(ms / 1000.0)
+            lead_ms = int(self._lead_sec * 1000)
+            self.lbl_mm_now.setText(_fmt_time(ms - lead_ms))
+            self.lbl_mm_all.setText(_fmt_time(self._duration_ms - lead_ms))
+        ce = getattr(self, "chart_edit", None)
+        if ce is not None and self.bottom_stack.currentIndex() == self.MODE_EDIT:
+            try:
+                span = ce._visible_span()
+            except Exception:  # noqa: BLE001
+                span = 0.0
+            if span > 0:
+                mm.set_view(ce.view_start, ce.view_start + span)
+            else:
+                mm.set_view(None, None)
+        else:
+            mm.set_view(None, None)
 
     #: キー一覧の窓(1つだけ作って使い回す)。
     _key_help = None
@@ -3395,7 +3461,7 @@ class PreviewDock(QDockWidget):
         # レートを更新する。値は段階の番号なので、倍率へ引き直してから配る。
         value = max(0, min(len(SPEED_STEPS) - 1, int(value)))
         rate = SPEED_STEPS[value]
-        self.lbl_speed.setText(f"×{rate:.2f}")
+        self.btn_speed.setText(f"×{rate:.2f}")
         self._save_speed(rate)
         self.audio.set_playback_rate(rate)
         self.chart_preview.set_playback_rate(rate)
@@ -3535,6 +3601,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
+        self._push_minimap_chart()
         self.metronome.set_schedule(self._editor_metronome_clicks,
                                     self._grid_offset())
         self._apply_hit_schedule(self._grid_offset())
@@ -3837,10 +3904,16 @@ class PreviewDock(QDockWidget):
             self.seek_slider.blockSignals(True)
             self.seek_slider.setValue(ms)
             self.seek_slider.blockSignals(False)
+        self._sync_minimap(ms)
 
     def _on_duration_changed(self, ms):
         self._duration_ms = ms
         self.seek_slider.setRange(0, max(0, ms))
+        mm = getattr(self, "minimap", None)
+        if mm is not None:
+            mm.set_duration(ms / 1000.0)
+            lead_ms = int(self._lead_sec * 1000)
+            self.lbl_mm_all.setText(_fmt_time(ms - lead_ms))
         if self.duration_ready_cb:
             self.duration_ready_cb()
 
@@ -4123,6 +4196,7 @@ class PreviewDock(QDockWidget):
         self.chart_edit.clear_pending()
         # 命令が増減/変化したので、パネルの値と「追加/変更」も見直す。
         self._sync_command_panel()
+        self._push_minimap_chart()
         self._apply_hit_schedule(self._grid_offset())
         self._take_bar_lines(data)
         self.chart_preview.set_preview_data(data)
