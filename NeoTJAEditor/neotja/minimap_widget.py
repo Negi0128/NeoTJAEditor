@@ -46,6 +46,19 @@ class ChartMinimap(QWidget):
     #: 音符の文字 → 色の鍵(theme のパレット)。
     _KEY_OF = {"1": "don", "3": "don", "2": "ka", "4": "ka"}
 
+    #: 色をどれだけ落とすか。帯は曲ぜんたいぶんが一度に目に入るので、
+    #: レーンと同じ濃さだと**うるさい**(利用者の指定 2026-11-07
+    #: 「色もっと暗くしてほしいな　情報量が少し多い」)。
+    DIM = 0.58
+
+    @classmethod
+    def _dim(cls, name):
+        c = QColor(name)
+        if not c.isValid():
+            return name
+        return QColor(int(c.red() * cls.DIM), int(c.green() * cls.DIM),
+                      int(c.blue() * cls.DIM)).name()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self.BAR_H + self.PAD_V * 2)
@@ -56,7 +69,9 @@ class ChartMinimap(QWidget):
         self._duration = 0.0
         self._position = 0.0
         self._view = None         # (始まり, 終わり) 音源時刻
-        self._pal = {"don": "#ff6b6b", "ka": "#5bc8fc", "roll": "#f5c518"}
+        self._pal = {k: self._dim(v) for k, v in
+                     (("don", "#ff6b6b"), ("ka", "#5bc8fc"),
+                      ("roll", "#f5c518"))}
         self._strip = None        # 焼いた帯
         self._strip_key = None
 
@@ -64,10 +79,10 @@ class ChartMinimap(QWidget):
     # 外から入れるもの
     # ------------------------------------------------------------------
     def set_palette_colors(self, pal):
-        """テーマの色を入れる(don / ka / roll)。"""
+        """テーマの色を入れる(don / ka / roll)。帯では DIM ぶん落として使う。"""
         for k in ("don", "ka", "roll"):
             if pal.get(k):
-                self._pal[k] = pal[k]
+                self._pal[k] = self._dim(pal[k])
         self._strip_key = None
         self.update()
 
