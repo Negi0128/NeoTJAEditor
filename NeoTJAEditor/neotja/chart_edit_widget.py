@@ -452,6 +452,21 @@ class ChartEditWaveform(WaveformWidget):
         self._cmd_kind_times = ({k: [t for t, _x in v] for k, v in by.items()}
                                 if by else None)
 
+    #: 歌詞の札の色。ほかの命令と見分けが付く、落ち着いた緑。
+    LYRIC_COLOR = "#7fd6a0"
+    #: 札に出す歌詞の長さ(これより長ければ「…」で切る)。
+    LYRIC_CHIP_CHARS = 8
+
+    @classmethod
+    def lyric_chip_text(cls, text):
+        """札に出す字面。長い歌詞は頭だけ。空の #LYRIC は「(消す)」。"""
+        s = " ".join(str(text or "").split())
+        if not s:
+            return "(消す)"
+        if len(s) > cls.LYRIC_CHIP_CHARS:
+            return s[:cls.LYRIC_CHIP_CHARS] + "…"
+        return s
+
     def set_commands(self, bpm_changes, scroll_changes, measure_changes,
                      gogo_regions, *args, **kwargs):
         # ゴーゴーの薄い色と小節線は帯に焼いてある(_static_strip を参照)。
@@ -461,8 +476,55 @@ class ChartEditWaveform(WaveformWidget):
         self._meter_changes = sorted(
             (float(t), int(n), int(d)) for t, n, d in (measure_changes or []))
         super().set_commands(bpm_changes, scroll_changes, measure_changes,
-                             gogo_regions, *args, **kwargs)
+                             gogo_regions)
+        # 歌詞(#LYRIC)も札にする。**この作譜ペインだけ** — 波形のほうは
+        # 同じ _cmd_raw を別に持っているので混ざらない。
+        lyrics = kwargs.get("lyrics")
+        if lyrics is None and args:
+            lyrics = args[0]
+        self._lyrics_raw = list(lyrics or [])
+        if self._lyrics_raw:
+            raw = list(self._cmd_raw or [])
+            for t, txt in self._lyrics_raw:
+                raw.append((float(t), self.lyric_chip_text(txt),
+                            self.LYRIC_COLOR, "lyric"))
+            self._cmd_raw = raw
+            self._apply_offset_local(self.offset)
         self._bump_strip()
+
+    #: いまの歌詞 [(譜面時刻, 文字)]。札の字面ではなく**元の文字**。
+    _lyrics_raw = ()
+
+    def lyric_at(self, t, tol=None):
+        """その時刻に置いてある歌詞。無ければ None。"""
+        if not self._lyrics_raw:
+            return None
+        tol = self.SYNC_TOLERANCE_SEC if tol is None else float(tol)
+        best, bd = None, None
+        for tt, txt in self._lyrics_raw:
+            d = abs(float(tt) - float(t))
+            if d <= tol and (bd is None or d < bd):
+                best, bd = txt, d
+        return best
+
+    def open_lyric_popup(self):
+        """カーソルの所へ歌詞を置く/直す小さな欄を出す(右クリックから)。
+
+        空で決定すればその歌詞を消す。値が文字なので、ほかの命令より
+        欄を広く取る。"""
+        m, s = self._cursor_addr()
+        cur = self.lyric_at(self.cursor_time())
+
+        def accept(txt):
+            self._run_op({"kind": "command", "a": (m, s), "name": "LYRIC",
+                          "value": None if txt == "" else txt})
+            return True
+
+        popup = self._show_command_popup("歌詞", cur or "", accept)
+        if popup is not None:
+            popup.edit.setFixedWidth(260)
+            popup.adjustSize()
+        return popup
 
     #: 拍子の変化点 [(譜面時刻, 分子, 分母)]。既定は 4/4。
     _meter_changes = ((0.0, 4, 4),)
@@ -1279,7 +1341,8 @@ class ChartEditWaveform(WaveformWidget):
     # 位置で持つのは、BPM が変わっても同じものを指し続けるため。
     POS_DEN = 192
     #: 命令の行の種類 → TJA の命令名。
-    _CMD_NAMES = {"bpm": "BPMCHANGE", "hs": "SCROLL", "measure": "MEASURE"}
+    _CMD_NAMES = {"bpm": "BPMCHANGE", "hs": "SCROLL", "measure": "MEASURE",
+                  "lyric": "LYRIC"}
 
     def _pos_of_time(self, t):
         """音源時刻 → 位置(分数)。"""
@@ -1891,7 +1954,8 @@ class ChartEditWaveform(WaveformWidget):
     # 命令(BPM / HS)を置く
     # ------------------------------------------------------------------
     #: 命令 → メニューと入力欄の見出し
-    _COMMAND_LABELS = {"BPMCHANGE": "BPM", "SCROLL": "スクロール(HS)"}
+    _COMMAND_LABELS = {"BPMCHANGE": "BPM", "SCROLL": "スクロール(HS)",
+                       "LYRIC": "歌詞"}
 
     def _build_command_menu(self, at_x=None):
         """右クリックのメニュー(と、窓の「作譜」メニューの中身)。"""
@@ -1933,6 +1997,13 @@ class ChartEditWaveform(WaveformWidget):
         # BPM / スクロール / ゴーゴー / 小節線 は**命令パネル**にあるので、
         # 右クリックからは外した(利用者の指定 2026-10-31)。同じ物が2か所に
         # あると、どちらを使えばいいのか分からなくなる。
+        # 歌詞は値が文字なので、命令パネル(数の欄しか無い)ではなく
+        # ここから置く(利用者の要望 2026-11-07)。
+        lyr = menu.addAction("歌詞…" if self.lyric_at(self.cursor_time())
+                             is None else "歌詞を直す…")
+        lyr.setData("lyric")
+        lyr.triggered.connect(self.open_lyric_popup)
+        menu.addSeparator()
         ins = menu.addAction("小節を前に挿入…")
         ins.triggered.connect(self.open_measure_insert)
         # 押した所までを譜面の終わりにする(利用者の希望 2026-11-06
@@ -2675,6 +2746,9 @@ class ChartEditWaveform(WaveformWidget):
         ("measure", "拍子記号", 30),
         ("note", "音符", 0),
         ("hs", "スクロール", 30),
+        # 歌詞(#LYRIC)。値が文字なので、札には頭の何文字かだけ出す
+        # (利用者の要望 2026-11-07)。
+        ("lyric", "歌詞", 28),
         # 帯が出ているのは「隠している区間」なので、名前もそう呼ぶ
         # (利用者の指定 2026-11-05)。
         ("barline", "小節線の非表示", 28),
@@ -3361,9 +3435,10 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(xs, note_top, max(1, xe - xs), note_h,
                        QColor(255, 120, 120, 18))
         self._draw_measure_lines(p, note_top, note_h, t0, t1)
-        # 命令の行(BPM・拍子・スクロール)も時間の関数。右端は帯の幅で見る。
+        # 命令の行(BPM・拍子・スクロール・歌詞)も時間の関数。右端は帯の
+        # 幅で見る。
         rows = self._row_rects()
-        for kind in ("bpm", "measure", "hs"):
+        for kind in ("bpm", "measure", "hs", "lyric"):
             y, rh = rows[kind]
             self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
         self._draw_ruler(p, t0, t1)

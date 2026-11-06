@@ -1948,7 +1948,7 @@ def run_op(text, course_range, op):
 #     小節を細かく組み直してから足す(既存の命令行は同じ割合の位置に残る)。
 # 同じ位置に同じ命令がもうあれば、足さずに値を書き換える(二重に書かない)。
 
-COMMAND_NAMES = ("BPMCHANGE", "SCROLL", "MEASURE")
+COMMAND_NAMES = ("BPMCHANGE", "SCROLL", "MEASURE", "LYRIC")
 
 
 def _fmt_number(v):
@@ -1960,7 +1960,13 @@ def _fmt_number(v):
 def _fmt_value(name, value):
     """命令の値を行に書く形へ。おかしな値なら None(置かない)。
 
-    #MEASURE だけは数ではなく "7/8" の形。ほかは数として書く。"""
+    #MEASURE は "7/8" の形、#LYRIC は文字そのまま。ほかは数として書く。"""
+    if name == "LYRIC":
+        # 歌詞は**文字がそのまま値**(利用者の要望 2026-11-07)。行を壊す
+        # 改行とコメント記号だけ落として、あとは手を入れない。
+        s = str(value).replace(chr(13), " ").replace(chr(10), " ")
+        s = s.split("//")[0].strip()
+        return s or None
     if name == "MEASURE":
         parts = str(value).replace(" ", "").split("/")
         if len(parts) != 2:

@@ -232,8 +232,12 @@ class WaveformWidget(QWidget):
         self._checkpoint_audio = sorted(float(t) for t in (times or [])) or None
         self.update()
 
-    def set_commands(self, bpm_changes, scroll_changes, measure_changes, gogo_regions):
-        """作譜モードの波形に描く命令注釈を設定する。各変化点(先頭=基準値は
+    def set_commands(self, bpm_changes, scroll_changes, measure_changes,
+                     gogo_regions, *_extra, **_kw):
+        """作譜モードの波形に描く命令注釈を設定する。
+
+        余分な引数(歌詞など)は受け取るだけで使わない — 作譜ペインだけが
+        使う物を、同じ組のまま渡せるようにしてある。各変化点(先頭=基準値は
         除く)を色つきラベルに、GOGO区間を帯にする。引数は build_preview_timeline
         の bpm_changes[(t,bpm)]/scroll_changes[(t,scroll)]/measure_changes[
         (t,num,den)]/gogo_regions[(s,e)] と同じ形。"""

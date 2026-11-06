@@ -1478,7 +1478,7 @@ class PreviewDock(QDockWidget):
         self._preview_notes = []  # 作譜モードの波形の帯に描く音符 [(time,char,bpm,scroll,se)]
         self._preview_spans = ([], [], [])  # (rolls, balloons, kusudamas) 同上
         # 作譜モードの波形に描く命令注釈 (bpm/scroll/measure変化, gogo区間)
-        self._preview_commands = ([], [], [], [])
+        self._preview_commands = ([], [], [], [], [])
         # 作譜モードの波形グリッド用のクリック列 [(chart_time, is_measure)]。
         # メトロノーム用の build_metronome_clicks は小節途中の #BPMCHANGE を
         # 小節全体に一括適用するため build_preview_timeline の音符/小節時刻と
@@ -3574,7 +3574,8 @@ class PreviewDock(QDockWidget):
             self._preview_commands = (list(preview_data.get("bpm_changes", [])),
                                       list(preview_data.get("scroll_changes", [])),
                                       list(preview_data.get("measure_changes", [])),
-                                      list(preview_data.get("gogo_regions", [])))
+                                      list(preview_data.get("gogo_regions", [])),
+                                      list(preview_data.get("lyrics", [])))
             self._game_grid_clicks = self._bar_grid_clicks(preview_data.get("bar_times", []))
 
         self.waveform.set_beat_grid(headers["bpm"], self._grid_offset(),
@@ -4180,7 +4181,8 @@ class PreviewDock(QDockWidget):
         self._preview_commands = (list(data.get("bpm_changes", [])),
                                   list(data.get("scroll_changes", [])),
                                   list(data.get("measure_changes", [])),
-                                  list(data.get("gogo_regions", [])))
+                                  list(data.get("gogo_regions", [])),
+                                  list(data.get("lyrics", [])))
         self.game_waveform.set_notes(self._preview_notes)  # 音声波形: 波形の下に譜面
         self.game_waveform.set_spans(*self._preview_spans)
         self.game_waveform.set_commands(*self._preview_commands)
