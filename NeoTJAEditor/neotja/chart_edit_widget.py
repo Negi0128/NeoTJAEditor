@@ -1823,12 +1823,31 @@ class ChartEditWaveform(WaveformWidget):
             self._run_op({"kind": "long", "a": lg["head"], "b": tail, "char": char})
         self.update()
 
+    def apply_transform(self, kind="flip"):
+        """外(右クリックのメニュー・ツールバー)から W/Q と同じ変換を呼ぶ口。
+
+        本文側で「小節まるごと」を選び直す道(run_chart_tool → reverse_don_ka)
+        だと、囲んだ所だけでなくその小節が全部反転していた(利用者の報告
+        2026-11-07)。"""
+        self._delete_or_transform(kind)
+
     def _delete_or_transform(self, kind):
-        if kind == "delete" and self._sel:
-            # 選んだものを消す(音符も命令も。利用者の指定 2026-09-25)。
-            self._run_op({"kind": "delete_items", "items": self.selected_items()})
-            self.clear_selection()
-            return
+        # **選んだ音符があれば、それだけ**に効かせる(帯より選択が先)。
+        if self._sel:
+            if kind == "delete":
+                # 選んだものを消す(音符も命令も。利用者の指定 2026-09-25)。
+                self._run_op({"kind": "delete_items",
+                              "items": self.selected_items()})
+                self.clear_selection()
+                return
+            if kind in ("flip", "size"):
+                items = self.selected_items()
+                if any(i.get("kind") == "note" for i in items):
+                    # 入れ替えても音符は残るので、選択はそのままにする
+                    # (続けて W / Q を押せる)。
+                    self._run_op({"kind": "transform_items",
+                                  "items": items, "mode": kind})
+                    return
         rng = self._range_addresses()
         if rng is not None:
             self._run_op({"kind": kind, "a": rng[0], "b": rng[1]})

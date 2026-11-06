@@ -1464,6 +1464,40 @@ def op_transform(text, course_range, a, b, grid, mode):
     return _result(text, new, sound=sound, visual=visual, reparse=not visual)
 
 
+def op_transform_items(text, course_range, items, mode):
+    """**選んだ音符**を W=flip / Q=size で入れ替える(帯ではなく選択が相手)。
+
+    消す操作(op_delete_items)は前から選んだ音符を見ていたのに、反転と
+    大小の切り替えは帯しか見ていなかった。クリックで音符を選んだだけ
+    (帯が張られていない)ときに、カーソルの1個しか変わらなかった
+    (利用者の選択 2026-11-07)。
+    """
+    body = course_body_span(text, course_range)
+    table = _FLIP if mode == "flip" else _SIZE if mode == "size" else None
+    if body is None or table is None or not items:
+        return None
+    all_items = chart_items(text, body)
+    want = _snap_wants(
+        all_items, {_item_pos(i) for i in items if i.get("kind") == "note"})
+    if not want:
+        return None
+    writes = []
+    sound = None
+    for it in all_items:
+        if _head_pos(it) not in want:
+            continue
+        c = table.get(it["char"])
+        if c is None:
+            continue                    # 連打・風船は入れ替えない
+        m, i, L = it["head"]
+        writes.append((m, i, L, c))
+        sound = sound or c
+    if not writes:
+        return None
+    new = _apply_writes(text, body, writes)
+    return _result(text, new, sound=sound, reparse=True)
+
+
 def append_measures(text, course_range, count, grid=16):
     """譜面の末尾に、空の小節を count 個足す(利用者の希望 2026-11-06)。
 
@@ -1785,6 +1819,7 @@ def run_op(text, course_range, op):
       {"kind": "key",    "a": (小節, スロット), "grid": G, "char": "1"〜"4"}
       {"kind": "long",   "a": ..., "b": ..., "grid": G, "char": "5"/"6"/"7"/"9"}
       {"kind": "delete", "a": ..., "b": None か住所, "grid": G}
+      {"kind": "transform_items", "items": [...], "mode": "flip"/"size"}
       {"kind": "fill",   "a": ..., "b": 住所, "grid": G, "char": "1"〜"4"}
       {"kind": "flip" / "size", "a": ..., "b": None か住所, "grid": G}
 
@@ -1808,6 +1843,9 @@ def run_op(text, course_range, op):
         return None if new is None else {"text": new, "reparse": True}
     if kind == "delete_items":
         return op_delete_items(text, course_range, op.get("items") or [])
+    if kind == "transform_items":
+        return op_transform_items(text, course_range, op.get("items") or [],
+                                  str(op.get("mode") or "flip"))
     if kind == "paste_items":
         return op_paste_items(text, course_range, op.get("clip"),
                               op.get("dest"))

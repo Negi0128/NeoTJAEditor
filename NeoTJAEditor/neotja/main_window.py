@@ -2667,6 +2667,16 @@ class MainWindow(QMainWindow):
         fn = funcs.get(name)
         if fn is None:
             return
+        if name == "reverse":
+            # **帯/選んだ音符にそのまま効かせる**(W キーと同じ道)。本文側で
+            # 「小節まるごと」を選び直していたので、囲んだ所だけでなくその
+            # 小節が全部反転していた(利用者の報告 2026-11-07
+            # 「範囲指定して反転すると、小節全部反転する」)。
+            ce = getattr(self.preview_dock, "chart_edit", None)
+            fn2 = getattr(ce, "apply_transform", None)
+            if fn2 is not None:
+                fn2("flip")
+                return
         got = self._select_pane_measures(whole=(name != "strobe"))
         if got is None:
             return
