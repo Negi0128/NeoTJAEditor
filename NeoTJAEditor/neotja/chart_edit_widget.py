@@ -641,6 +641,35 @@ class ChartEditWaveform(WaveformWidget):
     #: 無いのでカーソルの住所では表せない。置いていなければ None。
     _free_time = None
 
+    #: 停止中、赤い線がこの割合より端に寄ったら景色を連れていく。
+    #: 窓の中に居るあいだは動かさない — 1グリッドずつ歩くたびに景色が
+    #: 動くと、見ている所が落ち着かない(利用者の指定 2026-11-05
+    #: 「ホイール以外では見てる範囲を遷移しない」の趣旨は残す)。
+    EDGE_FRAC = 0.04
+
+    def _scroll_line_into_view(self, t, span):
+        """停止中、赤い線が窓から出そうなら景色を連れていく。
+
+        利用者の要望 2026-11-07:
+          「作譜モードで Home や End を押したときに、現在位置を現す赤い線
+            のみの移動で、画面自体はそこに飛ばない」
+          「矢印キーで譜面移動したときに、赤い線だけでなく画面も追尾して
+            ほしい」
+        置き場所は再生中の追従と同じ(窓の左 FOLLOW_FRAC)。窓の中を歩いて
+        いるあいだは動かさないので、端に着いたときだけ送られる。
+        """
+        if span <= 0:
+            return
+        rel = (float(t) - self.view_target()) / span
+        if self.EDGE_FRAC <= rel <= 1.0 - self.EDGE_FRAC:
+            return                      # まだ窓の中。動かさない
+        hi = (max(0.0, self.duration - span) if self.duration > 0
+              else max(0.0, float(t)))
+        dest = max(0.0, min(float(t) - span * self.FOLLOW_FRAC, hi))
+        if abs(dest - self.view_target()) < 1e-6:
+            return
+        self.scroll_view_to(dest)
+
     def _pin_playhead_to_cursor(self):
         """赤い線と表示をカーソルの位置へ直接合わせる(音源の返事を待たない)。
 
@@ -649,7 +678,11 @@ class ChartEditWaveform(WaveformWidget):
         self.position_sec = t
         span = self._visible_span()
         if self._follow_window and span > 0:
-            self.view_start = self._follow_view_start(t, span)
+            if self._playing:
+                self.view_start = self._follow_view_start(t, span)
+            else:
+                # 停止中は、窓から出そうなときだけ連れていく。
+                self._scroll_line_into_view(t, span)
         self.update()
 
     def _follow_playhead(self, t, nearest):
