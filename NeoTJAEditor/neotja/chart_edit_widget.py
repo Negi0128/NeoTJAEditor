@@ -127,13 +127,17 @@ class _CommandInput(QFrame):
 
 
 class _GridPicker(QFrame):
-    """分割(1/1〜1/192)を選ぶ小さな窓。左上の「1/16」を押すと出る。
+    """値を1つ選ぶ小さな窓。左上の「1/16」「×1.0」を押すと出る。
 
-    横のつまみを引くと、その場で分割が変わって譜面の目盛りも付いてくる
+    横のつまみを引くと、その場で変わって譜面の目盛りも付いてくる
     (PeepoDrumKit と同じ手触り。利用者の指定 2026-10-01)。決定も取り消しも
-    いらない — 引いた先がそのまま今の分割で、外を押せば閉じる。"""
+    いらない — 引いた先がそのまま今の値で、外を押せば閉じる。
 
-    def __init__(self, parent, choices, current, on_change):
+    title / fmt を変えれば分割以外にも使える(移動量の感度。利用者の要望
+    2026-11-07)。"""
+
+    def __init__(self, parent, choices, current, on_change,
+                 title="グリッド", fmt=None):
         super().__init__(parent, Qt.Popup)
         self.setObjectName("chartEditGridPicker")
         self.setStyleSheet(
@@ -143,13 +147,14 @@ class _GridPicker(QFrame):
             "QLabel#hint { color: #9aa0aa; }")
         self._choices = list(choices)
         self._on_change = on_change
+        self._fmt = fmt or (lambda v: "1/%d" % v)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 7, 10, 7)
         lay.setSpacing(4)
         top = QHBoxLayout()
         top.setSpacing(8)
-        top.addWidget(QLabel("グリッド"))
-        self.value = QLabel("1/%d" % current)
+        top.addWidget(QLabel(title))
+        self.value = QLabel(self._fmt(current))
         self.value.setObjectName("value")
         self.value.setFixedWidth(52)
         top.addWidget(self.value)
@@ -164,14 +169,14 @@ class _GridPicker(QFrame):
         try:
             self.slider.setValue(self._choices.index(current))
         except ValueError:
-            self.slider.setValue(self._choices.index(16))
+            self.slider.setValue(len(self._choices) // 2)
         self.slider.valueChanged.connect(self._changed)
         lay.addWidget(self.slider)
         self.slider.setFocus()
 
     def _changed(self, i):
         g = self._choices[max(0, min(len(self._choices) - 1, i))]
-        self.value.setText("1/%d" % g)
+        self.value.setText(self._fmt(g))
         self._on_change(g)
 
     def keyPressEvent(self, e):
@@ -195,6 +200,8 @@ class ChartEditWaveform(WaveformWidget):
     legendToggled = Signal(bool)
     # 選んだものが変わった(命令パネルを「追加/変更」へ切り替えるため)。
     selectionChanged = Signal()
+    # ホイールの移動量が変わった(設定に覚えるため)。
+    moveScaleChanged = Signal(float)
 
     LEGEND_H = 18          # 凡例の帯の高さ
     #: 再生位置(＝編集カーソル)をペインの真ん中に置く(利用者の指定)。
@@ -317,6 +324,17 @@ class ChartEditWaveform(WaveformWidget):
         except Exception:  # noqa: BLE001
             self._wave_gain = 1.0
         self._wave_gain = max(0.25, min(8.0, self._wave_gain))
+        # ホイール1目盛で動く量の倍率(設定に覚える。利用者の要望
+        # 2026-11-07「一回の操作で動かせる量を変えられる、感度調節の
+        # ような機能が欲しい」)。
+        try:
+            from neotja import settings as settings_mod
+            self._move_scale = float(settings_mod.load_settings().get(
+                "chart_move_scale", 1.0) or 1.0)
+        except Exception:  # noqa: BLE001
+            self._move_scale = 1.0
+        self._move_scale = max(self.MOVE_CHOICES[0],
+                               min(self.MOVE_CHOICES[-1], self._move_scale))
         # 楽観的表示用。置いた直後、再解析が届くまでのあいだ描く音符。
         # {(小節, スロット, 分割数): 文字}
         self._pending = {}
@@ -982,9 +1000,14 @@ class ChartEditWaveform(WaveformWidget):
             self.setFocus(Qt.MouseFocusReason)
             # 左上の「1/16」だけは押せる。分割を選ぶつまみが出る
             # (利用者の指定 2026-10-01)。
-            if (event.button() == Qt.LeftButton
-                    and self.grid_label_rect().contains(event.position().toPoint())):
-                self.open_grid_picker()
+            if event.button() == Qt.LeftButton:
+                pt = event.position().toPoint()
+                if self.grid_label_rect().contains(pt):
+                    self.open_grid_picker()
+                elif self.move_label_rect().contains(pt):
+                    # 「×1.0」= ホイール1目盛で動く量(利用者の要望
+                    # 2026-11-07)。
+                    self.open_move_picker()
             return
         if event.button() == Qt.RightButton and not self.offset_mode:
             # 囲って選ぶのは右ドラッグだけ(利用者の指定 2026-09-26)。四角は
@@ -2353,6 +2376,24 @@ class ChartEditWaveform(WaveformWidget):
         self._cmd_popup = popup
         return popup
 
+    def jump_measure(self, step):
+        """カーソルを1小節ぶん動かす(Ctrl + ← / →)。
+
+        小節の途中に居るときは、まずその小節の頭へ寄せる(押した回数と
+        着く小節が合うように)。"""
+        n = self._measure_count()
+        if n <= 0:
+            return
+        m = self._cur_measure
+        if step < 0 and self._cur_slot > 0:
+            pass                        # 途中 → この小節の頭へ
+        else:
+            m += int(step)
+        self._cur_measure = max(0, min(m, n - 1))
+        self._cur_slot = 0
+        self._clamp_cursor()
+        self._cursor_changed()
+
     def jump_to_edge(self, end):
         """Home / End: 譜面の先頭 / 最後の小節の頭へ。"""
         n = self._known_measures()
@@ -2544,6 +2585,12 @@ class ChartEditWaveform(WaveformWidget):
 
         if key in (Qt.Key_Left, Qt.Key_Right):
             step = -1 if key == Qt.Key_Left else 1
+            if mods & (Qt.ControlModifier | Qt.MetaModifier):
+                # Ctrl + ← / → は**1小節ずつ**(利用者の選択 2026-11-07
+                # 「長距離の移動が大変」)。矢印そのものは1グリッドのまま
+                # ——音符を置く位置決めに使うので、精密さを残す。
+                self.jump_measure(step)
+                return
             # Shift を押していれば、動いた先に最後の音符を置く
             # (利用者の言い直し 2026-10-30)。
             # **帯は消さない。** Tab で張った帯は ←→ で端まで
@@ -2855,17 +2902,17 @@ class ChartEditWaveform(WaveformWidget):
                              "present": True})
 
     def _wheel_view_step(self):
-        """ホイール1目盛で動かす秒数(1小節ぶんの WHEEL_STEP_FRAC 倍)。
+        """ホイール1目盛で動かす秒数。
 
-        小節の長さが分からないときは表示幅の決まった割合で代用する。"""
-        base = self.view_target()
-        addr = self._address_from_time(max(0.0, base))
-        if addr is not None:
-            a = self._bar_time(addr[0])
-            b = self._bar_time(addr[0] + 1)
-            if a is not None and b is not None and b > a:
-                return (b - a) * self.WHEEL_STEP_FRAC
-        return max(0.05, self._visible_span() * self.SCROLL_FRAC)
+        **小節ではなく時間で動かす**(利用者の要望 2026-11-07「ホイール
+        移動の時は時間で移動してほしい。大量に小節線があるとそこだけ速度が
+        遅い」)。以前は「いまの小節の長さ × 0.7」だったので、#MEASURE で
+        刻んだ所や BPM の速い所だけ進みが遅かった。波形ページと同じ
+        「表示幅の決まった割合」にして、どこでも同じ距離だけ動く。
+
+        そこへ移動量の倍率(左上の「×1.0」)を掛ける。"""
+        return max(0.05, self._visible_span() * self.WHEEL_TIME_FRAC
+                   * self._move_scale)
 
     def _drag_dx(self, dr=None):
         """掴んだ所からの px。掴んでいるあいだに景色が動いたぶんを足して直す。
@@ -3639,14 +3686,82 @@ class ChartEditWaveform(WaveformWidget):
     _legend_at = 0.0
 
     #: 左上の「1/16」の当たり判定(凡例の描き位置に合わせてある)。
-    GRID_LABEL_X = 80
-    GRID_LABEL_W = 46
+    GRID_LABEL_X = 66
+    GRID_LABEL_W = 36
+    #: その隣の「×1.0」(ホイールの移動量)の当たり判定。
+    MOVE_LABEL_X = 102
+    MOVE_LABEL_W = 28
+
+    #: ホイール1目盛(×1.0)で動く量。表示幅に対する割合。
+    #:
+    #: 0.25 は、今までの「1小節 × 0.7」とだいたい同じ手触りになる値
+    #: (窓6秒・BPM120 の 4/4 で 1.5秒 ≒ 今までの 1.4秒)。小節の長さでは
+    #: なく時間で決めるので、#MEASURE で刻んだ所でも同じ距離だけ動く
+    #: (利用者の要望 2026-11-07)。
+    WHEEL_TIME_FRAC = 0.25
+
+    #: ホイール1目盛で動く量の倍率。選べる値(利用者の選択 2026-11-07)。
+    MOVE_CHOICES = (0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+    _move_scale = 1.0
+
+    @staticmethod
+    def move_scale_text(v):
+        """「×1.0」の字面。狭いので 1 未満は頭の 0 を落とす。"""
+        s = ("%.2f" % float(v)).rstrip("0").rstrip(".")
+        if s.startswith("0."):
+            s = s[1:]
+        return "\u00d7" + (s or "0")
+
+    def move_scale(self):
+        return self._move_scale
+
+    def set_move_scale(self, v):
+        """ホイール1目盛で動く量の倍率を変える。"""
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        v = max(self.MOVE_CHOICES[0], min(v, self.MOVE_CHOICES[-1]))
+        if abs(v - self._move_scale) < 1e-9:
+            return
+        self._move_scale = v
+        self._legend_key = None         # 焼いた帯を作り直す
+        self.moveScaleChanged.emit(v)
+        self.update()
+        try:
+            from neotja import settings as settings_mod
+            cfg = settings_mod.load_settings()
+            cfg["chart_move_scale"] = v
+            settings_mod.save_settings(cfg)
+        except Exception:  # noqa: BLE001
+            pass
 
     def grid_label_rect(self):
         """「1/16」の当たり判定。凡例を出していないときは無効(空)。"""
         if not self._show_legend:
             return QRect()
         return QRect(self.GRID_LABEL_X, 0, self.GRID_LABEL_W, self.RULER_H)
+
+    def move_label_rect(self):
+        """「×1.0」の当たり判定。凡例を出していないときは無効(空)。"""
+        if not self._show_legend:
+            return QRect()
+        return QRect(self.MOVE_LABEL_X, 0, self.MOVE_LABEL_W, self.RULER_H)
+
+    def open_move_picker(self):
+        """左上の「×1.0」を押したときに出す、移動量のつまみ。"""
+        picker = _GridPicker(self, list(self.MOVE_CHOICES), self._move_scale,
+                             self.set_move_scale, title="移動量",
+                             fmt=self.move_scale_text)
+        r = self.move_label_rect()
+        picker.adjustSize()
+        picker.move(self.mapToGlobal(QPoint(max(0, r.left() - 60),
+                                            r.bottom() + 2)))
+        picker.show()
+        self._move_picker = picker
+        return picker
+
+    _move_picker = None
 
     def set_grid(self, grid):
         """分割を変える。カーソルの時刻上の位置はできるだけ保つ。"""
@@ -3688,6 +3803,7 @@ class ChartEditWaveform(WaveformWidget):
         lr, lg, lb = GRID_COLORS.get(self._grid, (255, 210, 60))
         dpr = self.devicePixelRatioF()
         key = (self._time_text(self.position_sec), self._grid,
+               self._move_scale,
                pal.get("fg_dim"), (lr, lg, lb), self.RULER_H, self.LANE_X0, dpr)
         now = time.monotonic()
         if self._legend_pm is None or (
@@ -3700,13 +3816,24 @@ class ChartEditWaveform(WaveformWidget):
             q = QPainter(pm)
             try:
                 f = self.font()
-                f.setPixelSize(self.fpx(11))
+                f.setPixelSize(self.fpx(10))
                 q.setFont(f)
                 q.setPen(QColor(pal["fg_dim"]))
-                q.drawText(10, 0, 70, h, Qt.AlignVCenter | Qt.AlignLeft, key[0])
+                q.drawText(self.spx(8), 0, self.spx(58), h,
+                           Qt.AlignVCenter | Qt.AlignLeft, key[0])
                 q.setPen(QColor(lr, lg, lb))
-                q.drawText(84, 0, 40, h, Qt.AlignVCenter | Qt.AlignLeft,
+                q.drawText(self.GRID_LABEL_X + self.spx(2), 0,
+                           self.GRID_LABEL_W, h,
+                           Qt.AlignVCenter | Qt.AlignLeft,
                            "1/%d" % self._grid)
+                # ホイールの移動量(利用者の要望 2026-11-07)。既定(×1)の
+                # ときは控えめに、変えてあるときは目立つ色にする。
+                plain = abs(self._move_scale - 1.0) < 1e-9
+                q.setPen(QColor(pal["fg_dim"]) if plain
+                         else QColor(lr, lg, lb))
+                q.drawText(self.MOVE_LABEL_X, 0, self.MOVE_LABEL_W, h,
+                           Qt.AlignVCenter | Qt.AlignLeft,
+                           self.move_scale_text(self._move_scale))
             finally:
                 q.end()
             self._legend_pm = pm
