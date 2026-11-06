@@ -2095,8 +2095,14 @@ class ChartEditWaveform(WaveformWidget):
 
         その時刻を**含む**小節まで足す(そこで終わる譜面にしたい、という
         指定)。もう先まであるなら 0。小節が1つも無いときは数えられないので
-        0(足す先が決まらない)。t_end を渡さなければ赤い線の所。"""
-        n = self._measure_count()
+        0(足す先が決まらない)。t_end を渡さなければ赤い線の所。
+
+        数えるのは**実在の小節**(_known_measures)まで。_measure_count は
+        「カーソルを置ける所」なので末尾より EXTEND_MEASURES(64小節)先まで
+        含んでおり、そちらで数えると「もう足りている」と判断されて、
+        メニューの項目が灰色のままだった(利用者の報告 2026-11-07
+        「終了位置の設定が押せない」)。"""
+        n = self._known_measures()
         if n <= 0:
             return 0
         t_end = (float(self.position_sec) if t_end is None
