@@ -1535,7 +1535,8 @@ class PreviewDock(QDockWidget):
 
         self.chart_preview = ChartPreviewWidget(
             course_select_cb=self.course_select_cb,
-            seek_seconds_cb=lambda sec: self.audio.seek(self._audio_ms(sec)),
+            # レーンは助走を含んだ音源の時刻で渡してくる(_seek_padded)。
+            seek_seconds_cb=self._seek_padded,
             # Explicit play/pause (not just toggle) so the widget's own player
             # model can drive precise start-from-anchor / pause-in-place
             # transitions (机能1).
@@ -3979,12 +3980,27 @@ class PreviewDock(QDockWidget):
         """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
         return max(0, int((float(seconds) + self._lead_sec) * 1000))
 
+    def _seek_padded(self, seconds):
+        """**助走を含んだ音源の時刻**でシークする。
+
+        レーン(chart_preview の _nav_points)と波形は、助走ぶんを足した
+        「音源そのものの時刻」で物を言う。ここへ _audio_ms を通すと助走を
+        二重に足してしまい、1小節戻したつもりがほぼ同じ所へ着いていた
+        (利用者の報告 2026-11-07「再生中に戻そうとすると一瞬だけ後ろに
+        戻って、また再生中の場所に引き戻される」)。助走を入れる前は
+        0 秒だったので両方の数え方が一致していて、表に出ていなかった。
+
+        譜面の時刻で頼む側は seek_to_seconds / _audio_ms のまま。
+        """
+        self.audio.seek(max(0, int(float(seconds) * 1000)))
+
     def _on_stop(self):
         self.audio.stop()
         self.audio.seek(self._audio_ms(0))
 
     def _on_seek_requested(self, seconds):
-        self.audio.seek(self._audio_ms(seconds))
+        # 波形の x から出した時刻は**助走を含んだ音源の時刻**(set_wave_lead)。
+        self._seek_padded(seconds)
 
     def _on_edit_cursor_moved(self, seconds):
         """作譜ペインで編集カーソルを動かした。音源をそこへシークし、停止中は
