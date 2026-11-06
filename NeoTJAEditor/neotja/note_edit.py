@@ -28,8 +28,24 @@ from neotja.measure_math import (convert_notes, min_len, parse_measure_lines,
 NOTE_CHARS = "0123456789"
 
 # 分割数の上限。これを超える再分割は要求されても行わない(テキストが巨大に
-# なるうえ、そこまで細かい位置は別の書き方をしたほうがよいため)。
-MAX_DIVISION = 256
+# なるため)。
+#
+# **1920 = エディタで選べる分割ぜんぶ(GRID_CHOICES: 1,2,3,4,6,8,12,16,20,
+# 24,32,48,64,96,128,192)の最小公倍数。** どう混ぜても必ず収まる数なので、
+# これ以上大きくする意味は無い。
+#
+# 以前は 256 だった。TJA は1小節を文字列で書くので、16分・20分・24分を
+# 同じ小節に混ぜるとその時点で 240 文字になり、そこへ32分を足すには
+# lcm(240,32)=480 が要る。256 を超えるので**黙って何も起きず**、キーが
+# 効かないように見えていた(利用者の報告 2026-11-07「32分だけ入力が
+# 受け付けず、配置することができません」)。48分だけ置けたのは
+# lcm(240,48)=240 とたまたま収まるため。
+#
+# 重さ(実測 200小節・1小節に 20/24/32/128分 を混ぜた最悪の形): 1打あたり
+# 3ms 以下。長くなるのは**混ぜた小節だけ**で、ほかの小節は元のまま。
+# なお、あとから細かい音符を消しても小節の長さは戻らない(消すのは1文字の
+# 書き換えで、割り直しが起きないため)。短くしたいときは「リサイズ」。
+MAX_DIVISION = 1920
 
 
 def _line_starts(text):
@@ -254,6 +270,27 @@ def slot_char(text, body, m_index, slot, grid):
     if not (0 <= idx < L):
         return None
     return notes[idx]
+
+
+def division_needed(text, course_range, m_index, grid):
+    """その小節へ 1/grid で置くのに要る分割数。分からなければ None。
+
+    上限(MAX_DIVISION)を超えていると置けないので、**なぜ置けないか**を
+    伝えるのに使う(利用者の報告 2026-11-07: 黙って何も起きなかった)。
+    """
+    body = course_body_span(text, course_range)
+    if body is None or grid <= 0 or m_index < 0:
+        return None
+    spans = measure_spans(text, body)
+    if m_index >= len(spans):
+        return int(grid)
+    notes = _measure_notes(text, spans[m_index])
+    if not notes:
+        return int(grid)
+    if len(notes) % grid == 0:
+        return len(notes)               # 割り直しが要らない
+    m = min_len(notes) or grid
+    return int(m * grid // math.gcd(m, grid))
 
 
 def set_slot(text, body, m_index, slot, grid, char):

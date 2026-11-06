@@ -2576,6 +2576,34 @@ class MainWindow(QMainWindow):
                                       self._preview_branch_path):
             return self._chart_op_in_branch(text, rng, op)
 
+    #: 音符を置く操作(置けなかった理由を出す相手)。
+    _PLACING_OPS = ("key", "long", "fill")
+
+    def _warn_if_too_fine(self, text, rng, op):
+        """置けなかったのが「細かすぎる」せいなら、黙らずに理由を出す。
+
+        以前は何も起きず、キーが効かないように見えていた(利用者の報告
+        2026-11-07「32分だけ入力が受け付けず、配置することができません」)。
+        """
+        if op.get("kind") not in self._PLACING_OPS:
+            return
+        a = op.get("a")
+        if a is None:
+            return
+        try:
+            need = note_edit.division_needed(
+                text, rng, int(a[0]), int(op.get("grid", 16)))
+        except Exception:  # noqa: BLE001
+            return
+        if need is None or need <= note_edit.MAX_DIVISION:
+            return
+        self.statusBar().showMessage(
+            "この小節に 1/%d は置けません："
+            "すでに入っている音符と合わせると1小節を %d 分割する必要があり、"
+            "上限の %d 分割を超えます（同じ小節に細かさの違う音符を"
+            "混ぜすぎています）"
+            % (int(op.get("grid", 16)), need, note_edit.MAX_DIVISION), 6000)
+
     def _chart_op_in_branch(self, text, rng, op):
         """_apply_chart_op の中身(系統を決めたあと)。"""
         if op.get("kind") == "peek_command":
@@ -2608,6 +2636,7 @@ class MainWindow(QMainWindow):
                 str(op.get("region", "")).upper())}
         res = note_edit.run_op(text, rng, op)
         if res is None:
+            self._warn_if_too_fine(text, rng, op)
             return None
         new = res["text"]
         # 末尾には空の小節を常に1つ置いておく(利用者の指定 2026-10-04)。
