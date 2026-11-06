@@ -98,8 +98,28 @@ def balloon_pops(span, roll_hit_speed):
 
 
 class TJACourseAnalyzer:
+    #: COURSE: に書ける名前 → こちらの呼び名。大文字小文字は問わない
+    #: (下の course_key を通すこと)。"Ura" / "Ura Oni" / "Oni_Ura" は
+    #: 裏譜面のよくある書き方で、対応表に無かったため「おに」と同じものと
+    #: 見なされていた。同じコースが2つになるので、裏を選ぶと表が出て、
+    #: 風船の打数も表のものが出ていた(利用者の報告 2026-11-06)。
     DIFF = {"0": "Easy", "Easy": "Easy", "1": "Normal", "Normal": "Normal",
-            "2": "Hard", "Hard": "Hard", "3": "Oni", "Oni": "Oni", "4": "Edit", "Edit": "Edit"}
+            "2": "Hard", "Hard": "Hard", "3": "Oni", "Oni": "Oni",
+            "4": "Edit", "Edit": "Edit",
+            "Ura": "Edit", "UraOni": "Edit", "Ura Oni": "Edit",
+            "Oni_Ura": "Edit", "OniUra": "Edit", "Edit Oni": "Edit"}
+    #: 大文字小文字を無視して引くための控え。
+    _DIFF_CI = {k.lower().replace(" ", "").replace("_", ""): v
+                for k, v in DIFF.items()}
+
+    @classmethod
+    def course_key(cls, name, fallback="Oni"):
+        """COURSE: の中身 → こちらの呼び名。大文字小文字と空白は問わない。"""
+        s = str(name or "").strip()
+        if s in cls.DIFF:
+            return cls.DIFF[s]
+        return cls._DIFF_CI.get(
+            s.lower().replace(" ", "").replace("_", ""), fallback)
     DIFF_LABEL = {"Easy": "かんたん", "Normal": "ふつう", "Hard": "むずかしい", "Oni": "おに", "Edit": "おに(裏)"}
     # かんたん=赤, ふつう=黄緑, むずかしい=水色, おに=ピンク, おに(裏)=紫
     DIFF_COLOR = {"Easy": "#F44336", "Normal": "#9ACD32", "Hard": "#4FC3F7", "Oni": "#FF80AB", "Edit": "#9C27B0"}
@@ -159,7 +179,7 @@ class TJACourseAnalyzer:
                 if buffer:
                     result.append({"key": cname, "data": buffer})
                     starts.append(start_idx)
-                cname = self.DIFF.get(s[7:].strip(), "Oni")
+                cname = self.course_key(s[7:])
                 buffer = []
                 in_score = False
             elif s.startswith("#START"):
@@ -461,7 +481,7 @@ class TJACourseAnalyzer:
                 continue
             s = raw.split("//")[0].strip()
             if s.startswith("COURSE:"):
-                cur_key = self.DIFF.get(s[7:].strip(), "Oni")
+                cur_key = self.course_key(s[7:])
             elif s.startswith("#START"):
                 start = idx
             elif s.startswith("#END") and start is not None:
@@ -1080,7 +1100,7 @@ class TJACourseAnalyzer:
         for idx, raw in enumerate(lines, start=1):
             s = raw.split("//")[0].strip()
             if s.startswith("COURSE:"):
-                cur_key = self.DIFF.get(s[7:].strip(), "Oni")
+                cur_key = self.course_key(s[7:])
                 cur_level = None
                 cur_init = ()
             elif s.startswith("LEVEL:"):

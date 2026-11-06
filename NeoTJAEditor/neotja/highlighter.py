@@ -98,7 +98,7 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
     for i, line in enumerate(lines, 1):
         s = line.strip()
         if s.startswith("COURSE:"):
-            current_course = TJACourseAnalyzer.DIFF.get(s[7:].strip(), "Oni")
+            current_course = TJACourseAnalyzer.course_key(s[7:])
         elif s.startswith("#START"):
             in_r = True
             sl = i

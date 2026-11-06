@@ -80,7 +80,7 @@ def _levels_by_course(content, analyzer):
     for raw in content.splitlines():
         s = raw.split("//")[0].strip()
         if s.upper().startswith("COURSE:"):
-            cur = analyzer.DIFF.get(s[7:].strip(), "Oni")
+            cur = analyzer.course_key(s[7:])
         elif s.upper().startswith("LEVEL:"):
             try:
                 levels.setdefault(cur, int(s[6:].strip()))
