@@ -3860,6 +3860,10 @@ class PreviewDock(QDockWidget):
     # ------------------------------------------------------------------
     # Playback
     # ------------------------------------------------------------------
+    #: シークした行き先(ms)と、こだまを捨てる期限。_seek_padded を参照。
+    _seek_target_ms = -10 ** 9
+    _seek_echo_until = 0.0
+
     def _on_position_changed(self, ms):
         # Throttle to ~30Hz while playing so the 60Hz position feed doesn't
         # crowd the GUI thread and unevenly delay the preview's own redraw
@@ -3868,6 +3872,9 @@ class PreviewDock(QDockWidget):
         # drift correction is imperceptible; the playhead/label/slider are
         # equally fine at 30Hz. Not throttled when paused/seeking (rare calls).
         playing = self.audio.is_playing()
+        if (not playing and _time.monotonic() < self._seek_echo_until
+                and abs(int(ms) - self._seek_target_ms) > 150):
+            return                      # シーク前の位置のこだま。捨てる
         if playing:
             now = _time.monotonic()
             if now - self._last_pos_ui_wall < 0.030:
@@ -4066,7 +4073,20 @@ class PreviewDock(QDockWidget):
 
         譜面の時刻で頼む側は seek_to_seconds / _audio_ms のまま。
         """
-        self.audio.seek(max(0, int(float(seconds) * 1000)))
+        ms = max(0, int(float(seconds) * 1000))
+        # ミキサーの seek は別スレッドへ投げてから「いまの位置」を知らせる
+        # ので、**シーク前の位置**が1回こだまで返ってくる。止めているあいだ
+        # それを真に受けると、景色がいったん前の所へ飛んでから戻る。
+        # 行き先を控えて、しばらくは離れた知らせを捨てる。
+        self._seek_target_ms = ms
+        self._seek_echo_until = _time.monotonic() + 0.35
+        self.audio.seek(ms)
+        # **その場で画面へも知らせる。** ミキサーの seek は別スレッドへ
+        # 投げるだけなので、position() はしばらく前の値を返す。待っていると
+        # 赤い線も景色も1手遅れて動く(止めているあいだは次の知らせが来ない
+        # ので、動かないまま)。利用者の報告 2026-11-07「下のバーで移動
+        # しようとすると線だけ動いて、見ている背景が移動しない」。
+        self._on_position_changed(ms)
 
     def _on_stop(self):
         self.audio.stop()

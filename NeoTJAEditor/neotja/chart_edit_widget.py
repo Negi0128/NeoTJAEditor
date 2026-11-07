@@ -612,6 +612,13 @@ class ChartEditWaveform(WaveformWidget):
             return
         super().set_position(seconds)
         self._follow_playhead(seconds, nearest=True)
+        # **よそからのシークでも景色を連れていく。** 下のシークバーや波形を
+        # 押して遠くへ飛ぶと、赤い線だけ動いて譜面が元の所に残っていた
+        # (利用者の報告 2026-11-07「下のバーで移動しようとすると線だけ
+        # 動いて、見ている背景が移動しない」)。窓の中に居るうちは動かさない
+        # ので、少しのシークでは今までどおり景色は動かない。
+        if not self._playing:
+            self._scroll_line_into_view(seconds, self._visible_span())
 
     def set_position_smooth(self, seconds: float):
         """再生中の位置(レーンの 120fps クロックから)。
@@ -3444,12 +3451,9 @@ class ChartEditWaveform(WaveformWidget):
         # 命令の行(BPM・拍子・スクロール・歌詞)も時間の関数。右端は帯の
         # 幅で見る。
         rows = self._row_rects()
-        for kind in ("bpm", "measure", "hs"):
+        for kind in ("bpm", "measure", "hs", "lyric"):
             y, rh = rows[kind]
             self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
-        # 歌詞は**帯**(利用者の指定 2026-11-07「LYRICはブロックみたいに
-        # してほしいな GOGOと同じ感じで」)。次の #LYRIC までが1本。
-        self._draw_lyric_row(p, rows["lyric"], t0, t1, right=w)
         self._draw_ruler(p, t0, t1)
 
     #: 描いているあいだの**本当の**表示の左端。帯に合わせて view_start を
@@ -4005,88 +4009,6 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(lo, y + 3, max(2, hi - lo), rh - 6, fill)
             p.setPen(QPen(col, 1))
             p.drawRect(lo, y + 3, max(2, hi - lo), rh - 6)
-
-    def _lyric_spans(self):
-        """歌詞の帯 [(始まり, 終わり, 文字)]。音源時刻。
-
-        次の #LYRIC が来るまで出し続ける(ゲーム画面と同じ決まり)。文字の
-        無い #LYRIC は**そこで消す**合図なので、帯を終わらせるだけで
-        新しい帯は始めない。最後の1本は譜面の終わりまで。
-        """
-        key = (tuple(self._lyrics_raw or ()), self.offset,
-               self._known_measures())
-        got = self._lyric_spans_cache
-        if got is not None and got[0] == key:
-            return got[1]
-        items = sorted((float(tt) - self.offset, str(x or ""))
-                       for tt, x in (self._lyrics_raw or ()))
-        end_all = self._bar_time(self._known_measures())
-        if end_all is None:
-            end_all = (items[-1][0] + 2.0) if items else 0.0
-        out = []
-        for i, (st, txt) in enumerate(items):
-            if not txt.strip():
-                continue                # 消す合図。帯は始めない
-            e = items[i + 1][0] if i + 1 < len(items) else end_all
-            if e > st:
-                out.append((st, e, txt))
-        self._lyric_spans_cache = (key, out)
-        return out
-
-    _lyric_spans_cache = None
-
-    def _draw_lyric_row(self, p, rect, t0, t1, right=None):
-        """歌詞の行。ゴーゴーと同じ帯で、中に歌詞を書く。
-
-        帯だけだと何の歌詞か分からないので、**帯の中に字を入れる**
-        (ゴーゴーと違って中身が1本ずつ違うため)。帯からはみ出す長い歌詞は
-        そこで切る。文字の無い #LYRIC は帯の切れ目として読む。
-        """
-        y, rh = rect
-        spans = self._lyric_spans()
-        if right is None:
-            right = self.width()
-        col = QColor(self.LYRIC_COLOR)
-        fill = QColor(col)
-        fill.setAlpha(55)
-        p.setFont(self._row_font())
-        for s_t, e_t, txt in spans:
-            if e_t < t0 or s_t > t1:
-                continue
-            xs = self._sec_to_x(s_t) + self._drag_dx_for("LYRIC", s_t,
-                                                         snap=True)
-            xe = self._sec_to_x(e_t) + self._drag_dx_for("LYRIC", e_t,
-                                                         snap=True)
-            lo, hi = sorted((xs, xe))
-            lo = max(lo, self.LANE_X0 - 1)
-            hi = min(hi, right)
-            if hi <= lo:
-                continue
-            wdt = max(2, hi - lo)
-            p.fillRect(lo, y + 3, wdt, rh - 6, fill)
-            p.setPen(QPen(col, 1))
-            p.drawRect(lo, y + 3, wdt, rh - 6)
-            if wdt > 14:
-                p.save()
-                p.setClipRect(lo + 1, y + 3, wdt - 2, rh - 6)
-                p.setPen(QColor(self.ROW_CONTENT_COLOR))
-                p.drawText(lo + 5, y + 3, wdt - 8, rh - 6,
-                           Qt.AlignVCenter | Qt.AlignLeft, txt)
-                p.restore()
-        # 帯の上に #LYRIC を1本ずつ。重なった2本目も選んで消せるように
-        # (ゴーゴーの _draw_cmd_marks と同じ考え方)。文字の無いものは
-        # ここにしか出ないので、消す合図もこの線で見える。
-        times = (self._cmd_kind_times or {}).get("lyric") or []
-        if not times:
-            return
-        p.setPen(QPen(col, 2))
-        for tt in times:
-            if tt < t0 or tt > t1:
-                continue
-            x = self._sec_to_x(tt) + self._drag_dx_for("LYRIC", tt, snap=True)
-            if x < self.LANE_X0 or x > right:
-                continue
-            p.drawLine(int(x), y + 2, int(x), y + rh - 2)
 
     _row_font_cache = None
     _row_width_cache = None
