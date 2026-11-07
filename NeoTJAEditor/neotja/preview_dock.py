@@ -1876,7 +1876,7 @@ class PreviewDock(QDockWidget):
 
         self.seek_slider = _SeekSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
-        self.seek_slider.sliderMoved.connect(lambda ms: self.audio.seek(ms))
+        self.seek_slider.sliderMoved.connect(self._seek_ms)
         layout.addWidget(self.seek_slider)
 
         transport_row = QHBoxLayout()
@@ -3826,7 +3826,7 @@ class PreviewDock(QDockWidget):
             # 頭に助走を足したぶん、開いた直後の赤い線は**音源の頭**へ
             # 置き直す(そうしないと助走の先頭に立って、譜面が右の外)。
             if lead > 0 and self.audio.position() <= 0:
-                self.audio.seek(self._audio_ms(0))
+                self._seek_ms(self._audio_ms(0))
         self.status_label.setText(self._silent_note or "")
         # 知らせるのは**全部済ませてから**。ミキサーへ PCM を渡す前に出すと、
         # 受け取った側が play() を呼んでも鳴らない(実際にそうなっていた)。
@@ -4068,6 +4068,22 @@ class PreviewDock(QDockWidget):
         v = self.spin_offset.value() if offset is None else float(offset)
         return v - self._lead_sec
 
+    def _seek_ms(self, ms):
+        """音の位置(ms)へ飛ぶ。**シークはぜんぶここを通す。**
+
+        ミキサーの seek は別スレッドへ投げてから「いまの位置」を知らせる
+        ので、**シーク前の位置**が1回こだまで返ってくる。止めているあいだ
+        それを真に受けると、赤い線も景色もいったん前の所へ飛んでから戻る
+        (利用者の報告 2026-11-07「下のバーで移動しようとすると線だけ動いて、
+        見ている背景が移動しない」)。行き先を控えてしばらく離れた知らせを
+        捨て、行き先はその場で画面へ流す。
+        """
+        ms = max(0, int(ms))
+        self._seek_target_ms = ms
+        self._seek_echo_until = _time.monotonic() + 0.35
+        self.audio.seek(ms)
+        self._on_position_changed(ms)
+
     def _audio_ms(self, seconds):
         """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
         return max(0, int((float(seconds) + self._lead_sec) * 1000))
@@ -4085,13 +4101,7 @@ class PreviewDock(QDockWidget):
         譜面の時刻で頼む側は seek_to_seconds / _audio_ms のまま。
         """
         ms = max(0, int(float(seconds) * 1000))
-        # ミキサーの seek は別スレッドへ投げてから「いまの位置」を知らせる
-        # ので、**シーク前の位置**が1回こだまで返ってくる。止めているあいだ
-        # それを真に受けると、景色がいったん前の所へ飛んでから戻る。
-        # 行き先を控えて、しばらくは離れた知らせを捨てる。
-        self._seek_target_ms = ms
-        self._seek_echo_until = _time.monotonic() + 0.35
-        self.audio.seek(ms)
+        self._seek_ms(ms)
         # **その場で画面へも知らせる。** ミキサーの seek は別スレッドへ
         # 投げるだけなので、position() はしばらく前の値を返す。待っていると
         # 赤い線も景色も1手遅れて動く(止めているあいだは次の知らせが来ない
@@ -4101,7 +4111,7 @@ class PreviewDock(QDockWidget):
 
     def _on_stop(self):
         self.audio.stop()
-        self.audio.seek(self._audio_ms(0))
+        self._seek_ms(self._audio_ms(0))
 
     def _on_seek_requested(self, seconds):
         # 波形の x から出した時刻は**助走を含んだ音源の時刻**(set_wave_lead)。
@@ -4118,7 +4128,7 @@ class PreviewDock(QDockWidget):
         # **ここへ来る seconds は作譜ペインの時刻 = 音の時刻**
         # (_edit_offset が助走ぶんを織り込んである)。_audio_ms を通すと
         # 助走を二重に足してしまう(利用者の報告 2026-11-05)。
-        self.audio.seek(max(0, int(float(seconds) * 1000)))
+        self._seek_ms(max(0, int(float(seconds) * 1000)))
         if not self.audio.is_playing():
             self.chart_preview.set_playback(seconds, False)
         # 命令パネルの値も、その位置で効いている値に合わせる。
@@ -4146,7 +4156,7 @@ class PreviewDock(QDockWidget):
         これを使う。鳴らしてしまうと、編集者が止めた直後に届いた
         「ここに居る」でこちらだけ再生が戻ってしまう(実測 2026-10-24:
         スマホが止めても PC が流れ続けた)。"""
-        self.audio.seek(self._audio_ms(seconds))
+        self._seek_ms(self._audio_ms(seconds))
         if play:
             self.audio.play()
 
@@ -4270,7 +4280,7 @@ class PreviewDock(QDockWidget):
         # ちょうどの1打目まで消えていた(戻すのが間に合わない)。ここで先に
         # 境目を渡しておけば、助走ぶんだけ黙って1打目から鳴る。
         self._set_hit_mute_before(measure_time)
-        self.audio.seek(self._audio_ms(start))
+        self._seek_ms(self._audio_ms(start))
         self.audio.play()
 
     def _end_fadein(self):

@@ -630,7 +630,7 @@ class ChartEditWaveform(WaveformWidget):
         # (利用者の報告 2026-11-07「下のバーで移動しようとすると線だけ
         # 動いて、見ている背景が移動しない」)。窓の中に居るうちは動かさない
         # ので、少しのシークでは今までどおり景色は動かない。
-        if not self._playing:
+        if not self._playing and not self._hand_busy():
             self._scroll_line_into_view(seconds, self._visible_span())
 
     def set_position_smooth(self, seconds: float):
@@ -728,6 +728,17 @@ class ChartEditWaveform(WaveformWidget):
     #: 動くと、見ている所が落ち着かない(利用者の指定 2026-11-05
     #: 「ホイール以外では見てる範囲を遷移しない」の趣旨は残す)。
     EDGE_FRAC = 0.04
+
+    def _hand_busy(self):
+        """いま指で何かを引いている最中か。
+
+        引いている最中に景色が動くと、押した所と離した所の時刻が食い違って
+        **囲んだ範囲が壊れる**(右ドラッグの帯が張られない)。シークの追従は
+        そのあいだ休ませる。
+        """
+        return bool(self._band is not None or self._note_drag is not None
+                    or self._pending_measure is not None
+                    or self._dragging)
 
     def _scroll_line_into_view(self, t, span):
         """停止中、赤い線が窓から出そうなら景色を連れていく。
