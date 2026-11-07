@@ -526,6 +526,19 @@ class ChartEditWaveform(WaveformWidget):
             popup.adjustSize()
         return popup
 
+    def place_lyric_stop(self):
+        """カーソルの所に「ここで歌詞を消す」印(文字の無い #LYRIC)を置く。
+
+        利用者の指定 2026-11-07。「歌詞…」の空欄決定は**その命令を消す**
+        (置き間違えたときの取り消し)ので、歌詞を止める印を置く道が別に
+        要る。札には「(消す)」と出る。
+        """
+        m, s = self._cursor_addr()
+        # 値が空文字 = 「文字の無い #LYRIC」。None(= 命令を消す)とは別もの。
+        return self._run_op({"kind": "command", "a": (m, s),
+                             "name": "LYRIC", "value": ""})
+
+
     #: 拍子の変化点 [(譜面時刻, 分子, 分母)]。既定は 4/4。
     _meter_changes = ((0.0, 4, 4),)
 
@@ -2006,10 +2019,14 @@ class ChartEditWaveform(WaveformWidget):
         # あると、どちらを使えばいいのか分からなくなる。
         # 歌詞は値が文字なので、命令パネル(数の欄しか無い)ではなく
         # ここから置く(利用者の要望 2026-11-07)。
-        lyr = menu.addAction("歌詞…" if self.lyric_at(self.cursor_time())
-                             is None else "歌詞を直す…")
+        here = self.lyric_at(self.cursor_time())
+        lyr = menu.addAction("歌詞…" if here is None else "歌詞を直す…")
         lyr.setData("lyric")
         lyr.triggered.connect(self.open_lyric_popup)
+        stop = menu.addAction("歌詞をここで消す")
+        stop.setData("lyric_stop")
+        stop.setToolTip("文字の無い #LYRIC を置きます。ここで歌詞が消えます。")
+        stop.triggered.connect(self.place_lyric_stop)
         menu.addSeparator()
         ins = menu.addAction("小節を前に挿入…")
         ins.triggered.connect(self.open_measure_insert)

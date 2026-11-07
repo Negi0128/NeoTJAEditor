@@ -1964,9 +1964,12 @@ def _fmt_value(name, value):
     if name == "LYRIC":
         # 歌詞は**文字がそのまま値**(利用者の要望 2026-11-07)。行を壊す
         # 改行とコメント記号だけ落として、あとは手を入れない。
+        #
+        # **空文字もそのまま通す。** 文字の無い `#LYRIC` は「ここで歌詞を
+        # 消す」という立派な命令なので、置けないと困る(利用者の指定
+        # 2026-11-07)。命令そのものを消すのは value=None のほう。
         s = str(value).replace(chr(13), " ").replace(chr(10), " ")
-        s = s.split("//")[0].strip()
-        return s or None
+        return s.split("//")[0].strip()
     if name == "MEASURE":
         parts = str(value).replace(" ", "").split("/")
         if len(parts) != 2:
@@ -2117,7 +2120,8 @@ def set_command(text, course_range, m, slot, grid, name, value):
         v = _fmt_value(name, value)
         if v is None:
             return None
-        new_line = "#%s %s" % (name, v)
+        # 値が空の命令(文字の無い #LYRIC)は名前だけの行にする。
+        new_line = ("#%s %s" % (name, v)) if v != "" else ("#" + name)
 
     # --- 同じ位置に同じ命令があれば、書き換える / 消す ---
     hit = _find_command(chunk, L, key, name)
