@@ -129,6 +129,21 @@ class ChartMinimap(QWidget):
         self._strip_key = None
         self.update()
 
+    # 絵が変わらない知らせでは塗り直さない。曲ぜんたいを1本に詰めている
+    # ので、1px ぶん動くのに何百ミリ秒もかかる。知らせは 60Hz で来るのに
+    # 毎回塗り直していて、**GL 画面の隣で毎回ウィンドウ合成が走り**、
+    # 作譜モードの fps が 1/3 になっていた(利用者の報告 2026-11-07
+    # 「LYRICとシークバーを追加してから平均fpsが100くらいに落ちてしまって
+    #  重い」。実測 59 → 173 fps)。
+    #
+    # 変わるときも**変わった所だけ**塗る(赤い線の筋と、枠の動いたぶん)。
+    def _px(self, sec):
+        return int(round(self._x_of(sec)))
+
+    def _mark_column(self, x):
+        """赤い線1本ぶんの塗り直し(太さに少し余裕を持たせる)。"""
+        self.update(x - 2, 0, 5, self.height())
+
     def set_position(self, seconds):
         """赤い線(音源時刻)。"""
         try:
@@ -137,16 +152,35 @@ class ChartMinimap(QWidget):
             return
         if abs(seconds - self._position) < 1e-4:
             return
+        was = self._px(self._position)
         self._position = seconds
-        self.update()
+        now = self._px(seconds)
+        if now == was:
+            return                      # 同じ画素。絵は変わらない
+        self._mark_column(was)
+        self._mark_column(now)
 
     def set_view(self, t0, t1):
         """いま作譜ペインに見えている範囲(音源時刻)。None で消す。"""
         v = None if t0 is None or t1 is None else (float(t0), float(t1))
         if v == self._view:
             return
+        old = self._view
         self._view = v
-        self.update()
+        if (old is None) != (v is None):
+            self.update()
+            return
+        if v is None:
+            return
+        a0, b0 = (self._px(min(old)), self._px(max(old)))
+        a1, b1 = (self._px(min(v)), self._px(max(v)))
+        if (a0, b0) == (a1, b1):
+            return                      # 同じ画素。絵は変わらない
+        if abs(a1 - a0) > 40 or abs(b1 - b0) > 40:
+            self.update()               # 大きく飛んだ。まとめて塗る
+            return
+        for x in (a0, a1, b0, b1):      # 枠の縦線が動いたぶんだけ
+            self._mark_column(x)
 
     # ------------------------------------------------------------------
     # 位置の計算

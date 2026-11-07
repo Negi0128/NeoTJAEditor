@@ -2840,11 +2840,22 @@ class PreviewDock(QDockWidget):
         """シークバーを押した/引いた。**助走こみの音源の時刻**で来る。"""
         self._seek_padded(seconds)
 
+    #: シークバーを合わせ直す間隔(秒)。曲ぜんたいを1本に詰めているので、
+    #: 1px 動くのに何百 ms もかかる。60Hz で合わせ直す意味は無いうえ、
+    #: GL 画面の隣での塗り直しは高い(利用者の報告 2026-11-07「重い」)。
+    MINIMAP_SYNC_SEC = 0.05
+    _last_mm_sync = 0.0
+
     def _sync_minimap(self, ms=None):
         """シークバーの赤い線と「いま見えている範囲」を合わせる。"""
         mm = getattr(self, "minimap", None)
         if mm is None:
             return
+        if ms is not None and self.audio.is_playing():
+            now = _time.monotonic()
+            if now - self._last_mm_sync < self.MINIMAP_SYNC_SEC:
+                return
+            self._last_mm_sync = now
         if ms is not None:
             mm.set_position(ms / 1000.0)
             lead_ms = int(self._lead_sec * 1000)
