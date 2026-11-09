@@ -80,6 +80,8 @@ class CommandPanel(QFrame):
         self._syncing = False
         # 倍率 ⇔ 見た目BPM を写し合っている最中。行ったり来たりを止める。
         self._linking = False
+        # 倍率欄の表示は3桁のまま、見た目BPMから求めた倍率は丸めずに保持する。
+        self._hs_exact = None
         # 欄ごとの「!」(選んだ音符へまとめて効かせる)。
         self._marks = []
         # いま「変更」になっている種類。
@@ -156,7 +158,7 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm = QDoubleSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
-        self.sp_hs_bpm.setSingleStep(5.0)
+        self.sp_hs_bpm.setSingleStep(1.0)
         self.sp_hs_bpm.setValue(120.0)
         self.sp_hs_bpm.setFixedWidth(68)
         self.sp_hs_bpm.setToolTip(
@@ -165,14 +167,14 @@ class CommandPanel(QFrame):
         # スクロールの「!」(ハイスピ変換)は外した。「追加」を足したぶん
         # 欄が狭く、同じことはツールバーの「ハイスピ変換」と右クリックの
         # メニューからできる(利用者の指定 2026-11-05)。
+        self.sp_hs.valueChanged.connect(self._on_hs_value_changed)
         grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
-                                 lambda: self.sp_hs.value(), auto=True,
+                                 self._scroll_value, auto=True,
                                  auto_on=[self.sp_hs], button=True,
                                  mark=None),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
-        self.sp_hs.valueChanged.connect(self._sync_hs_bpm)
         self.sp_bpm.valueChanged.connect(self._sync_hs_bpm)
         self.sp_hs_bpm.valueChanged.connect(self._on_hs_bpm_changed)
 
@@ -410,11 +412,11 @@ class CommandPanel(QFrame):
         """倍率(または BPM)が動いた → 見た目BPM を出し直す。
 
         こちらは**見せるだけ**なので、譜面へは何も書かない。"""
-        if self._linking:
+        if self._linking or self.sp_hs_bpm.hasFocus():
             return
         self._linking = True
         try:
-            self.sp_hs_bpm.setValue(self.sp_bpm.value() * self.sp_hs.value())
+            self.sp_hs_bpm.setValue(self.sp_bpm.value() * self._scroll_value())
         finally:
             self._linking = False
 
@@ -428,16 +430,24 @@ class CommandPanel(QFrame):
         base = self.sp_bpm.value()
         if not base:
             return
+        want = max(self.sp_hs.minimum(), min(self.sp_hs.maximum(), self.sp_hs_bpm.value() / base))
+        self._hs_exact = want
         self._linking = True
         try:
-            want = self.sp_hs_bpm.value() / base
+            self.sp_hs.setValue(want)
+            self.sp_hs_bpm.setValue(base * want)
         finally:
             self._linking = False
-        # 倍率を動かす。_linking を解いてから入れるので、こちらの
-        # valueChanged で本文へ入る(_auto_changed)。戻りの連動は
-        # _sync_hs_bpm が同じ値を書くだけなので、行ったり来たりはしない。
-        if abs(want - self.sp_hs.value()) > 1e-9:
-            self.sp_hs.setValue(want)
+        # 表示用の3桁が変わらない微調整でも、正確な倍率を即適用する。
+        self._auto_changed('hs', self._auto_timers['hs'], self._scroll_value)
+
+    def _scroll_value(self):
+        return self.sp_hs.value() if self._hs_exact is None else self._hs_exact
+
+    def _on_hs_value_changed(self, *_args):
+        if not self._linking and not self._syncing:
+            self._hs_exact = None
+        self._sync_hs_bpm()
 
     def _auto_changed(self, kind, timer, get_value):
         """値の欄が動いた。こちらから書き換えたぶん(_syncing)は無視する。"""
@@ -667,8 +677,10 @@ class CommandPanel(QFrame):
         try:
             if bpm is not None and not self.sp_bpm.hasFocus():
                 self._put(self.sp_bpm, float(bpm))
-            if scroll is not None and not self.sp_hs.hasFocus():
+            if scroll is not None and not self.sp_hs.hasFocus() and not self.sp_hs_bpm.hasFocus():
+                self._hs_exact = float(scroll)
                 self._put(self.sp_hs, float(scroll))
+                self._sync_hs_bpm()
             if measure:
                 try:
                     n, d = (int(x) for x in str(measure).split("/"))
