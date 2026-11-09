@@ -3512,11 +3512,9 @@ class ChartEditWaveform(WaveformWidget):
         pal = self._pal
         return (self.width(), self.height(), self.LANE_X0,
                 self.devicePixelRatioF(), round(self._visible_span(), 6),
-                # 「いま編集している小節」「再生中か」はここに入れない。それで
-                # 変わるのは編集グリッドと音符だけで、どちらも帯から外して
-                # 貼ったあとに直に描いている(_paint_static を参照)。入れて
-                # いたころは、1秒に781小節ある譜面(幸福な死を)で毎コマ
-                # 焼き直しになり、1コマ 340ms(3fps)まで落ちていた。
+                # グリッドは表示範囲の全小節に引くので、再生位置に依存しない。
+                # ドラッグ開始・終了で範囲命令を静的/動的描画に切り替える。
+                self._note_drag is not None,
                 self._grid, self._strip_rev, self._wave_gain,
                 self._show_legend, pal.get("bg"), pal.get("bg2"),
                 pal.get("border"), pal.get("fg"),
@@ -3563,16 +3561,40 @@ class ChartEditWaveform(WaveformWidget):
         self._strip_key = key
         return pm, base
 
+    def _draw_region_tracks(self, p, rows, t0, t1):
+        """通常は帯に保存し、ドラッグ中だけ直接描く範囲命令。"""
+        # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
+        # 指定 2026-09-26)。
+        if self._region_audio is not None:
+            # 小節線を隠している区間も帯で見せる(ゴーゴーと同じ読み方)。
+            # 字をやめたので、隠れているかどうかは帯の有無で読む。
+            self._draw_span_row(p, rows["barline"], self._barline_audio,
+                                self.BARLINE_BAND_COLOR, t0, t1,
+                                ("BARLINEOFF", "BARLINEON"))
+            self._draw_cmd_marks(p, rows["barline"], "barline", t0, t1)
+        else:
+            self._draw_marker_row(p, rows["barline"], self._barline_audio,
+                                  ("BARLINEOFF", "BARLINEON"), ("OFF", "ON"),
+                                  t0, t1)
+        # GOGO は帯のまま(長さが目で分かるように)。端をつかんでいる間は、
+        # その端が付いてきて帯が伸び縮みする。
+        self._draw_span_row(p, rows["gogo"], self._gogo_audio,
+                            self.ROW_CONTENT_COLOR, t0, t1)
+        # 帯の上に、#GOGOSTART / #GOGOEND を**1本ずつ**札で出す。帯だけだと
+        # 重なった2本目が見えず、選べない=消せなかった(利用者の報告
+        # 2026-11-05)。
+        if self._region_audio is not None:
+            self._draw_cmd_marks(p, rows["gogo"], "gogo", t0, t1)
+
     def _paint_static(self, p, w, t0, t1):
         """時間の関数でしかない絵。帯へ焼くときも、直に描くときも同じ道。
 
         w は描き先の幅(帯のときは画面より広い)。呼ぶ側が self.view_start を
         t0 に合わせておくこと。
 
-        **編集グリッドと音符はここで描かない。** どちらも「いま編集している
-        小節」「再生位置」で変わるので、帯に焼くと小節が変わるたびに焼き直しに
-        なる(1秒に781小節ある譜面では毎コマ焼き直しで 340ms 払っていた)。
-        帯を貼ったあとに直に引く(_paint_rows_inner)。"""
+        グリッドは全表示小節に共通なので保存できる。音符は再生位置で変わる
+        ため直接描く。範囲命令はドラッグ中だけ直接描き、端の動きに追従する。
+        """
         pal = self._pal
         rows = self._row_rects()
         note_top, note_h = rows["note"]
@@ -3594,6 +3616,9 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(xs, note_top, max(1, xe - xs), note_h,
                        QColor(255, 120, 120, 18))
         self._draw_measure_lines(p, note_top, note_h, t0, t1)
+        self._draw_edit_grid(p, note_top, note_h - wave_h, t0, t1)
+        if self._note_drag is None:
+            self._draw_region_tracks(p, rows, t0, t1)
         # 命令の行(BPM・拍子・スクロール・歌詞)も時間の関数。右端は帯の
         # 幅で見る。
         rows = self._row_rects()
@@ -3654,35 +3679,12 @@ class ChartEditWaveform(WaveformWidget):
         # しまってから帯をもう一度貼って消していたが、そのために幅 3000px の
         # 帯を1コマに2回貼ることになっていた。先に切っておけば1回で済む。
         p.setClipRect(0, self.RULER_H, w, h - self.RULER_H)
-        # 編集グリッドと音符は帯に焼かず、毎コマここで引く(_paint_static の
-        # 説明を参照)。重なりの順番は帯に焼いていたころと同じ
-        # 「小節線 → グリッド → 音符」。
-        self._draw_edit_grid(p, note_top, upper_h, t0, t1)
+        # 音符だけを直接描く。グリッドとの座標丸めは上の帯に揃える。
         self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
         self._draw_long_preview(p, note_top, upper_h)
         self._draw_pending(p, note_top, upper_h)
-        # 小節線は帯ではなく、ON/OFF の札(スクロールと同じ見せ方。利用者の
-        # 指定 2026-09-26)。
-        if self._region_audio is not None:
-            # 小節線を隠している区間も帯で見せる(ゴーゴーと同じ読み方)。
-            # 字をやめたので、隠れているかどうかは帯の有無で読む。
-            self._draw_span_row(p, rows["barline"], self._barline_audio,
-                                self.BARLINE_BAND_COLOR, t0, t1,
-                                ("BARLINEOFF", "BARLINEON"))
-            self._draw_cmd_marks(p, rows["barline"], "barline", t0, t1)
-        else:
-            self._draw_marker_row(p, rows["barline"], self._barline_audio,
-                                  ("BARLINEOFF", "BARLINEON"), ("OFF", "ON"),
-                                  t0, t1)
-        # GOGO は帯のまま(長さが目で分かるように)。端をつかんでいる間は、
-        # その端が付いてきて帯が伸び縮みする。
-        self._draw_span_row(p, rows["gogo"], self._gogo_audio,
-                            self.ROW_CONTENT_COLOR, t0, t1)
-        # 帯の上に、#GOGOSTART / #GOGOEND を**1本ずつ**札で出す。帯だけだと
-        # 重なった2本目が見えず、選べない=消せなかった(利用者の報告
-        # 2026-11-05)。
-        if self._region_audio is not None:
-            self._draw_cmd_marks(p, rows["gogo"], "gogo", t0, t1)
+        if self._note_drag is not None:
+            self._draw_region_tracks(p, rows, t0, t1)
 
         # --- 行の区切り線 ---
         p.setPen(QPen(QColor(pal["border"])))
