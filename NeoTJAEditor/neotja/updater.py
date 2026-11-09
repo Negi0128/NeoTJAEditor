@@ -105,9 +105,10 @@ class UpdateDownloadWorker(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, asset_url: str, player_url: str = "", parent=None):
+    def __init__(self, asset_url: str, player_url: str = "", parent=None, require_player=False):
         super().__init__(parent)
         self.asset_url = asset_url
+        self.require_player = require_player
         self.player_url = player_url
         #: Player だけ落とせなかったときの理由。Editor は更新される。
         self.player_error = ""
@@ -200,6 +201,9 @@ class UpdateDownloadWorker(QThread):
             pass
 
     def run(self):
+        if self.require_player and not self.player_url:
+            self.failed.emit('この版にはNeoTJAPlayerがありません。')
+            return
         dest = os.path.join(tempfile.gettempdir(), "NeoTJAEditor_update.exe")
         pdest = os.path.join(tempfile.gettempdir(), "NeoTJAPlayer_update.exe")
         # 2本落とすときは前半/後半で半分ずつ。Player が無いリリース(旧版へ
@@ -244,9 +248,26 @@ class UpdateDownloadWorker(QThread):
                     self.cancelled.emit()
                     return
                 self._discard(pdest)
+                if self.require_player:
+                    self._discard(dest)
+                    self.failed.emit('NeoTJAPlayerの取得に失敗しました。\n' + str(e))
+                    return
                 self.player_error = str(e)
 
         self.finished_ok.emit(dest, player_path)
+
+
+def backup_version_settings(settings_path, config):
+    """バージョン変更前の設定を退避。元ファイルは書き換えない。"""
+    from pathlib import Path
+    from datetime import datetime
+    folder = Path(settings_path).parent / 'version-backups'
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    path = folder / ('settings-v%s-%s.json' % (VERSION, stamp))
+    with path.open('x', encoding='utf-8') as stream:
+        json.dump(config, stream, ensure_ascii=False, indent=2)
+    return path
 
 
 class PlayerFetchWorker(QThread):

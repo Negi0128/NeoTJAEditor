@@ -978,6 +978,7 @@ class MainWindow(QMainWindow):
 
         sm = mb.addMenu("設定")
         sm.addAction("環境設定...", self.open_settings)
+        mb.addAction("バージョン変更", self.open_version_change)
 
         hm = mb.addMenu("ヘルプ")
         hm.addAction("ヘルプを表示", self.open_help)
@@ -3090,6 +3091,27 @@ class MainWindow(QMainWindow):
             return
         self._offer_player_download(repair=True)
 
+    def open_version_change(self):
+        from neotja.dialogs.version_change_dialog import VersionChangeDialog
+        from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME
+        dialog = VersionChangeDialog(self)
+        if not dialog.exec() or not dialog.selected_release:
+            return
+        if not getattr(sys, 'frozen', False):
+            QMessageBox.information(self, 'バージョン変更',
+                                    'バージョン変更はexe版で利用できます。')
+            return
+        if self._is_recording():
+            QMessageBox.information(self, 'バージョン変更', '録画を終了してから変更してください。')
+            return
+        release = dialog.selected_release
+        urls = {a.get('name'): a.get('browser_download_url', '')
+                for a in release.get('assets', [])}
+        if not urls.get(ASSET_NAME) or not urls.get(PLAYER_ASSET_NAME):
+            return
+        self._run_update_download(urls[ASSET_NAME], urls[PLAYER_ASSET_NAME],
+                                  version_change=True)
+
     def check_for_updates(self, manual=False):
         from neotja.updater import UpdateCheckWorker
 
@@ -3124,14 +3146,15 @@ class MainWindow(QMainWindow):
             return
         self._run_update_download(asset_url, player_url)
 
-    def _run_update_download(self, asset_url, player_url=""):
+    def _run_update_download(self, asset_url, player_url="", version_change=False):
         from neotja.updater import UpdateDownloadWorker, apply_update
 
         progress = QProgressDialog("更新をダウンロード中...", "キャンセル", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
 
-        worker = UpdateDownloadWorker(asset_url, player_url, self)
+        worker = UpdateDownloadWorker(asset_url, player_url, self,
+                                      require_player=version_change)
 
         def on_progress(pct):
             if pct >= 0:
@@ -3175,6 +3198,15 @@ class MainWindow(QMainWindow):
                     "更新を中止しました。\n次回起動時に再度お知らせします。",
                 )
                 return
+            if version_change:
+                # 旧版による設定書き換えに備え、切替前の設定を別ファイルへ残す。
+                try:
+                    from neotja.updater import backup_version_settings
+                    backup_version_settings(settings_mod.settings_path(), self.config_data)
+                except OSError as exc:
+                    QMessageBox.warning(self, 'バージョン変更',
+                                        '設定を退避できませんでした。\n' + str(exc))
+                    return
             self._updating = True
             apply_update(path, player_path)
             self.close()
