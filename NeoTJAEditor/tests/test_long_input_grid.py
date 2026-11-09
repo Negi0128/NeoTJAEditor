@@ -1,9 +1,10 @@
 import unittest
 
-from gui_support import editor_session, open_test_chart
+from gui_support import editor_session, open_test_chart, real_qt_test
 
 
 class LongInputGridTests(unittest.TestCase):
+    @real_qt_test
     def test_roll_and_balloon_input_keep_grid_until_key_release(self):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest

@@ -5,11 +5,54 @@ import tempfile
 import time
 import wave
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 
 from neotja import settings
 
 _app = None
+
+
+def close_test_editor(win):
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from neotja.worker_util import LINGERING_WORKERS
+    win.preview_dock.game_preview_window.close()
+    chara = getattr(win.preview_dock.game_screen, '_chara', None)
+    if chara is not None:
+        chara.sprites.cancel_preload()
+    win.editor.modified_lines.clear()
+    win.close()
+    deadline = time.monotonic() + 5
+    while LINGERING_WORKERS and time.monotonic() < deadline:
+        QTest.qWait(10)
+        time.sleep(0.005)
+    QApplication.processEvents()
+
+
+def real_qt_test(function):
+    """通常のQtイベントループ内で試験する（Windowsの同期入力中のCOM再入を避ける）。"""
+    @wraps(function)
+    def run(*args, **kwargs):
+        global _app
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+        _app = QApplication.instance() or QApplication([])
+        _app.setQuitOnLastWindowClosed(False)
+        failures = []
+        def execute():
+            try:
+                function(*args, **kwargs)
+            except BaseException as exc:
+                failures.append((exc, exc.__traceback__))
+            finally:
+                _app.quit()
+        QTimer.singleShot(0, execute)
+        _app.exec()
+        if failures:
+            exc, tb = failures[0]
+            raise exc.with_traceback(tb)
+    return run
 
 
 @contextmanager
@@ -37,9 +80,7 @@ def editor_session():
         try:
             yield win, root
         finally:
-            win.editor.modified_lines.clear()
-            win.close()
-            _app.processEvents()
+            close_test_editor(win)
             settings.settings_path, settings._fallback_settings_path = original_path, original_fallback
             assert before == snapshot(), 'User settings changed'
 

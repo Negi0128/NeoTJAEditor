@@ -9,9 +9,11 @@ from fractions import Fraction
 from pathlib import Path
 
 from neotja import settings
+from gui_support import real_qt_test, close_test_editor
 
 
 class MoveGuiTests(unittest.TestCase):
+    @real_qt_test
     def test_drag_across_meter_preserves_notes_and_undo(self):
         real = {settings.settings_path(), settings._primary_settings_path(), settings._fallback_settings_path()}
         def snapshot():
@@ -85,9 +87,7 @@ class MoveGuiTests(unittest.TestCase):
                 win.editor.undo()
                 self.assertEqual(win.editor.toPlainText(), text)
             finally:
-                win.editor.modified_lines.clear()
-                win.close()
-                self.app.processEvents()
+                close_test_editor(win)
                 settings.settings_path = original_path
                 settings._fallback_settings_path = original_fallback
                 self.assertEqual(before, snapshot())
