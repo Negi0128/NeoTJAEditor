@@ -338,6 +338,11 @@ def set_slot(text, body, m_index, slot, grid, char):
     # --- 再分割する場合 ---
     # 情報を落とさずに書ける最小分割数(m)と grid の最小公倍数。
     m = min_len(notes) if L > 0 else grid
+    # 命令の位置も再分割で保つ。音符だけを最小化すると途中のBPM等がずれる。
+    for cut, _line in measure['breaks']:
+        if L and 0 < cut < L:
+            den = Fraction(cut, L).denominator
+            m = m * den // math.gcd(m, den)
     if m <= 0:
         m = grid
     target = m * grid // math.gcd(m, grid)
@@ -962,97 +967,22 @@ def _move_one_command(text, course_range, pos, name, value, dest):
 
 
 def op_move(text, course_range, a, b, grid, delta):
-    """範囲 a〜b の音符を delta グリッドぶん左右へ動かす。
-
-    長い音符は終端ごと。風船・くす玉の打数(BALLOON:)は、動かしたあとの
-    並び順で書き直す。行き先にあった音符は上書きされる(本家と同じ)。"""
+    """範囲選択も、選んだオブジェクトの移動と同じ時間基準を使う。"""
     body = course_body_span(text, course_range)
-    delta = int(delta)
+    if body is None:
+        return None
     G = _as_grids(grid)
-    if body is None or delta == 0:
-        return None
-    items = chart_items(text, body)
-    sel = _items_in(items, a, b, G, False)
-    if not sel:
-        return None
+    selected = _items_in(chart_items(text, body), a, b, G, False)
+    items = [{'kind': 'note', 'pos': (_head_pos(it).numerator, _head_pos(it).denominator)}
+             for it in selected]
+    (m0, s0), (m1, s1) = _range_keys(a, b, G)
+    lo, hi = G.key(m0, s0), G.key(m1, s1)
+    items.extend({'kind': 'cmd', 'name': name, 'pos': (pos.numerator, pos.denominator)}
+                 for pos, name, value in command_items(text, body)
+                 if lo <= (int(pos), pos - int(pos)) <= hi
+                 and (name in COMMAND_NAMES or name in _MARKER_BY_NAME))
+    return op_move_items(text, course_range, items, delta, G)
 
-    def pos_of(addr):
-        return Fraction(addr[0]) + Fraction(addr[1], addr[2])
-
-    def moved(addr):
-        # 「delta グリッドぶん」の長さは小節ごとに違うので、歩いて出す。
-        return G.shift(pos_of(addr), delta)
-
-    for it in sel:
-        if moved(it["head"]) is None:
-            return None                 # 譜面の頭より前へは出せない
-
-    vals = balloon_values(text, course_range)
-    writes = []
-    for it in sel:
-        writes.extend(_removal_writes(it))
-    for it in sel:
-        moves = [(it["head"], it["char"])]
-        if it["tail"] is not None:
-            moves.append((it["tail"], "8"))
-        for addr, ch in moves:
-            p = moved(addr)
-            m = int(p)
-            frac = p - m
-            writes.append((m, frac.numerator, frac.denominator, ch))
-    new = _apply_writes(text, body, writes)
-    if new == text:
-        return None
-    # BALLOON: を書き直す。動かした先に元から居た風船は**上書きされて消える**
-    # ので、書き換え後の本文に実際に残っている風船を数えて、その位置の打数を
-    # 拾う(動かしたものを優先)。
-    moved = {id(it) for it in sel}
-    by_pos = {}
-    for it in items:
-        o = it["ord"]
-        if o is None:
-            continue
-        val = vals[o] if o < len(vals) else "5"
-        if id(it) in moved:
-            continue
-        by_pos.setdefault(pos_of(it["head"]), val)
-    for it in sel:
-        if it["ord"] is None:
-            continue
-        o = it["ord"]
-        by_pos[moved(it["head"])] = vals[o] if o < len(vals) else "5"
-    # --- 範囲に入っている命令も一緒に動かす ---
-    (mm0, ss0), (mm1, ss1) = _range_keys(a, b, G)
-    lo_pos = mm0 + Fraction(ss0, G.at(mm0))
-    hi_pos = mm1 + Fraction(ss1, G.at(mm1))
-    body_c = course_body_span(new, course_range)
-    cmds = [c for c in (command_items(new, body_c) if body_c else [])
-            if lo_pos <= c[0] <= hi_pos and (c[1] in COMMAND_NAMES
-                                             or c[1] in _MARKER_BY_NAME)]
-    # 右へ動かすときは後ろから、左へ動かすときは前から(自分どうしがぶつからない)。
-    for pos, name, value in sorted(cmds, key=lambda c: c[0], reverse=delta > 0):
-        rng_c = (course_range[0], course_range[1] + new.count(chr(10)) - text.count(chr(10)))
-        moved_txt = _move_one_command(new, rng_c, pos, name, value,
-                                      G.shift(pos, delta))
-        if moved_txt is not None:
-            new = moved_txt
-
-    body2 = course_body_span(new, course_range)
-    out = []
-    for it in chart_items(new, body2) if body2 else []:
-        if it["ord"] is None:
-            continue
-        out.append(by_pos.get(pos_of(it["head"]), "5"))
-    new = set_balloon_values(new, course_range, out)
-    return _result(text, new, reparse=True)
-
-
-# ---------------------------------------------------------------------------
-# 選んだオブジェクトを動かす / 消す(エクスプローラー式の選択)
-# ---------------------------------------------------------------------------
-# items は [{"kind": "note"/"cmd", "name": 命令名かNone, "pos": (分子, 分母)}]。
-# pos は「小節番号 + 小節の中の割合」を約分した分数。音符は頭の位置、命令は
-# その行の位置。範囲ではなく**選んだものだけ**を動かす/消すために使う。
 
 def _item_pos(it):
     n, d = it["pos"]
@@ -1149,29 +1079,82 @@ def _match_cmds(cmds, want_cmds, keep=None):
     return out
 
 
-def op_move_items(text, course_range, items, steps, grid=16):
-    """選んだオブジェクトを steps グリッドぶん動かす。
+def plan_move_items(text, course_range, items, steps, grid=16, anchor=None):
+    """選択全体を同じ時間だけずらす。本文に触る前に全行き先を検証する。"""
+    from .note_timing import NoteTiming, TimingError
+    body = course_body_span(text, course_range)
+    if body is None or not items:
+        return None
+    G = _as_grids(grid)
+    all_items = chart_items(text, body)
+    wanted = _snap_wants(all_items, {_item_pos(i) for i in items
+                                   if i.get('kind') == 'note'})
+    selected = [it for it in all_items if _head_pos(it) in wanted]
+    sources = {_head_pos(it) for it in selected}
+    sources.update(_tail_pos(it) for it in selected if it['tail'] is not None)
+    commands = _match_cmds(command_items(text, body),
+                           {(str(i.get('name', '')).upper(), _item_pos(i))
+                            for i in items if i.get('kind') == 'cmd'},
+                           lambda n: n in COMMAND_NAMES or n in _MARKER_BY_NAME)
+    sources.update(p for p, _n, _v in commands)
+    if not sources:
+        return None
+    if not selected:
+        # 命令だけを動かす従来操作は維持する。時間保持の対象は音符の配置。
+        positions = {p: G.shift(p, steps) for p in sources}
+        if any(p is None for p in positions.values()):
+            raise TimingError('譜面の先頭より前へは移動できません。')
+        return {'positions': positions, 'timing': None}
+    spans = measure_spans(text, body)
+    timing = NoteTiming(text, body, spans)
+    origin = min(sources) if anchor is None else Fraction(anchor)
+    origin = min(sources, key=lambda p: abs(p - origin))
+    destination = G.shift(origin, steps, snap=True)
+    if destination is None:
+        raise TimingError('譜面の先頭より前へは移動できません。')
+    delta = timing.time_at(destination) - timing.time_at(origin)
+    positions = {p: timing.position_at(timing.time_at(p) + delta) for p in sources}
+    # 残す音符・命令の境目と全移動先をまとめて確かめる。一部だけの書き込みは禁止。
+    divisions = {}
+    for m, (a, b) in enumerate(spans):
+        parsed = parse_measure_lines(text[a:b])
+        measure = next((p for p in parsed if p['type'] == 'measure'), None)
+        if measure is None:
+            continue
+        size = len(measure['notes'])
+        need = min_len(measure['notes']) or 1
+        for cut, _line in measure['breaks']:
+            den = Fraction(cut, size or 1).denominator
+            need = need * den // math.gcd(need, den)
+        divisions[m] = need
+    for p in positions.values():
+        m = int(p)
+        den = (p - m).denominator
+        old = divisions.get(m, 1)
+        divisions[m] = old * den // math.gcd(old, den)
+    if any(n > MAX_DIVISION for n in divisions.values()):
+        raise TimingError('時間間隔を保つには上限の%d分割を超えるため、移動を中止しました。' % MAX_DIVISION)
+    note_targets = [positions[_head_pos(it)] for it in selected]
+    if len(set(note_targets)) != len(note_targets):
+        raise TimingError('移動先で音符が重なるため、移動を中止しました。')
+    return {'positions': positions, 'selected': selected, 'commands': commands,
+            'delta': delta, 'timing': timing}
 
-    「何グリッドぶん」は小節によって長さが違う(拍子が変わると1小節に入る数が
-    変わる)ので、小節単位の分数ではなく**グリッドの数**で受けて、位置ごとに
-    歩いて行き先を出す(_Grids.shift)。"""
+
+def op_move_items(text, course_range, items, steps, grid=16, anchor=None):
+    """基準位置をstepsグリッド動かし、音符全体の時間間隔を保持する。"""
     body = course_body_span(text, course_range)
     G = _as_grids(grid)
     steps = int(steps)
     if body is None or not items or steps == 0:
         return None
 
+    plan = plan_move_items(text, course_range, items, steps, G, anchor)
+    if plan is None:
+        return None
     def dest(p):
-        """命令・マーカーの行き先。丸めない — #GOGOSTART などの境目が
-        勝手に目盛へ寄ると、ゴーゴーの範囲が意図せず動いてしまう。"""
-        return G.shift(Fraction(p), steps)
-
-    def dest_note(p):
-        """音符の行き先。今のグリッドの目盛へ乗せる(利用者の指定 2026-10-05)。
-
-        1/12 の音符を 1/16 のグリッドで動かすと端数が残り、どの目盛にも
-        乗らなかったため。"""
-        return G.shift(Fraction(p), steps, snap=True)
+        return plan['positions'][Fraction(p)]
+    dest_note = dest
     want_cmds = {(str(i.get("name", "")).upper(), _item_pos(i))
                  for i in items if i.get("kind") == "cmd"}
     all_items = chart_items(text, body)
@@ -1228,7 +1211,16 @@ def op_move_items(text, course_range, items, steps, grid=16):
            for it in (chart_items(new, body2) if body2 else [])
            if it["ord"] is not None]
     new = set_balloon_values(new, course_range, out)
-    return _result(text, new, reparse=True)
+    from .note_timing import NoteTiming, TimingError
+    final_body = course_body_span(new, (course_range[0], course_range[1] + new.count('\n') - text.count('\n')))
+    final_timing = NoteTiming(new, final_body, measure_spans(new, final_body))
+    for old, target in plan['positions'].items():
+        if plan['timing'] is not None and final_timing.time_at(target) != plan['timing'].time_at(old) + plan['delta']:
+            raise TimingError('移動した命令によって時間間隔が変わるため、移動を中止しました。')
+    result = _result(text, new, reparse=True)
+    if result:
+        result['moved_positions'] = plan['positions']
+    return result
 
 
 def _tail_pos(it):
@@ -1869,8 +1861,10 @@ def run_op(text, course_range, op):
     # 選んだオブジェクトへの操作は住所(a/b)を使わない。下の「a が無ければ
     # 何もしない」より前で受ける。
     if kind == "move_items":
+        anchor = op.get('anchor')
         return op_move_items(text, course_range, op.get("items") or [],
-                             int(op.get("steps", 0)), g)
+                             int(op.get("steps", 0)), g,
+                             Fraction(*anchor) if anchor is not None else None)
     if kind == "tail_items":
         return op_tail_items(text, course_range, op.get("items") or [],
                              int(op.get("steps", 0)), g)

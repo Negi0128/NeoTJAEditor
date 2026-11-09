@@ -1492,6 +1492,16 @@ class MainWindow(QMainWindow):
         )
         self._preview_branch_path = list(preview_data.get("branch_path") or [])
         course_stats = self._find_course_stats(preview_data.get("course_key"))
+        # 作譜の位置変換も本文のBPM・拍子・DELAYを使う。小節内の線形補間はしない。
+        from .note_timing import NoteTiming
+        rng = self.analyzer.course_line_range(content, preview_data.get('course_key'))
+        try:
+            with note_edit.editing_branch(self._preview_branch_level, self._preview_branch_path):
+                body = note_edit.course_body_span(content, rng)
+                timing = NoteTiming(content, body, note_edit.measure_spans(content, body)) if body else None
+        except (ValueError, ZeroDivisionError):
+            timing = None
+        self.preview_dock.chart_edit.note_timing = timing
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
         # 今組み立てた条件を控える。この直後にカーソル移動で走る
         # _update_metronome_schedule が、同じ条件なら丸ごと省けるようにする。
@@ -2606,6 +2616,17 @@ class MainWindow(QMainWindow):
 
     def _chart_op_in_branch(self, text, rng, op):
         """_apply_chart_op の中身(系統を決めたあと)。"""
+        from .note_timing import TimingError
+        if op.get('kind') == 'peek_move_items':
+            try:
+                anchor = op.get('anchor')
+                plan = note_edit.plan_move_items(
+                    text, rng, op.get('items') or [], int(op.get('steps', 0)),
+                    note_edit._Grids(int(op.get('grid', 16)), op.get('grids')),
+                    note_edit.Fraction(*anchor) if anchor is not None else None)
+                return {'positions': plan['positions']} if plan else {}
+            except (TimingError, ValueError, ZeroDivisionError):
+                return {}
         if op.get("kind") == "peek_command":
             # 入力欄に出す今の値を読むだけ。テキストは変えない。
             a = op.get("a") or (0, 0)
@@ -2634,7 +2655,11 @@ class MainWindow(QMainWindow):
             return {"value": note_edit.region_state(
                 text, rng, tuple(op["a"]), tuple(op["b"]), int(op.get("grid", 16)),
                 str(op.get("region", "")).upper())}
-        res = note_edit.run_op(text, rng, op)
+        try:
+            res = note_edit.run_op(text, rng, op)
+        except TimingError as exc:
+            self.statusBar().showMessage(str(exc), 8000)
+            return None
         if res is None:
             self._warn_if_too_fine(text, rng, op)
             return None

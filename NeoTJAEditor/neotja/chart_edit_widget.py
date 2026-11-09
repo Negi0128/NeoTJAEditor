@@ -975,6 +975,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def _address_time(self, m, slot, grid):
         """(小節, スロット) の時刻。既知の小節の外でも返す。"""
+        if getattr(self, 'note_timing', None) is not None and grid > 0:
+            return float(self.note_timing.time_at(Fraction(m) + Fraction(slot, grid))) - self.offset
         t0 = self._bar_time(m)
         if t0 is None or grid <= 0:
             return None
@@ -1023,6 +1025,16 @@ class ChartEditWaveform(WaveformWidget):
 
     def _address_from_time(self, t, nearest=False):
         """時刻から (小節, スロット)。譜面の末尾より先の外挿ぶんも当てる。"""
+        if getattr(self, 'note_timing', None) is not None:
+            try:
+                pos = self.note_timing.position_at(Fraction(str(t + self.offset)))
+                m = int(pos)
+                g = self._measure_grid(m)
+                s = float((pos - m) * g)
+                slot = int(round(s)) if nearest else int(math.floor(s + 1e-7))
+                return (m + 1, 0) if slot >= g else (m, max(0, slot))
+            except ValueError:
+                pass
         if self._grid <= 0:
             return None
         n = self._known_measures()
@@ -1377,6 +1389,11 @@ class ChartEditWaveform(WaveformWidget):
 
     def _pos_of_time(self, t):
         """音源時刻 → 位置(分数)。"""
+        if getattr(self, 'note_timing', None) is not None:
+            try:
+                return self.note_timing.position_at(Fraction(str(t + self.offset))).limit_denominator(note_edit.MAX_DIVISION)
+            except ValueError:
+                pass
         n = self._measure_count()
         if n <= 0:
             return None
@@ -1392,6 +1409,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def _time_of_pos(self, pos):
         """位置(分数) → 音源時刻。"""
+        if getattr(self, 'note_timing', None) is not None:
+            return float(self.note_timing.time_at(pos)) - self.offset
         m = int(pos)
         frac = pos - m
         a = self._bar_time(m)
@@ -1864,7 +1883,8 @@ class ChartEditWaveform(WaveformWidget):
             # それでも分からないときだけ、カーソルのまわりを渡す。
             ms = [self._cur_measure]
         # 動かす先は数グリッド先なので、少し広めに取っておく。
-        lo, hi = max(0, min(ms) - 2), min(count, max(ms) + 3)
+        margin = max(2, abs(int(op.get('steps', 0))))
+        lo, hi = max(0, min(ms) - margin), min(count, max(ms) + margin + 1)
         return {m: self._measure_grid(m) for m in range(lo, hi)}
 
     # ------------------------------------------------------------------
@@ -3060,14 +3080,21 @@ class ChartEditWaveform(WaveformWidget):
             # 終端をつかんだときは「長さを変える」操作。頭は動かさない。
             res = items and self._run_op(
                 {"kind": "tail_items" if tails else "move_items",
-                 "items": items, "steps": int(steps)})
+                 "items": items, "steps": int(steps),
+                 "anchor": (dr['anchor'].numerator, dr['anchor'].denominator)
+                 if dr.get('anchor') is not None else None})
             if res:
                 # 動かしたものは選んだまま付いていく(続けて動かせるように)。
                 def shifted(k):
                     # 音符は本文側(op_move_items)が目盛へ丸めるので、枠の
                     # 行き先も同じに丸める。命令はどちらも丸めない。
                     cmd = k[0] == "cmd"
-                    p = self._shift_pos(k[-1], steps, snap=not cmd)
+                    moved = res.get('moved_positions')
+                    if moved is not None:
+                        old = min(moved, key=lambda p: abs(p - k[-1]))
+                        p = moved[old]
+                    else:
+                        p = self._shift_pos(k[-1], steps, snap=not cmd)
                     return (k[0], k[1], p) if cmd else (k[0], p)
                 self.set_selection({
                     shifted(k) if k in move_keys else k for k in self._sel})
@@ -3107,6 +3134,28 @@ class ChartEditWaveform(WaveformWidget):
                 m += 1
                 g = self._measure_grid(m)
         return m + Fraction(s) / g
+
+    def _drag_time_positions(self):
+        """本文と同じ計算でドラッグの行き先を得る。1移動につき1回だけ。"""
+        dr = self._note_drag
+        if dr is None or self._op_cb is None or self._drag_tail():
+            return None
+        steps = self._drag_delta_slots(self._drag_dx(dr), dr.get('anchor'))
+        keys = self._drag_keys()
+        cache_key = (steps, tuple(sorted(keys)), dr.get('anchor'))
+        if dr.get('time_plan_key') != cache_key:
+            items = [{'kind': k[0] if k[0] in ('cmd', 'tail') else 'note',
+                      'name': k[1] if k[0] == 'cmd' else None,
+                      'pos': (k[-1].numerator, k[-1].denominator)} for k in keys]
+            anchor = dr.get('anchor')
+            result = self._op_cb({'kind': 'peek_move_items', 'items': items,
+                                 'steps': steps, 'grid': self._grid,
+                                 'grids': self._grids_for({'items': items, 'steps': steps}),
+                                 'anchor': (anchor.numerator, anchor.denominator)
+                                 if anchor is not None else None}) or {}
+            dr['time_plan'] = result.get('positions', {})
+            dr['time_plan_key'] = cache_key
+        return dr.get('time_plan')
 
     def _slots_between(self, a, b):
         """住所 a から b まで、グリッドいくつぶんか(符号つき)。
@@ -3221,7 +3270,12 @@ class ChartEditWaveform(WaveformWidget):
                     elif self._drag_edge_name() is not None:
                         dx = 0      # 端をつかんでいる間は帯の端だけが動く
                     else:
-                        dx = int(self._drag_dx())
+                        positions = self._drag_time_positions()
+                        if positions:
+                            old = min(positions, key=lambda p: abs(p - key[-1]))
+                            dx = self._sec_to_x(self._time_of_pos(positions[old])) - self._sec_to_x(t)
+                        else:
+                            dx = int(self._drag_dx())
                     x0 += dx
                     x1 += dx
                 if orow == "note":
@@ -3296,6 +3350,10 @@ class ChartEditWaveform(WaveformWidget):
             if key not in move_keys:
                 continue
             x = self._sec_to_x(t) + dx
+            positions = self._drag_time_positions()
+            if positions:
+                old = min(positions, key=lambda p: abs(p - key[-1]))
+                x = self._sec_to_x(self._time_of_pos(positions[old]))
             if orow == "note":
                 p.setOpacity(0.75)
                 c = self._char_at_time(t)
@@ -3314,8 +3372,15 @@ class ChartEditWaveform(WaveformWidget):
             # 歩き方で出す — 以前はカーソルのいる分割数で割った分数を
             # 足していたので、4/4 以外の小節では線が実際の落ち先とずれた。
             # 音符は目盛へ丸める(利用者の指定 2026-10-05)。
-            gt = self._time_of_pos(
-                self._shift_pos(key[-1], steps, snap=key[0] != "cmd"))
+            positions = self._drag_time_positions()
+            if positions:
+                old = min(positions, key=lambda p: abs(p - key[-1]))
+                gt = self._time_of_pos(positions[old])
+            elif positions is not None:
+                gt = None
+            else:
+                gt = self._time_of_pos(
+                    self._shift_pos(key[-1], steps, snap=key[0] != "cmd"))
             if gt is not None:
                 p.setPen(QPen(QColor(255, 210, 60, 180), 1))
                 gx = self._sec_to_x(gt)
@@ -4004,6 +4069,10 @@ class ChartEditWaveform(WaveformWidget):
         edge = self._drag_edge_name()
         if edge is not None and name != edge:
             return 0            # 端をつかんでいる間は、反対側の端は動かさない
+        positions = self._drag_time_positions()
+        if positions:
+            old = min(positions, key=lambda p: abs(p - pos))
+            return self._sec_to_x(self._time_of_pos(positions[old])) - self._sec_to_x(t)
         if not snap:
             return int(self._drag_dx())
         steps = self._drag_delta_slots(self._drag_dx(), dr.get("anchor"))
