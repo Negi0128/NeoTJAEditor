@@ -400,6 +400,8 @@ class ChartEditWaveform(WaveformWidget):
         if start is not None:
             hidden.append((start, raw[-1] if raw else start))
         self._barline_raw = hidden or None
+        if self._region_raw is not None:
+            self._rebuild_barline_regions()
         # 小節が1つしか無いと間隔から長さを測れない。解析が返してきた BPM を
         # 使う(ヘッダの BPM が空の新規譜面でも、ここは埋まっている)。
         if last_bpm and last_bpm > 0:
@@ -423,8 +425,29 @@ class ChartEditWaveform(WaveformWidget):
         """
         self._region_raw = ([(float(t0), str(n)) for t0, n in marks]
                             if marks is not None else None)
+        if self._region_raw is not None:
+            self._rebuild_barline_regions()
         self._rebuild_bar_times()
         self.update()
+
+    def _rebuild_barline_regions(self):
+        """非表示の帯と命令の縦線を、同じ命令時刻から作る。"""
+        hidden = []
+        start = None
+        for at, name in self._region_raw or []:
+            if name == 'BARLINEOFF' and start is None:
+                start = at
+            elif name == 'BARLINEON' and start is not None:
+                if at > start:
+                    hidden.append((start, at))
+                start = None
+        if start is not None:
+            timing = getattr(self, 'note_timing', None)
+            raw = self._bar_times_raw or []
+            end = float(timing.end) if timing is not None else (raw[-1] + self._default_measure_len if raw else start)
+            if end > start:
+                hidden.append((start, end))
+        self._barline_raw = hidden or None
 
     def set_time_offset(self, offset):
         """譜面の時刻 ↔ 音の位置の OFFSET だけを差し替える。
