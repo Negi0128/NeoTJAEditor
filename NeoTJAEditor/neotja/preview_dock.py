@@ -3567,6 +3567,11 @@ class PreviewDock(QDockWidget):
         headers = parse_preview_headers(content)
         self._editor_bpm = headers["bpm"]
         self._editor_offset = headers["offset"]
+        # 音源が同じでも本文のOFFSETは変わり得る。音源読込の早期returnより先に
+        # 同期し、下のグリッド・打音・プレビューも新しい値で組み立てる。
+        self.spin_offset.blockSignals(True)
+        self.spin_offset.setValue(headers['offset'])
+        self.spin_offset.blockSignals(False)
         self._editor_subtitle = headers["subtitle"]
         self._editor_metronome_clicks = metronome_clicks or []
         self.lbl_editor_bpm.setText(f"{headers['bpm']:g}" if headers["bpm"] else "-")
