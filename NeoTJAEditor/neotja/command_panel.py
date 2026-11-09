@@ -16,10 +16,31 @@ LANE_Y=196、枠はその 56px 上から)。窓は広げない・レーンには
 数字が飛ぶのを防ぐため。
 """
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QVBoxLayout)
+
+
+class _SelectAllOnClick:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if (obj is self.lineEdit() and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton):
+            # 通常のマウス処理が選択を解除した後で選ぶ。上下ボタンには干渉しない。
+            QTimer.singleShot(0, self.selectAll)
+        return super().eventFilter(obj, event)
+
+
+class _CommandDoubleSpinBox(_SelectAllOnClick, QDoubleSpinBox):
+    pass
+
+
+class _CommandSpinBox(_SelectAllOnClick, QSpinBox):
+    pass
 
 
 class CommandPanel(QFrame):
@@ -109,7 +130,7 @@ class CommandPanel(QFrame):
         self._ui_scale = 1.0
 
         # --- BPM ---
-        self.sp_bpm = QDoubleSpinBox()
+        self.sp_bpm = _CommandDoubleSpinBox()
         self.sp_bpm.setDecimals(3)
         self.sp_bpm.setRange(1.0, 9999.0)
         self.sp_bpm.setValue(120.0)
@@ -121,11 +142,11 @@ class CommandPanel(QFrame):
                        0, 0)
 
         # --- 拍子記号 ---
-        self.sp_num = QSpinBox()
+        self.sp_num = _CommandSpinBox()
         self.sp_num.setRange(1, 64)
         self.sp_num.setValue(4)
         self.sp_num.setFixedWidth(48)
-        self.sp_den = QSpinBox()
+        self.sp_den = _CommandSpinBox()
         self.sp_den.setRange(1, 64)
         self.sp_den.setValue(4)
         self.sp_den.setFixedWidth(48)
@@ -143,7 +164,7 @@ class CommandPanel(QFrame):
 
         # --- スクロール(HS): 倍率と「見た目BPM」。どちらを変えても連動する
         #     (利用者の指定 2026-10-08)。本文へ書くのは倍率のほう。
-        self.sp_hs = QDoubleSpinBox()
+        self.sp_hs = _CommandDoubleSpinBox()
         self.sp_hs.setDecimals(3)
         self.sp_hs.setRange(-100.0, 100.0)
         self.sp_hs.setSingleStep(0.05)
@@ -155,7 +176,7 @@ class CommandPanel(QFrame):
         # 枠の幅(BOX_W=214)は動かせない — 3つ並べて 672 におさめる決まり。
         self.sp_hs.setFixedWidth(70)
         self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。")
-        self.sp_hs_bpm = QDoubleSpinBox()
+        self.sp_hs_bpm = _CommandDoubleSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
         self.sp_hs_bpm.setSingleStep(1.0)
