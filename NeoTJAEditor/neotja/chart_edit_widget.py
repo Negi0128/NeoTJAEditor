@@ -1444,7 +1444,56 @@ class ChartEditWaveform(WaveformWidget):
             b = a + self._default_measure_len
         return a + float(frac) * (b - a)
 
+    def _ensure_object_index(self):
+        """譜面データが差し替わった時だけ、正確な時刻から住所を引き直す。"""
+        sources = (self._note_audio, self._span_audio, self._cmd_audio,
+                   self._region_audio, self._gogo_audio, self._barline_audio,
+                   self._bar_times, getattr(self, 'note_timing', None))
+        key = (tuple(id(value) for value in sources), self.offset,
+               self.NOTE_R, self.NOTE_R_BIG, self.SPAN_TH, self.SPAN_TH_BIG,
+               self._default_measure_len)
+        if getattr(self, '_object_index_key', None) == key:
+            return
+        objects = self._build_objects()
+        by_key = {}
+        for obj in objects:
+            by_key.setdefault(obj[0], []).append(obj)
+        spans = {}
+        for row, names in self._SPAN_ROWS.items():
+            for st, end in self._span_rows_audio(row):
+                ps, pe = self._pos_of_time(st), self._pos_of_time(end)
+                if ps is not None and pe is not None:
+                    k0, k1 = ('cmd', names[0], ps), ('cmd', names[1], pe)
+                    spans.setdefault(k0, []).append((k1, row, st, end, names))
+        for st, end, kind in self._span_audio or []:
+            ps, pe = self._pos_of_time(st), self._pos_of_time(end)
+            if ps is not None and pe is not None:
+                spans.setdefault(('note', ps), []).append(
+                    (('tail', pe), 'note', st, end, kind))
+        self._indexed_objects = objects
+        self._objects_by_key = by_key
+        self._spans_by_start = spans
+        # 古い配列も保持し、解放後の id 再利用で誤って一致するのを防ぐ。
+        self._object_index_sources = sources
+        self._object_index_key = key
+
     def _objects(self):
+        self._ensure_object_index()
+        return self._indexed_objects
+
+    def _selected_objects(self, keys):
+        self._ensure_object_index()
+        for key in keys:
+            yield from self._objects_by_key.get(key, ())
+
+    def _selected_spans(self):
+        self._ensure_object_index()
+        for k0 in self._sel:
+            for k1, row, st, end, detail in self._spans_by_start.get(k0, ()):
+                if k1 in self._sel:
+                    yield k0, k1, row, st, end, detail
+
+    def _build_objects(self):
         """いま画面に出ているオブジェクト [(鍵, 行, 時刻, つかめる半幅px)]。"""
         out = []
         for t, c in (self._note_audio or []):
@@ -3219,52 +3268,33 @@ class ChartEditWaveform(WaveformWidget):
         囲むと、長い帯では緑の四角が離れた2つに見えて分かりにくかった
         (利用者の指定 2026-10-08)。"""
         done = set()
-        for row, names in self._SPAN_ROWS.items():
-            rect = rows.get(row)
-            if rect is None:
-                continue
-            for st, e in self._span_rows_audio(row):
-                ps, pe = self._pos_of_time(st), self._pos_of_time(e)
-                if ps is None or pe is None:
+        for k0, k1, row, st, e, detail in self._selected_spans():
+            if row != "note":
+                rect = rows.get(row)
+                if rect is None:
                     continue
-                k0 = ("cmd", names[0], ps)
-                k1 = ("cmd", names[1], pe)
-                if k0 not in self._sel or k1 not in self._sel:
-                    continue
-                x0 = self._sec_to_x(st) + self._drag_dx_for(names[0], st,
-                                                            snap=True)
-                x1 = self._sec_to_x(e) + self._drag_dx_for(names[1], e,
-                                                           snap=True)
+                names = detail
+                x0 = self._sec_to_x(st) + self._drag_dx_for(names[0], st, snap=True)
+                x1 = self._sec_to_x(e) + self._drag_dx_for(names[1], e, snap=True)
                 ry, rh = rect
                 p.drawRect(int(min(x0, x1)) - 4, ry + 2,
                            int(abs(x1 - x0)) + 8, rh - 4)
-                done |= {k0, k1}
-        # 連打・風船は音符の行。帯の高さではなく音符の丸の高さで囲む。
-        for st, e, kind in (self._span_audio or []):
-            ps, pe = self._pos_of_time(st), self._pos_of_time(e)
-            if ps is None or pe is None:
-                continue
-            k0, k1 = ("note", ps), ("tail", pe)
-            if k0 not in self._sel or k1 not in self._sel:
-                continue
-            half = (self.SPAN_TH_BIG // 2 if kind == "roll_big"
-                    else self.SPAN_TH // 2)
-            v = self._object_vrange("note", half)
-            if v is None:
-                continue
-            dr = self._note_drag
-            dx0 = dx1 = 0
-            if dr is not None:
-                # 終端を掴んでいるあいだは終端側だけ伸び縮みする。
-                if self._drag_tail():
-                    dx1 = int(self._drag_dx())
-                else:
-                    dx0 = dx1 = int(self._drag_dx())
-            x0 = self._sec_to_x(st) + dx0
-            x1 = self._sec_to_x(e) + dx1
-            p.drawRect(int(min(x0, x1)) - half - 3, v[0],
-                       int(abs(x1 - x0)) + 2 * half + 6, v[1] - v[0])
-            done |= {k0, k1}
+            else:
+                half = self.SPAN_TH_BIG // 2 if detail == "roll_big" else self.SPAN_TH // 2
+                v = self._object_vrange("note", half)
+                if v is None:
+                    continue
+                dx0 = dx1 = 0
+                if self._note_drag is not None:
+                    if self._drag_tail():
+                        dx1 = int(self._drag_dx())
+                    else:
+                        dx0 = dx1 = int(self._drag_dx())
+                x0 = self._sec_to_x(st) + dx0
+                x1 = self._sec_to_x(e) + dx1
+                p.drawRect(int(min(x0, x1)) - half - 3, v[0],
+                           int(abs(x1 - x0)) + 2 * half + 6, v[1] - v[0])
+            done.update((k0, k1))
         return done
 
     def _draw_selection(self, p, note_cy):
@@ -3279,8 +3309,8 @@ class ChartEditWaveform(WaveformWidget):
             # 両端がそろって選ばれている帯は、端を2つ囲むのではなく**帯ぜんたい**
             # を1つの枠で囲む(利用者の指定 2026-10-08: 端だけ緑だと見にくい)。
             done = self._draw_span_selection(p, rows)
-            for key, orow, t, half in self._objects():
-                if key not in self._sel or key in done:
+            for key, orow, t, half in self._selected_objects(self._sel):
+                if key in done:
                     continue
                 rect = rows.get(orow)
                 if rect is None:
@@ -3371,9 +3401,7 @@ class ChartEditWaveform(WaveformWidget):
         r, g, b = self.RANGE_COLOR
         cy = note_cy if note_cy is not None else top + strip // 2
         steps = self._drag_delta_slots(self._drag_dx(), dr.get("anchor"))
-        for key, orow, t, half in self._objects():
-            if key not in move_keys:
-                continue
+        for key, orow, t, half in self._selected_objects(move_keys):
             x = self._sec_to_x(t) + dx
             positions = self._drag_time_positions()
             if positions:
