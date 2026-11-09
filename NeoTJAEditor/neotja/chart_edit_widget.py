@@ -2495,6 +2495,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def change_grid(self, direction):
         """分割数を1段変える。カーソルの時刻上の位置はできるだけ保つ。"""
+        if self._long is not None:
+            return
         try:
             i = GRID_CHOICES.index(self._grid)
         except ValueError:
@@ -3833,6 +3835,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def set_grid(self, grid):
         """分割を変える。カーソルの時刻上の位置はできるだけ保つ。"""
+        if self._long is not None:
+            return
         grid = int(grid)
         if grid <= 0 or grid == self._grid:
             return
