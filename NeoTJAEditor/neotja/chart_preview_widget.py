@@ -2919,8 +2919,10 @@ class ChartPreviewWidget(QWidget):
             self.pause()
             return
         self._clear_reveal()   # 保留中のリード表示があれば解除して即その場から
-        target = self._pos_sec
+        # 移動アニメーション中は_pos_secが旧位置のまま。確定した行き先から再生する。
+        target = self.scroll_target_time()
         self._animating = False
+        self._pos_sec = target
         self._pos_wall = _time.monotonic()
         if self._seek_seconds_cb:
             self._seek_seconds_cb(target)
