@@ -114,3 +114,11 @@ cd <このリポジトリの NeoTJAEditor フォルダ>
 - `settings.json` は**絶対にコミットしない**（`git add` は明示的なファイル列挙で）
 - 太鼓さん次郎 / TNDE の素材は同梱・再配布しない
 - リリース（push・ビルド・`gh release`）は利用者の承認を得てから
+
+## 配布ビルド確認（2026-11-10 / v14.9.0）
+
+- Editor・Player双方のspecで、外部ツールのPATHから混入するicuuc.dll／icuin.dll／icudt*を除外。
+  PopplerのICUがWindows標準ICUを隠し、QtGuiの起動時に関数不足となることを配布前に検出した。
+- 修正後のPlayer exeが起動することを、隔離した設定・TEMP・LOCALAPPDATAで確認。
+- Editorの実差し替え処理で両exeを14.7.0へ変更し、14.9.0へ戻した後のハッシュ一致も確認。
+- ユーザー設定は変更していない。実exeの画面操作はツール許可の制限で未実施。
