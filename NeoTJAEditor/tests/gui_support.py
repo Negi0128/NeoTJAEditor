@@ -2,6 +2,7 @@
 import hashlib
 import json
 import tempfile
+import time
 import wave
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,9 +58,10 @@ def open_test_chart(win, root, body='1111,\n1111,\n1111,\n1111,', bpm=120):
     path = root / 'test.tja'
     path.write_text(text, encoding='cp932')
     win._open_path(str(path))
-    for _ in range(100):
+    for _ in range(250):
         if win.preview_dock.btn_play.isEnabled() and not win.preview_dock.is_decoding():
             break
         QTest.qWait(20)
-    assert win.preview_dock.btn_play.isEnabled(), 'Audio did not load'
+        time.sleep(0.005)  # Pythonのデコードワーカーにも実行時間を渡す
+    assert win.preview_dock.btn_play.isEnabled(), win.preview_dock.status_label.text()
     return text

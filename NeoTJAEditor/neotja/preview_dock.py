@@ -3880,7 +3880,7 @@ class PreviewDock(QDockWidget):
     _seek_target_ms = -10 ** 9
     _seek_echo_until = 0.0
 
-    def _on_position_changed(self, ms):
+    def _on_position_changed(self, ms, manual=False):
         # Throttle to ~30Hz while playing so the 60Hz position feed doesn't
         # crowd the GUI thread and unevenly delay the preview's own redraw
         # timer (which is what caused the "60fps but juddery" microstutter).
@@ -3888,10 +3888,14 @@ class PreviewDock(QDockWidget):
         # drift correction is imperceptible; the playhead/label/slider are
         # equally fine at 30Hz. Not throttled when paused/seeking (rare calls).
         playing = self.audio.is_playing()
-        if (not playing and _time.monotonic() < self._seek_echo_until
-                and abs(int(ms) - self._seek_target_ms) > 150):
-            return                      # シーク前の位置のこだま。捨てる
-        if playing:
+        if getattr(self, '_issuing_seek', False):
+            return                      # seek()自身が同期で出す旧位置
+        now = _time.monotonic()
+        expected = self._seek_expected_ms(playing)
+        if (not manual and now < self._seek_echo_until
+                and abs(int(ms) - expected) > 150):
+            return                      # 再生中もシーク前の通知で上書きしない
+        if playing and not manual:
             now = _time.monotonic()
             if now - self._last_pos_ui_wall < 0.030:
                 return
@@ -3993,7 +3997,11 @@ class PreviewDock(QDockWidget):
             # 試聴中。音は鳴らすが譜面は動かさない(set_audition 参照)。
             self.chart_preview.set_playback(self.audio.position() / 1000.0, False)
             return
-        self.chart_preview.set_playback(self.audio.position() / 1000.0, playing)
+        ms = self.audio.position()
+        expected = self._seek_expected_ms(playing)
+        if (_time.monotonic() < self._seek_echo_until and abs(ms - expected) > 150):
+            ms = expected
+        self.chart_preview.set_playback(ms / 1000.0, playing)
         if not playing and self.refresh_preview_cb:
             # Reload from the current editor content (not whatever was last
             # cached) so edits made while playing/paused show up immediately
@@ -4073,6 +4081,11 @@ class PreviewDock(QDockWidget):
         v = self.spin_offset.value() if offset is None else float(offset)
         return v - self._lead_sec
 
+    def _seek_expected_ms(self, playing):
+        elapsed = max(0.0, _time.monotonic() - getattr(self, '_seek_started', _time.monotonic()))
+        rate = getattr(self.chart_preview, '_playback_rate', 1.0)
+        return self._seek_target_ms + (elapsed * 1000 * rate if playing else 0)
+
     def _seek_ms(self, ms):
         """音の位置(ms)へ飛ぶ。**シークはぜんぶここを通す。**
 
@@ -4085,9 +4098,14 @@ class PreviewDock(QDockWidget):
         """
         ms = max(0, int(ms))
         self._seek_target_ms = ms
-        self._seek_echo_until = _time.monotonic() + 0.35
-        self.audio.seek(ms)
-        self._on_position_changed(ms)
+        self._seek_started = _time.monotonic()
+        self._seek_echo_until = self._seek_started + 0.35
+        self._issuing_seek = True
+        try:
+            self.audio.seek(ms)
+        finally:
+            self._issuing_seek = False
+        self._on_position_changed(ms, manual=True)
 
     def _audio_ms(self, seconds):
         """譜面の時刻(秒) → 音の位置(ms)。無音の助走ぶんだけ後ろへずらす。"""
