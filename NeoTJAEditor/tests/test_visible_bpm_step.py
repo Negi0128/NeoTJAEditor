@@ -2,6 +2,24 @@ import unittest
 
 
 class VisibleBpmStepTests(unittest.TestCase):
+    def test_unchanged_visible_bpm_does_not_repaint(self):
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QApplication
+        from neotja.command_panel import CommandPanel
+        self.app = QApplication.instance() or QApplication([])
+        panel = CommandPanel()
+        try:
+            panel.set_values(bpm=150, scroll=1.5)
+            with patch.object(panel.sp_hs_bpm, 'setValue', wraps=panel.sp_hs_bpm.setValue) as put:
+                for _ in range(10):
+                    panel.set_values(bpm=150, scroll=1.5)
+                put.assert_not_called()
+                panel.set_values(bpm=160, scroll=1.5)
+                self.assertEqual(panel.sp_hs_bpm.value(), 240)
+                self.assertEqual(put.call_count, 1)
+        finally:
+            panel.close()
+
     def test_one_bpm_steps_keep_precision_and_emit_scroll(self):
         from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSpinBox
         from PySide6.QtCore import Qt

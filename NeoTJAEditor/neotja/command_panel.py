@@ -437,7 +437,7 @@ class CommandPanel(QFrame):
             return
         self._linking = True
         try:
-            self.sp_hs_bpm.setValue(self.sp_bpm.value() * self._scroll_value())
+            self._put(self.sp_hs_bpm, self.sp_bpm.value() * self._scroll_value())
         finally:
             self._linking = False
 
