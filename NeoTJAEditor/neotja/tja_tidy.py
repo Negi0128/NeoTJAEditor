@@ -172,7 +172,8 @@ def _collapse_same_pos(m):
     dropped = 0
     for i, (pos, line) in enumerate(m.cmds):
         c = _cmd_of(line)
-        if c is not None and c[0] in _VALUE_CMDS and last[(pos, c[0])] != i:
+        if (c is not None and c[0] in _VALUE_CMDS and last[(pos, c[0])] != i
+                and not (c[0] == 'SCROLL' and _same_value('SCROLL', c[1], '1'))):
             dropped += 1
             continue
         keep.append((pos, line))
@@ -202,7 +203,8 @@ def _drop_dead(measures):
                 continue
             name, val = c
             if name in _VALUE_CMDS:
-                if _same_value(name, state.get(name), val):
+                if (_same_value(name, state.get(name), val)
+                        and not (name == 'SCROLL' and _same_value(name, val, '1'))):
                     dropped += 1
                     continue
                 state[name] = val
