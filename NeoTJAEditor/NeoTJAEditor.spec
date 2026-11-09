@@ -31,6 +31,10 @@ from PyInstaller.utils.hooks import collect_submodules
 # QtWidgets のみ。Pdf は PDF 表示、VirtualKeyboard はタッチ端末用ソフト
 # キーボードで、どちらも呼び出していない。
 _DROP_EXACT = {
+    # Qt の Windows ICU は OS 標準を使う。PATH 上の Poppler/Conda の
+    # 同名 DLL は ucnv_open 等の関数名が異なり、QtGui の起動を壊す。
+    'icuuc.dll',
+    'icuin.dll',
     # OpenGL のソフトウェア実装(約 20MB)。描画は QPainter のラスタ経路なので
     # 使われない。GPU ドライバが無い環境向けの保険だが、費用対効果が悪すぎる。
     'PySide6/opengl32sw.dll',
@@ -64,7 +68,7 @@ _DROP_EXACT = {
 
 # Qt の翻訳(約 6.7MB / 124 ファイル)。UI は自前の日本語文言で、Qt 標準
 # ダイアログのボタン程度しか影響しない。
-_DROP_PREFIX = ('PySide6/translations/',)
+_DROP_PREFIX = ('PySide6/translations/', 'icudt')
 
 
 def _slim(entries):

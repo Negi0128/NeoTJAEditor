@@ -32,6 +32,10 @@ _ffmpeg_bin_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 # は使うので Qt の av*.dll と plugins/multimedia は残す。ffmpeg も録画に必須。
 # ---------------------------------------------------------------------------
 _DROP_EXACT = {
+    # Qt の Windows ICU は OS 標準を使う。PATH 上の Poppler/Conda の
+    # 同名 DLL は ucnv_open 等の関数名が異なり、QtGui の起動を壊す。
+    'icuuc.dll',
+    'icuin.dll',
     # OpenGL のソフトウェア実装(約 20MB)。描画は QPainter のラスタ経路。
     'PySide6/opengl32sw.dll',
     'PySide6/Qt6Quick.dll',
@@ -59,7 +63,7 @@ _DROP_EXACT = {
 }
 
 # Qt の翻訳(約 6.7MB)。UI 文言は自前の日本語。
-_DROP_PREFIX = ('PySide6/translations/',)
+_DROP_PREFIX = ('PySide6/translations/', 'icudt')
 
 
 def _slim(entries):
