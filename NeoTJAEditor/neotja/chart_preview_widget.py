@@ -3909,13 +3909,22 @@ class ChartPreviewWidget(QWidget):
         # climbs continuously during playback instead of jumping straight to
         # the whole-course total up front.
         total = 0
-        for spans in (self._rolls, self._balloons, self._kusudamas):
+        for span in self._rolls:
+            start, end, hits = span[0], span[1], span[-1]
+            if end <= now:
+                total += hits
+            elif start <= now < end and end > start:
+                total += int(hits * (now - start) / (end - start))
+        for spans in (self._balloons, self._kusudamas):
             for span in spans:
-                start, end, hits = span[0], span[1], span[-1]
-                if end <= now:
-                    total += hits
-                elif start <= now < end and end > start:
-                    total += int(hits * (now - start) / (end - start))
+                start, end, need = span[0], span[1], span[-1]
+                if now < start:
+                    continue
+                # 打音と同じく区間内に入る打数だけを数える。必要打数を
+                # 短い区間へ詰め込まず、最初の打は区間の頭に入る。
+                speed = self._roll_hit_speed
+                hits = min(int(need), int(max(0.0, end - start) * speed + 1e-6))
+                total += min(max(0, hits), int((now - start) * speed + 1e-6) + 1)
         return total
 
     def set_info_update_cb(self, cb):

@@ -1248,7 +1248,7 @@ def balloon_tick_notes(spans, speed, bpm_index=2):
     from neotja.tja_analyzer import balloon_pop_spans, balloon_pops
     out = []
     for sp in balloon_pop_spans(spans or [], speed):
-        ticks = _roll_tick_notes([sp], bpm_index=bpm_index)
+        ticks = _roll_tick_notes([sp], bpm_index=bpm_index, speed=speed)
         if ticks and balloon_pops(sp, speed):
             ticks.pop()
         out.extend(ticks)
