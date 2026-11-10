@@ -179,8 +179,11 @@ class ChartMinimap(QWidget):
         if abs(a1 - a0) > 40 or abs(b1 - b0) > 40:
             self.update()               # 大きく飛んだ。まとめて塗る
             return
-        for x in (a0, a1, b0, b1):      # 枠の縦線が動いたぶんだけ
-            self._mark_column(x)
+        # 枠の中には半透明の塗りもある。旧端と新端の間をすべて更新しないと、
+        # 5px より大きく動いたときに古い塗りや未描画の隙間が残る。
+        for before, after in ((a0, a1), (b0, b1)):
+            self.update(min(before, after) - 2, 0,
+                        abs(after - before) + 5, self.height())
 
     # ------------------------------------------------------------------
     # 位置の計算
