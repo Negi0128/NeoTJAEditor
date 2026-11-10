@@ -39,6 +39,27 @@ class _CommandDoubleSpinBox(_SelectAllOnClick, QDoubleSpinBox):
     pass
 
 
+class _ScrollSpinBox(_CommandDoubleSpinBox):
+    entered = Signal()
+    stepped = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setKeyboardTracking(False)
+
+    def keyPressEvent(self, event):
+        enter = event.key() in (Qt.Key_Return, Qt.Key_Enter)
+        super().keyPressEvent(event)
+        if enter:
+            self.entered.emit()
+
+    def stepBy(self, steps):
+        old = self.value()
+        super().stepBy(steps)
+        if self.value() != old:
+            self.stepped.emit()
+
+
 class _CommandSpinBox(_SelectAllOnClick, QSpinBox):
     pass
 
@@ -164,7 +185,7 @@ class CommandPanel(QFrame):
 
         # --- スクロール(HS): 倍率と「見た目BPM」。どちらを変えても連動する
         #     (利用者の指定 2026-10-08)。本文へ書くのは倍率のほう。
-        self.sp_hs = _CommandDoubleSpinBox()
+        self.sp_hs = _ScrollSpinBox()
         self.sp_hs.setDecimals(3)
         self.sp_hs.setRange(-100.0, 100.0)
         self.sp_hs.setSingleStep(0.05)
@@ -175,8 +196,8 @@ class CommandPanel(QFrame):
         # 2026-11-05「SCROLLパネル微妙にレイアウト崩れてる」)。
         # 枠の幅(BOX_W=214)は動かせない — 3つ並べて 672 におさめる決まり。
         self.sp_hs.setFixedWidth(70)
-        self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。")
-        self.sp_hs_bpm = _CommandDoubleSpinBox()
+        self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。Enterでカーソル位置へ配置します。")
+        self.sp_hs_bpm = _ScrollSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
         self.sp_hs_bpm.setSingleStep(1.0)
@@ -184,20 +205,21 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm.setFixedWidth(68)
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
-            "ここを変えると倍率もそれに合わせて変わる。")
+            "Enterで倍率をカーソル位置へ配置します。")
         # スクロールの「!」(ハイスピ変換)は外した。「追加」を足したぶん
         # 欄が狭く、同じことはツールバーの「ハイスピ変換」と右クリックの
         # メニューからできる(利用者の指定 2026-11-05)。
         self.sp_hs.valueChanged.connect(self._on_hs_value_changed)
         grid.addWidget(self._box("hs", "スクロール  倍率 / 見た目BPM",
                                  [self.sp_hs, self.sp_hs_bpm], "SCROLL",
-                                 self._scroll_value, auto=True,
-                                 auto_on=[self.sp_hs], button=True,
-                                 mark=None),
+                                 self._scroll_value, mark=None),
                        0, 2)
         # 倍率 ⇔ 見た目BPM の連動。BPM の欄が動いたときも見た目を出し直す。
         self.sp_bpm.valueChanged.connect(self._sync_hs_bpm)
         self.sp_hs_bpm.valueChanged.connect(self._on_hs_bpm_changed)
+        for spin in (self.sp_hs, self.sp_hs_bpm):
+            spin.entered.connect(lambda: self.placeCommand.emit("SCROLL", self._scroll_value()))
+            spin.stepped.connect(self._apply_scroll_step)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---
         # 小節線の「!」は使い道が無いので出さない(利用者の指定 2026-10-31)。
@@ -340,7 +362,7 @@ class CommandPanel(QFrame):
     AUTO_DELAY_MS = 0
 
     def _box(self, kind, title, widgets, name, get_value, auto=False,
-             auto_on=None, mark="selection", button=None, btn_w=52):
+             mark="selection", button=None, btn_w=52):
         """[見出し / 値の欄… (+ 追加(変更))] の枠。
 
         その位置に同じ命令が居るときは editCommand(新しく足すのではなく、
@@ -350,11 +372,7 @@ class CommandPanel(QFrame):
         カーソルに合わせて欄を書き換えるとき(set_values)は入れない —
         動かすたびに命令が増えてしまうため。
 
-        button は「追加」ボタンを出すか。既定(None)は auto の裏返しで、
-        auto の欄には出さない。**auto と両立する** — スクロールは値をいじれば
-        入るが、それだと「いまと同じ倍率をもう一か所へ置く」手が無かった
-        (利用者の報告 2026-11-04「SCROLLを変更するかコピペしないとつかない」)。
-        同じ値でも押せば置けるように、auto のままボタンも出す。"""
+        button は「追加」ボタンを出すか。既定(None)は auto の裏返し。"""
         box, row = self._new_box(title)
         for wdg in widgets:
             row.addWidget(wdg)
@@ -394,10 +412,7 @@ class CommandPanel(QFrame):
                 setter = getattr(wdg, "setKeyboardTracking", None)
                 if setter is not None:
                     setter(False)
-            # auto_on を渡したときは、その欄が動いたときだけ入れる。
-            # (スクロールの「見た目BPM」は倍率へ写してから入れるので、
-            #  こちらを直に繋ぐと写す前の倍率で入ってしまう)
-            for wdg in (widgets if auto_on is None else auto_on):
+            for wdg in widgets:
                 sig = getattr(wdg, "valueChanged", None)
                 if sig is None:
                     continue
@@ -442,10 +457,7 @@ class CommandPanel(QFrame):
             self._linking = False
 
     def _on_hs_bpm_changed(self, *_a):
-        """見た目BPM が動いた → 倍率へ写す。
-
-        写した先(sp_hs)の valueChanged が本文への書き込みを起こすので、
-        ここでは譜面に触らない。BPM が 0 のときは割れないので何もしない。"""
+        """見た目BPMを倍率へ写す。配置はEnter・上下ボタンの操作で確定する。"""
         if self._linking or self._syncing:
             return
         base = self.sp_bpm.value()
@@ -459,8 +471,10 @@ class CommandPanel(QFrame):
             self.sp_hs_bpm.setValue(base * want)
         finally:
             self._linking = False
-        # 表示用の3桁が変わらない微調整でも、正確な倍率を即適用する。
-        self._auto_changed('hs', self._auto_timers['hs'], self._scroll_value)
+
+    def _apply_scroll_step(self):
+        signal = self.editCommand if "hs" in self._editing else self.placeCommand
+        signal.emit("SCROLL", self._scroll_value())
 
     def _scroll_value(self):
         return self.sp_hs.value() if self._hs_exact is None else self._hs_exact
