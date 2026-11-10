@@ -341,6 +341,7 @@ class ChartEditWaveform(WaveformWidget):
         self._own_seek_until = 0.0
         # 再生中か(preview_dock が入れる)。再生中は黄色いカーソルを描かない。
         self._playing = False
+        self._follow_transition = None
         # 右クリックを押した時点の範囲と位置。動かさずに離したとき(=メニュー)は
         # 範囲を押す前に戻し、その位置でメニューを出す。
         # いま出ている命令の入力欄(テストから触るため覚えておく)。
@@ -740,7 +741,23 @@ class ChartEditWaveform(WaveformWidget):
         if not self._follow_now(seconds, span):
             return self.view_start      # ホイールで送った景色のまま
         self._stop_view_anim()
-        return super()._follow_view_start(seconds, span)
+        target = super()._follow_view_start(seconds, span)
+        if self._follow_transition is None:
+            return target
+        started, offset = self._follow_transition
+        u = (time.monotonic() - started) / self.VIEW_ANIM_SEC
+        if u >= 1.0:
+            self._follow_transition = None
+            return target
+        # 再生時刻はそのまま進め、停止時の景色と追従位置の差だけを減らす。
+        # シークしても target はすぐ新しい時刻に追従する。
+        remaining = (1.0 - u) ** 2 * (1.0 + 2.0 * u)
+        return max(0.0, min(target + offset * remaining,
+                            max(0.0, self.duration - span)))
+
+    def scroll_view_free(self, step, span=None):
+        self._follow_transition = None
+        super().scroll_view_free(step, span)
 
     #: 1小節目より前(頭の助走の中)に置いた赤い線の時刻。小節もグリッドも
     #: 無いのでカーソルの住所では表せない。置いていなければ None。
@@ -831,8 +848,15 @@ class ChartEditWaveform(WaveformWidget):
         playing = bool(playing)
         if playing != self._playing:
             self._playing = playing
+            self._follow_transition = None
             if playing:
                 self._view_free = False
+                if self._follow_window:
+                    self._stop_view_anim()
+                    target = super()._follow_view_start(self.position_sec,
+                                                        self._visible_span())
+                    self._follow_transition = (time.monotonic(),
+                                               self.view_start - target)
             self.update()
 
     def set_cursor_address(self, m, slot):
