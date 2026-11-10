@@ -1871,6 +1871,8 @@ def run_op(text, course_range, op):
         return op_region_items(text, course_range, op.get("items") or [],
                                op.get("region"), op.get("on", True),
                                str(op.get("mode") or "runs"))
+    if kind == "lyric_end":
+        return op_lyric_end(text, course_range, Fraction(*op["head"]), Fraction(*op["dest"]))
     if kind == "command_value":
         p = op.get("pos") or (0, 1)
         return op_command_value(text, course_range, Fraction(int(p[0]), int(p[1])),
@@ -2150,6 +2152,39 @@ def _insert_line_at(text, body, spans, m, slot, grid, new_line):
     # 音符行の途中。そこで行を割って間に入れる。
     pos = a + off
     return text[:pos] + "\n" + new_line + "\n" + text[pos:]
+
+
+def op_lyric_end(text, course_range, head, dest):
+    """歌詞本体の開始位置を保ち、停止行だけを一度の編集で移す。"""
+    body = course_body_span(text, course_range)
+    if body is None:
+        return None
+    lyrics = [(p, v) for p, n, v in command_items(text, body) if n == "LYRIC"]
+    idx = next((i for i, (p, v) in enumerate(lyrics) if p == head and v), None)
+    if idx is None or dest <= head:
+        return None
+    course_end = Fraction(len(measure_spans(text, body)))
+    stop = None
+    following = idx + 1
+    if following < len(lyrics) and not lyrics[following][1]:
+        stop = lyrics[following][0]
+        following += 1
+    limit = lyrics[following][0] if following < len(lyrics) else course_end
+    dest = min(dest, limit)
+    if dest == (stop if stop is not None else limit):
+        return None
+    new, rng = text, course_range
+    if stop is not None:
+        frac = stop % 1
+        new = set_command(text, rng, int(stop), frac.numerator, frac.denominator, "LYRIC", None)
+        if new is None:
+            return None
+        rng = (rng[0], rng[1] + new.count("\n") - text.count("\n"))
+    # 次の歌詞・曲末では自然に終わる。隣の歌詞を停止行で上書きしない。
+    if dest < limit:
+        frac = dest % 1
+        new = set_command(new, rng, int(dest), frac.numerator, frac.denominator, "LYRIC", "")
+    return None if new is None else _result(text, new, reparse=True)
 
 
 def op_command(text, course_range, m, slot, grid, name, value):

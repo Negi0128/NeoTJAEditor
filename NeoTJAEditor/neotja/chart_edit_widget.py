@@ -518,6 +518,82 @@ class ChartEditWaveform(WaveformWidget):
 
     #: いまの歌詞 [(譜面時刻, 文字)]。札の字面ではなく**元の文字**。
     _lyrics_raw = ()
+    _lyric_drag = None
+
+    def _lyric_spans(self, t0, t1):
+        """表示範囲にかかる歌詞 (開始, 終了, 動かせる上限, 全文)。時刻は音源基準。"""
+        lyrics = self._lyrics_raw
+        if not lyrics:
+            return
+        times = (self._cmd_kind_times or {}).get("lyric", ())
+        course_end = self._time_of_pos(Fraction(self._known_measures()))
+        if course_end is None:
+            return
+        lo = max(0, bisect.bisect_left(times, t0) - 1)
+        for i in range(lo, len(lyrics)):
+            t, txt = lyrics[i]
+            start = t - self.offset
+            if start > t1:
+                break
+            if not txt:
+                continue
+            j = i + 1
+            end = lyrics[j][0] - self.offset if j < len(lyrics) else course_end
+            if j < len(lyrics) and not lyrics[j][1]:
+                j += 1
+            limit = lyrics[j][0] - self.offset if j < len(lyrics) else course_end
+            if end > start:
+                yield start, end, limit, txt
+
+    def _lyric_handle_at(self, x, y):
+        top, height = self._row_rects()["lyric"]
+        if not top + 3 <= y < top + height - 3:
+            return None
+        # 境界のすぐ右は次の歌詞の開始札。右端の内側だけをつかむ。
+        for span in self._lyric_spans(self._x_to_sec(x - 1), self._x_to_sec(x + 6)):
+            edge = self._sec_to_x(span[1])
+            if self._sec_to_x(span[0]) < x and edge - 5 <= x <= edge:
+                return span
+        return None
+
+    def _update_lyric_drag(self, x):
+        drag = self._lyric_drag
+        address = self._address_from_time(self._x_to_sec(x), nearest=True)
+        if address is None:
+            return
+        m, slot = address
+        dest = self._address_time(m, slot, self._measure_grid(m))
+        if dest is not None:
+            # 開始と同じ位置に停止印を置くと歌詞を消すので、最低1目盛を残す。
+            start, _, limit, _ = drag["span"]
+            first = self._address_from_time(start, nearest=False)
+            if first is None:
+                return
+            fm, fs = first
+            minimum = self._address_time(fm, fs + 1, self._measure_grid(fm))
+            drag["end"] = min(limit, max(dest, minimum))
+            self.update()
+
+    def _draw_lyric_bands(self, p, y, h, t0, t1):
+        col = QColor(self.LYRIC_COLOR)
+        fill = QColor(col)
+        fill.setAlpha(70)
+        p.save()
+        p.setPen(col)
+        f = self.font()
+        f.setPixelSize(self.fpx(11))
+        p.setFont(f)
+        for start, end, _, txt in self._lyric_spans(t0, t1):
+            if self._lyric_drag and self._lyric_drag["span"][0] == start:
+                end = self._lyric_drag["end"]
+            x, r = self._sec_to_x(start), self._sec_to_x(end)
+            w = max(1, r - x)
+            p.fillRect(x, y + 3, w, h - 6, fill)
+            p.drawRect(x, y + 3, w, h - 6)
+            p.fillRect(r - min(3, w), y + 5, min(3, w), h - 10, col)
+            if w > 10:
+                p.drawText(x + 5, y, w - 10, h, Qt.AlignVCenter | Qt.AlignLeft, txt)
+        p.restore()
 
     def lyric_at(self, t, tol=None):
         """その時刻に置いてある歌詞。無ければ None。"""
@@ -734,7 +810,7 @@ class ChartEditWaveform(WaveformWidget):
         """
         if span <= 0:
             return self.view_start
-        if self._note_drag is not None:
+        if self._note_drag is not None or self._lyric_drag is not None:
             return self.view_start
         if not self._playing:
             return self.view_start      # 停止中は追従しない
@@ -776,7 +852,7 @@ class ChartEditWaveform(WaveformWidget):
         **囲んだ範囲が壊れる**(右ドラッグの帯が張られない)。シークの追従は
         そのあいだ休ませる。
         """
-        return bool(self._band is not None or self._note_drag is not None
+        return bool(self._band is not None or self._note_drag is not None or self._lyric_drag is not None
                     or self._pending_measure is not None
                     or self._dragging)
 
@@ -1172,6 +1248,14 @@ class ChartEditWaveform(WaveformWidget):
                 self._pending_measure = (mm, x, ctrl)
                 self._dragging = True
                 return
+            handle = None if ctrl else self._lyric_handle_at(x, y)
+            if handle:
+                self._stop_view_anim()
+                self._lyric_drag = {"span": handle, "end": handle[1], "x0": x}
+                self.setCursor(Qt.SizeHorCursor)
+                self.update()
+                event.accept()
+                return
             obj = self._object_at(x, y)
             if obj is None and self.near_playhead(x, y):
                 # 赤い線そのものをつかんで運ぶ(利用者の指定 2026-11-05
@@ -1238,6 +1322,9 @@ class ChartEditWaveform(WaveformWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._lyric_drag is not None and event.buttons() & Qt.LeftButton:
+            self._update_lyric_drag(event.position().x())
+            return
         if self._note_drag is not None and (event.buttons() & Qt.LeftButton):
             # 掴んでいるあいだは 1px ごとに付いてくる(置くときだけグリッド)。
             self._note_drag["dx"] = event.position().x() - self._note_drag["x0"]
@@ -1260,7 +1347,7 @@ class ChartEditWaveform(WaveformWidget):
         if not (event.buttons() & (Qt.LeftButton | Qt.RightButton)):
             hx, hy = event.position().x(), event.position().y()
             hit = self._object_at(hx, hy)
-            grab = hit is not None or self.near_playhead(hx, hy)
+            grab = hit is not None or self.near_playhead(hx, hy) or self._lyric_handle_at(hx, hy)
             self.setCursor(Qt.SizeHorCursor if grab else Qt.ArrowCursor)
         # 目盛りの帯を擦っているあいだ、編集カーソルも一緒に付いていく
         # (シークはカーソルがグリッドの位置で出す)。
@@ -1279,6 +1366,21 @@ class ChartEditWaveform(WaveformWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._lyric_drag is not None:
+            drag = self._lyric_drag
+            x = event.position().x()
+            if abs(x - drag["x0"]) >= 3:
+                self._update_lyric_drag(x)
+                start, end, _, _ = drag["span"]
+                if abs(drag["end"] - end) > 1e-8:
+                    head, dest = self._pos_of_time(start), self._pos_of_time(drag["end"])
+                    if head is not None and dest is not None:
+                        self._run_op({"kind": "lyric_end", "head": (head.numerator, head.denominator),
+                                      "dest": (dest.numerator, dest.denominator)})
+            self._lyric_drag = None
+            self.unsetCursor()
+            self.update()
+            return
         if event.button() == Qt.LeftButton and self._pending_measure is not None:
             mm, _x, ctrl = self._pending_measure
             self._pending_measure = None
@@ -3538,7 +3640,7 @@ class ChartEditWaveform(WaveformWidget):
                 self.devicePixelRatioF(), round(self._visible_span(), 6),
                 # グリッドは表示範囲の全小節に引くので、再生位置に依存しない。
                 # ドラッグ開始・終了で範囲命令を静的/動的描画に切り替える。
-                self._note_drag is not None,
+                self._note_drag is not None, self._lyric_drag is not None,
                 self._grid, self._strip_rev, self._wave_gain,
                 self._show_legend, pal.get("bg"), pal.get("bg2"),
                 pal.get("border"), pal.get("fg"),
@@ -3648,7 +3750,11 @@ class ChartEditWaveform(WaveformWidget):
         rows = self._row_rects()
         for kind in ("bpm", "measure", "hs", "lyric"):
             y, rh = rows[kind]
-            self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
+            if kind == "lyric":
+                if self._lyric_drag is None:
+                    self._draw_lyric_bands(p, y, rh, t0, t1)
+            else:
+                self._draw_cmd_row(p, kind, y, rh, t0, t1, right=w)
         self._draw_ruler(p, t0, t1)
 
     #: 描いているあいだの**本当の**表示の左端。帯に合わせて view_start を
@@ -3707,6 +3813,8 @@ class ChartEditWaveform(WaveformWidget):
         self._draw_notes(p, self._lane_w(), t0, t1, note_cy)
         self._draw_long_preview(p, note_top, upper_h)
         self._draw_pending(p, note_top, upper_h)
+        if self._lyric_drag is not None:
+            self._draw_lyric_bands(p, *rows["lyric"], t0, t1)
         if self._note_drag is not None:
             self._draw_region_tracks(p, rows, t0, t1)
 
