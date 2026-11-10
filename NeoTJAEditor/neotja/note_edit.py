@@ -293,87 +293,77 @@ def division_needed(text, course_range, m_index, grid):
     return int(m * grid // math.gcd(m, grid))
 
 
+def _measure_digit_positions(chunk):
+    """音符だけの文字位置と、命令・コメントのあるスロット境界を返す。"""
+    offsets, cuts = [], []
+    pos = 0
+    for line in chunk.splitlines(True):
+        if line.lstrip().startswith(('#', '//')):
+            cuts.append(len(offsets))
+        else:
+            code = line.split('//', 1)[0]
+            offsets.extend(pos + i for i, c in enumerate(code) if c in NOTE_CHARS)
+            if '//' in line:
+                cuts.append(len(offsets))
+        pos += len(line)
+    return offsets, cuts
+
+
 def set_slot(text, body, m_index, slot, grid, char):
-    """小節 m_index のスロット slot (分割数 grid) に char を書く。
-
-    戻り値 (start, end, 置換文字列, 置換後カーソル位置)。置けないときは None。
-
-    L(その小節の現在の分割数) が grid の倍数なら**1文字だけ**差し替える。
-    行の折り返しもコメントも命令行も一切触らないので、テキストの差分が
-    最小で済む(最頻ケース)。倍数でないときだけ、情報を落とさない最小の
-    分割数へ小節ごと書き直す。"""
-    if char not in NOTE_CHARS or grid <= 0 or m_index < 0:
+    """指定位置を編集し、音符・命令・コメントの時刻を保つ最小分割へ畳む。"""
+    if char not in NOTE_CHARS or grid <= 0 or m_index < 0 or not 0 <= slot < grid:
         return None
     spans = measure_spans(text, body)
     if m_index >= len(spans):
-        # 譜面の末尾より先。足りないぶんの空小節を作ってから置く。小節が
-        # 1つも無い譜面(新規作成直後)でも、ここを通って打ち始められる。
         return _extend_and_set(text, body, spans, m_index, slot, grid, char)
     a, b = spans[m_index]
     chunk = text[a:b]
-
-    parsed = parse_measure_lines(chunk)
-    measure = None
-    for p in parsed:
-        if p["type"] == "measure":
-            measure = p
-            break
-    if measure is None:
+    offsets, cuts = _measure_digit_positions(chunk)
+    length = len(offsets)
+    notes = {Fraction(i, length): chunk[p] for i, p in enumerate(offsets)
+             if chunk[p] != "0"}
+    position = Fraction(slot, grid)
+    if notes.get(position, "0") == char:
         return None
-    notes = measure["notes"]
-    L = len(notes)
-    if not (0 <= slot < grid):
+    if char == "0":
+        notes.pop(position)
+    else:
+        notes[position] = char
+    target = 1
+    for when in notes:
+        target = math.lcm(target, when.denominator)
+    for cut in cuts:
+        if length:
+            target = math.lcm(target, Fraction(cut, length).denominator)
+    if target > MAX_DIVISION and target != length:
         return None
+    if length == target:
+        p = a + offsets[int(position * target)]
+        return (p, p + 1, char, p + 1)
 
-    # --- 再分割が要らない場合: 1文字だけ置き換える ---
-    if L > 0 and L % grid == 0:
-        idx = (slot * L) // grid
-        if notes[idx] == char:
-            return None          # 変化なし
-        pos = _nth_digit_offset(chunk, idx)
-        if pos is None:
+    digits = ["0"] * target
+    for when, note in notes.items():
+        digits[int(when * target)] = note
+    if not offsets:
+        # 数字が無い小節はカンマの直前へ追加する。命令・コメント内の
+        # カンマと取り違えないよう、区切りを末尾から探す。
+        end = chunk.rstrip()
+        if not end.endswith(",") or end.rsplit("\n", 1)[-1].lstrip().startswith(("#", "//")):
             return None
-        return (a + pos, a + pos + 1, char, a + pos + 1)
+        p = len(end) - 1
+        return (a + p, a + p, "".join(digits), a + p + target)
 
-    # --- 再分割する場合 ---
-    # 情報を落とさずに書ける最小分割数(m)と grid の最小公倍数。
-    m = min_len(notes) if L > 0 else grid
-    # 命令の位置も再分割で保つ。音符だけを最小化すると途中のBPM等がずれる。
-    for cut, _line in measure['breaks']:
-        if L and 0 < cut < L:
-            den = Fraction(cut, L).denominator
-            m = m * den // math.gcd(m, den)
-    if m <= 0:
-        m = grid
-    target = m * grid // math.gcd(m, grid)
-    if target > MAX_DIVISION:
-        return None
-    converted = convert_notes(notes, target) if L > 0 else "0" * target
-    if len(converted) != target:
-        # convert_notes は target が min_len の倍数でないと長さが合わない。
-        # 上で LCM を取っているので通常は来ないが、来たら何もしない。
-        return None
-    idx = (slot * target) // grid
-    if not (0 <= idx < target):
-        return None
-    if converted[idx] == char:
-        return None
-    # parsed はこの場で作った使い捨てなので、そのまま書き換えてよい。
-    measure["notes"] = converted[:idx] + char + converted[idx + 1:]
-    # breaks(小節の途中の命令行)の位置は「元の分割数での何文字目か」で
-    # 記録されている。notes を target 長へ差し替えた以上、この位置も同じ
-    # 座標系へ直さないと、render_converted の割合計算が素通りしてしまい
-    # 命令行が元の文字数の位置に取り残される。
-    if L > 0 and target != L:
-        measure["breaks"] = [(min(target, (bidx * target) // L), line)
-                             for bidx, line in measure["breaks"]]
-    # render_converted は指定分割へ書き直す。notes は既に target 長なので
-    # 中身は変わらず、行の折り返しと命令行の位置だけが組み直される。
-    replacement = render_converted(parsed, target, _wrap_for(target))
-    # render_converted は末尾に改行を付けない。元の小節が改行で終わって
-    # いたら足す — でないと次の小節と1行に繋がってしまう。
-    if chunk.endswith("\n") and not replacement.endswith("\n"):
-        replacement += "\n"
+    # 元の各スロットの時間範囲に入る新しい文字だけを書き戻す。
+    # 命令、コメント、インデント、改行は元の並びをそのまま使う。
+    pieces = []
+    prev_end = prev_digit = 0
+    for i, p in enumerate(offsets, 1):
+        end_digit = (i * target + length - 1) // length
+        pieces.append(chunk[prev_end:p])
+        pieces.extend(digits[prev_digit:end_digit])
+        prev_end, prev_digit = p + 1, end_digit
+    pieces.append(chunk[prev_end:])
+    replacement = "".join(pieces)
     return (a, b, replacement, a + len(replacement))
 
 
@@ -392,19 +382,13 @@ def _extend_and_set(text, body, spans, m_index, slot, grid, char):
     if need <= 0:
         return None
 
-    wrap = _wrap_for(grid)
-    chunks = []
-    for i in range(need):
-        notes = ["0"] * grid
-        if i == need - 1:
-            notes[slot] = char
-        s = "".join(notes)
-        if wrap and grid > wrap:
-            lines = [s[j:j + wrap] for j in range(0, grid, wrap)]
-        else:
-            lines = [s]
-        lines[-1] += ","
-        chunks.append("\n".join(lines))
+    chunks = ["0,"] * (need - 1)
+    position = Fraction(slot, grid)
+    digits = ["0"] * position.denominator
+    digits[position.numerator] = char
+    wrap = _wrap_for(len(digits)) or len(digits)
+    lines = ["".join(digits[j:j + wrap]) for j in range(0, len(digits), wrap)]
+    chunks.append("\n".join(lines) + ",")
     # 直前が改行で終わっていなければ、まず行を改める。
     prefix = "" if (ins == 0 or text[ins - 1] == "\n") else "\n"
     replacement = prefix + "\n".join(chunks) + "\n"
