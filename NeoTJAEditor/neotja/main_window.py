@@ -465,10 +465,8 @@ class MainWindow(QMainWindow):
         sb_layout = QVBoxLayout(self.sb_outer)
         sb_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.sb_title = QLabel("")
-        self.sb_title.setWordWrap(True)
-        self.sb_title.setContentsMargins(8, 8, 8, 8)
-        sb_layout.addWidget(self.sb_title)
+        # 曲名・サブタイトルの札は置かない(利用者の指定 2026-11-12)。右下の
+        # 設定欄の TITLE / SUBTITLE が同じものを出すので二重になる。
 
         # 連打秒速の欄は右下の設定欄(連打速度)へ移した(_build_bottom_controls)。
         self.sb_scroll = QScrollArea()
@@ -539,13 +537,18 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.right_pane)
 
         splitter.setSizes([640, 1280])
+        # 余った幅は左(TJA)へ。再生画面は原寸(1280)が上限なので、右を
+        # それより広げても余白が増えるだけ。1:2 の比で分けると 1920 幅で
+        # 右が 1277 になり、再生画面が 99.8% の縮小表示に落ちていた。
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(1, 0)
         # どちらも畳ませない。0 幅まで畳むと取っ手が窓の端に貼り付いて、
         # つかめず開けなくなる(利用者の報告 2026-10-17)。
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
-        self.editor_container.setMinimumWidth(240)
+        # 右下の設定欄(5 段。OFFSET と DEMOSTART が同じ段)の最小幅が
+        # 1196 あるので、1400 幅の窓にも入るように左は 200 まで譲る。
+        self.editor_container.setMinimumWidth(200)
         self.right_pane.setMinimumWidth(320)
         self.right_pane.resize_cb = self._fit_player_to_pane
         self.splitter = splitter   # 分割比の保存/復元に使う
@@ -554,9 +557,10 @@ class MainWindow(QMainWindow):
     def _fit_player_to_pane(self):
         """右ペインの幅と高さに合わせて再生画面の倍率を決める(原寸が上限)。
 
-        幅だけで決めると、1920x1040 の窓では原寸(1280 幅)になって、下の
-        設定欄(7 段)が窓の下へはみ出す(通常再生は画面が 720 ぶん高い)。
-        下の段の最小の高さを引いた残りにも収まる倍率にする。"""
+        幅だけで決めると、窓が低いとき下の設定欄が窓の下へはみ出す
+        (通常再生は画面が 720 ぶん高い)。下の段の最小の高さを引いた残りにも
+        収まる倍率にする。5 段にしてからは 1920x1040 なら原寸で収まるが、
+        もっと低い窓(1400x900 など)のための保険として残す。"""
         dock = getattr(self, "preview_dock", None)
         if dock is None or getattr(self, "_fitting_player", False):
             return
@@ -687,10 +691,13 @@ class MainWindow(QMainWindow):
             "#settingsPanel QPushButton, #bpmBox QPushButton"
             " {{ padding: 2px 10px; min-height: 18px; }}"
             "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
+            "#settingsPanel QPushButton#demostartBtn {{ padding: 2px 6px; }}"
             "#settingsPanel QLineEdit, #settingsPanel QSpinBox,"
             " #settingsPanel QDoubleSpinBox, #settingsPanel QComboBox"
             " {{ padding: 2px 4px; min-height: 18px; }}"
             "#settingsPanel QLabel#fieldLabel {{ color: {fg}; }}"
+            "#settingsPanel QFrame#rowSeparator {{ border: none;"
+            " background: {border}; }}"
             "QPushButton#bpmTap {{ border-radius: {r}px; border: 1px solid"
             " {border}; background: {bg3}; font-size: 15px; }}"
             "QPushButton#bpmTap:pressed {{ background: {accent}; }}"
@@ -698,8 +705,9 @@ class MainWindow(QMainWindow):
         ).format(border=c["border"], fg=c["fg"], bg3=c["bg3"],
                  accent=c["accent"], r=self.TAP_DIAMETER // 2)
 
-    #: BPM測定の「タップ」の直径(px)。右下の段に収まる大きさ。
-    TAP_DIAMETER = 120
+    #: BPM測定の「タップ」の直径(px)。右下の段(設定欄 5 段ぶん)に収まり、
+    #: 通常再生(720 高)を 1920x1040 で原寸のまま置ける大きさ。
+    TAP_DIAMETER = 110
 
     def _restyle_bottom_controls(self):
         for w in (getattr(self, "settings_panel", None),
@@ -723,8 +731,8 @@ class MainWindow(QMainWindow):
         self.bpm_box.setObjectName("bpmBox")
         self.bpm_box.setFixedWidth(236)
         bv = QVBoxLayout(self.bpm_box)
-        bv.setContentsMargins(8, 4, 8, 6)
-        bv.setSpacing(4)
+        bv.setContentsMargins(8, 4, 8, 4)
+        bv.setSpacing(3)
         bv.addWidget(QLabel("BPM測定"))
         mid = QHBoxLayout()
         mid.setSpacing(10)
@@ -762,20 +770,40 @@ class MainWindow(QMainWindow):
             fr = QFrame()
             fr.setObjectName("settingsRow")
             h = QHBoxLayout(fr)
-            h.setContentsMargins(8, 1, 8, 1)
-            h.setSpacing(6)
+            h.setContentsMargins(6, 2, 6, 2)
+            # 札と欄は近く(5px)、項目と項目のあいだは広く(gap())。
+            h.setSpacing(5)
             pv.addWidget(fr)
             return h
 
-        def label(text, w=64):
+        def label(text):
             lb = QLabel(text)
             lb.setObjectName("fieldLabel")
-            lb.setMinimumWidth(w)
             return lb
+
+        def gap(h, n=1):
+            """項目と項目のあいだ。固定の 8px に加えて伸びる余白を置く。
+            固定ぶんは段の最小幅に効くので控えめに(1400 幅の窓でも
+            右ペインが収まるように)。広い窓では余白が伸びて間が空く。"""
+            h.addSpacing(8)
+            h.addStretch(n)
+
+        def vline(h):
+            """段の中の縦の仕切り線(再生速度 │ 再現FPS)。"""
+            # VLine の形は使わない — スタイルシートを当てると枠の描き方が
+            # 変わって線が出ないことがあるので、1px 幅の箱を塗って線にする。
+            ln = QFrame()
+            ln.setObjectName("rowSeparator")
+            ln.setFixedWidth(1)
+            h.addSpacing(10)
+            h.addWidget(ln)
+            h.addSpacing(10)
 
         #: ヘッダ→欄 の反映中(欄→ヘッダ の書き戻しを跳ね返さない)。
         self._syncing_fields = False
 
+        # 段は 5 つ(利用者の指定 2026-11-12)。7 段だと通常再生(720 高)の
+        # とき下がはみ出して再生画面を縮めるしかなかった。
         # 1. TITLE / SUBTITLE
         h = row()
         h.addWidget(label("TITLE"))
@@ -783,7 +811,7 @@ class MainWindow(QMainWindow):
         self.fld_title.editingFinished.connect(
             lambda: self._apply_text_field("TITLE", self.fld_title))
         h.addWidget(self.fld_title, 3)
-        h.addStretch(1)
+        gap(h)
         h.addWidget(label("SUBTITLE"))
         self.fld_subtitle = QLineEdit()
         self.fld_subtitle.setToolTip("先頭の -- / ++ は打ったとおりに残します。")
@@ -791,97 +819,82 @@ class MainWindow(QMainWindow):
             lambda: self._apply_text_field("SUBTITLE", self.fld_subtitle))
         h.addWidget(self.fld_subtitle, 3)
 
-        # 2. コース / 難易度
+        # 2. コース / 難易度 / BPM / メトロノーム
         h = row()
         h.addWidget(label("コース"))
         self.btn_course = QPushButton("-")
         self.btn_course.setFocusPolicy(Qt.NoFocus)
-        self.btn_course.setMinimumWidth(150)
+        self.btn_course.setMinimumWidth(120)
         self.btn_course.setToolTip("押すとコースを順に切り替えます"
                                    "(レーン上のコース切替と同じ)")
         self.btn_course.clicked.connect(pd._on_course_button)
-        h.addWidget(self.btn_course, 2)
-        h.addStretch(1)
+        h.addWidget(self.btn_course, 1)
+        gap(h)
         h.addWidget(label("難易度"))
         self.cmb_level = QComboBox()
         for n in range(1, 11):
             self.cmb_level.addItem("★%d" % n, n)
-        self.cmb_level.setFixedWidth(92)
+        self.cmb_level.setFixedWidth(84)
         self.cmb_level.setFocusPolicy(Qt.NoFocus)
         self.cmb_level.setToolTip("いま映しているコースの LEVEL: を書き換えます")
         self.cmb_level.currentIndexChanged.connect(self._on_level_combo)
         h.addWidget(self.cmb_level)
-        h.addStretch(2)
-
-        # 3. 基本BPM / メトロノーム
-        h = row()
-        h.addWidget(label("基本BPM"))
+        gap(h)
+        h.addWidget(label("BPM"))
         self.fld_bpm = QLineEdit()
         self.fld_bpm.setAlignment(Qt.AlignCenter)
-        self.fld_bpm.setFixedWidth(150)
+        self.fld_bpm.setFixedWidth(96)
         self.fld_bpm.setToolTip("ヘッダの BPM:。小数は打ったとおりに残します"
                                 "(137.250 など)。")
         self.fld_bpm.editingFinished.connect(self._apply_bpm_field)
         h.addWidget(self.fld_bpm)
-        h.addStretch(1)
+        gap(h)
         pd.btn_metronome.setFocusPolicy(Qt.NoFocus)
-        pd.btn_metronome.setMinimumWidth(150)
-        h.addWidget(pd.btn_metronome, 2)
-        h.addStretch(2)
+        pd.btn_metronome.setMinimumWidth(120)
+        h.addWidget(pd.btn_metronome, 1)
 
-        # 4. OFFSET
+        # 3. OFFSET / DEMOSTART
         h = row()
         h.addWidget(label("OFFSET"))
         for b in pd.offset_buttons:
             b.setFocusPolicy(Qt.NoFocus)
-            b.setFixedWidth(52)
+            b.setFixedWidth(44)
             b.setObjectName("offsetStep")
         for b in pd.offset_buttons[:3]:
             h.addWidget(b)
-        pd.spin_offset.setFixedWidth(110)
+        pd.spin_offset.setFixedWidth(80)
+        pd.spin_offset.setAlignment(Qt.AlignCenter)
         h.addWidget(pd.spin_offset)
         for b in pd.offset_buttons[3:]:
             h.addWidget(b)
-        h.addStretch(1)
-
-        # 5. 連打速度(設定 roll_speed。以前は左の難易度パネルの上にあった)
-        h = row()
-        h.addWidget(label("連打速度"))
-        self.roll_speed_spin = QSpinBox()
-        self.roll_speed_spin.setRange(1, 100)
-        self.roll_speed_spin.setSuffix(" 打/s")
-        self.roll_speed_spin.setAlignment(Qt.AlignCenter)
-        self.roll_speed_spin.setFixedWidth(150)
-        self.roll_speed_spin.setKeyboardTracking(False)
-        self.roll_speed_spin.setToolTip("連打を1秒に何回叩いた想定で数えるか")
-        self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
-        self.roll_speed_spin.valueChanged.connect(self._on_roll_speed_changed)
-        h.addWidget(self.roll_speed_spin)
-        h.addStretch(1)
-        # DEMOSTART はこの段の右に置く(6 段目に入れると 1400 幅で切れる)。
-        self.btn_demostart = QPushButton("現在位置をDEMOSTARTに")
+        gap(h)
+        h.addWidget(label("DEMOSTART"))
+        self.btn_demostart = QPushButton("現在位置を DEMOSTART に")
+        self.btn_demostart.setObjectName("demostartBtn")
         self.btn_demostart.setFocusPolicy(Qt.NoFocus)
         self.btn_demostart.setToolTip("いま止まっている/鳴っている位置を"
                                       "試聴開始(DEMOSTART:)にします")
         self.btn_demostart.clicked.connect(pd.demostart_here)
         h.addWidget(self.btn_demostart)
 
-        # 6. 音声を再接続 / 再生速度 / 再現FPS
+        # 4. 音声を再接続 / 再生速度 │ 再現FPS / 連打秒速
         h = row()
         pd.btn_reopen_audio.setFocusPolicy(Qt.NoFocus)
         h.addWidget(pd.btn_reopen_audio)
-        h.addStretch(1)
+        gap(h)
         h.addWidget(label("再生速度"))
         self.btn_speed_cycle = QPushButton("x1.0")
         self.btn_speed_cycle.setFocusPolicy(Qt.NoFocus)
-        self.btn_speed_cycle.setFixedWidth(80)
+        self.btn_speed_cycle.setFixedWidth(72)
         self.btn_speed_cycle.setToolTip(
             "再生速度。押すたび x1.0 → x0.75 → x0.5 → x0.25 → x1.0 と回ります。")
         self.btn_speed_cycle.clicked.connect(pd._cycle_speed)
         pd.speed_slider.valueChanged.connect(self._sync_speed_button)
         self._sync_speed_button(pd.speed_slider.value())
         h.addWidget(self.btn_speed_cycle)
-        h.addStretch(1)
+        # 左は音(再接続・速度)、右は譜面の見え方(FPS・連打の数え方)。
+        # 別の種類だと分かるように線で仕切る。
+        vline(h)
         h.addWidget(label("再現FPS"))
         # レーンの上にあったコンボをそのまま付け替える(配線は PreviewDock)。
         cmb = pd.sim_fps_combo
@@ -889,28 +902,43 @@ class MainWindow(QMainWindow):
         cmb.setFont(QFont())
         cmb.setMinimumSize(0, 0)
         cmb.setMaximumSize(16777215, 16777215)
-        cmb.setFixedWidth(92)
+        cmb.setFixedWidth(84)
         cmb.show()
         h.addWidget(cmb)
+        gap(h)
+        h.addWidget(label("連打秒速"))
+        # 設定 roll_speed。以前は左の難易度パネルの上にあった。
+        self.roll_speed_spin = QSpinBox()
+        self.roll_speed_spin.setRange(1, 100)
+        self.roll_speed_spin.setSuffix(" 打/s")
+        self.roll_speed_spin.setAlignment(Qt.AlignCenter)
+        self.roll_speed_spin.setFixedWidth(96)
+        self.roll_speed_spin.setKeyboardTracking(False)
+        self.roll_speed_spin.setToolTip("連打を1秒に何回叩いた想定で数えるか")
+        self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
+        self.roll_speed_spin.valueChanged.connect(self._on_roll_speed_changed)
+        h.addWidget(self.roll_speed_spin)
         h.addStretch(1)
 
-        # 7. 音量(利用者の指定 2026-11-11「音なかったね、追加しておいて」)
+        # 5. 音量(利用者の指定 2026-11-11「音なかったね、追加しておいて」)
         h = row()
+        h.addWidget(label("音量調整:"))
+        h.addSpacing(6)
         for text, slider, lbl in (("マスター", pd.master_volume_slider, pd.lbl_master_volume),
                                   ("曲(比率)", pd.volume_slider, pd.lbl_volume),
                                   ("SE(比率)", pd.sfx_volume_slider, pd.lbl_sfx_volume)):
-            h.addWidget(label(text, 50))
+            h.addWidget(label(text))
             slider.setFocusPolicy(Qt.NoFocus)
             # ドック時代の固定幅(120)をやめて、段の幅に合わせて伸び縮み。
-            slider.setMinimumWidth(60)
+            slider.setMinimumWidth(40)
             slider.setMaximumWidth(16777215)
             h.addWidget(slider, 1)
-            lbl.setMinimumWidth(36)
+            lbl.setMinimumWidth(40)
+            lbl.setAlignment(Qt.AlignCenter)
             h.addWidget(lbl)
-            h.addSpacing(4)
+            gap(h, 0)
         pd.btn_hit_sounds.setFocusPolicy(Qt.NoFocus)
         h.addWidget(pd.btn_hit_sounds)
-        h.addStretch(1)
 
         hb.addWidget(self.settings_panel, 1)
         self._restyle_bottom_controls()
@@ -1991,17 +2019,8 @@ class MainWindow(QMainWindow):
         self._request_analysis("preview")
 
     def _refresh_sidebar(self, content):
-        lines = content.split('\n')
-        title = ""
-        subtitle = ""
-        for l in lines:
-            if l.startswith("TITLE:"):
-                title = l[6:].strip()
-            if l.startswith("SUBTITLE:"):
-                subtitle = re.sub(r"^(--|\+\+)", "", l[9:].strip())
-        header = f"  {title}" if title else "  (無題)"
-        self.sb_title.setText(f"{header}\n  {subtitle}" if subtitle else header)
-
+        # 曲名の札は無くした(右下の TITLE / SUBTITLE 欄が受け持つ)。
+        # ここは難易度カードの作り直しだけ。
         ordered_courses = sorted(
             self.courses_info, key=lambda c: -TJACourseAnalyzer.DIFF_RANK.get(c["key"], -1)
         )

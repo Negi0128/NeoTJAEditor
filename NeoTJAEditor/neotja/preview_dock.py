@@ -569,9 +569,9 @@ class GamePreviewWindow(QWidget):
         # 広がらず、枠だけが変わってタイトルバーしか残らない潰れた窓になる。
         # 押せてしまうこと自体が罠なので、ボタンごと消す。
         # embedded=True は v15 の統合画面(メインウィンドウの右に埋める)。
-        # 別窓ではなくふつうの子ウィジェットとして作り、全画面(F11)のとき
-        # だけ一時的に窓へ出す(enter_fullscreen / exit_fullscreen)。
-        # Player(単独 exe)は今までどおり別窓。
+        # 別窓ではなくふつうの子ウィジェットとして作る。全画面(F11)は
+        # 埋め込みでは無し(2026-11-12)。Player(単独 exe)は今までどおり
+        # 別窓で、F11 の全画面も残る。
         if embedded:
             super().__init__(parent)
         else:
@@ -619,15 +619,15 @@ class GamePreviewWindow(QWidget):
         # Esc は全画面から戻る道(メニュー等から全画面にしたとき用)。
         # 窓かその子にフォーカスがあれば効く(レーンがフォーカスを持っている
         # ので keyPressEvent では拾えない)。
-        # 埋め込みのときはメインウィンドウの中に居るので、窓ぜんたいに
-        # 張るとエディタ側の Esc まで食う。この部品の中にフォーカスがある
-        # ときだけ効かせる。
-        for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
-                        (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
-            sc = QShortcut(seq, self)
-            sc.setContext(Qt.WidgetWithChildrenShortcut if self._embedded
-                          else Qt.WindowShortcut)
-            sc.activated.connect(fn)
+        # 統合画面(埋め込み)では全画面そのものを無くした(利用者の指定
+        # 2026-11-12)。再生画面は右ペインに収まるのが前提で、F11 で窓へ
+        # 出す道は要らない。キーも張らず、enter/toggle も何もしない。
+        if not self._embedded:
+            for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
+                            (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
+                sc = QShortcut(seq, self)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(fn)
         self._build_tuner()
 
     # --- 画面を見ながらの位置合わせ (Ctrl+Shift+…) ---------------------
@@ -861,6 +861,8 @@ class GamePreviewWindow(QWidget):
             return True
 
     def toggle_fullscreen(self):
+        if self._embedded:
+            return
         if self._fullscreen:
             self.exit_fullscreen()
         else:
@@ -876,7 +878,7 @@ class GamePreviewWindow(QWidget):
         ほかのモード(軽量・同時再生・作譜)では何も隠さない — 全画面のまま
         作譜したいという指定(利用者 2026-10-05)で、ペインまで消えると
         使い道が無くなるため。"""
-        if self._fullscreen:
+        if self._fullscreen or self._embedded:
             return
         self._fullscreen = True
         # ペインを画面の中から出す(置き場は下部パネルへ戻る。利用者の指定
@@ -1844,8 +1846,11 @@ class PreviewDock(QDockWidget):
             # 2026-11-11)。録画は通常再生のときだけ出るので最後。
             # 幅は字に合わせる(コース名が長くても重ならないように)。
             self.sim_fps_combo.hide()
+            # 下地は半透明の黒。通常モードの背景は明るい絵なので、
+            # 緑の字だけでは読めない(利用者の指定 2026-11-12)。
             self.fps_label.setStyleSheet(
-                "color: #7ddc7d; background: transparent; border: none;")
+                "color: #7ddc7d; background: rgba(0,0,0,150); border: none;"
+                " border-radius: 3px;")
             mode_w = max(self._lane_text_w(self._mode_display_name(n))
                          for n in self._mode_names)
             self._lane_overlays = [
