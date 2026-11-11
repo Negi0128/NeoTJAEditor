@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QToolBar, QToolButton,
+    QSpinBox, QSplitter, QStatusBar, QToolBar, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -273,6 +273,33 @@ class _ArrowLineEdit(QLineEdit):
         if d:
             self.stepped.emit(1 if d > 0 else -1)
         event.accept()
+
+
+class _ToastStatusBar(QStatusBar):
+    """隠したままの QStatusBar。showMessage の文はレーンのトーストへ回す。
+
+    v15 で下の帯は TJA 側の細い帯(文字コード/テーマ/倍率)だけになり、
+    QStatusBar は出さない(右ペインがそのぶん高くなる)。ただし
+    statusBar().showMessage(...) は合作・作譜・保存など何十か所から
+    呼ばれているので、呼び手は触らずここ 1 か所で受け止める。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        #: 文を見せる先。(text, seconds) を受ける。無ければ黙って捨てる。
+        self.toast_cb = None
+
+    def showMessage(self, text, timeout=0):
+        super().showMessage(text, timeout)
+        cb = self.toast_cb
+        if cb is None or not str(text).strip():
+            return
+        # timeout 0 は「消すまで出しっぱなし」。トーストは消えるものなので
+        # 4 秒にそろえる。
+        secs = (timeout / 1000.0) if timeout and timeout > 0 else 4.0
+        try:
+            cb(str(text), secs)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -1426,20 +1453,44 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self):
         """左下: 文字コード / テーマ切替 / ウィンドウ倍率(表示のみ)。
 
-        「▼ プレビュー」「譜面プレビュー」は v15 で廃止 — 再生画面は
-        常に右に出ている。"""
+        窓いっぱいの QStatusBar ではなく、TJA 側(editor_container)の
+        いちばん下に細い帯として置く(利用者の指定 2026-11-12)。右ペインは
+        帯のぶん高くなる。QStatusBar 自体は隠すが残す — showMessage の
+        呼び手が多いので、文はそこからレーンのトーストへ回す。
+
+        「行 1 文字数 0 │ 第n小節…」の表示(status_label)は帯には出さない
+        (帯は 3 つだけ、という指定)。不正文字数は行番号の色で分かる。
+        組み立てだけは残して _update_status が今までどおり動くようにする。"""
+        self.setStatusBar(_ToastStatusBar(self))
+        self.statusBar().toast_cb = self._toast_status_message
+        self.statusBar().hide()
+
+        self.info_strip = QWidget()
+        self.info_strip.setObjectName("infoStrip")
+        hs = QHBoxLayout(self.info_strip)
+        hs.setContentsMargins(6, 2, 6, 2)
+        hs.setSpacing(10)
         self.encoding_label = QLabel("ANSI (cp932)")
-        self.statusBar().addWidget(self.encoding_label)
+        hs.addWidget(self.encoding_label)
         self.btn_theme = QPushButton("テーマ切替")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        self.statusBar().addWidget(self.btn_theme)
+        hs.addWidget(self.btn_theme)
         self.lbl_scale = QLabel("ウィンドウ倍率 100%")
         self.lbl_scale.setToolTip("再生画面の表示倍率(右ペインの幅から自動で決まります)")
-        self.statusBar().addWidget(self.lbl_scale)
+        hs.addWidget(self.lbl_scale)
+        hs.addStretch(1)
+        self.editor_container.layout().addWidget(self.info_strip)
 
         self.status_label = QLabel("")
-        self.statusBar().addWidget(self.status_label, 1)
+        self.status_label.hide()
         self._on_player_refit()
+
+    def _toast_status_message(self, text, secs):
+        """statusBar().showMessage の文をレーン左上のトーストに出す。"""
+        dock = getattr(self, "preview_dock", None)
+        lane = getattr(dock, "chart_preview", None) if dock is not None else None
+        if lane is not None:
+            lane.show_toast(text, secs)
 
     def _on_preview_expanded_changed(self, expanded):
         pass
