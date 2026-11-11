@@ -8,9 +8,9 @@ import time
 import traceback
 
 from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
+from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QToolBar,
     QVBoxLayout, QWidget,
@@ -470,18 +470,7 @@ class MainWindow(QMainWindow):
         self.sb_title.setContentsMargins(8, 8, 8, 8)
         sb_layout.addWidget(self.sb_title)
 
-        spd_row = QWidget()
-        spd_layout = QHBoxLayout(spd_row)
-        spd_layout.setContentsMargins(8, 4, 8, 4)
-        spd_layout.addWidget(QLabel("連打秒速:"))
-        self.roll_speed_spin = QSpinBox()
-        self.roll_speed_spin.setRange(1, 100)
-        self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
-        self.roll_speed_spin.valueChanged.connect(self._on_roll_speed_changed)
-        spd_layout.addWidget(self.roll_speed_spin)
-        spd_layout.addStretch()
-        sb_layout.addWidget(spd_row)
-
+        # 連打秒速の欄は右下の設定欄(連打速度)へ移した(_build_bottom_controls)。
         self.sb_scroll = QScrollArea()
         self.sb_scroll.setWidgetResizable(True)
         self.sb_cards_container = QWidget()
@@ -563,9 +552,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
     def _fit_player_to_pane(self):
-        """右ペインの幅に合わせて再生画面の倍率を決める(原寸が上限)。"""
+        """右ペインの幅と高さに合わせて再生画面の倍率を決める(原寸が上限)。
+
+        幅だけで決めると、1920x1040 の窓では原寸(1280 幅)になって、下の
+        設定欄(7 段)が窓の下へはみ出す(通常再生は画面が 720 ぶん高い)。
+        下の段の最小の高さを引いた残りにも収まる倍率にする。"""
         dock = getattr(self, "preview_dock", None)
-        if dock is None:
+        if dock is None or getattr(self, "_fitting_player", False):
             return
         gpw = dock.game_preview_window
         if gpw.is_fullscreen():
@@ -573,20 +566,38 @@ class MainWindow(QMainWindow):
         w = self.player_host.width()
         if w <= 0:
             return
-        s = max(0.25, min(1.0, w / float(self.PLAYER_W)))
-        if abs(s - gpw.scaled_host.scale()) < 0.005:
+        s = min(1.0, w / float(self.PLAYER_W))
+        s0 = gpw.scaled_host.scale()
+        nat_h = gpw.height() / s0 if s0 > 0 else 0.0
+        avail_h = (self.right_pane.height()
+                   - self.bottom_row.minimumSizeHint().height())
+        if nat_h > 0 and avail_h > 0:
+            s = min(s, avail_h / nat_h)
+        s = max(0.25, s)
+        if abs(s - s0) < 0.005:
+            # 倍率は同じでも幅は変わったかもしれない。置き場所だけ直す。
+            gpw.move(max(0, (w - gpw.width()) // 2), 0)
             return
-        dock.apply_preview_scale(s)
-        gpw.refit()
+        self._fitting_player = True
+        try:
+            dock.apply_preview_scale(s)
+            gpw.refit()
+        finally:
+            self._fitting_player = False
 
     def _on_player_refit(self):
         """再生画面の大きさが変わった(モード切替・倍率)。入れ物を合わせる。"""
         gpw = self.preview_dock.game_preview_window
         self.player_host.setFixedHeight(gpw.height())
+        # 高さの都合で縮んだときは、右に空く隙間を左右に振り分ける。
+        gpw.move(max(0, (self.player_host.width() - gpw.width()) // 2), 0)
         s = gpw.scaled_host.scale()
         lbl = getattr(self, "lbl_scale", None)
         if lbl is not None:
             lbl.setText("ウィンドウ倍率 %d%%" % int(round(s * 100)))
+        # モード切替で画面の高さが変わった(360 ↔ 720)ので、高さの都合の
+        # 倍率も取り直す。倍率が同じなら中で何もしない。
+        self._fit_player_to_pane()
 
     def _build_preview_dock(self):
         self.preview_dock = PreviewDock(
@@ -621,13 +632,12 @@ class MainWindow(QMainWindow):
         )
         # ドックとしては出さない。中身(再生画面と操作)を右ペインへ移す。
         self.preview_dock.hide()
-        content = self.preview_dock.widget()
-        self.bottom_row.layout().addWidget(content, 1)
-        # 右下はシークバー(帯)と下部設定の場所。ドック時代の曲名・波形・
-        # スライダーは出さない(波形は作譜ペインにある)。
-        for wdg in (self.preview_dock.title_label, self.preview_dock.waveform,
-                    self.preview_dock.seek_slider):
-            wdg.hide()
+        # ドック時代の中身(曲名・波形・再生ボタンの段・音量の段…)は出さない。
+        # 使う部品(音量スライダー・OFFSET・メトロノーム・タップ)は
+        # _build_bottom_controls が右下の設定欄へ付け替える。
+        self.preview_dock.widget().hide()
+        self._build_bottom_controls()
+        self.preview_dock.course_label_cb = self._on_lane_course_label
         gpw = self.preview_dock.game_preview_window
         gpw.setParent(self.player_host)
         gpw.move(0, 0)
@@ -664,6 +674,360 @@ class MainWindow(QMainWindow):
         # (next to the theme switcher), so there's never a state where it
         # vanishes with no obvious way back.
         self.preview_dock.setFeatures(self.preview_dock.DockWidgetFeature(0))
+
+    # ------------------------------------------------------------------
+    # 右下の設定欄(v15 統合画面の2段目)
+    # ------------------------------------------------------------------
+    #: 設定欄の見た目。テーマを替えたら当て直す(_restyle_bottom_controls)。
+    def _bottom_css(self):
+        c = COLORS
+        return (
+            "QFrame#settingsRow, QFrame#bpmBox {{ border: 1px solid {border};"
+            " border-radius: 3px; }}"
+            "#settingsPanel QPushButton, #bpmBox QPushButton"
+            " {{ padding: 2px 10px; min-height: 18px; }}"
+            "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
+            "#settingsPanel QLineEdit, #settingsPanel QSpinBox,"
+            " #settingsPanel QDoubleSpinBox, #settingsPanel QComboBox"
+            " {{ padding: 2px 4px; min-height: 18px; }}"
+            "#settingsPanel QLabel#fieldLabel {{ color: {fg}; }}"
+            "QPushButton#bpmTap {{ border-radius: {r}px; border: 1px solid"
+            " {border}; background: {bg3}; font-size: 15px; }}"
+            "QPushButton#bpmTap:pressed {{ background: {accent}; }}"
+            "QLabel#bpmValue {{ font-size: 18px; font-weight: bold; }}"
+        ).format(border=c["border"], fg=c["fg"], bg3=c["bg3"],
+                 accent=c["accent"], r=self.TAP_DIAMETER // 2)
+
+    #: BPM測定の「タップ」の直径(px)。右下の段に収まる大きさ。
+    TAP_DIAMETER = 120
+
+    def _restyle_bottom_controls(self):
+        for w in (getattr(self, "settings_panel", None),
+                  getattr(self, "bpm_box", None)):
+            if w is not None:
+                w.setStyleSheet(self._bottom_css())
+
+    def _build_bottom_controls(self):
+        """右下: BPM測定の箱と、譜面ヘッダ・再生まわりの設定欄。
+
+        見本は v15-design/settings.png。部品のうち音量・OFFSET・メトロノーム・
+        打音・タップ・音声を再接続・再現FPS は PreviewDock が持っている
+        ものをそのまま付け替える(配線を二重に持たないため)。ヘッダへの
+        書き込みは replace_header_line / set_header_line / _set_course_level
+        を通す — 元に戻すが行単位で効くように、本文は丸ごと組み直さない。"""
+        pd = self.preview_dock
+        hb = self.bottom_row.layout()
+
+        # ---- BPM測定 ----------------------------------------------------
+        self.bpm_box = QFrame()
+        self.bpm_box.setObjectName("bpmBox")
+        self.bpm_box.setFixedWidth(236)
+        bv = QVBoxLayout(self.bpm_box)
+        bv.setContentsMargins(8, 4, 8, 6)
+        bv.setSpacing(4)
+        bv.addWidget(QLabel("BPM測定"))
+        mid = QHBoxLayout()
+        mid.setSpacing(10)
+        pd.btn_tap.setFixedSize(self.TAP_DIAMETER, self.TAP_DIAMETER)
+        pd.btn_tap.setObjectName("bpmTap")
+        pd.btn_tap.setFocusPolicy(Qt.NoFocus)
+        pd.btn_tap.setToolTip("拍に合わせて押すと BPM を測ります。"
+                              "譜面の 基本BPM とは別の値です。")
+        mid.addWidget(pd.btn_tap)
+        val = QVBoxLayout()
+        val.addStretch()
+        pd.lbl_tap_bpm.setObjectName("bpmValue")
+        pd.lbl_tap_bpm.setAlignment(Qt.AlignCenter)
+        val.addWidget(pd.lbl_tap_bpm)
+        cap = QLabel("BPM")
+        cap.setAlignment(Qt.AlignCenter)
+        val.addWidget(cap)
+        val.addStretch()
+        mid.addLayout(val, 1)
+        bv.addLayout(mid, 1)
+        self.btn_tap_reset = QPushButton("リセット")
+        self.btn_tap_reset.setFocusPolicy(Qt.NoFocus)
+        self.btn_tap_reset.clicked.connect(self._reset_bpm_tap)
+        bv.addWidget(self.btn_tap_reset)
+        hb.addWidget(self.bpm_box)
+
+        # ---- 設定欄 -----------------------------------------------------
+        self.settings_panel = QWidget()
+        self.settings_panel.setObjectName("settingsPanel")
+        pv = QVBoxLayout(self.settings_panel)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(3)
+
+        def row():
+            fr = QFrame()
+            fr.setObjectName("settingsRow")
+            h = QHBoxLayout(fr)
+            h.setContentsMargins(8, 1, 8, 1)
+            h.setSpacing(6)
+            pv.addWidget(fr)
+            return h
+
+        def label(text, w=64):
+            lb = QLabel(text)
+            lb.setObjectName("fieldLabel")
+            lb.setMinimumWidth(w)
+            return lb
+
+        #: ヘッダ→欄 の反映中(欄→ヘッダ の書き戻しを跳ね返さない)。
+        self._syncing_fields = False
+
+        # 1. TITLE / SUBTITLE
+        h = row()
+        h.addWidget(label("TITLE"))
+        self.fld_title = QLineEdit()
+        self.fld_title.editingFinished.connect(
+            lambda: self._apply_text_field("TITLE", self.fld_title))
+        h.addWidget(self.fld_title, 3)
+        h.addStretch(1)
+        h.addWidget(label("SUBTITLE"))
+        self.fld_subtitle = QLineEdit()
+        self.fld_subtitle.setToolTip("先頭の -- / ++ は打ったとおりに残します。")
+        self.fld_subtitle.editingFinished.connect(
+            lambda: self._apply_text_field("SUBTITLE", self.fld_subtitle))
+        h.addWidget(self.fld_subtitle, 3)
+
+        # 2. コース / 難易度
+        h = row()
+        h.addWidget(label("コース"))
+        self.btn_course = QPushButton("-")
+        self.btn_course.setFocusPolicy(Qt.NoFocus)
+        self.btn_course.setMinimumWidth(150)
+        self.btn_course.setToolTip("押すとコースを順に切り替えます"
+                                   "(レーン上のコース切替と同じ)")
+        self.btn_course.clicked.connect(pd._on_course_button)
+        h.addWidget(self.btn_course, 2)
+        h.addStretch(1)
+        h.addWidget(label("難易度"))
+        self.cmb_level = QComboBox()
+        for n in range(1, 11):
+            self.cmb_level.addItem("★%d" % n, n)
+        self.cmb_level.setFixedWidth(92)
+        self.cmb_level.setFocusPolicy(Qt.NoFocus)
+        self.cmb_level.setToolTip("いま映しているコースの LEVEL: を書き換えます")
+        self.cmb_level.currentIndexChanged.connect(self._on_level_combo)
+        h.addWidget(self.cmb_level)
+        h.addStretch(2)
+
+        # 3. 基本BPM / メトロノーム
+        h = row()
+        h.addWidget(label("基本BPM"))
+        self.fld_bpm = QLineEdit()
+        self.fld_bpm.setAlignment(Qt.AlignCenter)
+        self.fld_bpm.setFixedWidth(150)
+        self.fld_bpm.setToolTip("ヘッダの BPM:。小数は打ったとおりに残します"
+                                "(137.250 など)。")
+        self.fld_bpm.editingFinished.connect(self._apply_bpm_field)
+        h.addWidget(self.fld_bpm)
+        h.addStretch(1)
+        pd.btn_metronome.setFocusPolicy(Qt.NoFocus)
+        pd.btn_metronome.setMinimumWidth(150)
+        h.addWidget(pd.btn_metronome, 2)
+        h.addStretch(2)
+
+        # 4. OFFSET
+        h = row()
+        h.addWidget(label("OFFSET"))
+        for b in pd.offset_buttons:
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setFixedWidth(52)
+            b.setObjectName("offsetStep")
+        for b in pd.offset_buttons[:3]:
+            h.addWidget(b)
+        pd.spin_offset.setFixedWidth(110)
+        h.addWidget(pd.spin_offset)
+        for b in pd.offset_buttons[3:]:
+            h.addWidget(b)
+        h.addStretch(1)
+
+        # 5. 連打速度(設定 roll_speed。以前は左の難易度パネルの上にあった)
+        h = row()
+        h.addWidget(label("連打速度"))
+        self.roll_speed_spin = QSpinBox()
+        self.roll_speed_spin.setRange(1, 100)
+        self.roll_speed_spin.setSuffix(" 打/s")
+        self.roll_speed_spin.setAlignment(Qt.AlignCenter)
+        self.roll_speed_spin.setFixedWidth(150)
+        self.roll_speed_spin.setKeyboardTracking(False)
+        self.roll_speed_spin.setToolTip("連打を1秒に何回叩いた想定で数えるか")
+        self.roll_speed_spin.setValue(self.config_data.get("roll_speed", 45))
+        self.roll_speed_spin.valueChanged.connect(self._on_roll_speed_changed)
+        h.addWidget(self.roll_speed_spin)
+        h.addStretch(1)
+        # DEMOSTART はこの段の右に置く(6 段目に入れると 1400 幅で切れる)。
+        self.btn_demostart = QPushButton("現在位置をDEMOSTARTに")
+        self.btn_demostart.setFocusPolicy(Qt.NoFocus)
+        self.btn_demostart.setToolTip("いま止まっている/鳴っている位置を"
+                                      "試聴開始(DEMOSTART:)にします")
+        self.btn_demostart.clicked.connect(pd.demostart_here)
+        h.addWidget(self.btn_demostart)
+
+        # 6. 音声を再接続 / 再生速度 / 再現FPS
+        h = row()
+        pd.btn_reopen_audio.setFocusPolicy(Qt.NoFocus)
+        h.addWidget(pd.btn_reopen_audio)
+        h.addStretch(1)
+        h.addWidget(label("再生速度"))
+        self.btn_speed_cycle = QPushButton("x1.0")
+        self.btn_speed_cycle.setFocusPolicy(Qt.NoFocus)
+        self.btn_speed_cycle.setFixedWidth(80)
+        self.btn_speed_cycle.setToolTip(
+            "再生速度。押すたび x1.0 → x0.75 → x0.5 → x0.25 → x1.0 と回ります。")
+        self.btn_speed_cycle.clicked.connect(pd._cycle_speed)
+        pd.speed_slider.valueChanged.connect(self._sync_speed_button)
+        self._sync_speed_button(pd.speed_slider.value())
+        h.addWidget(self.btn_speed_cycle)
+        h.addStretch(1)
+        h.addWidget(label("再現FPS"))
+        # レーンの上にあったコンボをそのまま付け替える(配線は PreviewDock)。
+        cmb = pd.sim_fps_combo
+        cmb.setStyleSheet("")
+        cmb.setFont(QFont())
+        cmb.setMinimumSize(0, 0)
+        cmb.setMaximumSize(16777215, 16777215)
+        cmb.setFixedWidth(92)
+        cmb.show()
+        h.addWidget(cmb)
+        h.addStretch(1)
+
+        # 7. 音量(利用者の指定 2026-11-11「音なかったね、追加しておいて」)
+        h = row()
+        for text, slider, lbl in (("マスター", pd.master_volume_slider, pd.lbl_master_volume),
+                                  ("曲(比率)", pd.volume_slider, pd.lbl_volume),
+                                  ("SE(比率)", pd.sfx_volume_slider, pd.lbl_sfx_volume)):
+            h.addWidget(label(text, 50))
+            slider.setFocusPolicy(Qt.NoFocus)
+            # ドック時代の固定幅(120)をやめて、段の幅に合わせて伸び縮み。
+            slider.setMinimumWidth(60)
+            slider.setMaximumWidth(16777215)
+            h.addWidget(slider, 1)
+            lbl.setMinimumWidth(36)
+            h.addWidget(lbl)
+            h.addSpacing(4)
+        pd.btn_hit_sounds.setFocusPolicy(Qt.NoFocus)
+        h.addWidget(pd.btn_hit_sounds)
+        h.addStretch(1)
+
+        hb.addWidget(self.settings_panel, 1)
+        self._restyle_bottom_controls()
+        # 右ペインは下の段が切れない幅まで。分割バーはこれより左へ寄らない。
+        self.right_pane.setMinimumWidth(
+            max(320, self.bottom_row.minimumSizeHint().width()))
+
+    def _reset_bpm_tap(self):
+        self.preview_dock.tapper.reset()
+        self.preview_dock.lbl_tap_bpm.setText("--")
+
+    def _sync_speed_button(self, index):
+        from neotja.preview_dock import SPEED_STEPS
+        index = max(0, min(len(SPEED_STEPS) - 1, int(index)))
+        s = ("%.2f" % SPEED_STEPS[index]).rstrip("0")
+        if s.endswith("."):
+            s += "0"
+        self.btn_speed_cycle.setText("x" + s)
+
+    def _on_lane_course_label(self, label, color):
+        """レーンが映すコースが変わった。右下の「コース」と難易度カードを合わせる。"""
+        self.btn_course.setText(label or "-")
+        self.btn_course.setStyleSheet(
+            f"color: {color}; font-weight: bold;" if color else "")
+        self._lane_course_label = label
+        self._sync_course_card()
+        self._sync_header_fields()
+
+    def _shown_course_key(self):
+        """いま再生画面に出ているコースの鍵。"""
+        label = getattr(self, "_lane_course_label", None)
+        for c in self.courses_info:
+            if label and c.get("label") == label:
+                return c.get("key")
+        return self._preview_course_key()
+
+    def _sync_course_card(self):
+        """難易度カードは**いま映しているコースの1枚だけ**出す
+        (利用者の指定 2026-11-11)。ほかの札は作ったまま隠しておく。"""
+        key = self._shown_course_key()
+        if key not in self._course_cards and self._course_cards:
+            key = next(iter(self._course_cards))
+        for k, card in self._course_cards.items():
+            card.setVisible(k == key)
+
+    @staticmethod
+    def _bpm_display(s):
+        """ヘッダの BPM の字 → 欄に出す字。整数なら .0 を添え、小数は
+        打ったとおり(137.250 の末尾の 0 も)残す。数でなければそのまま。"""
+        s = (s or "").strip()
+        try:
+            float(s)
+        except ValueError:
+            return s
+        return s if ("." in s or not s) else s + ".0"
+
+    def _sync_header_fields(self):
+        """本文のヘッダ → 右下の欄。打っている最中の欄は触らない。"""
+        if not hasattr(self, "fld_title"):
+            return
+        vals = self.header_values()
+        self._syncing_fields = True
+        try:
+            for fld, key in ((self.fld_title, "TITLE"),
+                             (self.fld_subtitle, "SUBTITLE")):
+                if not fld.hasFocus() and fld.text() != vals[key]:
+                    fld.setText(vals[key])
+            if not self.fld_bpm.hasFocus():
+                shown = self._bpm_display(vals["BPM"])
+                if self.fld_bpm.text() != shown:
+                    self.fld_bpm.setText(shown)
+            try:
+                lv = int(float(vals["LEVEL"]))
+            except (TypeError, ValueError):
+                lv = None
+            idx = self.cmb_level.findData(lv) if lv is not None else -1
+            if self.cmb_level.currentIndex() != idx:
+                self.cmb_level.setCurrentIndex(idx)
+        finally:
+            self._syncing_fields = False
+
+    def _apply_text_field(self, key, fld):
+        """TITLE / SUBTITLE の欄を Enter(か欄を離れた)で本文へ。"""
+        if self._syncing_fields:
+            return
+        text = fld.text().strip()
+        if text == self.header_values()[key]:
+            return
+        self.set_header_line(key, text)
+        self._sync_header_fields()
+
+    def _apply_bpm_field(self):
+        if self._syncing_fields:
+            return
+        text = self.fld_bpm.text().strip()
+        try:
+            v = float(text)
+        except ValueError:
+            v = None
+        if v is None or v <= 0 or not text:
+            # 数でないものは本文へ入れない。欄を元の値へ戻す。
+            self.fld_bpm.setText(self._bpm_display(self.header_values()["BPM"]))
+            return
+        if text != self.header_values()["BPM"]:
+            self.set_header_line("BPM", text)
+        self._sync_header_fields()
+
+    def _on_level_combo(self, idx):
+        if self._syncing_fields or idx < 0:
+            return
+        n = self.cmb_level.itemData(idx)
+        if n is None:
+            return
+        cur = self.header_values()["LEVEL"]
+        if cur.strip() == str(n):
+            return
+        self._set_course_level(str(n))
 
     def _set_checkpoint_lines(self, lines):
         """譜面プレビューで P を押した結果をエディタのチェックポイントへ。
@@ -758,6 +1122,7 @@ class MainWindow(QMainWindow):
         # regardless of where the cursor is, until picked again.
         self._preview_course_override = course_key
         self._update_metronome_schedule()
+        self._sync_course_card()
 
     def _on_preview_branch_selected(self, level):
         # Static branch choice for the whole course - see build_preview_timeline's
@@ -1660,6 +2025,8 @@ class MainWindow(QMainWindow):
         # whatever index it was first inserted at.
         for i, course in enumerate(ordered_courses):
             self.sb_cards_layout.insertWidget(i, self._course_cards[course["key"]])
+        self._sync_course_card()
+        self._sync_header_fields()
 
     def _update_status(self):
         cursor = self.editor.textCursor()
@@ -3075,6 +3442,7 @@ class MainWindow(QMainWindow):
         self.editor.gutter.update()
         self.ruler.refresh_theme()
         self.preview_dock.refresh_theme()
+        self._restyle_bottom_controls()
 
     def _show_about(self):
         QMessageBox.information(self, "バージョン情報", f"{APP_NAME}\nVersion: {VERSION}\n\nRedesigned & Optimized Edition (PySide6)")

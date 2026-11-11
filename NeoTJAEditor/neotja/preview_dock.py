@@ -1738,8 +1738,9 @@ class PreviewDock(QDockWidget):
         # 右上だったが、右上は曲名が出る場所なので左へ移した。
         left = 8
 
-        self.mode_button = self._lane_button(self._mode_names[0], 96,
-                                             "下部パネルの表示切替(Tab)")
+        self.mode_button = self._lane_button(
+            self._mode_display_name(self._mode_names[0]), 96,
+            "下部パネルの表示切替(Tab)")
         self.mode_button.move(left, 6)
         left += 96 + 6
         self.mode_button.clicked.connect(self.cycle_bottom_mode)
@@ -1837,8 +1838,19 @@ class PreviewDock(QDockWidget):
             # (MainWindow._fit_player_to_pane)。ボタンは出さない
             # (利用者の指定 2026-11-11「倍率と合作はとりあえず削除」)。
             self.zoom_button.hide()
-            self._lane_overlays = [t for t in self._lane_overlays
-                                   if t[0] is not self.zoom_button]
+            # 再現FPS は右下の設定欄へ移す(MainWindow が付け替える)ので、
+            # レーンの上には並べない。実測FPS は緑の字だけ(枠なし)。
+            # 並びは「モード切替 / コース切替 / 実測FPS」(利用者の指定
+            # 2026-11-11)。録画は通常再生のときだけ出るので最後。
+            # 幅は字に合わせる(コース名が長くても重ならないように)。
+            self.sim_fps_combo.hide()
+            self.fps_label.setStyleSheet(
+                "color: #7ddc7d; background: transparent; border: none;")
+            mode_w = max(self._lane_text_w(self._mode_display_name(n))
+                         for n in self._mode_names)
+            self._lane_overlays = [
+                (self.mode_button, mode_w, 6), (self.course_button, 150, 6),
+                (self.fps_label, 74, 2), (self.record_button, 84, 6)]
         # --- 合作の操作を画面の上に置く(利用者の指定 2026-10-17) ---
         # 置き場所は左上、スコア枠より上の黒い所。どんちゃんにも譜面にも
         # 掛からず、作譜しながら手が届く。合作していない間は出さない。
@@ -1932,11 +1944,13 @@ class PreviewDock(QDockWidget):
         layout.addWidget(self.seek_slider)
 
         transport_row = QHBoxLayout()
-        self.btn_play = QPushButton("再生")
-        self.btn_play.setObjectName("accentButton")
-        self.btn_play.clicked.connect(self.audio.toggle_play_pause)
-        self.btn_stop = QPushButton("停止")
-        self.btn_stop.clicked.connect(self._on_stop)
+        if not self._embedded:
+            # 統合画面では ▶ / ■ をシークバーの左に置く(_build_speed_row)。
+            self.btn_play = QPushButton("再生")
+            self.btn_play.setObjectName("accentButton")
+            self.btn_play.clicked.connect(self.audio.toggle_play_pause)
+            self.btn_stop = QPushButton("停止")
+            self.btn_stop.clicked.connect(self._on_stop)
         self.btn_seek_cursor = QPushButton("カーソル位置から再生")
         self.btn_seek_cursor.clicked.connect(self._on_seek_cursor)
         self.btn_metronome = QPushButton("メトロノーム")
@@ -1949,8 +1963,9 @@ class PreviewDock(QDockWidget):
         self.btn_hit_sounds.toggled.connect(self._on_hit_sounds_toggled)
         self._on_hit_sounds_toggled(True)
         self.time_label = QLabel("0:00 / 0:00")
-        transport_row.addWidget(self.btn_play)
-        transport_row.addWidget(self.btn_stop)
+        if not self._embedded:
+            transport_row.addWidget(self.btn_play)
+            transport_row.addWidget(self.btn_stop)
         transport_row.addWidget(self.btn_seek_cursor)
         transport_row.addWidget(self.btn_metronome)
         transport_row.addWidget(self.btn_hit_sounds)
@@ -2025,7 +2040,16 @@ class PreviewDock(QDockWidget):
         self.spin_offset.setDecimals(3)
         self.spin_offset.setSingleStep(0.001)
         self.spin_offset.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        if self._embedded:
+            # 統合画面の欄は Enter(または欄を離れたとき)で確定する
+            # (利用者の指定 2026-11-11)。1字打つごとにヘッダへ書くと、
+            # 「-1.」のような途中の値まで本文へ入ってしまう。
+            self.spin_offset.setKeyboardTracking(False)
+            self.spin_offset.setAlignment(Qt.AlignCenter)
         self.spin_offset.valueChanged.connect(self._on_offset_value_changed)
+        #: OFFSET の ± ボタン(左から +0.1 … -0.1 の順)。統合画面が
+        #: 右下の設定欄へ並べ直すので、参照を持っておく。
+        self.offset_buttons = []
         # OFFSET convention: audio_time = chart_time - OFFSET, so increasing
         # OFFSET shifts the beat grid/notes earlier (left) and decreasing it
         # shifts them later (right). Placing +/- this way means pressing the
@@ -2035,11 +2059,13 @@ class PreviewDock(QDockWidget):
             btn = QPushButton(label)
             btn.clicked.connect(lambda _, d=delta: self.spin_offset.setValue(self.spin_offset.value() + d))
             offset_row.addWidget(btn)
+            self.offset_buttons.append(btn)
         offset_row.addWidget(self.spin_offset)
         for label, delta in (("-0.001", -0.001), ("-0.01", -0.01), ("-0.1", -0.1)):
             btn = QPushButton(label)
             btn.clicked.connect(lambda _, d=delta: self.spin_offset.setValue(self.spin_offset.value() + d))
             offset_row.addWidget(btn)
+            self.offset_buttons.append(btn)
         offset_row.addStretch()
         layout.addLayout(offset_row)
 
@@ -2184,6 +2210,7 @@ class PreviewDock(QDockWidget):
         items = getattr(self, "_lane_overlays", None)
         if not items:
             return
+        self._lane_scale = s
         x = px(self.LANE_OVERLAY_X0, s)
         y = px(6, s)
         h = px(LANE_BUTTON_H, s)
@@ -2197,8 +2224,12 @@ class PreviewDock(QDockWidget):
             if isinstance(w, QPushButton):
                 # ボタンの中の余白は OS が原寸で入れる。背を低くすると
                 # 字の場所が無くなって**文字が消える**(実機で確認)。
-                w.setStyleSheet("" if s >= 0.999
-                                else "QPushButton { padding: 0px; }")
+                css = "" if s >= 0.999 else "QPushButton { padding: 0px; }"
+                if w is self.course_button:
+                    # コースの色(太字)はここで消さない。倍率を当て直す
+                    # たびに白へ戻っていた。
+                    css = self._course_button_css + css
+                w.setStyleSheet(css)
             w.move(x, y)
             x += bw + px(gap, s)
         # 合作の操作は**モード切替・コース切替のすぐ下**(利用者の指定
@@ -2526,7 +2557,9 @@ class PreviewDock(QDockWidget):
         host.raise_overlays()
         # コースのボタンは「並べる難易度を選ぶ」に変わる(_on_course_button)。
         self.course_button.setText("難易度: %d本" % len(previews))
+        self._course_button_css = ""
         self.course_button.setStyleSheet("")
+        self._fit_course_button()
         self._rebuild_multi_notes()
 
     def _muted_band_indices(self):
@@ -2821,6 +2854,29 @@ class PreviewDock(QDockWidget):
         h = QHBoxLayout(row)
         h.setContentsMargins(10, 4, 10, 8)
         h.setSpacing(8)
+        if self._embedded:
+            # 統合画面の ▶(再生/一時停止)と ■(停止)。文字のボタンは
+            # 右下から消して、シークバーの左へ記号で置く(利用者の指定
+            # 2026-11-11)。フォーカスは取らない — Space はレーンのまま。
+            self.btn_play = QPushButton("▶")
+            self.btn_play.setObjectName("accentButton")
+            self.btn_play.setFocusPolicy(Qt.NoFocus)
+            self.btn_play.setFixedWidth(36)
+            self.btn_play.setToolTip("再生 / 一時停止(Space)")
+            self.btn_play.clicked.connect(self.audio.toggle_play_pause)
+            self.btn_stop = QPushButton("■")
+            self.btn_stop.setFocusPolicy(Qt.NoFocus)
+            self.btn_stop.setFixedWidth(36)
+            self.btn_stop.setToolTip("停止(頭へ戻る)")
+            self.btn_stop.clicked.connect(self._on_stop)
+            # 記号は字より小さく見えるので、少し大きい字で。倍率を下げても
+            # 読めるように px で持つ(UiScaler は px の字を倍率で縮める)。
+            for b in (self.btn_play, self.btn_stop):
+                f = b.font()
+                f.setPixelSize(15)
+                b.setFont(f)
+            h.addWidget(self.btn_play)
+            h.addWidget(self.btn_stop)
         self.lbl_mm_now = QLabel("0:00.000")
         self.lbl_mm_now.setFocusPolicy(Qt.NoFocus)
         h.addWidget(self.lbl_mm_now)
@@ -2872,7 +2928,26 @@ class PreviewDock(QDockWidget):
         # ヘッダ / キーで」。
         h.addWidget(self.btn_header)
         h.addWidget(self.btn_keys)
+        if self._embedded:
+            # 統合画面では速度は右下の設定欄(再生速度)、ヘッダは欄そのもの、
+            # キー一覧はメニューから。シークバーに幅を全部使わせる。
+            for b in (self.btn_speed, self.btn_header, self.btn_keys):
+                b.hide()
         return row
+
+    def demostart_here(self):
+        """「現在位置を DEMOSTART に」(統合画面)。
+
+        波形のボタン(_on_demostart_requested)と同じく**音源の時計**の秒を
+        書く。再生位置は助走ぶん進んだ値なので、助走を引いて音源の頭を
+        0 にする(時刻の表示 _fmt_time(ms - lead) と同じ直し方)。"""
+        if self.demostart_cb is None:
+            return
+        sec = self.audio.position() / 1000.0 - self._lead_sec
+        sec = max(0.0, float(sec or 0.0))
+        self.demostart_cb("%.3f" % sec)
+        self.set_demostart(sec)
+        self.status_label.setText("DEMOSTART を %.3f 秒にしました。" % sec)
 
     def _cycle_speed(self):
         """押すたび ×1 → ×0.75 → ×0.5 → ×0.25 → ×1(利用者の指定
@@ -3039,15 +3114,61 @@ class PreviewDock(QDockWidget):
     #: 最後に出したコースの表示(同時再生から戻るときに書き戻す)。
     _course_label_last = (None, None)
 
+    #: いま映しているコースが変わったとき(label, color)で呼ぶ。統合画面の
+    #: 右下にある「コース」ボタンと難易度カードを合わせるために main_window
+    #: が差す。
+    course_label_cb = None
+
     def _set_lane_course_label(self, label, color):
         """レーン上のコースボタンの表示を、いま映しているコースに合わせる。
         情報バーのコースボタンと同じ内容(あちらは情報モードでしか見えない)。"""
         self._course_label_last = (label, color)
+        if self.course_label_cb is not None:
+            self.course_label_cb(label, color)
         if self.bottom_stack.currentIndex() == self.MODE_MULTI:
             return          # 同時再生中は「難易度を選ぶ」のまま
         self.course_button.setText(f"コース: {label or '-'}")
         if color:
-            self.course_button.setStyleSheet(f"color: {color}; font-weight: bold;")
+            self._course_button_css = f"color: {color}; font-weight: bold;"
+            self.course_button.setStyleSheet(self._course_button_css)
+        self._fit_course_button()
+
+    #: コースボタンの色の指定(倍率を当て直すときに残すため)。
+    _course_button_css = ""
+
+    #: 統合画面でモード切替ボタンに出す名前。内部の名前(_mode_names)は
+    #: 設定の保存にも使うので変えず、見せる字だけ替える。
+    MODE_DISPLAY = {"通常再生": "通常モード", "軽量": "軽量モード",
+                    "同時再生": "同時再生モード", "作譜": "作譜モード"}
+
+    def _mode_display_name(self, name):
+        if self._embedded:
+            return self.MODE_DISPLAY.get(name, name)
+        return name
+
+    #: レーンの上の小物へ最後に当てた倍率(_scale_lane_overlays)。
+    _lane_scale = 1.0
+
+    def _lane_text_w(self, text):
+        """レーンのボタンに text を入れるのに要る幅(原寸)。"""
+        from PySide6.QtGui import QFont, QFontMetrics
+        f = QFont(self.font())
+        f.setPixelSize(LANE_BUTTON_FONT_PX)
+        f.setBold(True)         # コース名は太字で出す
+        return QFontMetrics(f).horizontalAdvance(text) + 24
+
+    def _fit_course_button(self):
+        """コースボタンの幅を字に合わせて並べ直す(統合画面だけ)。
+        固定幅だと「コース: むずかしい」のような長い名前が切れる。"""
+        if not self._embedded:
+            return
+        items = getattr(self, "_lane_overlays", None)
+        if not items:
+            return
+        w = max(96, self._lane_text_w(self.course_button.text()))
+        self._lane_overlays = [(wd, w if wd is self.course_button else bw, g)
+                               for wd, bw, g in items]
+        self._scale_lane_overlays(self._lane_scale)
 
     # 25% は小さすぎて譜面が読めないので廃止した。
     ZOOM_STEPS = (100, 75, 50)
@@ -3416,7 +3537,7 @@ class PreviewDock(QDockWidget):
         elif idx == self.MODE_MULTI:
             self._multi_pending = False
         self.bottom_stack.setCurrentIndex(idx)
-        self.mode_button.setText(self._mode_names[idx])
+        self.mode_button.setText(self._mode_display_name(self._mode_names[idx]))
         # 同時再生は画面そのものを差し替える。入る/出るをここで決めてから、
         # 下の「ふつうのゲーム画面向けの支度」へ進む(入っているあいだは
         # ゲーム画面は隠れているだけなので、支度はそのまま通してよい)。
@@ -4040,7 +4161,10 @@ class PreviewDock(QDockWidget):
             pass
 
     def _on_playing_changed(self, playing):
-        self.btn_play.setText("一時停止" if playing else "再生")
+        if self._embedded:
+            self.btn_play.setText("❚❚" if playing else "▶")
+        else:
+            self.btn_play.setText("一時停止" if playing else "再生")
         # 再生中は作譜ペインの黄色いカーソルを消し、赤い線だけにする。
         ce = getattr(self, "chart_edit", None)
         if ce is not None:
@@ -4246,6 +4370,13 @@ class PreviewDock(QDockWidget):
 
     def _on_metronome_toggled(self, checked):
         self.metronome.set_enabled(checked)
+        if self._embedded:
+            # 統合画面では塗り潰さず、細い青(アクセント色)の枠だけ出す
+            # (利用者の指定 2026-11-11: OFFSET 欄のフォーカス色と同じ)。
+            self.btn_metronome.setStyleSheet(
+                "QPushButton { border: 1px solid %s; }" % theme.COLORS["accent"]
+                if checked else "")
+            return
         self.btn_metronome.setObjectName("accentButton" if checked else "")
         self.btn_metronome.style().unpolish(self.btn_metronome)
         self.btn_metronome.style().polish(self.btn_metronome)
