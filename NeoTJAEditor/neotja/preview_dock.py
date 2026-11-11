@@ -560,7 +560,7 @@ class GamePreviewWindow(QWidget):
     closed = Signal()
 
     def __init__(self, chart_preview, bottom_widget: QWidget, parent=None,
-                 lane_widget: ChartPreviewWidget = None):
+                 lane_widget: ChartPreviewWidget = None, embedded=False):
         """chart_preview には、レーン単体(ChartPreviewWidget)でも本家レイアウト
         (GameScreenWidget)でも渡せる。後者のときは lane_widget に中のレーンを
         渡すこと(打音表記のオン/オフで高さが変わる通知を受けるため)。"""
@@ -568,10 +568,22 @@ class GamePreviewWindow(QWidget):
         # 合わせて setFixedSize で大きさを固定しているので、最大化しても中身は
         # 広がらず、枠だけが変わってタイトルバーしか残らない潰れた窓になる。
         # 押せてしまうこと自体が罠なので、ボタンごと消す。
-        super().__init__(parent, Qt.Window | Qt.CustomizeWindowHint
-                         | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
-                         | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
-        self.setWindowTitle("NeoTJAPlayer")
+        # embedded=True は v15 の統合画面(メインウィンドウの右に埋める)。
+        # 別窓ではなくふつうの子ウィジェットとして作り、全画面(F11)のとき
+        # だけ一時的に窓へ出す(enter_fullscreen / exit_fullscreen)。
+        # Player(単独 exe)は今までどおり別窓。
+        if embedded:
+            super().__init__(parent)
+        else:
+            super().__init__(parent, Qt.Window | Qt.CustomizeWindowHint
+                             | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+                             | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
+            self.setWindowTitle("NeoTJAPlayer")
+        self._embedded = bool(embedded)
+        #: 埋め込みのとき、大きさを取り直したら知らせる先(置いた側が
+        #: 入れ物の高さを合わせる)。
+        self._embed_cb = None
+        self._embed_host = None
         # アプリのテーマに関わらず窓全体をダーク基調に固定する。ウィジェット
         # 自身のスタイルシートは app 全体の QSS より優先されるので、ライト
         # テーマに切り替えても速度スライダー・ラベル・ボタン等はダークのまま。
@@ -607,10 +619,14 @@ class GamePreviewWindow(QWidget):
         # Esc は全画面から戻る道(メニュー等から全画面にしたとき用)。
         # 窓かその子にフォーカスがあれば効く(レーンがフォーカスを持っている
         # ので keyPressEvent では拾えない)。
+        # 埋め込みのときはメインウィンドウの中に居るので、窓ぜんたいに
+        # 張るとエディタ側の Esc まで食う。この部品の中にフォーカスがある
+        # ときだけ効かせる。
         for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
                         (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
             sc = QShortcut(seq, self)
-            sc.setContext(Qt.WindowShortcut)
+            sc.setContext(Qt.WidgetWithChildrenShortcut if self._embedded
+                          else Qt.WindowShortcut)
             sc.activated.connect(fn)
         self._build_tuner()
 
@@ -805,6 +821,15 @@ class GamePreviewWindow(QWidget):
         self.scaled_host.refit()
         self.setFixedSize(max(self.scaled_host.width(), self._bottom_widget.minimumWidth()),
                           self.scaled_host.height() + self._bottom_widget.minimumHeight())
+        cb = getattr(self, "_embed_cb", None)
+        if cb is not None:
+            cb()
+
+    def set_embed_resized_cb(self, cb):
+        """埋め込みのとき、大きさを取り直したあとに呼ぶ先。"""
+        self._embed_cb = cb
+        if cb is not None:
+            cb()
 
     # ------------------------------------------------------------------
     # 全画面(鑑賞会用)
@@ -866,6 +891,12 @@ class GamePreviewWindow(QWidget):
         cb = getattr(self, "_pane_cb", None)
         if cb is not None:
             cb()
+        if self._embedded:
+            # 子ウィジェットのままでは全画面にならない。親から外して窓にし、
+            # 戻すときに同じ所へ入れ直す(exit_fullscreen)。
+            self._embed_host = self.parentWidget()
+            self._embed_pos = self.pos()
+            self.setParent(None, Qt.Window)
         self._fs_geometry = self.saveGeometry()
         self._fs_scale = self.scaled_host.scale()
         #: 今回の全画面で実際に隠したか。戻すときは**隠したものだけ**を
@@ -913,7 +944,18 @@ class GamePreviewWindow(QWidget):
             self.set_overlay_visible(True)
         self._fs_hidden = False
         self._refit()
-        if self._fs_geometry is not None:
+        if self._embedded:
+            host = self._embed_host
+            self._embed_host = None
+            if host is not None:
+                self.setParent(host, Qt.Widget)
+                self.move(self._embed_pos)
+                self.show()
+                QTimer.singleShot(0, self.scaled_host.raise_overlays)
+                cb = getattr(self, "_embed_cb", None)
+                if cb is not None:
+                    cb()
+        elif self._fs_geometry is not None:
             self.restoreGeometry(self._fs_geometry)
 
     def _screen_size(self):
@@ -1331,8 +1373,10 @@ class PreviewDock(QDockWidget):
                  chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
                  checkpoint_lines_cb=None, undo_cb=None, redo_cb=None,
-                 demostart_cb=None, header_edit_cb=None):
+                 demostart_cb=None, header_edit_cb=None, embedded=False):
         super().__init__("音源プレビュー", parent)
+        #: v15 統合画面か(再生窓をメインウィンドウの右に埋める)。
+        self._embedded = bool(embedded)
         self.apply_offset_cb = apply_offset_cb
         #: DEMOSTART を本文へ書く口(MainWindow が持つ)。
         self.demostart_cb = demostart_cb
@@ -1668,8 +1712,9 @@ class PreviewDock(QDockWidget):
             self.chart_edit.set_screen_uncoupled(
                 bool(getattr(self.game_screen, "native_screen_window", False)))
         self.game_preview_window = GamePreviewWindow(
-            self.game_screen, self._bottom_panel, parent=self,
-            lane_widget=self.chart_preview,
+            self.game_screen, self._bottom_panel,
+            parent=None if self._embedded else self,
+            lane_widget=self.chart_preview, embedded=self._embedded,
         )
         self.game_preview_window.set_pane_cb(self._update_pane_host)
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
@@ -1787,6 +1832,13 @@ class PreviewDock(QDockWidget):
             (self.mode_button, 96, 6), (self.course_button, 150, 6),
             (self.record_button, 84, 6), (self.zoom_button, 96, 6),
             (self.fps_label, 74, 2), (self.sim_fps_combo, 62, 6)]
+        if self._embedded:
+            # 統合画面では表示倍率は右ペインの幅から自動で決まる
+            # (MainWindow._fit_player_to_pane)。ボタンは出さない
+            # (利用者の指定 2026-11-11「倍率と合作はとりあえず削除」)。
+            self.zoom_button.hide()
+            self._lane_overlays = [t for t in self._lane_overlays
+                                   if t[0] is not self.zoom_button]
         # --- 合作の操作を画面の上に置く(利用者の指定 2026-10-17) ---
         # 置き場所は左上、スコア枠より上の黒い所。どんちゃんにも譜面にも
         # 掛からず、作譜しながら手が届く。合作していない間は出さない。

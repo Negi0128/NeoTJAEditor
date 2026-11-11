@@ -61,6 +61,21 @@ def find_non_cp932_chars(content: str):
     return bad
 
 
+class PlayerPane(QWidget):
+    """右ペイン(v15 統合画面)。幅が変わったら知らせる(再生画面の倍率を
+    取り直すため)。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.resize_cb = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cb = self.resize_cb
+        if cb is not None:
+            cb()
+
+
 class CourseCard(QFrame):
     """Sidebar card showing one course's stats (notes/measures/time/roll/balloon),
     with a collapsible roll-by-roll detail list."""
@@ -434,17 +449,11 @@ class MainWindow(QMainWindow):
                              self.open_density_graph)
         self._toolbar_button(self.toolbar_top, "ヘルプ", self.open_help)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar_top.addWidget(spacer)
-        self.encoding_label = QLabel("ANSI (cp932)")
-        self.toolbar_top.addWidget(self.encoding_label)
-
-        self.addToolBarBreak(Qt.TopToolBarArea)
-
+        # ハイスピ変換〜TJA校正は TJA 側だけの道具なので、窓の幅いっぱい
+        # ではなくエディタの上に置く(v15 統合画面)。
         self.toolbar_bottom = QToolBar("tools")
         self.toolbar_bottom.setMovable(False)
-        self.addToolBar(Qt.TopToolBarArea, self.toolbar_bottom)
+        self.editor_container.layout().insertWidget(0, self.toolbar_bottom)
         self._toolbar_button(self.toolbar_bottom, "ハイスピ変換", self.open_scroll_splitter)
         self._toolbar_button(self.toolbar_bottom, "リサイズ", self.open_measure_converter)
         self._toolbar_button(self.toolbar_bottom, "反転", self.reverse_don_ka)
@@ -511,20 +520,73 @@ class MainWindow(QMainWindow):
         self.editor.centerCursor()
         self.editor.setFocus(Qt.OtherFocusReason)
 
+    #: 再生画面の原寸の幅(px)。右ペインがこれより狭いときは縮めて入れる。
+    PLAYER_W = 1280
+
     def _build_central_layout(self):
+        """v15 統合画面: 左に TJA、右上に再生画面、右下に情報・操作。
+
+        右ペインは PlayerPane。幅が変わるたびに再生画面の倍率を取り直す
+        (_fit_player_to_pane)。再生画面そのものは固定サイズなので、
+        入れ物(player_host)には並び(レイアウト)を付けず、固定サイズが
+        外へ伝わらないようにしてある — 伝わると分割バーが 1280px より
+        左へ動かせなくなる。"""
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.sb_outer)
         splitter.addWidget(self.editor_container)
-        splitter.setSizes([260, 1020])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        # **左の難易度パネルは畳ませない。** 0 幅まで畳むと取っ手が窓の端に
-        # 貼り付いて、つかめず開けなくなる(利用者の報告 2026-10-17
-        # 「一回閉じたら開けなくなる」)。閉じる機能そのものを無くす。
+
+        self.right_pane = PlayerPane()
+        rl = QVBoxLayout(self.right_pane)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        self.player_host = QWidget()
+        rl.addWidget(self.player_host)
+        self.bottom_row = QWidget()
+        hb = QHBoxLayout(self.bottom_row)
+        hb.setContentsMargins(4, 4, 4, 4)
+        hb.setSpacing(6)
+        self.sb_outer.setFixedWidth(270)
+        hb.addWidget(self.sb_outer)
+        rl.addWidget(self.bottom_row, 1)
+        splitter.addWidget(self.right_pane)
+
+        splitter.setSizes([640, 1280])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        # どちらも畳ませない。0 幅まで畳むと取っ手が窓の端に貼り付いて、
+        # つかめず開けなくなる(利用者の報告 2026-10-17)。
         splitter.setCollapsible(0, False)
-        self.sb_outer.setMinimumWidth(120)
-        self.splitter = splitter   # サイドバー分割比の保存/復元に使う
+        splitter.setCollapsible(1, False)
+        self.editor_container.setMinimumWidth(240)
+        self.right_pane.setMinimumWidth(320)
+        self.right_pane.resize_cb = self._fit_player_to_pane
+        self.splitter = splitter   # 分割比の保存/復元に使う
         self.setCentralWidget(splitter)
+
+    def _fit_player_to_pane(self):
+        """右ペインの幅に合わせて再生画面の倍率を決める(原寸が上限)。"""
+        dock = getattr(self, "preview_dock", None)
+        if dock is None:
+            return
+        gpw = dock.game_preview_window
+        if gpw.is_fullscreen():
+            return
+        w = self.player_host.width()
+        if w <= 0:
+            return
+        s = max(0.25, min(1.0, w / float(self.PLAYER_W)))
+        if abs(s - gpw.scaled_host.scale()) < 0.005:
+            return
+        dock.apply_preview_scale(s)
+        gpw.refit()
+
+    def _on_player_refit(self):
+        """再生画面の大きさが変わった(モード切替・倍率)。入れ物を合わせる。"""
+        gpw = self.preview_dock.game_preview_window
+        self.player_host.setFixedHeight(gpw.height())
+        s = gpw.scaled_host.scale()
+        lbl = getattr(self, "lbl_scale", None)
+        if lbl is not None:
+            lbl.setText("ウィンドウ倍率 %d%%" % int(round(s * 100)))
 
     def _build_preview_dock(self):
         self.preview_dock = PreviewDock(
@@ -532,6 +594,7 @@ class MainWindow(QMainWindow):
             self,
             demostart_cb=lambda v: self.set_header_line("DEMOSTART", v),
             header_edit_cb=self.open_header_dialog,
+            embedded=True,
             seek_cursor_cb=self._cursor_preview_seconds,
             volume_cb=self._save_preview_volume,
             duration_ready_cb=self._update_metronome_schedule,
@@ -556,7 +619,20 @@ class MainWindow(QMainWindow):
             redo_cb=self.editor.redo,
             checkpoint_lines_cb=self._set_checkpoint_lines,
         )
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.preview_dock)
+        # ドックとしては出さない。中身(再生画面と操作)を右ペインへ移す。
+        self.preview_dock.hide()
+        content = self.preview_dock.widget()
+        self.bottom_row.layout().addWidget(content, 1)
+        # 右下はシークバー(帯)と下部設定の場所。ドック時代の曲名・波形・
+        # スライダーは出さない(波形は作譜ペインにある)。
+        for wdg in (self.preview_dock.title_label, self.preview_dock.waveform,
+                    self.preview_dock.seek_slider):
+            wdg.hide()
+        gpw = self.preview_dock.game_preview_window
+        gpw.setParent(self.player_host)
+        gpw.move(0, 0)
+        gpw.show()
+        gpw.set_embed_resized_cb(self._on_player_refit)
         # 音源を読み直したいとき(合作で後から降ってきた / 音声を再接続)に、
         # 譜面の中身から全部を組み直してもらう道。
         self.preview_dock.reload_all_cb = self._force_update
@@ -843,36 +919,28 @@ class MainWindow(QMainWindow):
         return None
 
     def _build_statusbar(self):
+        """左下: 文字コード / テーマ切替 / ウィンドウ倍率(表示のみ)。
+
+        「▼ プレビュー」「譜面プレビュー」は v15 で廃止 — 再生画面は
+        常に右に出ている。"""
+        self.encoding_label = QLabel("ANSI (cp932)")
+        self.statusBar().addWidget(self.encoding_label)
         self.btn_theme = QPushButton("テーマ切替")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        self.statusBar().addPermanentWidget(self.btn_theme)
-
-        self.btn_preview_toggle = QPushButton("▼ プレビュー")
-        self.btn_preview_toggle.setCheckable(True)
-        self.btn_preview_toggle.setChecked(True)
-        self.btn_preview_toggle.toggled.connect(self._on_preview_toggle_clicked)
-        self.statusBar().addPermanentWidget(self.btn_preview_toggle)
-
-        self.btn_game_preview_toggle = QPushButton("譜面プレビュー")
-        self.btn_game_preview_toggle.setCheckable(True)
-        self.btn_game_preview_toggle.toggled.connect(self._on_game_preview_toggle_clicked)
-        self.statusBar().addPermanentWidget(self.btn_game_preview_toggle)
+        self.statusBar().addWidget(self.btn_theme)
+        self.lbl_scale = QLabel("ウィンドウ倍率 100%")
+        self.lbl_scale.setToolTip("再生画面の表示倍率(右ペインの幅から自動で決まります)")
+        self.statusBar().addWidget(self.lbl_scale)
 
         self.status_label = QLabel("")
         self.statusBar().addWidget(self.status_label, 1)
-
-    def _on_preview_toggle_clicked(self, checked):
-        self.preview_dock.set_expanded(checked)
-        self.btn_preview_toggle.setText("▼ プレビュー" if checked else "▲ プレビュー")
+        self._on_player_refit()
 
     def _on_preview_expanded_changed(self, expanded):
-        self.btn_preview_toggle.setChecked(expanded)
-
-    def _on_game_preview_toggle_clicked(self, checked):
-        self.preview_dock.set_game_preview_visible(checked)
+        pass
 
     def _on_game_preview_visibility_changed(self, visible):
-        self.btn_game_preview_toggle.setChecked(visible)
+        pass
 
     def _on_f1(self):
         """F1: launch the built-in game-style preview (NeoTJAPlayer)
@@ -880,7 +948,6 @@ class MainWindow(QMainWindow):
         sounds so the key never relaunches/duplicates the preview."""
         if not self.preview_dock.is_game_preview_visible():
             self.preview_dock.set_game_preview_visible(True)
-            self.btn_game_preview_toggle.setChecked(True)
         else:
             self.preview_dock.toggle_hit_sounds()
 
@@ -1193,7 +1260,7 @@ class MainWindow(QMainWindow):
             geo = self.config_data.get("window_geometry", "")
             if geo:
                 self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
-            st = self.config_data.get("splitter_state", "")
+            st = self.config_data.get("splitter_state_v15", "")
             if st and hasattr(self, "splitter"):
                 self.splitter.restoreState(QByteArray.fromBase64(st.encode("ascii")))
         except Exception:  # noqa: BLE001
@@ -1204,7 +1271,7 @@ class MainWindow(QMainWindow):
             self.config_data["window_geometry"] = bytes(
                 self.saveGeometry().toBase64()).decode("ascii")
             if hasattr(self, "splitter"):
-                self.config_data["splitter_state"] = bytes(
+                self.config_data["splitter_state_v15"] = bytes(
                     self.splitter.saveState().toBase64()).decode("ascii")
             settings_mod.save_settings(self.config_data)
         except Exception:  # noqa: BLE001
@@ -2107,7 +2174,6 @@ class MainWindow(QMainWindow):
         try:
             if not self.preview_dock.is_game_preview_visible():
                 self.preview_dock.set_game_preview_visible(True)
-                self.btn_game_preview_toggle.setChecked(True)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
