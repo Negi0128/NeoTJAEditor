@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QToolBar,
+    QSpinBox, QSplitter, QToolBar, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -243,6 +243,36 @@ class CourseCard(QFrame):
         balloons = course.get("balloons_info", [])
         total_balloon_hits = sum(b["hits"] for b in balloons)
         self.lbl_balloon.setText(f"風船総計: {len(balloons)}個 ({total_balloon_hits}打)")
+
+
+class _ArrowLineEdit(QLineEdit):
+    """↑↓キーとホイールで stepped(±1) を出す字の欄(右下の BPM 用)。
+
+    QDoubleSpinBox だと打った字を自分の形(3桁など)に直してしまう。
+    ヘッダの BPM: は打ったとおり残したいので、字の欄のまま矢印の操作
+    だけ足す。"""
+    stepped = Signal(int)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Up:
+            self.stepped.emit(1)
+            return
+        if event.key() == Qt.Key_Down:
+            self.stepped.emit(-1)
+            return
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event):
+        # 命令パネルの箱と同じく、欄の上でホイールを回しても ±1。
+        # 欄に入っている(フォーカスがある)ときだけ。素通りすると
+        # 設定欄全体が転がる心配はないが、狙わず回して値が動くのを防ぐ。
+        if not self.hasFocus():
+            event.ignore()
+            return
+        d = event.angleDelta().y()
+        if d:
+            self.stepped.emit(1 if d > 0 else -1)
+        event.accept()
 
 
 class MainWindow(QMainWindow):
@@ -692,6 +722,10 @@ class MainWindow(QMainWindow):
             " {{ padding: 2px 10px; min-height: 18px; }}"
             "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
             "#settingsPanel QPushButton#demostartBtn {{ padding: 2px 6px; }}"
+            # BPM の上下矢印。2 段重ねで欄の高さ(24px)に収める。
+            "#settingsPanel QToolButton#bpmArrow {{ padding: 0px; margin: 0px;"
+            " border: 1px solid {border}; border-radius: 2px; }}"
+            "#settingsPanel QToolButton#bpmArrow:hover {{ background: {bg3}; }}"
             "#settingsPanel QLineEdit, #settingsPanel QSpinBox,"
             " #settingsPanel QDoubleSpinBox, #settingsPanel QComboBox"
             " {{ padding: 2px 4px; min-height: 18px; }}"
@@ -714,6 +748,13 @@ class MainWindow(QMainWindow):
                   getattr(self, "bpm_box", None)):
             if w is not None:
                 w.setStyleSheet(self._bottom_css())
+        # OFFSET の値の箱は常に青い枠(メトロノーム ON の枠と同じ色)。
+        # 部品に直に当てるのは、テーマの QDoubleSpinBox の枠線より
+        # 優先させるため。
+        spin = getattr(self.preview_dock, "spin_offset", None)
+        if spin is not None:
+            spin.setStyleSheet(
+                "QDoubleSpinBox { border: 1px solid %s; }" % COLORS["accent"])
 
     def _build_bottom_controls(self):
         """右下: BPM測定の箱と、譜面ヘッダ・再生まわりの設定欄。
@@ -810,14 +851,16 @@ class MainWindow(QMainWindow):
         self.fld_title = QLineEdit()
         self.fld_title.editingFinished.connect(
             lambda: self._apply_text_field("TITLE", self.fld_title))
-        h.addWidget(self.fld_title, 3)
-        gap(h)
+        # 2 つの欄で段の幅を使い切る(利用者の指定 2026-11-12)。gap() の
+        # 伸びる余白を挟むと欄が縮むので、ここだけ固定の間隔にする。
+        h.addWidget(self.fld_title, 1)
+        h.addSpacing(14)
         h.addWidget(label("SUBTITLE"))
         self.fld_subtitle = QLineEdit()
         self.fld_subtitle.setToolTip("先頭の -- / ++ は打ったとおりに残します。")
         self.fld_subtitle.editingFinished.connect(
             lambda: self._apply_text_field("SUBTITLE", self.fld_subtitle))
-        h.addWidget(self.fld_subtitle, 3)
+        h.addWidget(self.fld_subtitle, 1)
 
         # 2. コース / 難易度 / BPM / メトロノーム
         h = row()
@@ -841,13 +884,38 @@ class MainWindow(QMainWindow):
         h.addWidget(self.cmb_level)
         gap(h)
         h.addWidget(label("BPM"))
-        self.fld_bpm = QLineEdit()
+        # 数字の欄 + 上下の矢印(命令パネルの BPM の箱と同じ操作感。
+        # 利用者の指定 2026-11-12)。QDoubleSpinBox にしないのは、打った
+        # 字をそのまま残したいから(137.250 の末尾の 0 を消さない)。
+        self.fld_bpm = _ArrowLineEdit()
         self.fld_bpm.setAlignment(Qt.AlignCenter)
         self.fld_bpm.setFixedWidth(96)
         self.fld_bpm.setToolTip("ヘッダの BPM:。小数は打ったとおりに残します"
-                                "(137.250 など)。")
+                                "(137.250 など)。矢印・↑↓キー・ホイールで ±1。")
         self.fld_bpm.editingFinished.connect(self._apply_bpm_field)
-        h.addWidget(self.fld_bpm)
+        self.fld_bpm.stepped.connect(self._step_bpm)
+        # 欄と矢印は 1px で密着させる(段の 5px だと別の部品に見えた)。
+        bpm_h = QHBoxLayout()
+        bpm_h.setContentsMargins(0, 0, 0, 0)
+        bpm_h.setSpacing(1)
+        bpm_h.addWidget(self.fld_bpm)
+        arrows = QWidget()
+        av = QVBoxLayout(arrows)
+        av.setContentsMargins(0, 0, 0, 0)
+        av.setSpacing(0)
+        self.btn_bpm_up = QToolButton()
+        self.btn_bpm_up.setArrowType(Qt.UpArrow)
+        self.btn_bpm_down = QToolButton()
+        self.btn_bpm_down.setArrowType(Qt.DownArrow)
+        for b, d in ((self.btn_bpm_up, 1), (self.btn_bpm_down, -1)):
+            b.setObjectName("bpmArrow")
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setAutoRepeat(True)
+            b.setFixedSize(16, 12)
+            b.clicked.connect(lambda _=False, d=d: self._step_bpm(d))
+            av.addWidget(b)
+        bpm_h.addWidget(arrows)
+        h.addLayout(bpm_h)
         gap(h)
         pd.btn_metronome.setFocusPolicy(Qt.NoFocus)
         pd.btn_metronome.setMinimumWidth(120)
@@ -864,16 +932,18 @@ class MainWindow(QMainWindow):
             h.addWidget(b)
         pd.spin_offset.setFixedWidth(80)
         pd.spin_offset.setAlignment(Qt.AlignCenter)
+        # いまの値の箱は常に青(アクセント色)の枠。± ボタンに挟まれて
+        # どれが値か分かりにくいので(利用者の指定 2026-11-12)。色は
+        # _restyle_bottom_controls が当てる(テーマ替えでも追従)。
         h.addWidget(pd.spin_offset)
         for b in pd.offset_buttons[3:]:
             h.addWidget(b)
         gap(h)
-        h.addWidget(label("DEMOSTART"))
-        self.btn_demostart = QPushButton("現在位置を DEMOSTART に")
+        # 札もツールチップも付けない。ボタンの字だけで足りる
+        # (利用者の指定 2026-11-12)。
+        self.btn_demostart = QPushButton("カーソル位置をDEMOSTARTに設定")
         self.btn_demostart.setObjectName("demostartBtn")
         self.btn_demostart.setFocusPolicy(Qt.NoFocus)
-        self.btn_demostart.setToolTip("いま止まっている/鳴っている位置を"
-                                      "試聴開始(DEMOSTART:)にします")
         self.btn_demostart.clicked.connect(pd.demostart_here)
         h.addWidget(self.btn_demostart)
 
@@ -1044,6 +1114,48 @@ class MainWindow(QMainWindow):
             return
         if text != self.header_values()["BPM"]:
             self.set_header_line("BPM", text)
+        self._sync_header_fields()
+
+    @staticmethod
+    def _bpm_stepped(text, delta):
+        """"137.250" に ±1 → "138.250"。小数の桁数は元の字に合わせる。
+
+        命令パネルの BPM の箱は 1 刻み(QDoubleSpinBox の既定)で、本文へは
+        末尾の 0 を落として書く(note_edit._fmt_number: 150.0 → 150)。
+        ここも刻みは同じ 1 にするが、書き方は元の字の桁数を守る —
+        "137.250" を "138.25" に縮めると「打ったとおり残す」約束が
+        矢印を押した途端に破れるから。整数なら整数のまま(120 → 121)。
+        数でなければ None。"""
+        s = (text or "").strip()
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+        dec = len(s.split(".", 1)[1]) if "." in s else 0
+        v = max(1.0, v + delta)      # 命令パネルと同じ下限(1)
+        return "%.*f" % (dec, v)
+
+    def _step_bpm(self, delta):
+        """矢印・↑↓・ホイールで BPM を ±1。打ちかけの字があればそこから。
+        本文へは set_header_line で書く(Enter で確定したときと同じ道)。"""
+        if self._syncing_fields:
+            return
+        cur = self.header_values()["BPM"]
+        base = self.fld_bpm.text()
+        if base.strip() == self._bpm_display(cur):
+            # 欄は本文の写し(整数には .0 を添えて見せている)。桁数は
+            # 本文の字に合わせる — 120 → 121 であって 121.0 ではない。
+            base = cur
+        new = self._bpm_stepped(base, delta)
+        if new is None:
+            new = self._bpm_stepped(cur, delta)
+        if new is None:
+            return
+        if new != self.header_values()["BPM"]:
+            self.set_header_line("BPM", new)
+        # 欄にフォーカスがあると _sync_header_fields は欄を触らないので
+        # ここで出し直す(打ちかけの字を確定した扱い)。
+        self.fld_bpm.setText(self._bpm_display(new))
         self._sync_header_fields()
 
     def _on_level_combo(self, idx):

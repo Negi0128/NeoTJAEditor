@@ -1846,11 +1846,17 @@ class PreviewDock(QDockWidget):
             # 2026-11-11)。録画は通常再生のときだけ出るので最後。
             # 幅は字に合わせる(コース名が長くても重ならないように)。
             self.sim_fps_combo.hide()
-            # 下地は半透明の黒。通常モードの背景は明るい絵なので、
-            # 緑の字だけでは読めない(利用者の指定 2026-11-12)。
+            # 下地は隣のボタン(モード切替・コース切替)と同じ色で塗り潰す。
+            # 半透明の黒(150)だと通常モードの明るい絵が透けて読みにくく、
+            # 「ボタンと同じくらい暗く」との指定(利用者 2026-11-12)。字は
+            # 緑のまま太字に。枠は付けない。ボタンはダーク固定のテーマ色
+            # (toolbar_btn)なので、それをそのまま使う。
+            _f = self.fps_label.font()
+            _f.setBold(True)
+            self.fps_label.setFont(_f)
             self.fps_label.setStyleSheet(
-                "color: #7ddc7d; background: rgba(0,0,0,150); border: none;"
-                " border-radius: 3px;")
+                "color: #7ddc7d; background: %s; border: none;"
+                " border-radius: 3px;" % theme.THEMES["dark"]["toolbar_btn"])
             mode_w = max(self._lane_text_w(self._mode_display_name(n))
                          for n in self._mode_names)
             self._lane_overlays = [
