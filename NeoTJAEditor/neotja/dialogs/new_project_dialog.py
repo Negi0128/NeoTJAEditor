@@ -1,16 +1,19 @@
 import os
 import re
+import shutil
+import subprocess
+import sys
 import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from neotja.audio_engine import BpmOffsetDetectWorker
+from neotja.audio_guess import AudioGuessWorker
 from neotja.theme import COLORS
 from neotja.worker_util import detach_worker as _detach_worker
 from neotja.ytdlp_worker import ThumbnailFetchWorker, YtDlpDownloadWorker
@@ -88,6 +91,88 @@ def resolve_soundcloud_url(text):
         return text
     return None
 
+# 「参照」で選べる音源の拡張子。ffmpeg が読める範囲で、実際に手元にありがち
+# なものだけ並べる(「すべて」も付けるので漏れても困らない)。
+AUDIO_FILE_FILTER = (
+    "音声ファイル (*.ogg *.mp3 *.wav *.flac *.m4a *.aac *.opus *.wma);;すべてのファイル (*)"
+)
+
+
+class LocalAudioImportWorker(QThread):
+    """手元の音源を保存先フォルダへ OGG として取り込む(利用者の指定 2026-11-12)。
+
+    なぜ元ファイルをそのまま使わないか: 新規作成の仕上げ(main_window の
+    _apply_youtube_project)は「渡された音源を曲フォルダへ複製してから元を
+    消す」+「名前は必ず <TITLE>.ogg」という、yt-dlp の落としたファイル向けの
+    動きをする。利用者の元ファイルを渡すと消されてしまうし、wav を .ogg と
+    名乗らせることになる。そこで先に保存先フォルダへ OGG の複製を作り、
+    以後はダウンロード完了とまったく同じ道を通す。
+
+    finished_ok の引数は YtDlpDownloadWorker.finished_ok と同じ並び
+    (ogg_path, title, uploader, thumbnail_url)。受け手を共有するため。"""
+
+    finished_ok = Signal(str, str, str, str)
+    failed = Signal(str)
+
+    def __init__(self, src: str, out_dir: str, parent=None):
+        super().__init__(parent)
+        self.src = src
+        self.out_dir = out_dir
+        self._cancelled = False
+        self._proc = None
+
+    def cancel(self):
+        self._cancelled = True
+        p = self._proc
+        if p is not None:
+            try:
+                p.kill()
+            except OSError:
+                pass
+
+    def _dest_path(self) -> str:
+        stem = os.path.splitext(os.path.basename(self.src))[0] or "song"
+        dest = os.path.join(self.out_dir, stem + ".ogg")
+        # 元ファイルそのものを上書き/削除してしまわないよう、同じ場所なら
+        # 別名にする(あとで main_window が元を消すため)。
+        if os.path.abspath(dest) == os.path.abspath(self.src):
+            dest = os.path.join(self.out_dir, stem + "_import.ogg")
+        return dest
+
+    def run(self):
+        try:
+            dest = self._dest_path()
+            os.makedirs(self.out_dir, exist_ok=True)
+            if self.src.lower().endswith(".ogg"):
+                shutil.copy2(self.src, dest)
+            else:
+                import imageio_ffmpeg
+                exe = imageio_ffmpeg.get_ffmpeg_exe()
+                cmd = [exe, "-y", "-v", "error", "-nostdin", "-i", self.src,
+                       "-vn", "-c:a", "libvorbis", "-q:a", "6", dest]
+                kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.PIPE, **kw)
+                _, err = self._proc.communicate()
+                code = self._proc.returncode
+                self._proc = None
+                if self._cancelled:
+                    self.failed.emit("キャンセルされました。")
+                    return
+                if code != 0 or not os.path.exists(dest):
+                    lines = (err or b"").decode("utf-8", "replace").strip().splitlines()
+                    self.failed.emit("OGGへの変換に失敗しました: " + (lines[-1] if lines else "原因不明"))
+                    return
+        except Exception as e:  # noqa: BLE001 - 取り込みの失敗で窓を落とさない
+            self.failed.emit(f"音源を取り込めませんでした: {e}")
+            return
+        if self._cancelled:
+            self.failed.emit("キャンセルされました。")
+            return
+        title = os.path.splitext(os.path.basename(self.src))[0]
+        self.finished_ok.emit(dest, title, "", "")
+
+
 # The process-level holding pen for still-running worker threads (and the
 # detach helper that moves them into it) now lives in neotja/worker_util.py,
 # since preview_dock and the AI chart dialog hit exactly the same
@@ -120,7 +205,11 @@ class NewProjectDialog(QDialog):
         self.enable_ai_gen = False
         self._worker = None
         self._thumb_worker = None
-        self._detect_worker = None
+        self._guess_worker = None
+        # 解析が自動で入れた文字。欄がこれのままなら次の解析で上書きして
+        # よく、違っていれば利用者が打ったので触らない。
+        self._auto_bpm_text = ""
+        self._auto_offset_text = ""
         self._last_activity = 0.0
         self._download_done = False
         # Workers kept alive after they've been superseded/cancelled but haven't
@@ -248,6 +337,20 @@ class NewProjectDialog(QDialog):
         self.btn_download.clicked.connect(self._start_download)
         v.addWidget(self.btn_download)
 
+        # URL の代わりに手元の音源を使う道(利用者の指定 2026-11-12)。
+        # 選んだ時点で保存先フォルダへ OGG として取り込み、ダウンロード完了と
+        # 同じ扱いに乗せる(LocalAudioImportWorker の説明を参照)。
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("音源ファイル"))
+        self.ed_file = QLineEdit()
+        self.ed_file.setReadOnly(True)
+        self.ed_file.setPlaceholderText("URLの代わりに手元の音声ファイルを使う場合は「参照」から選択")
+        file_row.addWidget(self.ed_file, 1)
+        self.btn_browse_file = QPushButton("参照")
+        self.btn_browse_file.clicked.connect(self._browse_audio_file)
+        file_row.addWidget(self.btn_browse_file)
+        v.addLayout(file_row)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setRange(0, 100)
@@ -317,12 +420,27 @@ class NewProjectDialog(QDialog):
         subtitle_row.addWidget(self.ed_subtitle, 1)
         v.addLayout(subtitle_row)
 
-        # Both the BPM/OFFSET auto-detect and AI chart generation are opt-in
-        # here, off by default, and collapsed out of sight unless the user
-        # explicitly wants to try them - keeping the normal/reliable
-        # creation flow completely separate from the experimental one
-        # (a past unconditional-auto-detect regression is what prompted
-        # gating it behind this toggle instead of running it by default).
+        # BPM と OFFSET(利用者の指定 2026-11-12)。音源が決まると裏で解析して
+        # 自動で埋めるが、欄はふつうの入力欄のままで、打ち直せる。解析中は
+        # 空欄のプレースホルダに「解析中…」を出す(文字を入れると利用者の
+        # 入力と見分けがつかなくなるので、プレースホルダで知らせる)。
+        bpm_row = QHBoxLayout()
+        bpm_row.addWidget(QLabel("BPM"))
+        self.ed_bpm = QLineEdit()
+        self.ed_bpm.setPlaceholderText("音源から自動入力(編集可)")
+        bpm_row.addWidget(self.ed_bpm, 1)
+        bpm_row.addSpacing(12)
+        bpm_row.addWidget(QLabel("OFFSET"))
+        self.ed_offset = QLineEdit()
+        self.ed_offset.setPlaceholderText("音源から自動入力(編集可)")
+        bpm_row.addWidget(self.ed_offset, 1)
+        v.addLayout(bpm_row)
+
+        # AI chart generation stays opt-in, off by default, and collapsed out
+        # of sight unless the user explicitly wants to try it - keeping the
+        # normal/reliable creation flow separate from the experimental one.
+        # (The old opt-in "自動OFFSET/BPM検出" lived here too; it was replaced
+        # by the always-on, editable BPM/OFFSET fields above - 2026-11-12.)
         self.chk_experimental = QCheckBox("実験的機能を使用する")
         self.chk_experimental.toggled.connect(self._on_experimental_toggled)
         v.addWidget(self.chk_experimental)
@@ -330,9 +448,7 @@ class NewProjectDialog(QDialog):
         self.experimental_panel = QWidget()
         exp_layout = QVBoxLayout(self.experimental_panel)
         exp_layout.setContentsMargins(20, 4, 0, 0)
-        self.chk_auto_detect = QCheckBox("自動OFFSET/BPM検出を使用")
         self.chk_ai_gen = QCheckBox("AI譜面生成を使用(実験的)")
-        exp_layout.addWidget(self.chk_auto_detect)
         exp_layout.addWidget(self.chk_ai_gen)
         self.experimental_panel.setVisible(False)
         v.addWidget(self.experimental_panel)
@@ -343,7 +459,6 @@ class NewProjectDialog(QDialog):
     def _on_experimental_toggled(self, checked):
         self.experimental_panel.setVisible(checked)
         if not checked:
-            self.chk_auto_detect.setChecked(False)
             self.chk_ai_gen.setChecked(False)
 
     def _update_open_buttons(self, _text=None):
@@ -397,6 +512,53 @@ class NewProjectDialog(QDialog):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.ed_folder.text())
         if folder:
             self.ed_folder.setText(folder)
+
+    # ------------------------------------------------------------------
+    # Local audio file
+    # ------------------------------------------------------------------
+    def _browse_audio_file(self):
+        if self._worker is not None:
+            return  # ダウンロード/取り込み中は選び直させない
+        start_dir = os.path.dirname(self.ed_file.text()) or self.ed_folder.text()
+        path, _ = QFileDialog.getOpenFileName(self, "音源ファイルを選択", start_dir, AUDIO_FILE_FILTER)
+        if path:
+            self.import_local_file(path)
+
+    def import_local_file(self, path):
+        """手元の音源を取り込む。保存先フォルダが要るのはダウンロードと同じ
+        理由(OGG の複製をそこへ作る)。進み具合の見せ方もダウンロードと
+        そろえ、終わったら _on_download_ok に合流する。"""
+        folder = self.ed_folder.text().strip()
+        if not folder:
+            QMessageBox.warning(self, "警告", "保存先フォルダを選択してください。")
+            return
+        if not os.path.isdir(folder):
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as e:
+                QMessageBox.critical(self, "エラー", f"フォルダを作成できませんでした: {e}")
+                return
+        self.ed_file.setText(path)
+        self.result_wave_path = None
+        self._download_done = False
+        self.btn_download.setText("中止")
+        self.btn_download.clicked.disconnect()
+        self.btn_download.clicked.connect(self._cancel_download)
+        self.btn_browse_file.setEnabled(False)
+        self.ed_url.setEnabled(False)
+        self.ed_folder.setEnabled(False)
+        self.status_label.setText(f"取り込み中: {os.path.basename(path)}")
+        self._sync_default_button()
+
+        self.progress_bar.setVisible(True)
+        self._set_progress_busy()
+        self._last_activity = time.monotonic()
+        self._watchdog.start()
+
+        self._worker = LocalAudioImportWorker(path, folder)
+        self._worker.finished_ok.connect(self._on_download_ok)
+        self._worker.failed.connect(self._on_download_failed)
+        self._worker.start()
 
     # ------------------------------------------------------------------
     # Download
@@ -499,6 +661,7 @@ class NewProjectDialog(QDialog):
         self.btn_download.clicked.connect(self._start_download)
         self.ed_url.setEnabled(True)
         self.ed_folder.setEnabled(True)
+        self.btn_browse_file.setEnabled(True)
         self._sync_default_button()
 
     def _on_download_ok(self, ogg_path, title, uploader, thumbnail_url):
@@ -523,31 +686,10 @@ class NewProjectDialog(QDialog):
             self._thumb_worker.fetched.connect(self._on_thumbnail_fetched)
             self._thumb_worker.start()
 
-        # Runs once, right after the download, so BPM:/OFFSET: come
-        # pre-filled by the time the file is created - btn_ok stays disabled
-        # meanwhile so the result can't be accepted with a half-finished
-        # analysis. The button's own text changes to "読み込み中..." (not
-        # just the small status label below) since that's what the user is
-        # actually looking at/clicking - a merely-grayed-out "作成" button
-        # with no other obvious feedback reads as broken/stuck rather than
-        # "please wait". BpmOffsetDetectWorker also carries its own timeout
-        # so this can never get stuck disabled forever.
-        #
-        # Opt-in only (see the 実験的機能を使用する section above) - this
-        # used to run unconditionally, which is what caused the file-lock
-        # crash a past project creation hit.
-        self.result_bpm = None
-        self.result_offset = None
-        if not self.chk_auto_detect.isChecked():
-            self.lbl_detect_status.setText("")
-            return
-        self.btn_ok.setEnabled(False)
-        self.btn_ok.setText("読み込み中...")
-        self.lbl_detect_status.setText("BPM/OFFSETを自動検出中(実験的)...")
-        self._detect_worker = BpmOffsetDetectWorker(ogg_path, self)
-        self._detect_worker.detected.connect(self._on_detect_ok)
-        self._detect_worker.failed.connect(self._on_detect_failed)
-        self._detect_worker.start()
+        # 音源が決まったので BPM/OFFSET の解析を裏で回す(利用者の指定
+        # 2026-11-12)。「作成」は止めない: 解析を待たずに作ってもよく、その
+        # ときは欄に入っている値(空なら既定)が使われる。
+        self._start_guess(ogg_path)
 
     def _on_thumbnail_fetched(self, data: bytes):
         pixmap = QPixmap()
@@ -569,17 +711,82 @@ class NewProjectDialog(QDialog):
         if not cancelled:
             QMessageBox.critical(self, "ダウンロードエラー", msg)
 
-    def _on_detect_ok(self, bpm, offset):
-        self.result_bpm = bpm
-        self.result_offset = offset
-        self.lbl_detect_status.setText(f"BPM/OFFSET自動検出(実験的): BPM {bpm:g} / OFFSET {offset:.3f}")
-        self.btn_ok.setText("作成")
-        self.btn_ok.setEnabled(True)
+    # ------------------------------------------------------------------
+    # BPM / OFFSET auto-fill (neotja/audio_guess.py)
+    # ------------------------------------------------------------------
+    def _field_is_user_typed(self, edit, auto_text):
+        """欄の中身が利用者の手によるものか。空か、前回の解析が入れた文字の
+        ままなら「触っていない」と見なして上書きしてよい。"""
+        text = edit.text().strip()
+        return bool(text) and text != auto_text
 
-    def _on_detect_failed(self, msg):
-        self.lbl_detect_status.setText(f"BPM/OFFSET自動検出に失敗しました(実験的): {msg}")
-        self.btn_ok.setText("作成")
-        self.btn_ok.setEnabled(True)
+    def _start_guess(self, path):
+        # 前の解析がまだ走っていたら切り離す(結果は捨てる)。
+        old = self._guess_worker
+        if old is not None:
+            try:
+                old.guessed.disconnect(self._on_guess_ok)
+                old.failed.disconnect(self._on_guess_failed)
+            except (RuntimeError, TypeError):
+                pass
+            _detach_worker(old)
+        self._guess_worker = None
+
+        for edit, auto in ((self.ed_bpm, self._auto_bpm_text),
+                           (self.ed_offset, self._auto_offset_text)):
+            if not self._field_is_user_typed(edit, auto):
+                edit.clear()
+                edit.setPlaceholderText("解析中…")
+        self.lbl_detect_status.setText("音源から BPM と OFFSET を解析中…")
+
+        self._guess_worker = AudioGuessWorker(path, self)
+        self._guess_worker.guessed.connect(self._on_guess_ok)
+        self._guess_worker.failed.connect(self._on_guess_failed)
+        self._guess_worker.start()
+
+    def _restore_placeholders(self):
+        for edit in (self.ed_bpm, self.ed_offset):
+            edit.setPlaceholderText("音源から自動入力(編集可)")
+
+    def _on_guess_ok(self, bpm, offset):
+        bpm, offset = AudioGuessWorker.unpack(bpm, offset)
+        self._restore_placeholders()
+        parts = []
+        if bpm is not None:
+            text = str(int(bpm))
+            if self._field_is_user_typed(self.ed_bpm, self._auto_bpm_text):
+                # 解析が終わる前に打ち込まれていた。消さずに、推定値だけ添える。
+                parts.append(f"BPM {text}(入力済みのため未反映)")
+            else:
+                self.ed_bpm.setText(text)
+                parts.append(f"BPM {text}")
+            self._auto_bpm_text = text
+        if offset is not None:
+            text = f"{offset:.3f}"
+            if self._field_is_user_typed(self.ed_offset, self._auto_offset_text):
+                parts.append(f"OFFSET {text}(入力済みのため未反映)")
+            else:
+                self.ed_offset.setText(text)
+                parts.append(f"OFFSET {text}")
+            self._auto_offset_text = text
+        self.lbl_detect_status.setText(
+            "音源から推定: " + " / ".join(parts) + "(手直しできます)")
+
+    def _on_guess_failed(self, msg):
+        # 欄は触らない(入っていた値はそのまま)。短く知らせるだけ。
+        self._restore_placeholders()
+        self.lbl_detect_status.setText(f"BPM/OFFSET を推定できませんでした: {msg}")
+
+    @staticmethod
+    def _parse_number(text):
+        """欄の文字を数に。空や読めないものは None(ひな形の既定値のまま)。"""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     # ------------------------------------------------------------------
     # Confirm / cancel
@@ -598,7 +805,11 @@ class NewProjectDialog(QDialog):
             return
         self.result_title = title
         self.result_subtitle = self.ed_subtitle.text().strip()
-        self.enable_auto_detect = self.chk_auto_detect.isChecked()
+        # 欄の値(自動入力でも手直し後でも)をそのまま渡す。main_window 側は
+        # bpm が偽なら BPM:、offset が None なら OFFSET: をひな形のままにする。
+        bpm = self._parse_number(self.ed_bpm.text())
+        self.result_bpm = bpm if bpm and bpm > 0 else None
+        self.result_offset = self._parse_number(self.ed_offset.text())
         self.enable_ai_gen = self.chk_ai_gen.isChecked()
         self.main_window.config_data["last_project_folder"] = self.result_folder
         self.accept()
@@ -612,12 +823,12 @@ class NewProjectDialog(QDialog):
     # ------------------------------------------------------------------
     def _shutdown_workers(self):
         self._watchdog.stop()
-        for w in [self._worker, self._thumb_worker, self._detect_worker,
+        for w in [self._worker, self._thumb_worker, self._guess_worker,
                   *self._retired_workers]:
             _detach_worker(w)
         self._worker = None
         self._thumb_worker = None
-        self._detect_worker = None
+        self._guess_worker = None
         self._retired_workers.clear()
 
     def accept(self):
@@ -626,7 +837,7 @@ class NewProjectDialog(QDialog):
         # destroyed with the dialog while running.
         self._watchdog.stop()
         _detach_worker(self._thumb_worker)
-        _detach_worker(self._detect_worker)
+        _detach_worker(self._guess_worker)
         super().accept()
 
     def reject(self):
