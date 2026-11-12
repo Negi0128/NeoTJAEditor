@@ -53,6 +53,9 @@ _SETTINGS_KEYS = (
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
     "nameplate_title_image_dx", "nameplate_title_image_dy",
     "nameplate_title_image_dw", "nameplate_title_image_dh",
+    # 新規作成の窓の「BPM自動入力」「OFFSET自動入力」。default_settings() と
+    # 両方に要る(片方だけだと次の起動で覚えた選択が戻ってしまう)。
+    "new_project_auto_bpm", "new_project_auto_offset",
 )
 
 
@@ -137,6 +140,10 @@ def default_settings() -> dict:
         "short_roll_comp": "段階的補正 (60fps理論値)",
         "preview_volume": 0.8,
         "last_project_folder": "",
+        # 新規作成の窓で、音源の解析結果を BPM / OFFSET の欄へ自動で入れるか
+        # (利用者の指定 2026-11-13)。既定はどちらも入れる。
+        "new_project_auto_bpm": True,
+        "new_project_auto_offset": True,
         "check_updates_on_startup": True,
         "auto_save_enabled": False,
         "hit_sound_don_path": "",

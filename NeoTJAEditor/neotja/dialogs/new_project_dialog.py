@@ -204,11 +204,20 @@ class NewProjectDialog(QDialog):
         self.result_folder = None
         self.result_bpm = None
         self.result_offset = None
+        # 「実験的機能」「AI譜面生成」のチェックは画面から外した(利用者の
+        # 指定 2026-11-13)。main_window は enable_ai_gen を読むので、属性
+        # だけは常に False のまま残す。
         self.enable_auto_detect = False
         self.enable_ai_gen = False
         self._worker = None
         self._thumb_worker = None
         self._guess_worker = None
+        # 最後の解析結果 (bpm, offset)。自動入力のチェックを後から入れた
+        # ときに、解析をやり直さずここから埋めるため。
+        self._guess_result = None
+        # 解析にかける音源。両方のチェックが外れていて解析を飛ばしたあとで
+        # チェックを入れたとき、ここから解析を始める。
+        self._guess_path = None
         # 解析が自動で入れた文字。欄がこれのままなら次の解析で上書きして
         # よく、違っていれば利用者が打ったので触らない。
         self._auto_bpm_text = ""
@@ -484,37 +493,73 @@ class NewProjectDialog(QDialog):
         info.addLayout(fields, 1, 1)
         v.addWidget(info_card)
 
-        # AI chart generation stays opt-in, off by default, and collapsed out
-        # of sight unless the user explicitly wants to try it - keeping the
-        # normal/reliable creation flow separate from the experimental one.
-        # (The old opt-in "自動OFFSET/BPM検出" lived here too; it was replaced
-        # by the always-on, editable BPM/OFFSET fields above - 2026-11-12.)
-        # カードの外、地の上に小さく置く(試すときだけ見るもの)。中の
-        # チェックは横に並べる — 縦に開くと窓の中身が詰まり直して下の
-        # ボタンが跳ねるため。
-        exp_row = QHBoxLayout()
-        exp_row.setContentsMargins(4, 0, 0, 0)
-        self.chk_experimental = QCheckBox("実験的機能を使用する")
-        self.chk_experimental.toggled.connect(self._on_experimental_toggled)
-        exp_row.addWidget(self.chk_experimental)
-
-        self.experimental_panel = QWidget()
-        exp_layout = QVBoxLayout(self.experimental_panel)
-        exp_layout.setContentsMargins(16, 0, 0, 0)
-        self.chk_ai_gen = QCheckBox("AI譜面生成を使用(実験的)")
-        exp_layout.addWidget(self.chk_ai_gen)
-        self.experimental_panel.setVisible(False)
-        exp_row.addWidget(self.experimental_panel)
-        exp_row.addStretch(1)
-        v.addLayout(exp_row)
+        # BPM / OFFSET を音源から自動で入れるかどうか(利用者の指定
+        # 2026-11-13、「実験的機能」「AI譜面生成」のチェックと入れ替え)。
+        # 曲によっては解析が外れて毎回消す手間になるので、欄ごとに切れる
+        # ようにした。置き場所は前のチェックと同じカードの外、地の上。
+        # 前回の選択は config_data に覚える(次に開いたときも同じ状態)。
+        cfg = self.main_window.config_data
+        auto_row = QHBoxLayout()
+        auto_row.setContentsMargins(4, 0, 0, 0)
+        auto_row.setSpacing(16)
+        self.chk_auto_bpm = QCheckBox("BPM自動入力")
+        self.chk_auto_bpm.setChecked(bool(cfg.get("new_project_auto_bpm", True)))
+        self.chk_auto_offset = QCheckBox("OFFSET自動入力")
+        self.chk_auto_offset.setChecked(bool(cfg.get("new_project_auto_offset", True)))
+        self.chk_auto_bpm.toggled.connect(lambda on: self._on_auto_toggled("bpm", on))
+        self.chk_auto_offset.toggled.connect(lambda on: self._on_auto_toggled("offset", on))
+        auto_row.addWidget(self.chk_auto_bpm)
+        auto_row.addWidget(self.chk_auto_offset)
+        auto_row.addStretch(1)
+        v.addLayout(auto_row)
+        self._restore_placeholders()
 
         v.addStretch()
         return w
 
-    def _on_experimental_toggled(self, checked):
-        self.experimental_panel.setVisible(checked)
-        if not checked:
-            self.chk_ai_gen.setChecked(False)
+    def _auto_fields(self):
+        """(欄, 自動入力のチェック, 前回自動で入れた文字の属性名) の組。"""
+        return (("bpm", self.ed_bpm, self.chk_auto_bpm, "_auto_bpm_text"),
+                ("offset", self.ed_offset, self.chk_auto_offset, "_auto_offset_text"))
+
+    @staticmethod
+    def _format_guess(which, value):
+        """解析の値を欄に入れる文字へ。BPM は整数、OFFSET は小数3桁。"""
+        if value is None:
+            return None
+        return str(int(value)) if which == "bpm" else f"{value:.3f}"
+
+    def _on_auto_toggled(self, which, checked):
+        cfg = self.main_window.config_data
+        cfg["new_project_auto_" + which] = bool(checked)
+        # 窓をキャンセルで閉じても選択は覚えておきたいので、その場で保存する。
+        # 保存口が無い呼び出し元(試験用の仮の親など)では config_data に
+        # 入れるだけにする。
+        save = getattr(self.main_window, "_save_config", None)
+        if callable(save):
+            save()
+
+        for key, edit, chk, auto_attr in self._auto_fields():
+            if key != which:
+                continue
+            auto_text = getattr(self, auto_attr)
+            if not checked:
+                # 自動で入れたままの値は消す(チェックを外した = 自動の値は
+                # 要らない、という意味に取る)。利用者が打った値は残す。
+                if auto_text and edit.text().strip() == auto_text:
+                    edit.clear()
+                setattr(self, auto_attr, "")
+            elif self._guess_result is not None:
+                # 解析はもう済んでいる。やり直さず、覚えておいた結果で埋める。
+                value = self._guess_result[0 if key == "bpm" else 1]
+                text = self._format_guess(key, value)
+                if text is not None and not self._field_is_user_typed(edit, auto_text):
+                    edit.setText(text)
+                    setattr(self, auto_attr, text)
+            elif self._guess_worker is None and self._guess_path:
+                # 両方切れていて解析を飛ばしていた。ここで初めて回す。
+                self._start_guess(self._guess_path)
+        self._restore_placeholders()
 
     def _update_open_buttons(self, _text=None):
         """入力欄の中身に応じてボタンの意味が変わるので、押す前に
@@ -776,6 +821,9 @@ class NewProjectDialog(QDialog):
         return bool(text) and text != auto_text
 
     def _start_guess(self, path):
+        # 新しい音源なので、前の音源の解析結果は使えない。
+        self._guess_path = path
+        self._guess_result = None
         # 前の解析がまだ走っていたら切り離す(結果は捨てる)。
         old = self._guess_worker
         if old is not None:
@@ -787,12 +835,22 @@ class NewProjectDialog(QDialog):
             _detach_worker(old)
         self._guess_worker = None
 
-        for edit, auto in ((self.ed_bpm, self._auto_bpm_text),
-                           (self.ed_offset, self._auto_offset_text)):
-            if not self._field_is_user_typed(edit, auto):
+        wanted = [key for key, _e, chk, _a in self._auto_fields() if chk.isChecked()]
+        if not wanted:
+            # 両方とも自動入力しない。解析は重い(数秒かかる)ので回さない。
+            # 後からチェックを入れたら _on_auto_toggled がここへ戻ってくる。
+            self.lbl_detect_status.setText("")
+            self._restore_placeholders()
+            return
+
+        for key, edit, chk, auto_attr in self._auto_fields():
+            if not chk.isChecked():
+                continue
+            if not self._field_is_user_typed(edit, getattr(self, auto_attr)):
                 edit.clear()
                 edit.setPlaceholderText("解析中…")
-        self.lbl_detect_status.setText("音源から BPM と OFFSET を解析中…")
+        names = " と ".join("BPM" if k == "bpm" else "OFFSET" for k in wanted)
+        self.lbl_detect_status.setText(f"音源から {names} を解析中…")
 
         self._guess_worker = AudioGuessWorker(path, self)
         self._guess_worker.guessed.connect(self._on_guess_ok)
@@ -800,35 +858,56 @@ class NewProjectDialog(QDialog):
         self._guess_worker.start()
 
     def _restore_placeholders(self):
-        for edit in (self.ed_bpm, self.ed_offset):
-            edit.setPlaceholderText("音源から自動入力(編集可)")
+        # 自動入力を切った欄に「自動入力」と出すと嘘になるので、案内を変える。
+        # 解析中は「解析中…」を出したままにする(途中でチェックを入れた欄も)。
+        for _k, edit, chk, _a in self._auto_fields():
+            if not chk.isChecked():
+                edit.setPlaceholderText("空欄可(未入力時は既定値)")
+            elif self._guess_worker is not None:
+                edit.setPlaceholderText("解析中…")
+            else:
+                edit.setPlaceholderText("音源から自動入力(編集可)")
+
+    def _release_guess_worker(self):
+        """終わった解析を「走っていない」扱いにする。参照は _retired_workers
+        へ移し、スレッドが本当に抜けるまで GC されないようにする(ダウンロード
+        の _retire_worker と同じ理由)。"""
+        done = self._guess_worker
+        self._guess_worker = None
+        if done is not None:
+            self._retired_workers.append(done)
+            done.finished.connect(lambda: self._retired_workers.remove(done)
+                                  if done in self._retired_workers else None)
 
     def _on_guess_ok(self, bpm, offset):
         bpm, offset = AudioGuessWorker.unpack(bpm, offset)
+        self._guess_result = (bpm, offset)
+        self._release_guess_worker()
         self._restore_placeholders()
         parts = []
-        if bpm is not None:
-            text = str(int(bpm))
-            if self._field_is_user_typed(self.ed_bpm, self._auto_bpm_text):
+        for key, edit, chk, auto_attr in self._auto_fields():
+            text = self._format_guess(key, bpm if key == "bpm" else offset)
+            if text is None or not chk.isChecked():
+                # 自動入力を切った欄は触らない(結果は _guess_result に
+                # 覚えてあり、後でチェックを入れたら埋まる)。
+                continue
+            name = "BPM" if key == "bpm" else "OFFSET"
+            if self._field_is_user_typed(edit, getattr(self, auto_attr)):
                 # 解析が終わる前に打ち込まれていた。消さずに、推定値だけ添える。
-                parts.append(f"BPM {text}(入力済みのため未反映)")
+                parts.append(f"{name} {text}(入力済みのため未反映)")
             else:
-                self.ed_bpm.setText(text)
-                parts.append(f"BPM {text}")
-            self._auto_bpm_text = text
-        if offset is not None:
-            text = f"{offset:.3f}"
-            if self._field_is_user_typed(self.ed_offset, self._auto_offset_text):
-                parts.append(f"OFFSET {text}(入力済みのため未反映)")
-            else:
-                self.ed_offset.setText(text)
-                parts.append(f"OFFSET {text}")
-            self._auto_offset_text = text
+                edit.setText(text)
+                parts.append(f"{name} {text}")
+            setattr(self, auto_attr, text)
         self.lbl_detect_status.setText(
-            "音源から推定: " + " / ".join(parts) + "(手直しできます)")
+            ("音源から推定: " + " / ".join(parts) + "(手直しできます)") if parts else "")
 
     def _on_guess_failed(self, msg):
         # 欄は触らない(入っていた値はそのまま)。短く知らせるだけ。
+        # 結果は「何も取れなかった」として覚える — チェックを入れ直すたびに
+        # 同じ音源で失敗する解析を回し直さないため。
+        self._guess_result = (None, None)
+        self._release_guess_worker()
         self._restore_placeholders()
         self.lbl_detect_status.setText(f"BPM/OFFSET を推定できませんでした: {msg}")
 
@@ -865,7 +944,6 @@ class NewProjectDialog(QDialog):
         bpm = self._parse_number(self.ed_bpm.text())
         self.result_bpm = bpm if bpm and bpm > 0 else None
         self.result_offset = self._parse_number(self.ed_offset.text())
-        self.enable_ai_gen = self.chk_ai_gen.isChecked()
         self.main_window.config_data["last_project_folder"] = self.result_folder
         self.accept()
 
