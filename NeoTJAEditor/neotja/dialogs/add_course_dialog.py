@@ -6,13 +6,16 @@ TJA に新しいコースを書き足すとき、COURSE: / LEVEL: / BALLOON: …
 が本文の末尾にひな型を書く。
 
 窓は「選んだもの(COURSE の値, LEVEL)を返す」だけ。本文を触るのは呼ぶ側。
+
+見た目は起動画面と同じ「ガラスと光」(dialogs/glass.py、利用者の承認
+2026-11-12)。欄は 1 枚のカードにまとめ、OK だけアクセント色。
 """
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QVBoxLayout,
+    QComboBox, QDialog, QHBoxLayout, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from neotja.dialogs import set_default_button
+from neotja.dialogs.glass import apply_glass, field_label, make_card
 from neotja.tja_analyzer import TJACourseAnalyzer
 
 #: 選べる難易度。並びは TJA の 0〜4 の順(かんたん → おに(裏))。
@@ -31,7 +34,11 @@ class AddCourseDialog(QDialog):
         present = set(present_keys or ())
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        apply_glass(self)
+
+        # 欄は 1 枚のガラスのカードに。QFormLayout でなく格子なのは、
+        # ラベルの幅を他の窓(新規作成)とそろえるため(field_label)。
+        card, form = make_card("追加する難易度")
 
         self.cb_course = QComboBox()
         first_free = None
@@ -48,14 +55,18 @@ class AddCourseDialog(QDialog):
         # 最初の「まだ無い」難易度を選んでおく。全部あるなら先頭のまま
         # (OK を押しても呼ぶ側が断る)。
         self.cb_course.setCurrentIndex(first_free if first_free is not None else 0)
-        form.addRow("難易度", self.cb_course)
+        form.addWidget(field_label("難易度"), 1, 0)
+        form.addWidget(self.cb_course, 1, 1)
 
         self.spin_level = QSpinBox()
         self.spin_level.setRange(1, 10)
         self.spin_level.setValue(5)
         self.spin_level.setPrefix("★")
-        form.addRow("LEVEL", self.spin_level)
-        layout.addLayout(form)
+        form.addWidget(field_label("LEVEL"), 2, 0)
+        form.addWidget(self.spin_level, 2, 1)
+        layout.addWidget(card)
+        # 欄が窮屈に見えない幅。高さは中身なり。
+        self.setMinimumWidth(400)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()

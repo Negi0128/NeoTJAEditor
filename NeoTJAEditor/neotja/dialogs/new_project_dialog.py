@@ -9,12 +9,15 @@ import webbrowser
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from neotja.audio_guess import AudioGuessWorker
-from neotja.theme import COLORS
+from neotja.dialogs.glass import apply_glass, field_label, make_card
+from neotja.theme import COLORS, glass_colors
+from neotja.theme import rgba as _rgba
 from neotja.worker_util import detach_worker as _detach_worker
 from neotja.ytdlp_worker import ThumbnailFetchWorker, YtDlpDownloadWorker
 
@@ -192,7 +195,7 @@ class NewProjectDialog(QDialog):
         super().__init__(parent or main_window)
         self.main_window = main_window
         self.setWindowTitle("新規作成")
-        self.resize(760, 620)
+        self.resize(800, 640)
 
         self.mode = "youtube"
         self.result_title = ""
@@ -224,6 +227,10 @@ class NewProjectDialog(QDialog):
         self._watchdog.timeout.connect(self._check_stall)
 
         layout = QVBoxLayout(self)
+        # 見た目は起動画面と同じ「ガラスと光」(dialogs/glass.py、利用者の
+        # 承認 2026-11-12)。中身は「音源」「譜面の情報」の 2 枚のカードに
+        # まとめ、主役のボタン(Enter の行き先)だけアクセント色にする。
+        apply_glass(self)
 
         mode_row = QHBoxLayout()
         self.btn_blank = QPushButton("空のファイル")
@@ -275,6 +282,25 @@ class NewProjectDialog(QDialog):
                 and self._worker is None):
             want = self.btn_download
         set_default_button(self, want)
+        # 主役の見た目(アクセント色)も同じ考えで付け替える: 光っている
+        # ボタンが「次に押すもの」。ただし「作成」は押して通るときだけ光らせる
+        # (落としている最中に光らせると、押しても警告が出るだけで紛らわしい)。
+        ok_ready = self.mode == "blank" or bool(self.result_wave_path)
+        self._set_accent(self.btn_download, want is self.btn_download)
+        self._set_accent(self.btn_ok, want is self.btn_ok and ok_ready)
+
+    @staticmethod
+    def _set_accent(button, on):
+        """主役の見た目(QSS の #accentButton)を付け外しする。objectName を
+        変えただけでは QSS が当て直されないので、polish し直す。"""
+        name = "accentButton" if on else ""
+        if button.objectName() == name:
+            return
+        button.setObjectName(name)
+        st = button.style()
+        st.unpolish(button)
+        st.polish(button)
+        button.update()
 
     def _set_mode(self, mode):
         if self._worker is not None:
@@ -288,19 +314,26 @@ class NewProjectDialog(QDialog):
     def _build_blank_page(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.addWidget(QLabel("空のTJAテンプレートを新規作成します。"))
+        v.setContentsMargins(0, 0, 0, 0)
+        card, g = make_card("空のファイル")
+        g.addWidget(QLabel("空のTJAテンプレートを新規作成します。"), 1, 0, 1, 2)
+        v.addWidget(card)
         v.addStretch()
         return w
 
     def _build_youtube_page(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setSpacing(10)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
 
-        v.addWidget(QLabel("YouTube / SoundCloud のURLから音声を取得し、OGGに変換します。"))
+        # 「音源」のカード: 音をどこから持ってくるか(URL か手元のファイル)と
+        # どこへ置くか。説明は見出しの右に添える(行を別に取ると窓が伸びる)。
+        src_card, src = make_card(
+            "音源", "YouTube / SoundCloud のURLから音声を取得し、OGGに変換します。")
 
         url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("URL"))
+        url_row.setSpacing(8)
         self.ed_url = QLineEdit()
         self.ed_url.setPlaceholderText(
             "https://www.youtube.com/watch?v=... / https://soundcloud.com/..."
@@ -322,26 +355,35 @@ class NewProjectDialog(QDialog):
         # 2026-11-07)。
         self.ed_url.returnPressed.connect(self._start_download)
         self._update_open_buttons()
-        v.addLayout(url_row)
+        src.addWidget(field_label("URL"), 1, 0)
+        src.addLayout(url_row, 1, 1)
 
         folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("保存先フォルダ"))
+        folder_row.setSpacing(8)
         self.ed_folder = QLineEdit(self.main_window.config_data.get("last_project_folder", ""))
         folder_row.addWidget(self.ed_folder, 1)
         btn_browse = QPushButton("参照")
         btn_browse.clicked.connect(self._browse_folder)
         folder_row.addWidget(btn_browse)
-        v.addLayout(folder_row)
+        src.addWidget(field_label("保存先フォルダ"), 2, 0)
+        src.addLayout(folder_row, 2, 1)
 
+        # ダウンロードの行: ボタンの右に進み具合の棒。ボタンは中身なりの幅に
+        # 固定する(棒が隠れているあいだに横いっぱいへ伸びないように)。幅の
+        # 下限は「中止」に変わったときに縮んで棒が跳ねないため。
+        dl_row = QHBoxLayout()
+        dl_row.setSpacing(10)
         self.btn_download = QPushButton("ダウンロード開始")
         self.btn_download.clicked.connect(self._start_download)
-        v.addWidget(self.btn_download)
+        self.btn_download.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_download.setMinimumWidth(150)
+        dl_row.addWidget(self.btn_download, 0, Qt.AlignLeft)
 
         # URL の代わりに手元の音源を使う道(利用者の指定 2026-11-12)。
         # 選んだ時点で保存先フォルダへ OGG として取り込み、ダウンロード完了と
         # 同じ扱いに乗せる(LocalAudioImportWorker の説明を参照)。
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("音源ファイル"))
+        file_row.setSpacing(8)
         self.ed_file = QLineEdit()
         self.ed_file.setReadOnly(True)
         self.ed_file.setPlaceholderText("URLの代わりに手元の音声ファイルを使う場合は「参照」から選択")
@@ -349,109 +391,122 @@ class NewProjectDialog(QDialog):
         self.btn_browse_file = QPushButton("参照")
         self.btn_browse_file.clicked.connect(self._browse_audio_file)
         file_row.addWidget(self.btn_browse_file)
-        v.addLayout(file_row)
 
+        # 進み具合の棒は窓の QSS(glass.py)の色で描く — 主役のボタンと同じ
+        # グラデーションの帯。ここで個別に色を当てると見た目が揃わない。
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setStyleSheet(
-            f"QProgressBar {{ border: 1px solid {COLORS['border']}; border-radius: 5px; "
-            f"background-color: {COLORS['surface']}; height: 18px; text-align: center; "
-            f"color: {COLORS['fg_bright']}; }} "
-            f"QProgressBar::chunk {{ background-color: {COLORS['accent']}; border-radius: 4px; }}"
-        )
-        v.addWidget(self.progress_bar)
+        dl_row.addWidget(self.progress_bar, 1)
+        # ダウンロードの行は URL と保存先のすぐ下(落とす操作の続き)、手元の
+        # ファイルの行はその下に「もう一つの道」として置く。
+        src.addLayout(dl_row, 3, 1)
+        src.addWidget(field_label("音源ファイル"), 4, 0)
+        src.addLayout(file_row, 4, 1)
 
         self.status_label = QLabel("")
         self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        v.addWidget(self.status_label)
-
         self.lbl_detect_status = QLabel("")
-        self.lbl_detect_status.setStyleSheet(f"color: {COLORS['fg_dim']};")
+        self.lbl_detect_status.setObjectName("dim")
         self.lbl_detect_status.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        v.addWidget(self.lbl_detect_status)
+        status_col = QVBoxLayout()
+        status_col.setSpacing(2)
+        status_col.addWidget(self.status_label)
+        status_col.addWidget(self.lbl_detect_status)
+        src.addLayout(status_col, 5, 1)
+        v.addWidget(src_card)
 
-        preview_frame = QFrame()
-        preview_frame.setStyleSheet(
-            f"QFrame {{ background-color: {COLORS['surface']}; "
-            f"border: 1px solid {COLORS['border']}; border-radius: 8px; }}"
-        )
-        preview_row = QHBoxLayout(preview_frame)
-        preview_row.setContentsMargins(12, 12, 12, 12)
-        preview_row.setSpacing(14)
-
+        # 「譜面の情報」のカード: 左にサムネイル、右に TITLE などの欄。
+        # サムネイルを欄の横に並べるのは、縦に積むと窓が画面からはみ出す
+        # 高さになるため(サムネイルの高さと欄 3 行がほぼ同じ)。取得した
+        # 曲名と投稿者は見出しの行の右へ — 見出しの行は横が空いているので、
+        # 行を別に取らずに済む(まだ何も取得していないときに空行が残らない)。
+        info_card, info = make_card("譜面の情報")
         self.lbl_thumbnail = QLabel("(サムネイル)")
         self.lbl_thumbnail.setFixedSize(THUMB_W, THUMB_H)
         self.lbl_thumbnail.setAlignment(Qt.AlignCenter)
+        # 地は欄と同じ半透明(真っ黒だと明るいテーマで穴に見える)。
+        g = glass_colors()
         self.lbl_thumbnail.setStyleSheet(
-            f"background-color: #000; color: {COLORS['fg_dim']}; "
-            f"border: 1px solid {COLORS['border']}; border-radius: 6px;"
+            f"background-color: {_rgba(g['field_fill'])}; color: {COLORS['fg_dim']}; "
+            f"border: 1px solid {_rgba(g['field_border'])}; border-radius: 8px;"
         )
-        preview_row.addWidget(self.lbl_thumbnail)
-
-        info_col = QVBoxLayout()
-        info_col.setSpacing(4)
         self.lbl_video_title = QLabel("")
         self.lbl_video_title.setWordWrap(True)
-        self.lbl_video_title.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {COLORS['fg_bright']};")
+        self.lbl_video_title.setStyleSheet(f"font-weight: bold; color: {COLORS['fg_bright']};")
         self.lbl_video_title.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.lbl_channel = QLabel("")
-        self.lbl_channel.setStyleSheet(f"color: {COLORS['fg_dim']};")
+        self.lbl_channel.setObjectName("dim")
         self.lbl_channel.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        info_col.addWidget(self.lbl_video_title)
-        info_col.addWidget(self.lbl_channel)
-        info_col.addStretch()
-        preview_row.addLayout(info_col, 1)
-        v.addWidget(preview_frame)
+        # 見出しの後ろ(伸び縮みの手前)へ。曲名は長いと折り返す。
+        info_card.header.insertWidget(1, self.lbl_video_title, 1)
+        info_card.header.insertWidget(2, self.lbl_channel)
 
-        title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("TITLE"))
+        fields = QGridLayout()
+        fields.setHorizontalSpacing(10)
+        fields.setVerticalSpacing(10)
+        fields.setColumnStretch(1, 1)
+        fields.setColumnStretch(4, 1)
         self.ed_title = QLineEdit()
         self.ed_title.setPlaceholderText("ダウンロード後に曲/動画のタイトルが自動入力されます(編集可)")
-        title_row.addWidget(self.ed_title, 1)
-        v.addLayout(title_row)
+        # このカードの欄の名前は、左端そろえ用の幅を取らない(サムネイルの
+        # 横で欄が狭いので、BPM/OFFSET の説明の字が切れないように)。
+        def short_label(text):
+            lbl = field_label(text)
+            lbl.setMinimumWidth(0)
+            return lbl
+        fields.addWidget(short_label("TITLE"), 0, 0)
+        fields.addWidget(self.ed_title, 0, 1, 1, 4)
 
-        subtitle_row = QHBoxLayout()
-        subtitle_row.addWidget(QLabel("SUBTITLE"))
         self.ed_subtitle = QLineEdit()
         self.ed_subtitle.setPlaceholderText("空欄可(未入力時は「--」になります)")
-        subtitle_row.addWidget(self.ed_subtitle, 1)
-        v.addLayout(subtitle_row)
+        fields.addWidget(short_label("SUBTITLE"), 1, 0)
+        fields.addWidget(self.ed_subtitle, 1, 1, 1, 4)
 
         # BPM と OFFSET(利用者の指定 2026-11-12)。音源が決まると裏で解析して
         # 自動で埋めるが、欄はふつうの入力欄のままで、打ち直せる。解析中は
         # 空欄のプレースホルダに「解析中…」を出す(文字を入れると利用者の
         # 入力と見分けがつかなくなるので、プレースホルダで知らせる)。
-        bpm_row = QHBoxLayout()
-        bpm_row.addWidget(QLabel("BPM"))
         self.ed_bpm = QLineEdit()
         self.ed_bpm.setPlaceholderText("音源から自動入力(編集可)")
-        bpm_row.addWidget(self.ed_bpm, 1)
-        bpm_row.addSpacing(12)
-        bpm_row.addWidget(QLabel("OFFSET"))
+        fields.addWidget(short_label("BPM"), 2, 0)
+        fields.addWidget(self.ed_bpm, 2, 1)
+        fields.setColumnMinimumWidth(2, 6)
+        fields.addWidget(short_label("OFFSET"), 2, 3)
         self.ed_offset = QLineEdit()
         self.ed_offset.setPlaceholderText("音源から自動入力(編集可)")
-        bpm_row.addWidget(self.ed_offset, 1)
-        v.addLayout(bpm_row)
+        fields.addWidget(self.ed_offset, 2, 4)
+        fields.setRowStretch(3, 1)
+
+        info.addWidget(self.lbl_thumbnail, 1, 0, Qt.AlignTop)
+        info.addLayout(fields, 1, 1)
+        v.addWidget(info_card)
 
         # AI chart generation stays opt-in, off by default, and collapsed out
         # of sight unless the user explicitly wants to try it - keeping the
         # normal/reliable creation flow separate from the experimental one.
         # (The old opt-in "自動OFFSET/BPM検出" lived here too; it was replaced
         # by the always-on, editable BPM/OFFSET fields above - 2026-11-12.)
+        # カードの外、地の上に小さく置く(試すときだけ見るもの)。中の
+        # チェックは横に並べる — 縦に開くと窓の中身が詰まり直して下の
+        # ボタンが跳ねるため。
+        exp_row = QHBoxLayout()
+        exp_row.setContentsMargins(4, 0, 0, 0)
         self.chk_experimental = QCheckBox("実験的機能を使用する")
         self.chk_experimental.toggled.connect(self._on_experimental_toggled)
-        v.addWidget(self.chk_experimental)
+        exp_row.addWidget(self.chk_experimental)
 
         self.experimental_panel = QWidget()
         exp_layout = QVBoxLayout(self.experimental_panel)
-        exp_layout.setContentsMargins(20, 4, 0, 0)
+        exp_layout.setContentsMargins(16, 0, 0, 0)
         self.chk_ai_gen = QCheckBox("AI譜面生成を使用(実験的)")
         exp_layout.addWidget(self.chk_ai_gen)
         self.experimental_panel.setVisible(False)
-        v.addWidget(self.experimental_panel)
+        exp_row.addWidget(self.experimental_panel)
+        exp_row.addStretch(1)
+        v.addLayout(exp_row)
 
         v.addStretch()
         return w
