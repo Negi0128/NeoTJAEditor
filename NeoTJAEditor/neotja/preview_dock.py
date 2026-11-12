@@ -2834,7 +2834,8 @@ class PreviewDock(QDockWidget):
             # 右下から消して、シークバーの左へ記号で置く(利用者の指定
             # 2026-11-11)。フォーカスは取らない — Space はレーンのまま。
             self.btn_play = QPushButton("▶")
-            self.btn_play.setObjectName("accentButton")
+            # 止まっているあいだはガラス、再生中だけアクセント色
+            # (_on_playing_changed)。右下の段のメトロノーム・打音と同じ約束。
             self.btn_play.setFocusPolicy(Qt.NoFocus)
             self.btn_play.setFixedWidth(36)
             self.btn_play.setToolTip("再生 / 一時停止(Space)")
@@ -2852,6 +2853,23 @@ class PreviewDock(QDockWidget):
                 b.setFont(f)
             h.addWidget(self.btn_play)
             h.addWidget(self.btn_stop)
+            # 右下の段(main_window._bottom_css)と同じガラスのボタン。この窓
+            # (GamePreviewWindow)はテーマに関わらず暗い地なので、色は暗い
+            # テーマの数字で固定し、テーマ替えでも当て直さない。
+            g = theme.glass_colors(theme.THEMES["dark"])
+            grad = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %s, stop:1 %s)"
+                    % (g["primary_top"].name(), g["primary_bottom"].name()))
+            row.setStyleSheet(
+                "QPushButton { background-color: %s; color: %s; border: 1px solid %s;"
+                " border-radius: 6px; padding: 5px 4px; }"
+                "QPushButton:hover { background-color: %s; }"
+                "QPushButton:disabled { color: %s; }"
+                "QPushButton#accentButton { background-color: %s; color: %s;"
+                " border: 1px solid %s; font-weight: bold; }"
+                % (theme.rgba(g["btn_fill"]), theme.THEMES["dark"]["fg"],
+                   theme.rgba(g["btn_border"]), theme.rgba(g["btn_fill_hover"]),
+                   theme.THEMES["dark"]["fg_dim"], grad, g["primary_fg"].name(),
+                   theme.rgba(g["primary_border"])))
         self.lbl_mm_now = QLabel("0:00.000")
         self.lbl_mm_now.setFocusPolicy(Qt.NoFocus)
         h.addWidget(self.lbl_mm_now)
@@ -4138,6 +4156,10 @@ class PreviewDock(QDockWidget):
     def _on_playing_changed(self, playing):
         if self._embedded:
             self.btn_play.setText("❚❚" if playing else "▶")
+            # 再生中だけ主役の色(アクセント色のグラデーション)。
+            self.btn_play.setObjectName("accentButton" if playing else "")
+            self.btn_play.style().unpolish(self.btn_play)
+            self.btn_play.style().polish(self.btn_play)
         else:
             self.btn_play.setText("一時停止" if playing else "再生")
         # 再生中は作譜ペインの黄色いカーソルを消し、赤い線だけにする。
@@ -4345,13 +4367,10 @@ class PreviewDock(QDockWidget):
 
     def _on_metronome_toggled(self, checked):
         self.metronome.set_enabled(checked)
-        if self._embedded:
-            # 統合画面では塗り潰さず、細い青(アクセント色)の枠だけ出す
-            # (利用者の指定 2026-11-11: OFFSET 欄のフォーカス色と同じ)。
-            self.btn_metronome.setStyleSheet(
-                "QPushButton { border: 1px solid %s; }" % theme.COLORS["accent"]
-                if checked else "")
-            return
+        # ON のあいだは主役の色(accentButton)。統合画面でも同じ — 以前は細い
+        # 青い枠だけ(2026-11-11)だったが、右下の段を「ガラスと光」にした
+        # とき(2026-11-12)に、ON のボタンはアクセント色のグラデーションで
+        # そろえた(打音・再生中の ▶ と同じ約束)。
         self.btn_metronome.setObjectName("accentButton" if checked else "")
         self.btn_metronome.style().unpolish(self.btn_metronome)
         self.btn_metronome.style().polish(self.btn_metronome)

@@ -74,6 +74,87 @@ THEMES = {
 COLORS = THEMES["dark"].copy()
 
 
+# ----------------------------------------------------------------------
+# 「ガラスと光」の色(起動画面 start_screen と統合画面の右下の段で共用)
+# ----------------------------------------------------------------------
+def with_alpha(hex_or_color, alpha=None):
+    """色に不透明度(0〜1)を付けて QColor で返す。"""
+    c = QColor(hex_or_color)
+    if alpha is not None:
+        c.setAlphaF(alpha)
+    return c
+
+
+def rgba(color):
+    """QColor → QSS の rgba(r,g,b,a) 文字列。QSS は #rrggbbaa を読めない。"""
+    c = QColor(color)
+    return "rgba(%d,%d,%d,%d)" % (c.red(), c.green(), c.blue(), c.alpha())
+
+
+def is_dark_theme(palette=None):
+    """そのテーマが暗いか。省けば今のテーマ(COLORS は中身が差し替わるので
+    毎回見る)。"""
+    p = COLORS if palette is None else palette
+    return QColor(p["bg"]).lightness() < 128
+
+
+def glass_colors(palette=None):
+    """ガラスの色一式。見本(start_style.py の S2)は暗い背景に白を薄く重ねる
+    数字で、明るいテーマでは白を重ねても見えないし光も目立ちすぎる。
+    そこで明るいときは「白いカードに薄い黒の縁」に置き換え、光はずっと
+    弱くする。数字はこの関数に集め、描く側は名前で引く。
+
+    palette を省けば今のテーマ。再生画面の中(GamePreviewWindow)はテーマに
+    関わらず暗い地に固定なので、そこは THEMES["dark"] を渡して暗い側の
+    数字をもらう(そうしないと明るいテーマで暗い地に黒い欄が乗る)。
+
+    field_* は字を打つ欄(QLineEdit / スピン / コンボ)。ボタンより一段
+    暗い半透明にして、押すものと打つものを塗りで見分けられるようにする。"""
+    p = COLORS if palette is None else palette
+    if is_dark_theme(p):
+        return {
+            "fill": with_alpha("#ffffff", 0.045),
+            "fill_hover": with_alpha("#ffffff", 0.085),
+            "border": with_alpha("#ffffff", 0.10),
+            "highlight": with_alpha("#ffffff", 0.16),
+            "accent_border": with_alpha(p["accent"], 0.35),
+            "btn_fill": with_alpha("#ffffff", 0.06),
+            "btn_fill_hover": with_alpha("#ffffff", 0.11),
+            "btn_border": with_alpha("#ffffff", 0.12),
+            "field_fill": with_alpha("#000000", 0.28),
+            "field_border": with_alpha("#ffffff", 0.10),
+            "primary_top": with_alpha(p["accent"]).lighter(118),
+            "primary_bottom": with_alpha(p["accent"]).darker(112),
+            "primary_border": with_alpha("#ffffff", 0.22),
+            "primary_fg": with_alpha(p["fg_bright"]),
+            "glow1_alpha": 0.12,
+            "glow2_alpha": 0.05,
+            "chip_fill_alpha": 0.16,
+            "chip_border_alpha": 0.5,
+        }
+    return {
+        "fill": with_alpha(p["surface"], 0.72),
+        "fill_hover": with_alpha(p["surface"], 1.0),
+        "border": with_alpha("#000000", 0.10),
+        "highlight": with_alpha("#ffffff", 0.9),
+        "accent_border": with_alpha(p["accent"], 0.45),
+        "btn_fill": with_alpha("#000000", 0.035),
+        "btn_fill_hover": with_alpha("#000000", 0.07),
+        "btn_border": with_alpha("#000000", 0.12),
+        "field_fill": with_alpha("#ffffff", 0.80),
+        "field_border": with_alpha("#000000", 0.14),
+        "primary_top": with_alpha(p["accent"]).lighter(112),
+        "primary_bottom": with_alpha(p["accent"]).darker(108),
+        "primary_border": with_alpha(p["accent"]).darker(115),
+        # 明るいテーマの fg_bright は黒。青いボタンの上では白のほうが読める。
+        "primary_fg": with_alpha("#ffffff"),
+        "glow1_alpha": 0.07,
+        "glow2_alpha": 0.03,
+        "chip_fill_alpha": 0.12,
+        "chip_border_alpha": 0.45,
+    }
+
+
 def _arrow_image_url(color_hex: str, up: bool) -> str:
     """テーマ色の小さな三角形(上/下向き)を PNG として一時ファイルに描き出し、
     QSS の image: url() で使える forward-slash 絶対パスを返す。Fusion は

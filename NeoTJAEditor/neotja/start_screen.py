@@ -39,7 +39,8 @@ from PySide6.QtWidgets import (
 )
 
 from neotja.constants import APP_NAME, VERSION
-from neotja.theme import COLORS
+from neotja.theme import COLORS, glass_colors, is_dark_theme
+from neotja.theme import with_alpha as _c, rgba as _rgba
 
 #: 画面の中央の列の幅。見本(1180)に合わせる。窓が狭ければ縮む。
 COLUMN_WIDTH = 1180
@@ -143,68 +144,10 @@ def format_mtime(path):
 # ----------------------------------------------------------------------
 # 色
 # ----------------------------------------------------------------------
-def _c(hex_or_color, alpha=None):
-    c = QColor(hex_or_color)
-    if alpha is not None:
-        c.setAlphaF(alpha)
-    return c
-
-
-def _rgba(color):
-    """QColor → QSS の rgba(r,g,b,a) 文字列。"""
-    c = QColor(color)
-    return "rgba(%d,%d,%d,%d)" % (c.red(), c.green(), c.blue(), c.alpha())
-
-
-def is_dark_theme():
-    """今のテーマが暗いか。COLORS は中身が差し替わるので毎回見る。"""
-    return QColor(COLORS["bg"]).lightness() < 128
-
-
-def glass_colors():
-    """ガラスの色一式。見本(start_style.py の S2)は暗い背景に白を薄く重ねる
-    数字で、明るいテーマでは白を重ねても見えないし光も目立ちすぎる。
-    そこで明るいときは「白いカードに薄い黒の縁」に置き換え、光はずっと
-    弱くする。数字はこの関数に集め、描く側は名前で引く。"""
-    p = COLORS
-    if is_dark_theme():
-        return {
-            "fill": _c("#ffffff", 0.045),
-            "fill_hover": _c("#ffffff", 0.085),
-            "border": _c("#ffffff", 0.10),
-            "highlight": _c("#ffffff", 0.16),
-            "accent_border": _c(p["accent"], 0.35),
-            "btn_fill": _c("#ffffff", 0.06),
-            "btn_fill_hover": _c("#ffffff", 0.11),
-            "btn_border": _c("#ffffff", 0.12),
-            "primary_top": _c(p["accent"]).lighter(118),
-            "primary_bottom": _c(p["accent"]).darker(112),
-            "primary_border": _c("#ffffff", 0.22),
-            "primary_fg": _c(p["fg_bright"]),
-            "glow1_alpha": 0.12,
-            "glow2_alpha": 0.05,
-            "chip_fill_alpha": 0.16,
-            "chip_border_alpha": 0.5,
-        }
-    return {
-        "fill": _c(p["surface"], 0.72),
-        "fill_hover": _c(p["surface"], 1.0),
-        "border": _c("#000000", 0.10),
-        "highlight": _c("#ffffff", 0.9),
-        "accent_border": _c(p["accent"], 0.45),
-        "btn_fill": _c("#000000", 0.035),
-        "btn_fill_hover": _c("#000000", 0.07),
-        "btn_border": _c("#000000", 0.12),
-        "primary_top": _c(p["accent"]).lighter(112),
-        "primary_bottom": _c(p["accent"]).darker(108),
-        "primary_border": _c(p["accent"]).darker(115),
-        # 明るいテーマの fg_bright は黒。青いボタンの上では白のほうが読める。
-        "primary_fg": _c("#ffffff"),
-        "glow1_alpha": 0.07,
-        "glow2_alpha": 0.03,
-        "chip_fill_alpha": 0.12,
-        "chip_border_alpha": 0.45,
-    }
+# ガラスの色一式(glass_colors)・不透明度付きの色(_c)・QSS の rgba 文字列
+# (_rgba)・暗いテーマか(is_dark_theme)は neotja.theme に置いてある。
+# 統合画面の右下の段も同じ見た目にする(main_window)ので、数字を 1 か所に
+# 集めた。この画面の中の名前(_c など)はそのまま使えるよう import で引く。
 
 
 def wordmark_family():

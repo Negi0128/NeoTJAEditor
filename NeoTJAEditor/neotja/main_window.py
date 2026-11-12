@@ -7,8 +7,11 @@ import tempfile
 import time
 import traceback
 
-from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal
-from PySide6.QtGui import QFont, QFontInfo, QKeySequence, QShortcut, QTextCursor
+from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal, QPointF
+from PySide6.QtGui import (
+    QFont, QFontInfo, QKeySequence, QShortcut, QTextCursor,
+    QPainter, QPixmap, QColor, QBrush, QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
@@ -24,13 +27,14 @@ from neotja.child_env import child_env
 from neotja.constants import APP_NAME, VERSION, new_file_text
 from neotja.find_replace import FindReplaceBar
 from neotja.editor_widget import TJAEditor
-from neotja.theme import COLORS
+from neotja.theme import COLORS, glass_colors, is_dark_theme
+from neotja.theme import with_alpha as _c, rgba as _rgba
 from neotja.highlighter import TJAHighlighter, compute_highlight_data
 from neotja.ai_chart_gen import build_ai_variant_content
 from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
 from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
-from neotja.start_screen import StartScreen
+from neotja.start_screen import StartScreen, GlassCard
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
 
@@ -81,24 +85,74 @@ class PlayerPane(ResizeNotifier):
     取り直すため)。"""
 
 
-class CourseCard(QFrame):
+class BottomRow(ResizeNotifier):
+    """右下の段の入れ物。起動画面と同じ「ガラスと光」(利用者の承認
+    2026-11-12)の地。地色の上に、やわらかい光を 2 つ置く(アクセント色を
+    右上に、空色を左下にもっと薄く)。半透明のカードはこの光の上に乗るので、
+    カードごとに少しずつ明るさが違って見える — 平らな面が並ぶより奥行きが
+    出る、という見本の要。
+
+    光は QPixmap に焼いて持ち、大きさかテーマが変わったときだけ描き直す。
+    カードや札が描き直るたびに下の光も(その範囲だけ)描くことになるが、
+    焼いた絵を写すだけなので放射グラデーションの計算は走らない。上の
+    再生画面(GL)は別のウィジェットで、ここを描いてもあちらは描き直らない。
+    タイマーで描き直すことはしない(fps を落とさないため)。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._glow = None
+
+    def paintEvent(self, ev):
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        key = (w, h, COLORS["bg"], COLORS["accent"])
+        if self._glow is None or self._glow[0] != key:
+            g = glass_colors()
+            pm = QPixmap(w, h)
+            pm.fill(QColor(COLORS["bg"]))
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.Antialiasing)
+            q.setPen(Qt.NoPen)
+            # 半径は段の幅に比例。段は横長なので、縦に対しては大きく
+            # はみ出すが、はみ出したぶんは切れるだけ。
+            for (cx, cy, rad, col, a) in (
+                    (w * 0.62, h * 0.10, max(260.0, w * 0.36), COLORS["accent"], g["glow1_alpha"] * 0.8),
+                    (w * 0.08, h * 0.95, max(160.0, w * 0.18), COLORS["ka"], g["glow2_alpha"])):
+                grad = QRadialGradient(cx, cy, rad)
+                grad.setColorAt(0, _c(col, a))
+                grad.setColorAt(0.55, _c(col, a * 0.35))
+                grad.setColorAt(1, _c(col, 0))
+                q.setBrush(QBrush(grad))
+                q.drawEllipse(QPointF(cx, cy), rad, rad)
+            q.end()
+            self._glow = (key, pm)
+        p = QPainter(self)
+        p.drawPixmap(0, 0, self._glow[1])
+        p.end()
+
+
+class CourseCard(GlassCard):
     """Sidebar card showing one course's stats (notes/measures/time/roll/balloon),
-    with a collapsible roll-by-roll detail list."""
+    with a collapsible roll-by-roll detail list.
+
+    見た目は起動画面と同じガラスのカード(GlassCard が塗る)。コース色は
+    見出しの札に出す — 以前はカードの枠と見出しの帯をコース色で塗って
+    いたが、半透明のカードにべた塗りの帯が乗ると札だけ別の部品に見える。"""
 
     #: 見出しを押した。本文のそのコースの所へ跳ぶ(コースの key)。
     jumpRequested = Signal(str)
 
     def __init__(self, course, parent=None):
-        super().__init__(parent)
+        super().__init__(radius=12, parent=parent)
         self.details_visible = False
         self._label = course["label"]
         self._key = course.get("key", "")
-
-        self.setFrameShape(QFrame.Box)
-        self.setStyleSheet(f"CourseCard {{ border: 1px solid {course['color']}; }}")
+        self._color = course["color"]
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # ガラスの縁(1px)の内側に見出しの札を置く。
+        outer.setContentsMargins(1, 1, 1, 1)
         outer.setSpacing(0)
 
         # 見出しは押すと中身を畳む。コースが何枚も並ぶと縦に長くなるので、
@@ -109,10 +163,8 @@ class CourseCard(QFrame):
         header.setFlat(True)
         header.setCursor(Qt.PointingHandCursor)
         header.setFocusPolicy(Qt.NoFocus)
-        header.setStyleSheet(
-            f"text-align: left; border: none;"
-            f" background-color: {course['color']}; color: {COLORS['bg']};"
-            f" font-weight: bold; padding: 1px 0;")
+        self.header = header
+        self.refresh_theme()
         # **押したら本文のそのコースへ跳ぶ**(利用者の指定 2026-10-17)。
         # 畳むほうは右クリックへ移した — 跳ぶほうが使う回数が多い。
         header.clicked.connect(
@@ -123,7 +175,6 @@ class CourseCard(QFrame):
         header.setToolTip("押すと本文のこのコースへ跳びます"
                           "（右クリックで畳む）")
         outer.addWidget(header)
-        self.header = header
         self.body_visible = True
 
         # 右下の段(設定欄 5 段ぶん、約 160px)に**丸ごと**入れる(利用者の
@@ -131,7 +182,7 @@ class CourseCard(QFrame):
         # 時間+小節 / ノーツ+BPM は 1 行にまとめて 6 行 + ボタン 1 行。
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(6, 2, 6, 2)
+        body_layout.setContentsMargins(9, 3, 9, 5)
         body_layout.setSpacing(0)
         outer.addWidget(body)
 
@@ -177,6 +228,27 @@ class CourseCard(QFrame):
         self._base_pt = QFontInfo(self.font()).pointSizeF()
         self._refresh_header()
         self.update_course(course)
+
+    def refresh_theme(self):
+        """見出しの札の見た目(テーマを替えたら当て直す)。
+
+        コース色を薄く敷いた札に、コース色の太字 — 起動画面の最近使った
+        項目に並ぶ難易度チップと同じ作り。上の角だけ丸めてカードの角丸
+        (12px)に沿わせる。明るいテーマではコース色が白地で薄く見えるので
+        字だけ少し濃くする。"""
+        g = glass_colors()
+        col = QColor(self._color)
+        fg = col if is_dark_theme() else col.darker(135)
+        self.header.setStyleSheet(
+            "QPushButton { text-align: left; border: none;"
+            " border-bottom: 1px solid %s;"
+            " border-top-left-radius: 11px; border-top-right-radius: 11px;"
+            " background-color: %s; color: %s; font-weight: bold;"
+            " padding: 2px 4px; }"
+            "QPushButton:hover { background-color: %s; }"
+            % (_rgba(_c(col, g["chip_border_alpha"] * 0.5)),
+               _rgba(_c(col, g["chip_fill_alpha"])), fg.name(),
+               _rgba(_c(col, g["chip_fill_alpha"] * 1.6))))
 
     def set_scale(self, f):
         """右下の段が高いとき(作譜モードなど)、字と行間を少し大きくして
@@ -569,7 +641,8 @@ class MainWindow(QMainWindow):
         self.sb_cards_container = QWidget()
         self.sb_cards_layout = QVBoxLayout(self.sb_cards_container)
         self.sb_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.sb_cards_layout.setSpacing(0)
+        # カードはそれぞれがガラスの札なので、重ねず少し離す。
+        self.sb_cards_layout.setSpacing(8)
         self.sb_cards_layout.addStretch()
         self.sb_scroll.setWidget(self.sb_cards_container)
         sb_layout.addWidget(self.sb_scroll, 1)
@@ -696,12 +769,13 @@ class MainWindow(QMainWindow):
         # 下の段は再生画面の残りを全部もらう(rl の stretch)。再生画面の
         # 高さはモードで違う(作譜は低い)ので、段の高さもモードで変わる。
         # 余った高さは部品を大きくして使う(_scale_bottom_block)。
-        self.bottom_row = ResizeNotifier()
+        self.bottom_row = BottomRow()
         self.bottom_row.setObjectName("bottomRow")
         hb = QHBoxLayout(self.bottom_row)
-        hb.setContentsMargins(4, 4, 4, 4)
-        # 箱と箱のあいだは _build_bottom_controls が仕切り線つきで置く。
-        hb.setSpacing(0)
+        hb.setContentsMargins(6, 6, 6, 6)
+        # 箱と箱(難易度カード / BPM測定 / 設定欄)のあいだは余白だけ。箱が
+        # ガラスの札(縁つき)になったので、仕切り線は要らない。
+        hb.setSpacing(self.BLOCK_GAP)
         self.sb_outer.setFixedWidth(self.CARD_W)
         hb.addWidget(self.sb_outer)
         rl.addWidget(self.bottom_row, 1)
@@ -903,44 +977,83 @@ class MainWindow(QMainWindow):
     #: 設定欄の見た目。テーマを替えたら当て直す(_restyle_bottom_controls)。
     def _bottom_css(self):
         c = COLORS
-        # 段ごとの枠は付けない(利用者の指定 2026-11-12「札 + 欄」の罫線
-        # なし)。段と段は余白だけで分ける。枠が要るのは字を打つ欄・コンボ・
-        # ボタンだけで、それはテーマの既定のまま。
+        g = glass_colors()
+        # 起動画面と同じ「ガラスと光」(利用者の承認 2026-11-12)。箱(難易度
+        # カード / BPM測定 / 設定欄)は GlassCard が自前で塗るので、この中の
+        # 部品はまず全部透明にして(でないと札や段の下地がテーマの地色で
+        # 四角く残る)、押すもの・打つものだけ塗り直す。
+        #  - ボタン: 白を薄く重ねたガラス。主役(accentButton: 再生中の ▶、
+        #    ON のメトロノーム・打音)はアクセント色の縦グラデーション。
+        #  - 字を打つ欄: ボタンより暗い半透明。フォーカスでアクセント色の縁。
+        #    OFFSET のいまの値は常にアクセント色の縁(_restyle_bottom_controls)。
+        # 選択子は #bottomRow で絞ってあるので、ほかの画面へは及ばない。
         # 部品の高さは段の余り具合で 18px の 1.0〜1.4 倍(_scale_bottom_block)。
         f = getattr(self, "_bottom_scale", 1.0)
         ch = int(round(self.BOTTOM_CTRL_H * f))
         d = self._tap_diameter()
+        grad = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %s, stop:1 %s)"
+                % (g["primary_top"].name(), g["primary_bottom"].name()))
+        grad_hover = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %s, stop:1 %s)"
+                      % (g["primary_top"].lighter(108).name(),
+                         g["primary_bottom"].lighter(108).name()))
         return (
-            "#settingsPanel QPushButton, #bpmBox QPushButton"
-            " {{ padding: 2px 10px; min-height: {ch}px; }}"
-            "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
-            "#settingsPanel QPushButton#demostartBtn {{ padding: 2px 6px; }}"
-            # BPM の上下矢印。2 段重ねで欄の高さ(24px)に収める。
-            "#settingsPanel QToolButton#bpmArrow {{ padding: 0px; margin: 0px;"
-            " border: 1px solid {border}; border-radius: 2px; }}"
-            "#settingsPanel QToolButton#bpmArrow:hover {{ background: {bg3}; }}"
-            "#settingsPanel QLineEdit, #settingsPanel QSpinBox,"
-            " #settingsPanel QDoubleSpinBox, #settingsPanel QComboBox"
-            " {{ padding: 2px 4px; min-height: {ch}px; }}"
-            "#settingsPanel QLabel#fieldLabel {{ color: {fg}; }}"
-            "#settingsPanel QFrame#rowSeparator {{ border: none;"
-            " background: {border}; }}"
-            # 箱と箱(難易度カード │ BPM測定 │ 設定欄)の仕切り線。箱に枠は
-            # 付けない方針(第6段)なので、線と余白で切る。
-            "#bottomRow QFrame#blockSeparator {{ border: none;"
-            " background: {border}; }}"
-            # min-width/height も書く(padding 0 で、枠を除いた中身が直径)。上の「#bpmBox QPushButton」の
-            # min-height: 18px が setFixedSize の最小値より優先されて、低い
-            # 窓(1400x900)では丸が 110x100 に潰れ、角丸が消えて四角に
-            # なっていた(実測 2026-11-12)。
-            "QPushButton#bpmTap {{ border-radius: {r}px; border: 1px solid"
-            " {border}; background: {bg3}; font-size: 15px; padding: 0px;"
-            " min-width: {d}px; min-height: {d}px; }}"
-            "QPushButton#bpmTap:pressed {{ background: {accent}; }}"
-            "QLabel#bpmValue {{ font-size: {vfs}px; font-weight: bold; }}"
-        ).format(border=c["border"], fg=c["fg"], bg3=c["bg3"],
-                 accent=c["accent"], r=d // 2, d=d, ch=ch,
-                 vfs=int(round(18 * f)))
+            "#bottomRow, #bottomRow QWidget {{ background: transparent; }}"
+            "#bottomRow QScrollArea {{ border: none; }}"
+            # コンボの一覧は別の窓のように浮くので、透明にしない。
+            "#bottomRow QComboBox QAbstractItemView {{ background-color: {surface};"
+            " color: {fg}; border: 1px solid {border};"
+            " selection-background-color: {select}; }}"
+            "#bottomRow QPushButton {{ background-color: {btn}; color: {fg};"
+            " border: 1px solid {btn_border}; border-radius: 6px;"
+            " padding: 2px 10px; min-height: {ch}px; }}"
+            "#bottomRow QPushButton:hover {{ background-color: {btn_hover}; }}"
+            "#bottomRow QPushButton:pressed {{ background-color: {fill}; }}"
+            "#bottomRow QPushButton:disabled {{ color: {fg_dim}; }}"
+            "#bottomRow QPushButton#accentButton {{ background-color: {grad};"
+            " color: {primary_fg}; border: 1px solid {primary_border};"
+            " font-weight: bold; }}"
+            "#bottomRow QPushButton#accentButton:hover {{ background-color: {grad_hover}; }}"
+            "#bottomRow QPushButton#offsetStep {{ padding: 2px 2px; }}"
+            "#bottomRow QPushButton#demostartBtn {{ padding: 2px 6px; }}"
+            # BPM の上下矢印。2 段重ねで欄の高さに収める。
+            "#bottomRow QToolButton#bpmArrow {{ padding: 0px; margin: 0px;"
+            " background-color: {btn}; border: 1px solid {btn_border};"
+            " border-radius: 2px; }}"
+            "#bottomRow QToolButton#bpmArrow:hover {{ background-color: {btn_hover}; }}"
+            "#bottomRow QLineEdit, #bottomRow QSpinBox,"
+            " #bottomRow QDoubleSpinBox, #bottomRow QComboBox"
+            " {{ background-color: {field}; color: {fg};"
+            " border: 1px solid {field_border}; border-radius: 6px;"
+            " padding: 2px 4px; min-height: {ch}px; }}"
+            "#bottomRow QLineEdit:focus, #bottomRow QSpinBox:focus,"
+            " #bottomRow QDoubleSpinBox:focus, #bottomRow QComboBox:focus"
+            " {{ border: 1px solid {accent}; }}"
+            "#bottomRow QLabel#fieldLabel {{ color: {fg}; }}"
+            "#bottomRow QFrame#rowSeparator {{ border: none; background: {border_g}; }}"
+            # タップはガラスの丸。乗せると薄い、押すと濃いアクセント色の輪。
+            # min-width/height も書く(padding 0 で、枠を除いた中身が直径)。
+            # min-height: 18px(上のボタンの指定)が setFixedSize の最小値より
+            # 優先されて、低い窓(1400x900)では丸が 110x100 に潰れ、角丸が
+            # 消えて四角になっていた(実測 2026-11-12)。
+            "#bottomRow QPushButton#bpmTap {{ border-radius: {r}px;"
+            " border: 1px solid {btn_border}; background-color: {btn};"
+            " font-size: 15px; padding: 0px; min-width: {d}px; min-height: {d}px; }}"
+            "#bottomRow QPushButton#bpmTap:hover {{ border: 2px solid {accent_border};"
+            " background-color: {btn_hover}; }}"
+            "#bottomRow QPushButton#bpmTap:pressed {{ border: 2px solid {accent};"
+            " background-color: {accent_fill}; }}"
+            "#bottomRow QLabel#bpmValue {{ font-size: {vfs}px; font-weight: bold; }}"
+        ).format(border=c["border"], fg=c["fg"], fg_dim=c["fg_dim"],
+                 surface=c["surface"], select=c["select"], accent=c["accent"],
+                 btn=_rgba(g["btn_fill"]), btn_hover=_rgba(g["btn_fill_hover"]),
+                 btn_border=_rgba(g["btn_border"]), fill=_rgba(g["fill"]),
+                 field=_rgba(g["field_fill"]), field_border=_rgba(g["field_border"]),
+                 border_g=_rgba(g["border"]), accent_border=_rgba(g["accent_border"]),
+                 accent_fill=_rgba(_c(c["accent"], 0.28)),
+                 grad=grad, grad_hover=grad_hover,
+                 primary_fg=g["primary_fg"].name(),
+                 primary_border=_rgba(g["primary_border"]),
+                 r=d // 2, d=d, ch=ch, vfs=int(round(18 * f)))
 
     #: BPM測定の「タップ」の直径(px、等倍)。右下の段(設定欄 5 段ぶん)に
     #: 収まり、通常再生(720 高)を 1920x1040 で原寸のまま置ける大きさ。
@@ -952,7 +1065,7 @@ class MainWindow(QMainWindow):
     BOTTOM_CTRL_H = 18
     #: 下の段の部品を大きくする上限。これ以上は間延びして見える。
     BOTTOM_SCALE_MAX = 1.4
-    #: 箱と箱のあいだ(余白 + 1px の線 + 余白)。
+    #: 箱と箱のあいだの余白(px)。箱はガラスの札(縁つき)なので線は無い。
     BLOCK_GAP = 12
 
     def _tap_diameter(self):
@@ -1031,11 +1144,15 @@ class MainWindow(QMainWindow):
         self._restyle_bottom_controls()
 
     def _restyle_bottom_controls(self):
-        # 段ぜんたいに当てる(箱の仕切り線も含む)。選択子は #settingsPanel /
-        # #bpmBox / #bottomRow で絞ってあるので、他へは及ばない。
+        # 段ぜんたいに当てる。選択子は #bottomRow で絞ってあるので、他へは
+        # 及ばない。ガラスの箱(GlassCard)と地の光(BottomRow)は描くときに
+        # 今のテーマの色を引くので、描き直すだけでよい。
         row = getattr(self, "bottom_row", None)
         if row is not None and hasattr(self, "bpm_box"):
             row.setStyleSheet(self._bottom_css())
+            for card in self._course_cards.values():
+                card.refresh_theme()
+            row.update()
         # OFFSET の値の箱は常に青い枠(メトロノーム ON の枠と同じ色)。
         # 部品に直に当てるのは、テーマの QDoubleSpinBox の枠線より
         # 優先させるため。
@@ -1057,25 +1174,14 @@ class MainWindow(QMainWindow):
         self._bottom_scale = 1.0
         self._bottom_scale_w = 1.0
 
-        def block_gap():
-            """箱と箱のあいだ: 余白 12 + 縦線 1 + 余白 12。BPM測定の箱と
-            設定欄が地続きに見えていた(利用者の報告 2026-11-12)。箱に枠は
-            付けない(第6段)ので、間を広げて線で切る。"""
-            hb.addSpacing(self.BLOCK_GAP)
-            ln = QFrame()
-            ln.setObjectName("blockSeparator")
-            ln.setFixedWidth(1)
-            hb.addWidget(ln)
-            hb.addSpacing(self.BLOCK_GAP)
-
         # ---- BPM測定 ----------------------------------------------------
-        # 外枠なし(見出し + 丸いボタンだけ)。
-        block_gap()
-        self.bpm_box = QWidget()
+        # ガラスの箱(見出し + 丸いボタン + リセット)。箱と箱のあいだは
+        # 段のレイアウトの spacing(BLOCK_GAP)。
+        self.bpm_box = GlassCard(radius=12)
         self.bpm_box.setObjectName("bpmBox")
         self.bpm_box.setFixedWidth(self.BPM_BOX_W)
         bv = QVBoxLayout(self.bpm_box)
-        bv.setContentsMargins(8, 4, 8, 4)
+        bv.setContentsMargins(10, 6, 10, 8)
         bv.setSpacing(3)
         bv.addWidget(QLabel("BPM測定"))
         mid = QHBoxLayout()
@@ -1102,13 +1208,12 @@ class MainWindow(QMainWindow):
         self.btn_tap_reset.clicked.connect(self._reset_bpm_tap)
         bv.addWidget(self.btn_tap_reset)
         hb.addWidget(self.bpm_box)
-        block_gap()
 
         # ---- 設定欄 -----------------------------------------------------
-        self.settings_panel = QWidget()
+        self.settings_panel = GlassCard(radius=12)
         self.settings_panel.setObjectName("settingsPanel")
         pv = QVBoxLayout(self.settings_panel)
-        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setContentsMargins(6, 5, 6, 5)
         pv.setSpacing(4)
 
         def row():
