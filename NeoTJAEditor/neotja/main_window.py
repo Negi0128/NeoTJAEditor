@@ -513,6 +513,9 @@ class MainWindow(QMainWindow):
         self.toolbar_bottom = QToolBar("tools")
         self.toolbar_bottom.setMovable(False)
         self.editor_container.layout().insertWidget(0, self.toolbar_bottom)
+        # いちばん左は「難易度を追加」(利用者の指定 2026-11-12)。コースの
+        # ひな型を書き足す道具で、ほかの変換より先に使うものなので先頭に。
+        self._toolbar_button(self.toolbar_bottom, "難易度を追加", self.open_add_course)
         self._toolbar_button(self.toolbar_bottom, "ハイスピ変換", self.open_scroll_splitter)
         self._toolbar_button(self.toolbar_bottom, "リサイズ", self.open_measure_converter)
         self._toolbar_button(self.toolbar_bottom, "反転", self.reverse_don_ka)
@@ -570,6 +573,75 @@ class MainWindow(QMainWindow):
         self.editor.setTextCursor(cur)
         self.editor.centerCursor()
         self.editor.setFocus(Qt.OtherFocusReason)
+
+    def _present_course_keys(self):
+        """本文にあるコースの鍵(Easy/Normal/Hard/Oni/Edit)の集まり。
+
+        courses_info は非同期の解析の結果なので、開いた直後や打った直後は
+        古いことがある。ここは本文をその場で見る — COURSE:4 / Oni / おに
+        の違いは course_line_range が course_key で吸収する。"""
+        text = self.editor.toPlainText()
+        keys = set()
+        for key in ("Easy", "Normal", "Hard", "Oni", "Edit"):
+            try:
+                if self.analyzer.course_line_range(text, key):
+                    keys.add(key)
+            except Exception:  # noqa: BLE001
+                pass
+        return keys
+
+    def open_add_course(self):
+        """「難易度を追加」の窓を出し、OK なら本文の末尾にコースのひな型を書く。"""
+        from neotja.dialogs.add_course_dialog import AddCourseDialog
+        dlg = AddCourseDialog(self._present_course_keys(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.add_course(dlg.course_value(), dlg.level())
+
+    def add_course(self, course_value, level):
+        """本文の末尾に COURSE:<course_value> のひな型を1つ書き足す。
+
+        書く場所は末尾(最後の #END の後)。途中に挟むと、どのコースの
+        BALLOON: かが変わってしまう(balloon_defs_for は #START から上へ
+        たどる)ので、必ず最後に足す。手前に空行を1つ置いて前のコースと
+        切り離す。1回の undo で消えるよう、1つの QTextCursor で書く。"""
+        key = self.analyzer.course_key(course_value, fallback=None)
+        if key is None:
+            self.statusBar().showMessage("その難易度は書けません: %s" % course_value, 4000)
+            return False
+        if key in self._present_course_keys():
+            self.statusBar().showMessage(
+                "%s はもうこの譜面にあります" % self.analyzer.DIFF_LABEL.get(key, key), 4000)
+            return False
+        doc = self.editor.document()
+        text = self.editor.toPlainText()
+        # 末尾の空行を数えて「ちょうど1行の空行」になるように前置きを決める。
+        tail = text.rstrip(chr(10))
+        lead = "" if not tail else chr(10) * 2
+        block = chr(10).join([
+            "COURSE:%s" % key, "LEVEL:%d" % int(level), "BALLOON:",
+            "SCOREINIT:", "SCOREDIFF:", "", "#START", "", "#END", ""])
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        # 末尾に改行がいくつあっても、本文の最後の字の直後から書き直す。
+        if len(tail) < len(text):
+            cursor.setPosition(len(tail), QTextCursor.MoveMode.KeepAnchor)
+        start = cursor.selectionStart()
+        cursor.insertText(lead + block)
+        cursor.endEditBlock()
+        # プログラム編集なので dirty と自動保存の対象を明示的に立てる
+        # (open_measure_converter と同じ作法)。
+        self.editor.mark_edited(start, cursor.position())
+        self.setWindowModified(True)
+        self._force_update()
+        # カーソルは #START と #END の間の空行へ — すぐ音符を打てるように。
+        empty_line = doc.blockCount() - 1 - 2     # 末尾: "" / "#END" / "" の並び
+        cur = QTextCursor(doc.findBlockByNumber(max(0, empty_line)))
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self.editor.setFocus(Qt.OtherFocusReason)
+        return True
 
     #: 再生画面の原寸の幅(px)。右ペインがこれより狭いときは縮めて入れる。
     PLAYER_W = 1280
@@ -1539,6 +1611,7 @@ class MainWindow(QMainWindow):
         fm.addAction("終了", self.close)
 
         tm = mb.addMenu("ツール")
+        self._menu_tools = tm
         tm.addAction("検索  Ctrl+F", self.find_bar.show_find)
         tm.addAction("置換  Ctrl+H", self.find_bar.show_replace)
         mm = tm.addMenu("小節編集")
@@ -1548,6 +1621,7 @@ class MainWindow(QMainWindow):
         mm.addAction("小節を上へ移動  Ctrl+Shift+↑", lambda: self._measure_op("move", "up"))
         mm.addAction("小節を下へ移動  Ctrl+Shift+↓", lambda: self._measure_op("move", "down"))
         tm.addSeparator()
+        tm.addAction("難易度を追加", self.open_add_course)
         tm.addAction("TJA校正", self.open_tja_tidy)
         tm.addSeparator()
         tm.addAction("ハイスピ変換", self.open_scroll_splitter)
