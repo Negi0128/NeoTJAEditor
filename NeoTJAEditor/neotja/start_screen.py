@@ -1,4 +1,5 @@
-"""起動したときの最初の画面(利用者の指定 2026-11-12、見本は start_mock_A2)。
+"""起動したときの最初の画面(利用者の指定 2026-11-12、見本は start_style_S2
+「ガラスと光」。配線と中身は前の版 start_mock_A2 のまま)。
 
 ファイルを何も開いていない起動直後だけ、中央(TJA と再生画面の分割)の
 上に被せて出す。何か開くか新規作成が決まれば消え、以後は戻ってこない
@@ -8,6 +9,13 @@
 最近使った項目、ヘルプ/環境設定。ここでは**並べて合図を出すだけ**で、
 実際に開く・作る・設定を出すのは MainWindow の既存の口へ繋ぐ(配線を
 二重に持たないため)。
+
+見た目は「ガラスと光」。背景に大きくやわらかい光(アクセント色)を置き、
+その上に半透明の白いカード(ガラス)を並べる。カードの塗りが半透明なので、
+後ろの光がカードごとに少しずつ違う明るさで透け、平らな面が並ぶより奥行き
+が出る。QSS は半透明の塗りまでは書けるが、上辺のハイライトや左の色帯の
+ように「角丸に沿って一部だけ描く」ことができないので、カードは自前の
+paintEvent で描く(GlassCard)。ボタンと札は QSS の rgba() で足りる。
 
 最近使った項目は、曲名とパスを**モザイクにして**出す。配信や画面共有で
 起動したとき、作りかけの曲名やフォルダ名が映ってしまうため。「表示する」
@@ -20,11 +28,14 @@
 import os
 import datetime
 
-from PySide6.QtCore import Qt, Signal, QSize, QRect
-from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPixmap, QColor
+from PySide6.QtCore import Qt, Signal, QSize, QRect, QRectF, QPointF
+from PySide6.QtGui import (
+    QFont, QFontMetrics, QFontDatabase, QPainter, QPixmap, QColor, QPen,
+    QBrush, QLinearGradient, QRadialGradient, QPainterPath,
+)
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QPushButton,
-    QScrollArea, QSizePolicy,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+    QPushButton, QScrollArea, QSizePolicy,
 )
 
 from neotja.constants import APP_NAME, VERSION
@@ -34,6 +45,12 @@ from neotja.theme import COLORS
 COLUMN_WIDTH = 1180
 #: 最近使った項目に出す上限。設定には 10 件まで残るが、画面には 8 件。
 RECENT_ROWS = 8
+#: 最近使った項目の列数(見本は 2 列のコンパクトカード)。
+RECENT_COLUMNS = 2
+#: 最近使った項目のカードの高さ(見本 92)。
+RECENT_CARD_HEIGHT = 92
+#: 新規作成 / TJA を開く のカードの高さ(見本 196)。
+ACTION_CARD_HEIGHT = 196
 #: モザイクの粗さ(縮小の倍率)。
 MOSAIC_BLOCK = 8
 #: ヘッダを読むのに頭から何バイトまで見るか。TITLE: は先頭にあり、COURSE:
@@ -60,6 +77,11 @@ COURSE_COLOR_KEY = {
     "Easy": "don", "Normal": "ok", "Hard": "accent", "Oni": "kusudama",
     "Edit": "cmd",
 }
+
+#: ワードマーク(アプリ名)の書体の候補。Office が無い Windows にも入っている
+#: ものだけ。先に見つかったものを使う。Segoe UI は Light/Semilight の
+#: ウェイトを持つので、見本どおりの細い字になる。
+WORDMARK_FAMILIES = ("Segoe UI", "Yu Gothic UI", "Meiryo")
 
 
 def scan_tja_header(path):
@@ -118,6 +140,85 @@ def format_mtime(path):
     return datetime.datetime.fromtimestamp(t).strftime("%Y/%m/%d %H:%M")
 
 
+# ----------------------------------------------------------------------
+# 色
+# ----------------------------------------------------------------------
+def _c(hex_or_color, alpha=None):
+    c = QColor(hex_or_color)
+    if alpha is not None:
+        c.setAlphaF(alpha)
+    return c
+
+
+def _rgba(color):
+    """QColor → QSS の rgba(r,g,b,a) 文字列。"""
+    c = QColor(color)
+    return "rgba(%d,%d,%d,%d)" % (c.red(), c.green(), c.blue(), c.alpha())
+
+
+def is_dark_theme():
+    """今のテーマが暗いか。COLORS は中身が差し替わるので毎回見る。"""
+    return QColor(COLORS["bg"]).lightness() < 128
+
+
+def glass_colors():
+    """ガラスの色一式。見本(start_style.py の S2)は暗い背景に白を薄く重ねる
+    数字で、明るいテーマでは白を重ねても見えないし光も目立ちすぎる。
+    そこで明るいときは「白いカードに薄い黒の縁」に置き換え、光はずっと
+    弱くする。数字はこの関数に集め、描く側は名前で引く。"""
+    p = COLORS
+    if is_dark_theme():
+        return {
+            "fill": _c("#ffffff", 0.045),
+            "fill_hover": _c("#ffffff", 0.085),
+            "border": _c("#ffffff", 0.10),
+            "highlight": _c("#ffffff", 0.16),
+            "accent_border": _c(p["accent"], 0.35),
+            "btn_fill": _c("#ffffff", 0.06),
+            "btn_fill_hover": _c("#ffffff", 0.11),
+            "btn_border": _c("#ffffff", 0.12),
+            "primary_top": _c(p["accent"]).lighter(118),
+            "primary_bottom": _c(p["accent"]).darker(112),
+            "primary_border": _c("#ffffff", 0.22),
+            "primary_fg": _c(p["fg_bright"]),
+            "glow1_alpha": 0.12,
+            "glow2_alpha": 0.05,
+            "chip_fill_alpha": 0.16,
+            "chip_border_alpha": 0.5,
+        }
+    return {
+        "fill": _c(p["surface"], 0.72),
+        "fill_hover": _c(p["surface"], 1.0),
+        "border": _c("#000000", 0.10),
+        "highlight": _c("#ffffff", 0.9),
+        "accent_border": _c(p["accent"], 0.45),
+        "btn_fill": _c("#000000", 0.035),
+        "btn_fill_hover": _c("#000000", 0.07),
+        "btn_border": _c("#000000", 0.12),
+        "primary_top": _c(p["accent"]).lighter(112),
+        "primary_bottom": _c(p["accent"]).darker(108),
+        "primary_border": _c(p["accent"]).darker(115),
+        # 明るいテーマの fg_bright は黒。青いボタンの上では白のほうが読める。
+        "primary_fg": _c("#ffffff"),
+        "glow1_alpha": 0.07,
+        "glow2_alpha": 0.03,
+        "chip_fill_alpha": 0.12,
+        "chip_border_alpha": 0.45,
+    }
+
+
+def wordmark_family():
+    """ワードマークに使う書体。候補のうち入っているものを返す。"""
+    have = set(QFontDatabase.families())
+    for fam in WORDMARK_FAMILIES:
+        if fam in have:
+            return fam
+    return ""
+
+
+# ----------------------------------------------------------------------
+# 部品
+# ----------------------------------------------------------------------
 class MosaicText(QWidget):
     """曲名・パス用の文字。隠している間はモザイクで描く。
 
@@ -156,8 +257,9 @@ class MosaicText(QWidget):
 
     def minimumSizeHint(self):
         fm = QFontMetrics(self._font())
-        # 省略できる相手は細くしてよい。曲名は最低限そのまま。
-        w = 40 if self._elide else fm.horizontalAdvance(self._text) + 2
+        # 省略できる相手は細くしてよい。曲名は長すぎればカード幅で切れる
+        # (2 列のカードは 1 行の幅が半分しか無いので、曲名にも上限を置く)。
+        w = 40 if self._elide else min(fm.horizontalAdvance(self._text) + 2, 160)
         return QSize(w, fm.height() + 2)
 
     def set_revealed(self, on):
@@ -170,9 +272,10 @@ class MosaicText(QWidget):
         self.update()
 
     def _shown_text(self, width):
-        if not self._elide:
-            return self._text
         fm = QFontMetrics(self._font())
+        if not self._elide:
+            # 曲名は末尾を省略(真ん中を省くと別の曲名に見えることがある)。
+            return fm.elidedText(self._text, Qt.ElideRight, max(10, width))
         return fm.elidedText(self._text, Qt.ElideMiddle, max(10, width))
 
     def paintEvent(self, ev):
@@ -208,61 +311,162 @@ class MosaicText(QWidget):
         p.end()
 
 
-class RecentRow(QFrame):
-    """最近使った項目の1行。クリックか Enter で開く。"""
+class GlassCard(QFrame):
+    """半透明のカード。塗り・縁・上辺のハイライト・(あれば)左の色帯を描く。
+
+    QSS でも rgba の塗りと縁は書けるが、上辺だけのハイライトと角丸に沿った
+    色帯は書けないので自前で描く。QSS はこのクラスに背景を塗らせない
+    (background: transparent)。hover は enterEvent/leaveEvent で持ち、
+    focus はフォーカス枠(アクセント色の縁)として描く。"""
+
+    def __init__(self, radius=14, accent=False, hoverable=False, parent=None):
+        super().__init__(parent)
+        self._radius = radius
+        self._accent = accent
+        self._hoverable = hoverable
+        self._hover = False
+        self._bar_color = None
+        self.setAttribute(Qt.WA_Hover, hoverable)
+
+    def set_bar_color(self, color):
+        """左の色帯。None なら描かない。"""
+        self._bar_color = QColor(color) if color is not None else None
+        self.update()
+
+    def enterEvent(self, ev):
+        if self._hoverable:
+            self._hover = True
+            self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        if self._hoverable:
+            self._hover = False
+            self.update()
+        super().leaveEvent(ev)
+
+    def focusInEvent(self, ev):
+        self.update()
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev):
+        self.update()
+        super().focusOutEvent(ev)
+
+    def paintEvent(self, ev):
+        g = glass_colors()
+        r = self._radius
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        # 縁の 1px が外にはみ出さないよう半ピクセル内へ。
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        fill = g["fill_hover"] if (self._hover or self.hasFocus()) else g["fill"]
+        if self.hasFocus():
+            border = QColor(COLORS["accent"])
+        elif self._accent:
+            border = g["accent_border"]
+        else:
+            border = g["border"]
+        p.setPen(QPen(border, 1))
+        p.setBrush(QBrush(fill))
+        p.drawRoundedRect(rect, r, r)
+        # 上辺のハイライト: 真ん中が明るく両端へ消える線。ガラスの縁に
+        # 光が当たっているように見せる要。
+        hl = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        hl.setColorAt(0, _c(g["highlight"], 0))
+        hl.setColorAt(0.5, g["highlight"])
+        hl.setColorAt(1, _c(g["highlight"], 0))
+        p.setPen(QPen(QBrush(hl), 1))
+        p.drawLine(QPointF(rect.left() + r, rect.top() + 1),
+                   QPointF(rect.right() - r, rect.top() + 1))
+        if self._bar_color is not None:
+            # 色帯は角丸に沿わせる(切り抜いてから長方形を塗る)。
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, r, r)
+            p.setClipPath(clip)
+            p.setPen(Qt.NoPen)
+            p.setBrush(self._bar_color)
+            p.drawRect(QRectF(rect.left(), rect.top(), 4, rect.height()))
+        p.end()
+
+
+class RecentRow(GlassCard):
+    """最近使った項目の1枚(2 列に並ぶコンパクトカード)。クリックか Enter で開く。
+
+    左の色帯はいちばん難しい難易度の色。上段に曲名と更新日時、下段に
+    難易度の札とパス。名前が RecentRow のままなのは、MainWindow や試験が
+    「行」として扱う口(path / title / chips / date / activated)を変えない
+    ため。"""
 
     activated = Signal(str)
 
-    def __init__(self, path, title, courses, date_text, last=False, parent=None):
-        super().__init__(parent)
+    def __init__(self, path, title, courses, date_text, parent=None):
+        super().__init__(radius=10, hoverable=True, parent=parent)
         self.path = path
-        self.setObjectName("recentRowLast" if last else "recentRow")
+        self.courses = list(courses)
+        self.setObjectName("recentRow")
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(path)
-        h = QHBoxLayout(self)
-        h.setContentsMargins(16, 10, 16, 10)
-        h.setSpacing(16)
-        left = QVBoxLayout()
-        left.setSpacing(3)
+        self.setFixedHeight(RECENT_CARD_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        v = QVBoxLayout(self)
+        # 左 22 は色帯(4)ぶん空けた位置(見本)。
+        v.setContentsMargins(22, 14, 18, 12)
+        v.setSpacing(8)
         top = QHBoxLayout()
         top.setSpacing(12)
-        self.title = MosaicText(title, "fg_bright", 14, bold=True)
-        top.addWidget(self.title)
+        self.title = MosaicText(title, "fg_bright", 16, bold=True)
+        top.addWidget(self.title, 1)
+        self.date = QLabel(date_text)
+        self.date.setObjectName("dim12")
+        self.date.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        top.addWidget(self.date, 0)
+        v.addLayout(top)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
         self.chips = []
         for c in courses:
             chip = QLabel(c)
             chip.setObjectName("chip")
             chip.setProperty("course", c)
-            top.addWidget(chip)
+            chip.setFixedHeight(20)
+            bottom.addWidget(chip)
             self.chips.append(chip)
-        top.addStretch(1)
-        left.addLayout(top)
+        if self.chips:
+            bottom.addSpacing(6)
         self.path_label = MosaicText(path, "fg_dim", 12, elide=True)
-        left.addWidget(self.path_label)
-        h.addLayout(left, 1)
-        self.date = QLabel(date_text)
-        self.date.setObjectName("dim13")
-        self.date.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        h.addWidget(self.date)
-        self._restyle_chips()
+        bottom.addWidget(self.path_label, 1)
+        v.addLayout(bottom)
+        v.addStretch(1)
+        self._restyle()
 
-    def _restyle_chips(self):
-        # 札の色は QSS の objectName では色を分けにくい(難易度ごとに違う)
-        # ので、部品ごとに当てる。テーマ替えで呼び直す。
+    def _restyle(self):
+        # 札の色は難易度ごとに違うので QSS の objectName では分けにくい。
+        # 部品ごとに当てる。テーマ替えで呼び直す。
+        g = glass_colors()
         for chip in self.chips:
-            col = COLORS.get(COURSE_COLOR_KEY.get(chip.text(), "fg_dim"), COLORS["fg_dim"])
+            col = QColor(COLORS.get(COURSE_COLOR_KEY.get(chip.text(), "fg_dim"),
+                                    COLORS["fg_dim"]))
             chip.setStyleSheet(
                 "QLabel { color: %s; background-color: %s; border: 1px solid %s;"
-                " border-radius: 3px; padding: 1px 6px; font-size: 11px;"
-                " font-weight: bold; }" % (col, COLORS["bg3"], col))
+                " border-radius: 5px; padding: 0px 7px; font-size: 12px;"
+                " font-weight: bold; }"
+                % (col.name(), _rgba(_c(col, g["chip_fill_alpha"])),
+                   _rgba(_c(col, g["chip_border_alpha"]))))
+        # 色帯は上から並べた先頭(いちばん難しい)の色。札が無ければ薄い字の色。
+        top = self.courses[0] if self.courses else None
+        self.set_bar_color(COLORS.get(COURSE_COLOR_KEY.get(top, "fg_dim"), COLORS["fg_dim"]))
+
+    def bar_color(self):
+        return QColor(self._bar_color) if self._bar_color is not None else None
 
     def set_revealed(self, on):
         self.title.set_revealed(on)
         self.path_label.set_revealed(on)
 
     def refresh_theme(self):
-        self._restyle_chips()
+        self._restyle()
         self.title.refresh()
         self.path_label.refresh()
 
@@ -306,12 +510,16 @@ class StartScreen(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         # 低い窓(1280x820 の既定など)では縦に入りきらないので、切れる
-        # 代わりにスクロールさせる。枠は見せない。
+        # 代わりにスクロールさせる。枠は見せない。背景は StartScreen の
+        # paintEvent が光ごと描くので、スクロール領域とその中身は透明に
+        # して邪魔をさせない(viewport は既定で塗りつぶす)。
         self.scroll = QScrollArea()
         self.scroll.setObjectName("startScroll")
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setAutoFillBackground(False)
+        self.scroll.viewport().setAutoFillBackground(False)
         outer.addWidget(self.scroll)
 
         page = QWidget()
@@ -335,33 +543,38 @@ class StartScreen(QWidget):
         v.setSpacing(0)
         v.addStretch(2)
 
+        # ワードマーク + 版のピル。見本では版はワードマークの右、上から 14。
         head = QHBoxLayout()
-        head.addWidget(self._label(APP_NAME, "appName"))
+        head.setSpacing(16)
+        self.lbl_name = self._label(APP_NAME, "appName")
+        head.addWidget(self.lbl_name, 0, Qt.AlignBottom)
+        self.lbl_ver = self._label("v" + VERSION, "appVer")
+        self.lbl_ver.setFixedHeight(22)
+        head.addWidget(self.lbl_ver, 0, Qt.AlignVCenter)
         head.addStretch(1)
-        head.addWidget(self._label("v" + VERSION, "appVer"))
         v.addLayout(head)
-        v.addSpacing(6)
-        v.addWidget(self._label("はじめる", "h2"))
-        v.addSpacing(14)
+        v.addSpacing(4)
+        v.addWidget(self._label("はじめる", "tagline"))
+        v.addSpacing(26)
 
         cards = QHBoxLayout()
-        cards.setSpacing(20)
+        cards.setSpacing(24)
         self.btn_new_url = QPushButton("YouTube / SoundCloud から")
         self.btn_new_url.setObjectName("primary")
         self.btn_new_url.clicked.connect(self.new_from_url)
         self.btn_new_file = QPushButton("音源ファイルから")
         self.btn_new_file.clicked.connect(self.new_from_file)
         cards.addWidget(self._card(
-            "+", "新規作成",
+            "新規作成",
             "YouTube / SoundCloud の URL か、手元の音源ファイルから譜面を作ります。",
             [self.btn_new_url, self.btn_new_file], accent=True), 1)
         self.btn_open = QPushButton("ファイルを選ぶ…")
         self.btn_open.clicked.connect(self.open_requested)
         cards.addWidget(self._card(
-            "▤", "TJA を開く", ".tja ファイルを選んで編集します。",
+            "TJA を開く", ".tja ファイルを選んで編集します。",
             [self.btn_open]), 1)
         v.addLayout(cards)
-        v.addSpacing(28)
+        v.addSpacing(40)
 
         rh = QHBoxLayout()
         rh.setSpacing(8)
@@ -370,20 +583,29 @@ class StartScreen(QWidget):
         self.lbl_hidden = self._label("曲名とパスを隠しています", "dim13")
         rh.addWidget(self.lbl_hidden)
         self.btn_reveal = QPushButton("表示する")
-        self.btn_reveal.setObjectName("ghost")
+        self.btn_reveal.setObjectName("link")
         self.btn_reveal.setToolTip("曲名とパスのモザイクを外します(次に起動するまで)")
         self.btn_reveal.clicked.connect(self.reveal)
         rh.addWidget(self.btn_reveal)
         v.addLayout(rh)
-        v.addSpacing(8)
+        v.addSpacing(12)
 
-        self.list_frame = QFrame()
-        self.list_frame.setObjectName("card")
-        self.list_layout = QVBoxLayout(self.list_frame)
-        self.list_layout.setContentsMargins(0, 2, 0, 2)
-        self.list_layout.setSpacing(0)
+        # 2 列のカードを並べる格子。枠は持たない(カードが各自ガラスを描く)。
+        # 件数が奇数でも最後のカードが半分の幅のままになるよう、両列の
+        # 伸び率をそろえる。
+        self.list_frame = QWidget()
+        self.list_frame.setObjectName("recentGrid")
+        self.list_layout = QGridLayout(self.list_frame)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setHorizontalSpacing(16)
+        self.list_layout.setVerticalSpacing(12)
+        for c in range(RECENT_COLUMNS):
+            self.list_layout.setColumnStretch(c, 1)
         v.addWidget(self.list_frame)
 
+        # 低い窓で伸び代が 0 になっても、最後のカードと脚注がくっつかない
+        # よう最低 24 は空ける。
+        v.addSpacing(24)
         v.addStretch(3)
         foot = QHBoxLayout()
         foot.setSpacing(4)
@@ -410,15 +632,13 @@ class StartScreen(QWidget):
         lbl.setObjectName(name)
         return lbl
 
-    def _card(self, icon, title, desc, buttons, accent=False):
-        f = QFrame()
-        f.setObjectName("cardAccent" if accent else "card")
-        f.setMinimumHeight(220)
+    def _card(self, title, desc, buttons, accent=False):
+        f = GlassCard(radius=14, accent=accent)
+        f.setObjectName("actionCard")
+        f.setMinimumHeight(ACTION_CARD_HEIGHT)
         cv = QVBoxLayout(f)
-        cv.setContentsMargins(24, 22, 24, 20)
+        cv.setContentsMargins(28, 26, 28, 28)
         cv.setSpacing(6)
-        cv.addWidget(self._label(icon, "icon"))
-        cv.addSpacing(4)
         cv.addWidget(self._label(title, "h1"))
         d = self._label(desc, "dim13")
         d.setWordWrap(True)
@@ -433,9 +653,37 @@ class StartScreen(QWidget):
         return f
 
     # ------------------------------------------------------------------
+    def paintEvent(self, ev):
+        """背景。アプリの地色の上に、大きくやわらかい光を 2 つ。
+
+        1 つ目はカードの後ろ(横の真ん中、上から 4 割)にアクセント色、
+        2 つ目は右下に空色をもっと薄く。半径は窓の幅に比例させるので、
+        窓を広げても光が小さな点に見えない。QWidget は大きさが変わると
+        全体を描き直すので、resize の面倒は見なくてよい。"""
+        g = glass_colors()
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(COLORS["bg"]))
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            p.end()
+            return
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        for (cx, cy, rad, col, a) in (
+                (w * 0.5, h * 0.41, max(300.0, w * 0.43), COLORS["accent"], g["glow1_alpha"]),
+                (w * 0.78, h * 0.79, max(200.0, w * 0.27), COLORS["ka"], g["glow2_alpha"])):
+            grad = QRadialGradient(cx, cy, rad)
+            grad.setColorAt(0, _c(col, a))
+            grad.setColorAt(0.55, _c(col, a * 0.35))
+            grad.setColorAt(1, _c(col, 0))
+            p.setBrush(QBrush(grad))
+            p.drawEllipse(QPointF(cx, cy), rad, rad)
+        p.end()
+
+    # ------------------------------------------------------------------
     def set_recent(self, paths):
         """最近使った項目を並べ直す。設定に残っている順(新しい順)のまま、
-        存在するものだけ、上限 RECENT_ROWS 件。"""
+        存在するものだけ、上限 RECENT_ROWS 件。左→右、上→下の順に置く。"""
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             w = item.widget()
@@ -445,19 +693,18 @@ class StartScreen(QWidget):
         paths = [p for p in paths if p and os.path.exists(p)][:RECENT_ROWS]
         if not paths:
             empty = self._label("まだありません。開いた譜面がここに並びます。", "dim13")
-            empty.setContentsMargins(16, 14, 16, 14)
-            self.list_layout.addWidget(empty)
+            empty.setContentsMargins(4, 10, 4, 10)
+            self.list_layout.addWidget(empty, 0, 0, 1, RECENT_COLUMNS)
             self.lbl_hidden.setVisible(False)
             self.btn_reveal.setVisible(False)
             return
         for i, p in enumerate(paths):
             title, courses = scan_tja_header(p)
             date = format_mtime(p)
-            row = RecentRow(p, title, courses, ("更新 " + date) if date else "",
-                            last=(i == len(paths) - 1))
+            row = RecentRow(p, title, courses, ("更新 " + date) if date else "")
             row.set_revealed(self._revealed)
             row.activated.connect(self.recent_activated)
-            self.list_layout.addWidget(row)
+            self.list_layout.addWidget(row, i // RECENT_COLUMNS, i % RECENT_COLUMNS)
             self._rows.append(row)
         self.lbl_hidden.setVisible(not self._revealed)
         self.btn_reveal.setVisible(not self._revealed)
@@ -481,34 +728,53 @@ class StartScreen(QWidget):
         self.setStyleSheet(self._qss())
         for row in self._rows:
             row.refresh_theme()
+        self.update()
 
     @staticmethod
     def _qss():
         p = COLORS
-        # 見本(start_mock.py)の数字をそのまま。アプリ全体の QSS(theme.build_qss)
-        # はボタンの余白などが違うので、この画面の中だけ上書きする。
+        g = glass_colors()
+        grad = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %s, stop:1 %s)"
+                % (g["primary_top"].name(), g["primary_bottom"].name()))
+        grad_hover = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 %s, stop:1 %s)"
+                      % (g["primary_top"].lighter(108).name(),
+                         g["primary_bottom"].lighter(108).name()))
+        fam = wordmark_family()
+        fam_css = ('font-family: "%s";' % fam) if fam else ""
+        # 見本(start_style.py の S2)の数字をそのまま。アプリ全体の QSS
+        # (theme.build_qss)はボタンの余白などが違うので、この画面の中だけ
+        # 上書きする。背景は paintEvent が描くので、この中の部品はすべて
+        # 透明(ガラスのカードは GlassCard が自前で塗る)。
         return f"""
-        QWidget {{ background-color: {p['bg']}; color: {p['fg']}; font-size: 13px; }}
-        QScrollArea {{ border: none; }}
+        QWidget {{ background: transparent; color: {p['fg']}; font-size: 13px; }}
+        QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
+        QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+        QScrollBar::handle:vertical {{ background: {_rgba(g['btn_border'])}; border-radius: 5px; min-height: 30px; }}
+        QScrollBar::handle:vertical:hover {{ background: {_rgba(g['btn_fill_hover'])}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
         QLabel {{ background: transparent; }}
-        QFrame#card {{ background-color: {p['bg2']}; border: 1px solid {p['border']}; border-radius: 8px; }}
-        QFrame#cardAccent {{ background-color: {p['bg2']}; border: 1px solid {p['accent']}; border-radius: 8px; }}
-        QFrame#recentRow, QFrame#recentRowLast {{ background-color: transparent; border: none; border-bottom: 1px solid {p['border']}; }}
-        QFrame#recentRowLast {{ border-bottom: none; }}
-        QFrame#recentRow:hover, QFrame#recentRowLast:hover {{ background-color: {p['bg3']}; }}
-        QFrame#recentRow:focus, QFrame#recentRowLast:focus {{ background-color: {p['bg3']}; border-left: 3px solid {p['accent']}; }}
-        QLabel#appName {{ color: {p['fg_dim']}; font-size: 14px; letter-spacing: 1px; }}
-        QLabel#appVer {{ color: {p['fg_dim']}; font-size: 12px; }}
-        QLabel#h1 {{ color: {p['fg_bright']}; font-size: 16px; font-weight: bold; }}
-        QLabel#h2 {{ color: {p['fg']}; font-size: 14px; font-weight: bold; }}
+        QLabel#appName {{ color: {p['fg_bright']}; {fam_css} font-size: 40px; font-weight: 300; letter-spacing: 2px; }}
+        QLabel#appVer {{ color: {p['fg']}; font-size: 12px; letter-spacing: 0.5px; padding: 0 10px;
+                        background-color: {_rgba(g['btn_fill'])}; border: 1px solid {_rgba(g['btn_border'])}; border-radius: 11px; }}
+        QLabel#tagline {{ color: {p['fg_dim']}; font-size: 13px; letter-spacing: 1px; }}
+        QLabel#h1 {{ color: {p['fg_bright']}; font-size: 19px; font-weight: bold; }}
+        QLabel#h2 {{ color: {p['fg']}; font-size: 15px; font-weight: bold; }}
         QLabel#dim {{ color: {p['fg_dim']}; font-size: 12px; }}
+        QLabel#dim12 {{ color: {p['fg_dim']}; font-size: 12px; }}
         QLabel#dim13 {{ color: {p['fg_dim']}; font-size: 13px; }}
-        QLabel#icon {{ color: {p['accent']}; font-size: 28px; font-weight: bold; }}
-        QPushButton {{ background-color: {p['bg3']}; color: {p['fg']}; border: 1px solid {p['border']}; border-radius: 5px; padding: 7px 14px; font-size: 13px; }}
-        QPushButton:hover {{ background-color: {p['toolbar_hover']}; }}
+        QPushButton {{ background-color: {_rgba(g['btn_fill'])}; color: {p['fg']}; border: 1px solid {_rgba(g['btn_border'])};
+                      border-radius: 9px; padding: 9px 22px; font-size: 13px; }}
+        QPushButton:hover {{ background-color: {_rgba(g['btn_fill_hover'])}; }}
         QPushButton:focus {{ border: 1px solid {p['accent']}; }}
-        QPushButton#primary {{ background-color: {p['accent']}; color: {p['fg_bright']}; border: 1px solid {p['accent']}; font-weight: bold; }}
-        QPushButton#primary:hover {{ background-color: {p['accent2']}; border-color: {p['accent2']}; }}
-        QPushButton#ghost {{ background-color: transparent; border: none; color: {p['fg_dim']}; padding: 4px 8px; }}
-        QPushButton#ghost:hover {{ color: {p['fg']}; background-color: {p['bg3']}; }}
+        QPushButton#primary {{ background-color: {grad}; color: {g['primary_fg'].name()};
+                              border: 1px solid {_rgba(g['primary_border'])}; font-weight: bold; }}
+        QPushButton#primary:hover {{ background-color: {grad_hover}; }}
+        QPushButton#primary:focus {{ border: 1px solid {p['fg_bright']}; }}
+        QPushButton#ghost {{ background-color: transparent; border: 1px solid transparent; color: {p['fg_dim']}; padding: 4px 8px; border-radius: 6px; }}
+        QPushButton#ghost:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
+        QPushButton#ghost:focus {{ border: 1px solid {p['accent']}; }}
+        QPushButton#link {{ background-color: transparent; border: 1px solid transparent; color: {p['accent']}; padding: 4px 10px; border-radius: 6px; }}
+        QPushButton#link:hover {{ background-color: {_rgba(g['btn_fill'])}; }}
+        QPushButton#link:focus {{ border: 1px solid {p['accent']}; }}
         """
