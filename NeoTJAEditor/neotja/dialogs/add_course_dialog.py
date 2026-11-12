@@ -57,11 +57,6 @@ class AddCourseDialog(QDialog):
         form.addRow("LEVEL", self.spin_level)
         layout.addLayout(form)
 
-        hint = QLabel("本文の末尾に COURSE / LEVEL / BALLOON / #START / #END の"
-                      "ひな型を書き足します。")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn_cancel = QPushButton("キャンセル")
