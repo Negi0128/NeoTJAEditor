@@ -205,8 +205,11 @@ class CourseCard(GlassCard):
                     self.lbl_density, self.lbl_roll, self.lbl_balloon):
             body_layout.addWidget(lbl)
 
-        # 連打詳細は総計 2 行の下。開くと下へ伸びる(そのときは段の中で
-        # スクロールして見る)。ボタンは字 1 行ぶんの高さに詰める。
+        # 連打詳細のボタンは**カードの下端**に置く。カードは段の高さいっぱいに
+        # 伸ばすので(_build_sidebar)、字の行とボタンのあいだを伸び縮みさせて
+        # 下に隙間を残さない(利用者の指定 2026-11-13「常に下までちゃんと
+        # 埋めて欲しい」)。開くと下へ伸び、そのときは段の中でスクロールする。
+        body_layout.addStretch(1)
         self.btn_toggle = QPushButton("連打詳細 [開く]")
         self.btn_toggle.setFlat(True)
         self.btn_toggle.setFixedHeight(18)
@@ -335,9 +338,14 @@ class CourseCard(GlassCard):
         if rolls:
             for i, r in enumerate(rolls, 1):
                 self.details_layout.addWidget(QLabel(f"  {i}本目: {r['duration']:.2f}秒 ({r['hits']}打)"))
-            self.btn_toggle.setVisible(True)
+            self.btn_toggle.setEnabled(True)
+            self.btn_toggle.setText("連打詳細 [閉じる]" if self.details_visible
+                                    else "連打詳細 [開く]")
         else:
-            self.btn_toggle.setVisible(False)
+            # 連打の無い譜面でもボタンは消さない。消すとカードの下が空いて
+            # 見え、譜面によって並びが変わる。押せない形で残す。
+            self.btn_toggle.setEnabled(False)
+            self.btn_toggle.setText("連打詳細 (連打なし)")
             self.details_frame.setVisible(False)
             self.details_visible = False
 
@@ -643,7 +651,8 @@ class MainWindow(QMainWindow):
         self.sb_cards_layout.setContentsMargins(0, 0, 0, 0)
         # カードはそれぞれがガラスの札なので、重ねず少し離す。
         self.sb_cards_layout.setSpacing(8)
-        self.sb_cards_layout.addStretch()
+        # 末尾の伸び縮みは置かない。見せるカードは1枚だけなので、それに
+        # 段の高さを全部渡して下まで埋める(insertWidget の stretch=1)。
         self.sb_scroll.setWidget(self.sb_cards_container)
         sb_layout.addWidget(self.sb_scroll, 1)
 
@@ -2568,7 +2577,7 @@ class MainWindow(QMainWindow):
         # "oni" course loaded at startup) would otherwise stay pinned at
         # whatever index it was first inserted at.
         for i, course in enumerate(ordered_courses):
-            self.sb_cards_layout.insertWidget(i, self._course_cards[course["key"]])
+            self.sb_cards_layout.insertWidget(i, self._course_cards[course["key"]], 1)
         self._sync_course_card()
         self._sync_header_fields()
 
