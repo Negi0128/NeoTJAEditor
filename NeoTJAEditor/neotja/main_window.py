@@ -107,7 +107,7 @@ class CourseCard(QFrame):
         header.setStyleSheet(
             f"text-align: left; border: none;"
             f" background-color: {course['color']}; color: {COLORS['bg']};"
-            f" font-weight: bold; padding: 3px 0;")
+            f" font-weight: bold; padding: 1px 0;")
         # **押したら本文のそのコースへ跳ぶ**(利用者の指定 2026-10-17)。
         # 畳むほうは右クリックへ移した — 跳ぶほうが使う回数が多い。
         header.clicked.connect(
@@ -121,14 +121,17 @@ class CourseCard(QFrame):
         self.header = header
         self.body_visible = True
 
+        # 右下の段(設定欄 5 段ぶん、約 160px)に**丸ごと**入れる(利用者の
+        # 指定 2026-11-12「下が切れている」)。行間は 0、余白は最小、
+        # 時間+小節 / ノーツ+BPM は 1 行にまとめて 6 行 + ボタン 1 行。
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(8, 6, 8, 6)
-        body_layout.setSpacing(2)
+        body_layout.setContentsMargins(6, 2, 6, 2)
+        body_layout.setSpacing(0)
         outer.addWidget(body)
 
-        self.lbl_time = QLabel()
-        self.lbl_notes = QLabel()
+        self.lbl_time = QLabel()       # 時間 ／ 小節
+        self.lbl_notes = QLabel()      # ノーツ ／ BPM
         # 音符の内訳と BPM の幅(利用者の希望 2026-11-04。tja-tools に
         # あるものを入れてほしい、という要望から)。
         self.lbl_breakdown = QLabel()
@@ -136,31 +139,31 @@ class CourseCard(QFrame):
             "ドン/カッは大音符もそれぞれに数えています"
             "(tja-tools の Don+DON / Ka+KA と同じ数え方)。" + chr(10) +
             "括弧はドン:カッの割合です。連打と風船は数に入れません。")
-        self.lbl_bpm = QLabel()
         self.lbl_density = QLabel()
         self.lbl_density.setToolTip(
             "最初の音符から最後の音符までで割った、音符の詰まり具合。\n"
             "連打と風船は数に入れません(上の「ノーツ」と同じ数え方)。")
-        self.lbl_measures = QLabel()
         self.lbl_roll = QLabel()
+        self.lbl_balloon = QLabel()
         for lbl in (self.lbl_time, self.lbl_notes, self.lbl_breakdown,
-                    self.lbl_bpm, self.lbl_density,
-                    self.lbl_measures, self.lbl_roll):
+                    self.lbl_density, self.lbl_roll, self.lbl_balloon):
             body_layout.addWidget(lbl)
 
+        # 連打詳細は総計 2 行の下。開くと下へ伸びる(そのときは段の中で
+        # スクロールして見る)。ボタンは字 1 行ぶんの高さに詰める。
         self.btn_toggle = QPushButton("連打詳細 [開く]")
         self.btn_toggle.setFlat(True)
+        self.btn_toggle.setFixedHeight(18)
+        self.btn_toggle.setStyleSheet("QPushButton { padding: 0px 4px; }")
         self.btn_toggle.clicked.connect(self._toggle_details)
         body_layout.addWidget(self.btn_toggle)
 
         self.details_frame = QWidget()
         self.details_layout = QVBoxLayout(self.details_frame)
         self.details_layout.setContentsMargins(8, 0, 0, 0)
+        self.details_layout.setSpacing(0)
         body_layout.addWidget(self.details_frame)
         self.details_frame.setVisible(False)
-
-        self.lbl_balloon = QLabel()
-        body_layout.addWidget(self.lbl_balloon)
 
         self.body = body
         self._refresh_header()
@@ -184,8 +187,8 @@ class CourseCard(QFrame):
         self.btn_toggle.setText("連打詳細 [閉じる]" if self.details_visible else "連打詳細 [開く]")
 
     def update_course(self, course):
-        self.lbl_time.setText(f"時間: {course['time']}")
-        self.lbl_notes.setText(f"ノーツ: {course['notes']}")
+        self.lbl_time.setText(
+            f"時間: {course['time']}　／　小節: {course['measures']}")
 
         # 内訳と、ドン:カッの割合(利用者の指定 2026-11-04)。音符が1つも
         # 無いコースでは出さない(「0 / 0」は読む意味が無い)。大音符の数は
@@ -209,17 +212,16 @@ class CourseCard(QFrame):
             # 150.0 は 150 と出す。小数が要るものだけ小数で。
             return f"{v:.3f}".rstrip("0").rstrip(".")
 
+        # ノーツと同じ行に出す(BPM が無い譜面はノーツだけ)。
+        notes = f"ノーツ: {course['notes']}"
         if b1 > 0:
-            self.lbl_bpm.setText("BPM: " + (_bpm(b0) if abs(b1 - b0) < 1e-9
-                                            else f"{_bpm(b0)}〜{_bpm(b1)}"))
-            self.lbl_bpm.setVisible(True)
-        else:
-            self.lbl_bpm.setVisible(False)
+            notes += "　／　BPM: " + (_bpm(b0) if abs(b1 - b0) < 1e-9
+                                    else f"{_bpm(b0)}〜{_bpm(b1)}")
+        self.lbl_notes.setText(notes)
 
         dens = course.get("density") or 0.0
         self.lbl_density.setText(
             f"平均密度: {dens:.2f} 打/秒" if dens > 0 else "平均密度: ―")
-        self.lbl_measures.setText(f"小節: {course['measures']}")
 
         rolls = course.get("rolls_info", [])
         total_roll_dur = sum(r["duration"] for r in rolls)
@@ -528,8 +530,13 @@ class MainWindow(QMainWindow):
         # 連打秒速の欄は右下の設定欄(連打速度)へ移した(_build_bottom_controls)。
         self.sb_scroll = QScrollArea()
         self.sb_scroll.setWidgetResizable(True)
+        # 枠も余白も付けない。カードには色の枠があるので二重になるし、
+        # 右下の段の高さ(約 160px)をカードに全部使いたい。
+        self.sb_scroll.setFrameShape(QFrame.NoFrame)
         self.sb_cards_container = QWidget()
         self.sb_cards_layout = QVBoxLayout(self.sb_cards_container)
+        self.sb_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.sb_cards_layout.setSpacing(0)
         self.sb_cards_layout.addStretch()
         self.sb_scroll.setWidget(self.sb_cards_container)
         sb_layout.addWidget(self.sb_scroll, 1)
@@ -707,9 +714,9 @@ class MainWindow(QMainWindow):
         # 音源を読み直したいとき(合作で後から降ってきた / 音声を再接続)に、
         # 譜面の中身から全部を組み直してもらう道。
         self.preview_dock.reload_all_cb = self._force_update
-        # 画面の上に置いた合作の操作(編集の受け渡し・追従)。
-        self.preview_dock.collab_give_cb = self._collab_give_menu
-        self.preview_dock.collab_follow_cb = self.collab_set_follow
+        # 合作の操作(画面の上の帯)は置かない(利用者の指定 2026-11-12
+        # 「合作を一回削除」)。仕組み(neotja/collab.py と下の collab_*)は
+        # 残してあり、入口だけ無い。
         # 作譜ペインの右クリックから、ツールバーと同じ道具を呼べるようにする。
         _ce = getattr(self.preview_dock, "chart_edit", None)
         if _ce is not None:
@@ -742,9 +749,10 @@ class MainWindow(QMainWindow):
     #: 設定欄の見た目。テーマを替えたら当て直す(_restyle_bottom_controls)。
     def _bottom_css(self):
         c = COLORS
+        # 段ごとの枠は付けない(利用者の指定 2026-11-12「札 + 欄」の罫線
+        # なし)。段と段は余白だけで分ける。枠が要るのは字を打つ欄・コンボ・
+        # ボタンだけで、それはテーマの既定のまま。
         return (
-            "QFrame#settingsRow, QFrame#bpmBox {{ border: 1px solid {border};"
-            " border-radius: 3px; }}"
             "#settingsPanel QPushButton, #bpmBox QPushButton"
             " {{ padding: 2px 10px; min-height: 18px; }}"
             "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
@@ -759,12 +767,18 @@ class MainWindow(QMainWindow):
             "#settingsPanel QLabel#fieldLabel {{ color: {fg}; }}"
             "#settingsPanel QFrame#rowSeparator {{ border: none;"
             " background: {border}; }}"
+            # min-width/height も書く(padding 0 で、枠を除いた中身が直径)。上の「#bpmBox QPushButton」の
+            # min-height: 18px が setFixedSize の最小値より優先されて、低い
+            # 窓(1400x900)では丸が 110x100 に潰れ、角丸が消えて四角に
+            # なっていた(実測 2026-11-12)。
             "QPushButton#bpmTap {{ border-radius: {r}px; border: 1px solid"
-            " {border}; background: {bg3}; font-size: 15px; }}"
+            " {border}; background: {bg3}; font-size: 15px; padding: 0px;"
+            " min-width: {d}px; min-height: {d}px; }}"
             "QPushButton#bpmTap:pressed {{ background: {accent}; }}"
             "QLabel#bpmValue {{ font-size: 18px; font-weight: bold; }}"
         ).format(border=c["border"], fg=c["fg"], bg3=c["bg3"],
-                 accent=c["accent"], r=self.TAP_DIAMETER // 2)
+                 accent=c["accent"], r=self.TAP_DIAMETER // 2,
+                 d=self.TAP_DIAMETER)
 
     #: BPM測定の「タップ」の直径(px)。右下の段(設定欄 5 段ぶん)に収まり、
     #: 通常再生(720 高)を 1920x1040 で原寸のまま置ける大きさ。
@@ -795,7 +809,8 @@ class MainWindow(QMainWindow):
         hb = self.bottom_row.layout()
 
         # ---- BPM測定 ----------------------------------------------------
-        self.bpm_box = QFrame()
+        # 外枠なし(見出し + 丸いボタンだけ)。
+        self.bpm_box = QWidget()
         self.bpm_box.setObjectName("bpmBox")
         self.bpm_box.setFixedWidth(236)
         bv = QVBoxLayout(self.bpm_box)
@@ -832,10 +847,11 @@ class MainWindow(QMainWindow):
         self.settings_panel.setObjectName("settingsPanel")
         pv = QVBoxLayout(self.settings_panel)
         pv.setContentsMargins(0, 0, 0, 0)
-        pv.setSpacing(3)
+        pv.setSpacing(4)
 
         def row():
-            fr = QFrame()
+            # 枠の無いただの入れ物。段の区切りは上下の余白(2px + 段間 4px)。
+            fr = QWidget()
             fr.setObjectName("settingsRow")
             h = QHBoxLayout(fr)
             h.setContentsMargins(6, 2, 6, 2)
@@ -1547,41 +1563,11 @@ class MainWindow(QMainWindow):
         # 窓の「作譜」メニューは置かない(利用者の指定 2026-10-04)。同じ中身は
         # 作譜ペインの右クリックから出る(populate_command_menu)ので、
         # メニューバーに常駐させる必要がない。
-        # 合作はメニューバーに1つ立てる(利用者の指定 2026-10-16)。ツールの
-        # 下に埋めると、相手と繋ぐという独立した話が道具の1つに見えてしまう。
-        # 14.0.0 から正式(利用者の指定 2026-10-25)。13.1.0 から 13.4.2 まで
-        # 「(実験的)」を付けていたが、音源・分岐・スマホまで揃ったので外す。
-        cm = mb.addMenu("合作")
-        cm.addAction("ルームを作成", self.collab_host)
-        cm.addAction("ルームに入室", self.collab_join)
-        cm.addSeparator()
-        # 「編集モード / プレビューモード」で言い切る(利用者の指定 2026-10-16。
-        # 「ペンを渡す」では何が起きるか分からない)。いまどちらに居るかが
-        # 分かるよう、印の付く項目にして排他で切り替える。
-        from PySide6.QtGui import QActionGroup
-        grp = QActionGroup(self)
-        grp.setExclusive(True)
-        self._act_collab_edit = cm.addAction("編集モードに切り替え",
-                                             self.collab_take_edit)
-        self._act_collab_view = cm.addAction("プレビューモードに切り替え",
-                                             self.collab_leave_edit)
-        for act in (self._act_collab_edit, self._act_collab_view):
-            act.setCheckable(True)
-            grp.addAction(act)
-        cm.addSeparator()
-        self._act_collab_hand = cm.addMenu("編集権を委譲")
-        self._act_collab_hand.aboutToShow.connect(self._collab_fill_hand_menu)
-        # 編集者の見ている所へ付いていく(既定で入 / 利用者の指定
-        # 2026-10-17)。再生中は再生の同期で揃うので動かさない。
-        self._act_collab_follow = cm.addAction(
-            "編集者の視点に追従", self.collab_set_follow)
-        self._act_collab_follow.setCheckable(True)
-        self._act_collab_follow.setChecked(True)
-        cm.addAction("編集者の視点へ移動", self.collab_jump_to_editor)
-        cm.addSeparator()
-        cm.addAction("退室", self.collab_stop)
-        self._menu_collab = cm
-        cm.aboutToShow.connect(self._collab_sync_menu)
+        # 「合作」メニューは置かない(利用者の指定 2026-11-12「合作を一回
+        # 削除」)。14.0.0 からあった ルームを作成/入室・編集モード切替・
+        # 編集権の委譲・視点追従・退室 の項目は、仕組みごと collab_* の
+        # メソッドに残してある — メニューから呼ぶ道だけ無くしてある。
+        self._menu_collab = None
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
@@ -2462,7 +2448,8 @@ class MainWindow(QMainWindow):
             self.editor.checkpointsChanged.emit()
             self._refresh_title()
             self._mark_saved()
-            self._collab_check_file(path)
+            # 合作の UI は外してある(2026-11-12)ので、合作中かの確認
+            # (_collab_check_file)は呼ばない — neotja.collab を読み込まない。
             self._push_recent(path)
             self._set_preview_content(content)
             self._force_update()
@@ -2806,10 +2793,13 @@ class MainWindow(QMainWindow):
             self._shutdown_analysis_thread()
             # 合作の入口(cloudflared)は子プロセスなので、置いて行くと
             # アプリを閉じたあとも外から入れる口が開いたままになる。
-            try:
-                self.collab_stop()
-            except Exception:  # noqa: BLE001
-                pass
+            # UI を外してある(2026-11-12)ので始まることは無いが、万一
+            # 動いていたら畳む。
+            if self._collab is not None or self._collab_tunnel is not None:
+                try:
+                    self.collab_stop()
+                except Exception:  # noqa: BLE001
+                    pass
             event.accept()
         else:
             event.ignore()
@@ -4268,6 +4258,9 @@ class MainWindow(QMainWindow):
 
     def _collab_sync_menu(self):
         """メニューの印と押せる/押せないを、いまの様子に合わせる。"""
+        if getattr(self, "_menu_collab", None) is None:
+            # メニューを置いていない(2026-11-12 以降)。帯も無い。
+            return
         cs = self._collab
         on = cs is not None and cs.is_on()
         editing = on and cs.holds_pen()
