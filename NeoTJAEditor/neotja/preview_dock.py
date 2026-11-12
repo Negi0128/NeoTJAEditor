@@ -604,13 +604,12 @@ class GamePreviewWindow(QWidget):
         self.scaled_host = ScaledHost(chart_preview, self)
         layout.addWidget(self.scaled_host)
         layout.addWidget(bottom_widget)
-        #: 埋め込みで「この高さより低くしない」を返す先(置いた側が決める)。
-        #: モードで中身の高さが違っても窓の高さを一定に保つ(_refit)。
-        self._embed_floor_cb = None
         if self._embedded:
-            # 中身より窓が高いとき、余りは**下**へ(中身が真ん中へ寄ったり
-            # 速度行が浮いたりしないように)。余った所は暗い地のまま。
-            layout.addStretch(1)
+            # 窓の高さは中身どおり(画面 + 下部パネル)。前は全モードを通常
+            # 再生の高さにそろえる床があり、低いモードでは下を暗い地で埋めて
+            # いたが、シークバーと右下の情報のあいだの空き地になるので
+            # やめた(利用者の指定 2026-11-12)。余りは置いた側(右下の段)が
+            # 使う。
             self.setAttribute(Qt.WA_StyledBackground, True)
         self._fullscreen = False
         self._fs_scale = 1.0
@@ -828,13 +827,6 @@ class GamePreviewWindow(QWidget):
         # 窓の大きさは「倍率をかけたあとのゲーム画面」＋下部パネル。
         self.scaled_host.refit()
         h = self.scaled_host.height() + self._bottom_widget.minimumHeight()
-        floor_cb = getattr(self, "_embed_floor_cb", None)
-        if self._embedded and floor_cb is not None:
-            # 統合画面ではモードを替えても窓の高さを変えない(通常再生の
-            # 高さに固定)。変わると下の設定欄ごと上下に跳ねる(利用者の
-            # 指定 2026-11-12)。作譜などは画面 360 + ページで低いので、
-            # 足りないぶんは下の余白(暗い地)で埋める。
-            h = max(h, int(floor_cb()))
         self.setFixedSize(max(self.scaled_host.width(), self._bottom_widget.minimumWidth()), h)
         cb = getattr(self, "_embed_cb", None)
         if cb is not None:
@@ -843,12 +835,6 @@ class GamePreviewWindow(QWidget):
     def set_embed_resized_cb(self, cb):
         """埋め込みのとき、大きさを取り直したあとに呼ぶ先。"""
         self._embed_cb = cb
-
-    def set_embed_floor_cb(self, cb):
-        """埋め込みのとき「窓をこれより低くしない高さ」を返す先。"""
-        self._embed_floor_cb = cb
-        if cb is not None:
-            cb()
 
     # ------------------------------------------------------------------
     # 全画面(鑑賞会用)
@@ -1740,8 +1726,6 @@ class PreviewDock(QDockWidget):
         self.game_preview_window.set_pane_cb(self._update_pane_host)
         self.game_preview_window.set_overlay_cb(self._on_overlay_visible)
         if self._embedded:
-            # 統合画面: モードを替えても窓の高さを通常再生にそろえる。
-            self.game_preview_window.set_embed_floor_cb(self._embed_height_floor)
             self.game_preview_window.refit()
         # 全画面でボタン類と下部パネルを隠すのは通常再生のときだけ
         # (利用者の指定 2026-10-05: 「通常モード以外はフルスクリーンで
@@ -2236,18 +2220,6 @@ class PreviewDock(QDockWidget):
             w.move(x, y)
             x += bw + px(gap, s)
         # 合作の帯(モード切替のすぐ下に置いていた)は無い(2026-11-12)。
-
-    def _embed_height_floor(self) -> int:
-        """統合画面での再生画面の高さ = 通常再生(画面 720 + 速度行)の高さ。
-
-        いちばん高いモードが通常再生/軽量/同時再生(どれも画面 720 で
-        ページ無し)。作譜はその半分の画面 + ページなので、この値まで
-        下に余白を足して全モードの高さをそろえる。"""
-        from neotja import game_screen as _gs
-        s = self.game_preview_window.scaled_host.scale()
-        speed_h = (self._speed_row.sizeHint().height()
-                   if getattr(self, "_overlay_visible", True) else 0)
-        return int(round(_gs.SCREEN_H_FULL * s)) + speed_h
 
     def _apply_bottom_height(self):
         """下部パネルの高さを、いまのモードとボタンの表示から決め直す。

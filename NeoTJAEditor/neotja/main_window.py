@@ -8,7 +8,7 @@ import time
 import traceback
 
 from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal
-from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
+from PySide6.QtGui import QFont, QFontInfo, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
@@ -62,9 +62,8 @@ def find_non_cp932_chars(content: str):
     return bad
 
 
-class PlayerPane(QWidget):
-    """右ペイン(v15 統合画面)。幅が変わったら知らせる(再生画面の倍率を
-    取り直すため)。"""
+class ResizeNotifier(QWidget):
+    """大きさが変わったら知らせる入れ物(resize_cb)。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,6 +74,11 @@ class PlayerPane(QWidget):
         cb = self.resize_cb
         if cb is not None:
             cb()
+
+
+class PlayerPane(ResizeNotifier):
+    """右ペイン(v15 統合画面)。幅が変わったら知らせる(再生画面の倍率を
+    取り直すため)。"""
 
 
 class CourseCard(QFrame):
@@ -167,8 +171,30 @@ class CourseCard(QFrame):
         self.details_frame.setVisible(False)
 
         self.body = body
+        #: 右下の段に余りがあるときの拡大率(set_scale)。字の元の大きさは
+        #: テーマの既定(pointSize が無い環境もあるので QFontInfo で読む)。
+        self._scale = 1.0
+        self._base_pt = QFontInfo(self.font()).pointSizeF()
         self._refresh_header()
         self.update_course(course)
+
+    def set_scale(self, f):
+        """右下の段が高いとき(作譜モードなど)、字と行間を少し大きくして
+        余りを使う。上限 1.25 — それ以上は 1 行が札の幅(270px 基準)を
+        越えて切れる。幅のほうは MainWindow が同じ比で広げる。"""
+        f = max(1.0, min(1.25, float(f)))
+        if abs(f - self._scale) < 0.01:
+            return
+        self._scale = f
+        font = QFont(self.font())
+        font.setPointSizeF(self._base_pt * f)
+        # 子にも1つずつ当てる。アプリにスタイルシートが入っていると親の
+        # setFont は子へ伝わらない(実測 2026-11-12: 親 10.5pt、札 9pt のまま)。
+        for wd in [self] + self.findChildren(QWidget):
+            wd.setFont(font)
+        # 行間は 0 → 3px まで。字だけ大きくすると詰まって見えるので。
+        self.body.layout().setSpacing(int(round(12 * (f - 1.0))))
+        self.btn_toggle.setFixedHeight(int(round(18 * f)))
 
     def toggle_body(self, on=None):
         """カードの中身を開閉する。on を渡せばその状態にする。"""
@@ -667,13 +693,19 @@ class MainWindow(QMainWindow):
         rl.setSpacing(0)
         self.player_host = QWidget()
         rl.addWidget(self.player_host)
-        self.bottom_row = QWidget()
+        # 下の段は再生画面の残りを全部もらう(rl の stretch)。再生画面の
+        # 高さはモードで違う(作譜は低い)ので、段の高さもモードで変わる。
+        # 余った高さは部品を大きくして使う(_scale_bottom_block)。
+        self.bottom_row = ResizeNotifier()
+        self.bottom_row.setObjectName("bottomRow")
         hb = QHBoxLayout(self.bottom_row)
         hb.setContentsMargins(4, 4, 4, 4)
-        hb.setSpacing(6)
-        self.sb_outer.setFixedWidth(270)
+        # 箱と箱のあいだは _build_bottom_controls が仕切り線つきで置く。
+        hb.setSpacing(0)
+        self.sb_outer.setFixedWidth(self.CARD_W)
         hb.addWidget(self.sb_outer)
         rl.addWidget(self.bottom_row, 1)
+        self.bottom_row.resize_cb = self._scale_bottom_block
         splitter.addWidget(self.right_pane)
 
         splitter.setSizes([640, 1280])
@@ -711,8 +743,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.central_stack)
 
     def _show_start_screen(self):
-        """起動画面を前に出す。起動時に1回だけ呼ぶ。"""
+        """起動画面を前に出す。起動時に1回だけ呼ぶ。
+
+        上のツールバー(新規/開く/保存…)も隠す(利用者の指定 2026-11-12)。
+        起動画面に同じ入口(新規作成/開く)があるので二重になるし、保存や
+        元に戻すは開くものが無い間は押しても意味が無い。メニューバーは
+        残す。キー(Ctrl+S など)は窓に張った QShortcut なので、ツール
+        バーを隠しても効き方は変わらない(_bind_shortcuts)。"""
         self.start_screen.set_recent(self.config_data.get("recent_files", []))
+        self.toolbar_top.hide()
         self.central_stack.setCurrentIndex(0)
 
     def _leave_start_screen(self):
@@ -721,6 +760,9 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "central_stack", None)
         if stack is not None and stack.currentIndex() != 1:
             stack.setCurrentIndex(1)
+        tb = getattr(self, "toolbar_top", None)
+        if tb is not None and tb.isHidden():
+            tb.show()
 
     def is_start_screen_visible(self):
         stack = getattr(self, "central_stack", None)
@@ -732,7 +774,12 @@ class MainWindow(QMainWindow):
         幅だけで決めると、窓が低いとき下の設定欄が窓の下へはみ出す
         (通常再生は画面が 720 ぶん高い)。下の段の最小の高さを引いた残りにも
         収まる倍率にする。5 段にしてからは 1920x1040 なら原寸で収まるが、
-        もっと低い窓(1400x900 など)のための保険として残す。"""
+        もっと低い窓(1400x900 など)のための保険として残す。
+
+        引くのは**等倍のときの**最小の高さ(_bottom_base_h)。下の段は余りが
+        あると部品を大きくする(_scale_bottom_block)ので、そのときの
+        minimumSizeHint を引くと「大きくした → 画面を縮めた → もっと余った
+        → もっと大きく…」と回る。"""
         dock = getattr(self, "preview_dock", None)
         if dock is None or getattr(self, "_fitting_player", False):
             return
@@ -745,8 +792,7 @@ class MainWindow(QMainWindow):
         s = min(1.0, w / float(self.PLAYER_W))
         s0 = gpw.scaled_host.scale()
         nat_h = gpw.height() / s0 if s0 > 0 else 0.0
-        avail_h = (self.right_pane.height()
-                   - self.bottom_row.minimumSizeHint().height())
+        avail_h = self.right_pane.height() - self._bottom_min_h()
         if nat_h > 0 and avail_h > 0:
             s = min(s, avail_h / nat_h)
         s = max(0.25, s)
@@ -860,9 +906,13 @@ class MainWindow(QMainWindow):
         # 段ごとの枠は付けない(利用者の指定 2026-11-12「札 + 欄」の罫線
         # なし)。段と段は余白だけで分ける。枠が要るのは字を打つ欄・コンボ・
         # ボタンだけで、それはテーマの既定のまま。
+        # 部品の高さは段の余り具合で 18px の 1.0〜1.4 倍(_scale_bottom_block)。
+        f = getattr(self, "_bottom_scale", 1.0)
+        ch = int(round(self.BOTTOM_CTRL_H * f))
+        d = self._tap_diameter()
         return (
             "#settingsPanel QPushButton, #bpmBox QPushButton"
-            " {{ padding: 2px 10px; min-height: 18px; }}"
+            " {{ padding: 2px 10px; min-height: {ch}px; }}"
             "#settingsPanel QPushButton#offsetStep {{ padding: 2px 2px; }}"
             "#settingsPanel QPushButton#demostartBtn {{ padding: 2px 6px; }}"
             # BPM の上下矢印。2 段重ねで欄の高さ(24px)に収める。
@@ -871,9 +921,13 @@ class MainWindow(QMainWindow):
             "#settingsPanel QToolButton#bpmArrow:hover {{ background: {bg3}; }}"
             "#settingsPanel QLineEdit, #settingsPanel QSpinBox,"
             " #settingsPanel QDoubleSpinBox, #settingsPanel QComboBox"
-            " {{ padding: 2px 4px; min-height: 18px; }}"
+            " {{ padding: 2px 4px; min-height: {ch}px; }}"
             "#settingsPanel QLabel#fieldLabel {{ color: {fg}; }}"
             "#settingsPanel QFrame#rowSeparator {{ border: none;"
+            " background: {border}; }}"
+            # 箱と箱(難易度カード │ BPM測定 │ 設定欄)の仕切り線。箱に枠は
+            # 付けない方針(第6段)なので、線と余白で切る。
+            "#bottomRow QFrame#blockSeparator {{ border: none;"
             " background: {border}; }}"
             # min-width/height も書く(padding 0 で、枠を除いた中身が直径)。上の「#bpmBox QPushButton」の
             # min-height: 18px が setFixedSize の最小値より優先されて、低い
@@ -883,20 +937,105 @@ class MainWindow(QMainWindow):
             " {border}; background: {bg3}; font-size: 15px; padding: 0px;"
             " min-width: {d}px; min-height: {d}px; }}"
             "QPushButton#bpmTap:pressed {{ background: {accent}; }}"
-            "QLabel#bpmValue {{ font-size: 18px; font-weight: bold; }}"
+            "QLabel#bpmValue {{ font-size: {vfs}px; font-weight: bold; }}"
         ).format(border=c["border"], fg=c["fg"], bg3=c["bg3"],
-                 accent=c["accent"], r=self.TAP_DIAMETER // 2,
-                 d=self.TAP_DIAMETER)
+                 accent=c["accent"], r=d // 2, d=d, ch=ch,
+                 vfs=int(round(18 * f)))
 
-    #: BPM測定の「タップ」の直径(px)。右下の段(設定欄 5 段ぶん)に収まり、
-    #: 通常再生(720 高)を 1920x1040 で原寸のまま置ける大きさ。
+    #: BPM測定の「タップ」の直径(px、等倍)。右下の段(設定欄 5 段ぶん)に
+    #: 収まり、通常再生(720 高)を 1920x1040 で原寸のまま置ける大きさ。
     TAP_DIAMETER = 110
+    #: BPM測定の箱の幅と難易度カードの幅(px、等倍)。
+    BPM_BOX_W = 236
+    CARD_W = 270
+    #: 設定欄の部品(ボタン・欄)の中身の高さ(px、等倍)。
+    BOTTOM_CTRL_H = 18
+    #: 下の段の部品を大きくする上限。これ以上は間延びして見える。
+    BOTTOM_SCALE_MAX = 1.4
+    #: 箱と箱のあいだ(余白 + 1px の線 + 余白)。
+    BLOCK_GAP = 12
+
+    def _tap_diameter(self):
+        return int(round(self.TAP_DIAMETER * getattr(self, "_bottom_scale", 1.0)))
+
+    def _bottom_min_h(self):
+        """下の段の、等倍のときの最小の高さ(px)。
+
+        等倍で見えているあいだに測り直して覚える(スタイルが当たり切る前の
+        値や、テーマ替えで変わる値を持ち越さないため)。拡大中は覚えている
+        値を返す — 拡大後の minimumSizeHint は部品ぶん伸びているので、
+        再生画面の倍率の計算(_fit_player_to_pane)には使えない。"""
+        if getattr(self, "_bottom_scale", 1.0) <= 1.0 or not hasattr(self, "_bottom_base_h"):
+            self._bottom_base_h = self.bottom_row.minimumSizeHint().height()
+            self._bottom_base_w = self.bottom_row.minimumSizeHint().width()
+        return self._bottom_base_h
+
+    def _scale_bottom_block(self):
+        """下の段の高さに合わせて部品を大きくする(等倍〜1.4 倍)。
+
+        再生画面の高さはモードで違う(作譜 360+ペイン、通常 720)。前は
+        低いモードで再生画面の下を暗い地で埋めて段の位置をそろえていたが、
+        シークバーと情報のあいだの空き地が気になる(利用者の指定
+        2026-11-12)ので、埋めるのをやめて余りを段に渡し、段の部品を
+        大きくして使う。モード切替で段が上下に動くのは承知のうえ。
+
+        縦(部品の高さ・段間・タップの直径・カードの字)は余りの高さの比で、
+        横(BPM測定の箱とカードの幅)は余りの幅の比で決める。横は別に見る
+        — 1400 幅の窓では右ペインに横の余りが無く、箱を広げると設定欄が
+        右で切れる。"""
+        row = getattr(self, "bottom_row", None)
+        if row is None or not hasattr(self, "bpm_box") or row.height() <= 0:
+            return
+        base_h = self._bottom_min_h()
+        base_w = self._bottom_base_w
+        if base_h <= 0:
+            return
+        f = max(1.0, min(self.BOTTOM_SCALE_MAX, row.height() / float(base_h)))
+        # 横に増やせるのは箱とカードの幅の合計ぶんまで。
+        grow = float(self.BPM_BOX_W + self.CARD_W)
+        # 切り捨て(丸めると 1px 溢れることがあった。実測 2026-11-12)。
+        fw = max(1.0, min(f, int((1.0 + (row.width() - base_w) / grow) * 100) / 100.0))
+        self._apply_bottom_scale(f, fw)
+        # 見積もりが数 px 外れて段から溢れたら、その比で一段戻す。
+        need = row.minimumSizeHint()
+        if need.height() > row.height() and f > 1.0:
+            f = max(1.0, f * row.height() / float(need.height()))
+            self._apply_bottom_scale(f, min(fw, f))
+            need = row.minimumSizeHint()
+        if need.width() > row.width() and fw > 1.0:
+            fw = max(1.0, fw - (need.width() - row.width()) / grow - 0.01)
+            self._apply_bottom_scale(f, fw)
+
+    def _apply_bottom_scale(self, f, fw):
+        f = round(float(f), 2)
+        fw = round(float(fw), 2)
+        if (f, fw) == (getattr(self, "_bottom_scale", 1.0),
+                       getattr(self, "_bottom_scale_w", 1.0)):
+            return
+        self._bottom_scale = f
+        self._bottom_scale_w = fw
+        pd = self.preview_dock
+        d = self._tap_diameter()
+        pd.btn_tap.setFixedSize(d, d)
+        # BPM の上下矢印は 2 段で欄の高さ(中身 + 余白 4 + 枠 2)に合わせる。
+        ah = int(round((self.BOTTOM_CTRL_H * f + 6) / 2.0))
+        for b in (self.btn_bpm_up, self.btn_bpm_down):
+            b.setFixedSize(16, ah)
+        self.bpm_box.setFixedWidth(int(round(self.BPM_BOX_W * fw)))
+        self.sb_outer.setFixedWidth(int(round(self.CARD_W * fw)))
+        for card in self._course_cards.values():
+            card.set_scale(fw)
+        # 段と段のあいだ(4px)も同じ比で。
+        self.settings_panel.layout().setSpacing(int(round(4 * f)))
+        self.bpm_box.layout().setSpacing(int(round(3 * f)))
+        self._restyle_bottom_controls()
 
     def _restyle_bottom_controls(self):
-        for w in (getattr(self, "settings_panel", None),
-                  getattr(self, "bpm_box", None)):
-            if w is not None:
-                w.setStyleSheet(self._bottom_css())
+        # 段ぜんたいに当てる(箱の仕切り線も含む)。選択子は #settingsPanel /
+        # #bpmBox / #bottomRow で絞ってあるので、他へは及ばない。
+        row = getattr(self, "bottom_row", None)
+        if row is not None and hasattr(self, "bpm_box"):
+            row.setStyleSheet(self._bottom_css())
         # OFFSET の値の箱は常に青い枠(メトロノーム ON の枠と同じ色)。
         # 部品に直に当てるのは、テーマの QDoubleSpinBox の枠線より
         # 優先させるため。
@@ -915,12 +1054,26 @@ class MainWindow(QMainWindow):
         を通す — 元に戻すが行単位で効くように、本文は丸ごと組み直さない。"""
         pd = self.preview_dock
         hb = self.bottom_row.layout()
+        self._bottom_scale = 1.0
+        self._bottom_scale_w = 1.0
+
+        def block_gap():
+            """箱と箱のあいだ: 余白 12 + 縦線 1 + 余白 12。BPM測定の箱と
+            設定欄が地続きに見えていた(利用者の報告 2026-11-12)。箱に枠は
+            付けない(第6段)ので、間を広げて線で切る。"""
+            hb.addSpacing(self.BLOCK_GAP)
+            ln = QFrame()
+            ln.setObjectName("blockSeparator")
+            ln.setFixedWidth(1)
+            hb.addWidget(ln)
+            hb.addSpacing(self.BLOCK_GAP)
 
         # ---- BPM測定 ----------------------------------------------------
         # 外枠なし(見出し + 丸いボタンだけ)。
+        block_gap()
         self.bpm_box = QWidget()
         self.bpm_box.setObjectName("bpmBox")
-        self.bpm_box.setFixedWidth(236)
+        self.bpm_box.setFixedWidth(self.BPM_BOX_W)
         bv = QVBoxLayout(self.bpm_box)
         bv.setContentsMargins(8, 4, 8, 4)
         bv.setSpacing(3)
@@ -949,6 +1102,7 @@ class MainWindow(QMainWindow):
         self.btn_tap_reset.clicked.connect(self._reset_bpm_tap)
         bv.addWidget(self.btn_tap_reset)
         hb.addWidget(self.bpm_box)
+        block_gap()
 
         # ---- 設定欄 -----------------------------------------------------
         self.settings_panel = QWidget()
@@ -1164,8 +1318,8 @@ class MainWindow(QMainWindow):
         hb.addWidget(self.settings_panel, 1)
         self._restyle_bottom_controls()
         # 右ペインは下の段が切れない幅まで。分割バーはこれより左へ寄らない。
-        self.right_pane.setMinimumWidth(
-            max(320, self.bottom_row.minimumSizeHint().width()))
+        self._bottom_min_h()   # 等倍の最小の大きさを覚える
+        self.right_pane.setMinimumWidth(max(320, self._bottom_base_w))
 
     def _reset_bpm_tap(self):
         self.preview_dock.tapper.reset()
@@ -2297,6 +2451,7 @@ class MainWindow(QMainWindow):
             else:
                 card = CourseCard(course)
                 card.jumpRequested.connect(self.jump_to_course)
+                card.set_scale(getattr(self, "_bottom_scale_w", 1.0))
                 self._course_cards[k] = card
 
         for k in [k for k in self._course_cards if k not in visible_keys]:
