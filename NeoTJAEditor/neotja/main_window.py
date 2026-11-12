@@ -201,8 +201,15 @@ class CourseCard(GlassCard):
             "連打と風船は数に入れません(上の「ノーツ」と同じ数え方)。")
         self.lbl_roll = QLabel()
         self.lbl_balloon = QLabel()
-        for lbl in (self.lbl_time, self.lbl_notes, self.lbl_breakdown,
-                    self.lbl_density, self.lbl_roll, self.lbl_balloon):
+        # 行と行のあいだに同じ伸び縮みを挟み、カードの高さを**行間に均等に
+        # 配る**(利用者の指定 2026-11-13「行間がせまく詰まってるから
+        # ちゃんと全てのスペースを活用して」)。連打詳細を開いて中身が
+        # 増えたときは伸び縮みが 0 まで縮み、今までどおり詰めて並ぶ。
+        rows = (self.lbl_time, self.lbl_notes, self.lbl_breakdown,
+                self.lbl_density, self.lbl_roll, self.lbl_balloon)
+        for i, lbl in enumerate(rows):
+            if i:
+                body_layout.addStretch(1)
             body_layout.addWidget(lbl)
 
         # 連打詳細のボタンは**カードの下端**に置く。カードは段の高さいっぱいに
@@ -210,10 +217,11 @@ class CourseCard(GlassCard):
         # 下に隙間を残さない(利用者の指定 2026-11-13「常に下までちゃんと
         # 埋めて欲しい」)。開くと下へ伸び、そのときは段の中でスクロールする。
         body_layout.addStretch(1)
+        # 見た目と高さは BPM測定の「リセット」と同じにする(利用者の指定
+        # 2026-11-13)。高さは MainWindow が段の倍率に合わせて揃える
+        # (_sync_card_button_height)。平らな字だけのボタンはやめた。
         self.btn_toggle = QPushButton("連打詳細 [開く]")
-        self.btn_toggle.setFlat(True)
-        self.btn_toggle.setFixedHeight(18)
-        self.btn_toggle.setStyleSheet("QPushButton { padding: 0px 4px; }")
+        self.btn_toggle.setFocusPolicy(Qt.NoFocus)
         self.btn_toggle.clicked.connect(self._toggle_details)
         body_layout.addWidget(self.btn_toggle)
 
@@ -269,7 +277,6 @@ class CourseCard(GlassCard):
             wd.setFont(font)
         # 行間は 0 → 3px まで。字だけ大きくすると詰まって見えるので。
         self.body.layout().setSpacing(int(round(12 * (f - 1.0))))
-        self.btn_toggle.setFixedHeight(int(round(18 * f)))
 
     def toggle_body(self, on=None):
         """カードの中身を開閉する。on を渡せばその状態にする。"""
@@ -1152,6 +1159,19 @@ class MainWindow(QMainWindow):
         self.bpm_box.layout().setSpacing(int(round(3 * f)))
         self._restyle_bottom_controls()
 
+    def _sync_card_button_height(self):
+        """難易度カードの「連打詳細」を BPM測定の「リセット」と同じ高さに。
+
+        リセットの高さは段の倍率(QSS の min-height)で変わるので、倍率や
+        テーマを当て直すたび、カードを作るたびに合わせる。"""
+        ref = getattr(self, "btn_tap_reset", None)
+        if ref is None:
+            return
+        ref.ensurePolished()
+        h = max(ref.sizeHint().height(), ref.minimumSizeHint().height())
+        for card in self._course_cards.values():
+            card.btn_toggle.setFixedHeight(h)
+
     def _restyle_bottom_controls(self):
         # 段ぜんたいに当てる。選択子は #bottomRow で絞ってあるので、他へは
         # 及ばない。ガラスの箱(GlassCard)と地の光(BottomRow)は描くときに
@@ -1162,6 +1182,7 @@ class MainWindow(QMainWindow):
             for card in self._course_cards.values():
                 card.refresh_theme()
             row.update()
+            self._sync_card_button_height()
         # OFFSET の値の箱は常に青い枠(メトロノーム ON の枠と同じ色)。
         # 部品に直に当てるのは、テーマの QDoubleSpinBox の枠線より
         # 優先させるため。
@@ -2566,6 +2587,7 @@ class MainWindow(QMainWindow):
                 card = CourseCard(course)
                 card.jumpRequested.connect(self.jump_to_course)
                 card.set_scale(getattr(self, "_bottom_scale_w", 1.0))
+                QTimer.singleShot(0, self._sync_card_button_height)
                 self._course_cards[k] = card
 
         for k in [k for k in self._course_cards if k not in visible_keys]:
