@@ -18,10 +18,18 @@ from neotja.dialogs import set_default_button
 from neotja.dialogs.glass import apply_glass, field_label, make_card
 from neotja.tja_analyzer import TJACourseAnalyzer
 
-#: 選べる難易度。並びは TJA の 0〜4 の順(かんたん → おに(裏))。
+#: 選べる難易度。並びは難しい順(おに(裏) → かんたん)。利用者の指定
+#: 2026-11-13「コース追加は基本的にまだ存在していない1番上のコース」で、
+#: 一覧の上から順に見て最初の空きを選ぶので、上ほど難しくしておくと
+#: 「1番上」が「いちばん難しい空き」と一致する(書き足すのはたいてい
+#: 上のコースから、という作り方にも合う)。
 #: 書く値は COURSE:Oni / COURSE:Edit のように英語名 — 数字より読みやすく、
 #: どの太鼓シミュでも通る綴りなので。
-COURSE_VALUES = ("Easy", "Normal", "Hard", "Oni", "Edit")
+COURSE_VALUES = ("Edit", "Oni", "Hard", "Normal", "Easy")
+
+#: LEVEL の既定。いちばん上の空きを選ぶ以上、たいていは難しいコースを
+#: 足すことになるので ★10 から(利用者の指定 2026-11-13)。
+DEFAULT_LEVEL = 10
 
 
 class AddCourseDialog(QDialog):
@@ -52,7 +60,8 @@ class AddCourseDialog(QDialog):
                 item.setText("%s  (COURSE:%s)  — あり" % (label, key))
             elif first_free is None:
                 first_free = i
-        # 最初の「まだ無い」難易度を選んでおく。全部あるなら先頭のまま
+        # 上から見て最初の「まだ無い」難易度 = いちばん難しい空きを選んで
+        # おく(並びは COURSE_VALUES の説明を参照)。全部あるなら先頭のまま
         # (OK を押しても呼ぶ側が断る)。
         self.cb_course.setCurrentIndex(first_free if first_free is not None else 0)
         form.addWidget(field_label("難易度"), 1, 0)
@@ -60,7 +69,7 @@ class AddCourseDialog(QDialog):
 
         self.spin_level = QSpinBox()
         self.spin_level.setRange(1, 10)
-        self.spin_level.setValue(5)
+        self.spin_level.setValue(DEFAULT_LEVEL)
         self.spin_level.setPrefix("★")
         form.addWidget(field_label("LEVEL"), 2, 0)
         form.addWidget(self.spin_level, 2, 1)
