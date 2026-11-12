@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QLineEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QStatusBar, QToolBar, QToolButton,
+    QSpinBox, QSplitter, QStackedWidget, QStatusBar, QToolBar, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -30,6 +30,7 @@ from neotja.ai_chart_gen import build_ai_variant_content
 from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
 from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
+from neotja.start_screen import StartScreen
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
 
@@ -431,6 +432,9 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
         self._restore_window_state()
         self.new_file(confirm=False)
+        # エディタにはひな型が入っているが、ファイルとしては何も開いていない
+        # ので起動画面を出す。開く/作るが決まった時点で分割画面へ切り替わる。
+        self._show_start_screen()
 
         # Alt単独の押下/離しでメニューバーへフォーカスが移る既定動作を止める
         # (eventFilter 参照)。QApplication へ登録するアプリ全体フィルタは、
@@ -688,7 +692,39 @@ class MainWindow(QMainWindow):
         self.right_pane.setMinimumWidth(320)
         self.right_pane.resize_cb = self._fit_player_to_pane
         self.splitter = splitter   # 分割比の保存/復元に使う
-        self.setCentralWidget(splitter)
+        # 起動直後の画面(利用者の指定 2026-11-12)。何も開いていない間だけ
+        # 分割画面の代わりに見せ、開いたら分割画面へ切り替える。メニューと
+        # ツールバーはそのまま。分割画面は裏で組み上がっているので、再生
+        # 画面やスキンの先読みは起動画面の後ろで従来どおり進む。
+        self.start_screen = StartScreen()
+        self.start_screen.new_from_url.connect(self.new_file_dialog)
+        self.start_screen.new_from_file.connect(
+            lambda: self.new_file_dialog(browse_audio=True))
+        self.start_screen.open_requested.connect(self.open_file)
+        self.start_screen.recent_activated.connect(self._open_recent)
+        self.start_screen.help_requested.connect(self.open_help)
+        self.start_screen.settings_requested.connect(self.open_settings)
+        self.central_stack = QStackedWidget()
+        self.central_stack.addWidget(self.start_screen)   # 0
+        self.central_stack.addWidget(splitter)            # 1
+        self.central_stack.setCurrentIndex(1)
+        self.setCentralWidget(self.central_stack)
+
+    def _show_start_screen(self):
+        """起動画面を前に出す。起動時に1回だけ呼ぶ。"""
+        self.start_screen.set_recent(self.config_data.get("recent_files", []))
+        self.central_stack.setCurrentIndex(0)
+
+    def _leave_start_screen(self):
+        """起動画面を片付けて分割画面へ。開く/新規作成が決まったときに呼ぶ。
+        何度呼んでも害は無い(すでに分割画面なら何もしない)。"""
+        stack = getattr(self, "central_stack", None)
+        if stack is not None and stack.currentIndex() != 1:
+            stack.setCurrentIndex(1)
+
+    def is_start_screen_visible(self):
+        stack = getattr(self, "central_stack", None)
+        return stack is not None and stack.currentIndex() == 0
 
     def _fit_player_to_pane(self):
         """右ペインの幅と高さに合わせて再生画面の倍率を決める(原寸が上限)。
@@ -1851,11 +1887,17 @@ class MainWindow(QMainWindow):
         if not recent:
             act = menu.addAction("(履歴なし)")
             act.setEnabled(False)
+            if self.is_start_screen_visible():
+                self.start_screen.set_recent([])
             return
         for p in recent:
             menu.addAction(os.path.basename(p), lambda checked=False, path=p: self._open_recent(path))
         menu.addSeparator()
         menu.addAction("履歴を消去", self._clear_recent)
+        # 起動画面にも同じ一覧を出す。見えている間だけ並べ直せば足りる
+        # (ヘッダを読み直す手間を、消えたあとにまでかけない)。
+        if self.is_start_screen_visible():
+            self.start_screen.set_recent(recent)
 
     def _clear_recent(self):
         self.config_data["recent_files"] = []
@@ -2326,15 +2368,24 @@ class MainWindow(QMainWindow):
         self._set_preview_content(text)
         self._force_update()
 
-    def new_file_dialog(self):
+    def new_file_dialog(self, browse_audio=False):
+        """新規作成のダイアログ。browse_audio が真なら、開いてすぐ「音源
+        ファイル」の参照(ファイル選択)まで進める — 起動画面の「音源ファイル
+        から」用。ダイアログが出てから選ばせるので、やめても URL の画面に
+        戻るだけで済む。"""
         if not self._unsaved_check():
             return
         from neotja.dialogs.new_project_dialog import NewProjectDialog
         dlg = NewProjectDialog(self)
+        if browse_audio:
+            # exec で表示されたあとに開く。先に開くとダイアログより前に
+            # ファイル選択が出て、どの窓の子か分からなくなる。
+            QTimer.singleShot(0, dlg._browse_audio_file)
         if dlg.exec() != QDialog.Accepted:
             return
         if dlg.mode == "blank":
             self.new_file(confirm=False)
+            self._leave_start_screen()
             return
         self._apply_youtube_project(
             dlg.result_title, dlg.result_subtitle, dlg.result_wave_path, dlg.result_folder,
@@ -2409,6 +2460,7 @@ class MainWindow(QMainWindow):
         self.save_file()
         self._mark_saved()
         self._push_recent(tja_path)
+        self._leave_start_screen()
         self._force_update()
 
         self.preview_dock.expand()
@@ -2525,6 +2577,10 @@ class MainWindow(QMainWindow):
             # 合作の UI は外してある(2026-11-12)ので、合作中かの確認
             # (_collab_check_file)は呼ばない — neotja.collab を読み込まない。
             self._push_recent(path)
+            # 起動画面から開いたときはここで分割画面へ。切り替えは解析
+            # (_force_update)より前 — 右ペインが見えてから再生画面の倍率を
+            # 取り直す(_fit_player_to_pane)ので、順番が逆だと一瞬縮んで映る。
+            self._leave_start_screen()
             self._set_preview_content(content)
             self._force_update()
             # 開いた直後は「開く」ボタンにフォーカスが残っていて、そのまま
@@ -2704,6 +2760,9 @@ class MainWindow(QMainWindow):
         ok = self.save_file()
         if ok:
             self._push_recent(path)
+            # 起動画面のまま「名前を付けて保存」した(メニューからはできる)
+            # なら、もうファイルがあるのでエディタへ。
+            self._leave_start_screen()
         return ok
 
     def open_new_window(self):
@@ -3689,6 +3748,7 @@ class MainWindow(QMainWindow):
         self.ruler.refresh_theme()
         self.preview_dock.refresh_theme()
         self._restyle_bottom_controls()
+        self.start_screen.refresh_theme()
 
     def _show_about(self):
         QMessageBox.information(self, "バージョン情報", f"{APP_NAME}\nVersion: {VERSION}\n\nRedesigned & Optimized Edition (PySide6)")
@@ -5138,6 +5198,7 @@ class MainWindow(QMainWindow):
             self.preview_dock.set_hit_sound_files(
                 *settings_mod.effective_hit_sound_paths(self.config_data))
             self.preview_dock.refresh_theme()
+            self.start_screen.refresh_theme()
             self.preview_dock.refresh_nameplate()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))
             self._apply_wireless_offset()
