@@ -3258,7 +3258,25 @@ class MainWindow(QMainWindow):
                 and event.button() in (Qt.BackButton, Qt.ForwardButton)
                 and self._grid_side_button(event.button())):
             return True
+        # 素早く2回押すと、2回目は Press ではなく DblClick として届く。
+        # これを素通しすると作譜ペインの既定の mouseDoubleClickEvent が
+        # mousePressEvent を呼び直し、分割がもう1段動いていた(2回押して
+        # 3段 = 1/32 から 1/48 を飛ばして 1/64 へ。利用者の報告
+        # 2026-11-13)。DblClick の前には必ず Press が来ていて、そちらで
+        # もう1段動かしてあるので、ここでは何もせず握りつぶすだけ。
+        if (event.type() == QEvent.MouseButtonDblClick
+                and event.button() in (Qt.BackButton, Qt.ForwardButton)
+                and self._grid_side_target() is not None):
+            return True
         return super().eventFilter(obj, event)
+
+    def _grid_side_target(self):
+        """サイドボタンで分割を変えられる作譜ペイン。無い/使えないなら None。"""
+        dock = getattr(self, "preview_dock", None)
+        w = getattr(dock, "chart_edit", None) if dock is not None else None
+        if w is None or w.offset_mode:
+            return None
+        return w
 
     def _grid_side_button(self, button):
         """サイドボタンを作譜ペインの分割へ渡す。渡せたら True。
@@ -3266,9 +3284,8 @@ class MainWindow(QMainWindow):
         進む(前)で細かく、戻る(後ろ)で粗く — ↑ ↓ と同じ向き。
         オフセット合わせ中だけは触らない(そのとき分割は使わない)。
         """
-        dock = getattr(self, "preview_dock", None)
-        w = getattr(dock, "chart_edit", None) if dock is not None else None
-        if w is None or w.offset_mode:
+        w = self._grid_side_target()
+        if w is None:
             return False
         w.change_grid(1 if button == Qt.ForwardButton else -1)
         return True

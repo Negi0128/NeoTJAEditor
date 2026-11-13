@@ -1338,6 +1338,18 @@ class ChartEditWaveform(WaveformWidget):
             slot = grid - 1
         return (i, slot)
 
+    def mouseDoubleClickEvent(self, event):
+        # サイドボタンの素早い2回押しは、2回目が DblClick で届く。既定の
+        # 処理は mousePressEvent を呼び直すので、分割がもう1段余計に動いて
+        # いた(2回押して3段。利用者の報告 2026-11-13)。1段ぶんは直前の
+        # Press で動かしてあるので、ここでは受け取って捨てるだけ。
+        # (窓のイベントフィルタでも止めているが、ペイン単体で使われた
+        # ときのための保険)
+        if event.button() in (Qt.BackButton, Qt.ForwardButton):
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
         """左クリック: その位置へ編集カーソルを置く(再生位置のシークは親)。
         右ドラッグ: 範囲選択(PeepoDrumKit の右ドラッグの箱選択に当たる。
@@ -4219,7 +4231,13 @@ class ChartEditWaveform(WaveformWidget):
         key = (self._time_text(self.position_sec), self._grid,
                pal.get("fg_dim"), (lr, lg, lb), self.RULER_H, self.LANE_X0, dpr)
         now = time.monotonic()
-        if self._legend_pm is None or (
+        # 分割が変わったときだけは間引かずにすぐ描き直す。続けて変えると
+        # 間引きに当たって古い数字が残り、1/48 を飛ばしたように見えた
+        # (利用者の報告 2026-11-13)。時刻の文字は毎フレーム変わるので
+        # 間引いたままにする。
+        grid_changed = (self._legend_key is None
+                        or self._legend_key[1] != self._grid)
+        if self._legend_pm is None or grid_changed or (
                 key != self._legend_key
                 and now - self._legend_at >= 1.0 / self.LEGEND_FPS):
             w, h = self.LANE_X0, self.RULER_H
