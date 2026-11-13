@@ -16,6 +16,10 @@ class HighlightData:
         self.invalid_lines = {}          # line -> note count that violated VALID_MEASURE_COUNTS
         self.warn_lines = set()          # lines needing the "consecutive #SCROLL" warning background
         self.cmd_lines = set()           # lines that are a whole "#..." command
+        # #LYRIC の行(cmd_lines の一部)。歌詞だけ緑にする(利用者の指定
+        # 2026-11-13)。作譜ペインの歌詞の帯と同じ色で、本文のどこに歌詞が
+        # あるかを紫の命令の中から見分けられるようにする。
+        self.lyric_lines = set()
         self.comment_ranges = {}         # line -> col where a "//" comment starts
         self.header_ranges = {}          # line -> col of the "KEY:VALUE" separator
         self.digit_spans = {}            # line -> [(start_col, end_col, tag)]
@@ -119,6 +123,8 @@ def compute_highlight_data(content: str, courses_info: list) -> HighlightData:
 
         if s.startswith("#"):
             data.cmd_lines.add(i)
+            if s.startswith("#LYRIC"):
+                data.lyric_lines.add(i)
             if s.startswith("#START"):
                 m_num, m_den = 4, 4       # コースが変わったら拍子は 4/4 に戻る
             elif s.startswith("#MEASURE"):
@@ -237,6 +243,7 @@ class TJAHighlighter(QSyntaxHighlighter):
     def _line_signature(data: "HighlightData", line: int):
         return (
             line in data.cmd_lines,
+            line in data.lyric_lines,
             line in data.warn_lines,
             data.comment_ranges.get(line),
             data.header_ranges.get(line),
@@ -336,6 +343,7 @@ class TJAHighlighter(QSyntaxHighlighter):
             "roll_big": fmt("roll", bold=True),
             "balloon_tag": fmt("balloon"),
             "cmd": fmt("cmd"),
+            "lyric": fmt("lyric"),
             "header_key": fmt("header_key"),
             "header_val": fmt("header_val"),
             "comment": fmt("comment"),
@@ -347,7 +355,8 @@ class TJAHighlighter(QSyntaxHighlighter):
         data = self.data
 
         if line in data.cmd_lines:
-            self.setFormat(0, len(text), self.formats["cmd"])
+            self.setFormat(0, len(text), self.formats[
+                "lyric" if line in data.lyric_lines else "cmd"])
             if line in data.warn_lines:
                 self.setFormat(0, len(text), self.formats["warn"])
             return

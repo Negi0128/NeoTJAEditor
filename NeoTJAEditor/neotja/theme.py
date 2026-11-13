@@ -22,6 +22,8 @@ THEMES = {
         "balloon":       "#ff9f43",
         "kusudama":      "#c77dff",
         "cmd":           "#a29bfe",
+        # #LYRIC の行。作譜ペインの歌詞の帯(LYRIC_COLOR)と同じ緑にそろえる。
+        "lyric":         "#7fd6a0",
         "header_key":    "#74b9ff",
         "header_val":    "#55efc4",
         "comment":       "#4a5568",
@@ -53,6 +55,8 @@ THEMES = {
         "balloon":       "#fd7e14",
         "kusudama":      "#9c27b0",
         "cmd":           "#6f42c1",
+        # 明るい地では帯の緑は薄すぎて読めないので、濃い緑にする。
+        "lyric":         "#198754",
         "header_key":    "#0d6efd",
         "header_val":    "#20c997",
         "comment":       "#adb5bd",
