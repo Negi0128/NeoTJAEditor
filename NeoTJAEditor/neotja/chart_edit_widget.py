@@ -609,6 +609,58 @@ class ChartEditWaveform(WaveformWidget):
                            Qt.AlignVCenter | Qt.AlignLeft, txt)
         p.restore()
 
+    def _draw_lyric_sticky(self, p, y, h, t0, t1):
+        """頭が左へ外れた歌詞の帯に、見えている左端から字を出し直す。
+
+        利用者の指定 2026-11-13。帯の字は帯の頭に焼いてあるので、長い
+        歌詞の頭が画面の左へ流れると、帯は見えているのに何の歌詞か読め
+        なかった。毎コマ描く側(_paint_rows)で、左端(LANE_X0)をまたぐ
+        帯だけ、帯の中を地の色+帯の色で塗り直してから字(と小さな絵)を
+        左端 + 5 に描く。塗り直すのは、焼いてある字が下から透けて二重に
+        見えないようにするため。頭が見えている帯は焼いたままで触らない。
+        左端をまたぐ帯はふつう 1 本なので、1コマの増えは字 1〜2 回ぶん。"""
+        left = self.LANE_X0
+        spans = None
+        for start, end, _, txt in self._lyric_spans(t0, t0):
+            if self._lyric_drag and self._lyric_drag["span"][0] == start:
+                end = self._lyric_drag["end"]
+            x, r = self._sec_to_x(start), self._sec_to_x(end)
+            if x < left < r:
+                if spans is None:
+                    spans = []
+                spans.append((r, txt))
+        if not spans:
+            return
+        col = QColor(self.LYRIC_COLOR)
+        fill = QColor(col)
+        fill.setAlpha(70)
+        bg = QColor(self._pal["bg2"])      # 帯の下の地(焼いた帯と同じ色)
+        p.save()
+        p.setPen(col)
+        f = self.font()
+        f.setPixelSize(self.fpx(11))
+        p.setFont(f)
+        ts = max(6, min(self.spx(self.JACKET_THUMB_PX), h - 10))
+        room = ts + 6 + 2 * p.fontMetrics().horizontalAdvance("あ") + 10
+        jackets = self._lyric_jackets
+        for r, txt in spans:
+            # 枠線(上下 y+3 / y+h-3)と右端のつまみ(r-3〜)は残して中だけ塗る。
+            iw = r - 3 - (left + 1)
+            if iw <= 0:
+                continue
+            p.fillRect(left + 1, y + 4, iw, h - 7, bg)
+            p.fillRect(left + 1, y + 4, iw, h - 7, fill)
+            tx = left + 5
+            if jackets and r - left >= room:
+                pm = self._jacket_thumb(jackets.get(txt.strip()), ts)
+                if pm is not None:
+                    p.drawPixmap(left + 4, y + (h - ts) // 2, pm)
+                    tx = left + 4 + ts + 4
+            if r - 5 - tx > 0:
+                p.drawText(tx, y, r - 5 - tx, h,
+                           Qt.AlignVCenter | Qt.AlignLeft, txt)
+        p.restore()
+
     # ------------------------------------------------------------------
     # 歌詞に付けたジャケット(利用者の承認 2026-11-13)
     # ------------------------------------------------------------------
@@ -4021,6 +4073,8 @@ class ChartEditWaveform(WaveformWidget):
         self._draw_pending(p, note_top, upper_h)
         if self._lyric_drag is not None:
             self._draw_lyric_bands(p, *rows["lyric"], t0, t1)
+        # 頭が左へ外れた歌詞の帯にも字を出す(_draw_lyric_sticky)。
+        self._draw_lyric_sticky(p, *rows["lyric"], t0, t1)
         if self._note_drag is not None:
             self._draw_region_tracks(p, rows, t0, t1)
 
