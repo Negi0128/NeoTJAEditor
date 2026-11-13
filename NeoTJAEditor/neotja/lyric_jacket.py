@@ -336,3 +336,72 @@ def blend_at(segments, t, fade=JACKET_FADE_SEC):
             return [(old, 1.0 - a)] if old else []
     path = image_at(segments, t)
     return [(path, 1.0)] if path else []
+
+
+# ---- 歌詞の字のクロスフェード ----------------------------------------
+# 利用者の指定 2026-11-13「LYRIC の切り替わりもフェードにしてほしい」。
+# ジャケットと同じ秒数(JACKET_FADE_SEC)・同じ決まり(切り替わりの時刻を
+# 真ん中に、前後の帯が短ければ縮める)で、字の入れ替わりも重ねて替える。
+# **時刻だけで決まる純粋な計算**にしてある — 録画は画面外のゲーム画面を
+# 動画の時刻で1コマずつ描くので、タイマーや経過時間で薄くすると、
+# 見ているときと書き出したものとで違う絵になる。
+
+class LyricTrack:
+    """歌詞の並び [(時刻, 文字)] から作った、字の区切りと切り替わり。
+
+    毎コマ作り直さないよう、呼び手は並びが変わったときだけ作る。"""
+
+    def __init__(self, lyrics, fade=JACKET_FADE_SEC):
+        # 区切りの作り方はジャケットと同じ(同じ時刻に2つあれば後のもの、
+        # 同じ字が続く所はつなぐ)。中身が「絵の道」か「字」かの違いだけ。
+        pts = sorted((float(t), i, str(txt or ""))
+                     for i, (t, txt) in enumerate(lyrics or ()))
+        segs = []
+        cur_start, cur = None, ""
+        for t, _i, txt in pts:
+            if txt == cur:
+                continue
+            if cur_start is None or t > cur_start:
+                segs.append((cur_start, t, cur))
+            cur_start, cur = t, txt
+        segs.append((cur_start, None, cur))
+        out = []
+        for s in segs:
+            if out and out[-1][2] == s[2]:
+                out[-1] = (out[-1][0], s[1], s[2])
+            else:
+                out.append(s)
+        self.segments = out
+        self.switches = jacket_switches(out, fade)
+        #: フェードの始まり(時刻 - d/2)の並び。bisect で引くため。
+        self._fade_starts = [w - d / 2.0 for w, d, _o, _n in self.switches]
+        self._seg_starts = [s if s is not None else float("-inf")
+                            for s, _e, _p in out]
+
+    def layers_at(self, t):
+        """その時刻に描く字 [(文字, 不透明度)]。
+
+        フェードの中なら前の字が 1-a、次の字が a(a は 0→1)で、真ん中は
+        どちらも半分。字はジャケットと違って重ねても下が透けて構わない
+        (前の字を不透明のまま残すと、次の字と重なって読めない)。
+        空の歌詞へ替わる所は前の字が薄くなって消え、最初の歌詞は薄い所から
+        出てくる。フェードの外は1つ(無ければ空のリスト)。"""
+        import bisect
+        t = float(t)
+        i = bisect.bisect_right(self._fade_starts, t) - 1
+        if i >= 0:
+            when, d, old, new = self.switches[i]
+            a0 = self._fade_starts[i]
+            if t < a0 + d:
+                a = (t - a0) / d
+                out = []
+                if old:
+                    out.append((old, 1.0 - a))
+                if new:
+                    out.append((new, a))
+                return out
+        k = bisect.bisect_right(self._seg_starts, t) - 1
+        if k < 0:
+            return []
+        text = self.segments[k][2]
+        return [(text, 1.0)] if text else []

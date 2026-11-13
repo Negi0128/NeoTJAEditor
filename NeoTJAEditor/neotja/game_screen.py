@@ -4205,6 +4205,10 @@ class _GameScreenBase:
     LYRIC_OUTLINE = "#0d47ff"
     LYRIC_OUTLINE_W = 9.0
     _lyric_cache = None
+    #: 歌詞の区切り(lyric_jacket.LyricTrack)と、作ったときの並び。並びが
+    #: 差し替わったとき(譜面を読み直した)だけ作り直す。
+    _lyric_track = None
+    _lyric_track_src = None
 
     # ------------------------------------------------------------------
     # 画面の中の知らせ(toast)
@@ -4265,13 +4269,36 @@ class _GameScreenBase:
         作っては捨てていた(実測 2026-10-24: 歌詞のある譜面を8秒流すと
         +2.0GB、この一行で +7MB まで落ちた)。
 
-        字形を起こすのは**覚えに無いときだけ**にする。"""
+        字形を起こすのは**覚えに無いときだけ**にする。
+
+        切り替わりは字を重ねて入れ替える(利用者の指定 2026-11-13「LYRIC の
+        切り替わりもフェードにしてほしい」)。薄さは**いまの時刻だけ**から
+        出す(lyric_jacket.LyricTrack)— 録画は画面外でこの関数を動画の
+        時刻ごとに呼ぶので、タイマーで薄くすると書き出しに出ない。"""
         try:
-            text = self.chart_preview.lyric_at(now)
+            layers = self._lyric_layers(now)
         except Exception:  # noqa: BLE001
             return
-        if not text:
-            return
+        for text, alpha in layers:
+            if text and alpha > 0.0:
+                self._draw_lyric_text(p, text, min(1.0, alpha))
+
+    def _lyric_layers(self, now):
+        """その時刻に描く歌詞 [(文字, 不透明度)]。"""
+        cp = self.chart_preview
+        src = getattr(cp, "_lyrics", None)
+        if not isinstance(src, list):
+            # 歌詞の並びを持たない画面(同時再生など)は今までどおり1つだけ。
+            text = cp.lyric_at(now)
+            return [(text, 1.0)] if text else []
+        if src is not self._lyric_track_src or self._lyric_track is None:
+            from neotja.lyric_jacket import LyricTrack
+            self._lyric_track = LyricTrack([(e[0], e[1]) for e in src])
+            self._lyric_track_src = src
+        return self._lyric_track.layers_at(now)
+
+    def _draw_lyric_text(self, p, text, alpha=1.0):
+        """1つの歌詞を、不透明度 alpha で描く。"""
         if self._lyric_cache is None:
             self._lyric_cache = {}
         # bake_text と同じ倍率の出し方。鍵も倍率ごとに分ける。
@@ -4286,7 +4313,7 @@ class _GameScreenBase:
             if got is False:
                 return          # 焼けない大きさ(4096 超え)。出さない
             pm, at = got
-            p.drawPixmap(at, pm)
+            self._draw_lyric_pixmap(p, at, pm, alpha)
             return
         f = self._lyric_font()
         fm = QFontMetricsF(f)
@@ -4305,6 +4332,7 @@ class _GameScreenBase:
             # — 毎コマ字形を起こし直すほうが害が大きい。
             self._lyric_cache[ck] = False
             p.save()
+            p.setOpacity(p.opacity() * alpha)
             p.setRenderHint(QPainter.Antialiasing, True)
             p.strokePath(path, QPen(QColor(self.LYRIC_OUTLINE),
                                     self.LYRIC_OUTLINE_W, Qt.SolidLine,
@@ -4314,7 +4342,19 @@ class _GameScreenBase:
             return
         self._lyric_cache[ck] = baked
         pm, at = baked
+        self._draw_lyric_pixmap(p, at, pm, alpha)
+
+    @staticmethod
+    def _draw_lyric_pixmap(p, at, pm, alpha):
+        """焼いた歌詞を貼る。薄くするときだけ不透明度を掛ける(ふだんの
+        1枚は今までと同じ描き方のまま)。"""
+        if alpha >= 1.0:
+            p.drawPixmap(at, pm)
+            return
+        p.save()
+        p.setOpacity(p.opacity() * alpha)
         p.drawPixmap(at, pm)
+        p.restore()
 
     # ------------------------------------------------------------------
     # 下のペインを画面の中へ入れる
