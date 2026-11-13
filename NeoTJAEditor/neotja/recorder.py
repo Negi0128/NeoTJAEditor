@@ -47,6 +47,30 @@ CANVAS_PRESETS = {
 }
 
 
+#: Windows で名前に使えない字。動画タイトルをそのままファイル名にするので
+#: ここで "_" に置き換える(曲名に ":" や "?" が入っているのはよくある)。
+_BAD_NAME_CHARS = '\\/:*?"<>|'
+#: Windows が名前として受け付けない予約語(拡張子を付けても駄目)。
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10)}
+
+
+def safe_file_stem(text, fallback="video"):
+    """動画タイトルを、拡張子の前の名前として使える形にする。
+
+    使えない字と制御文字は "_"、末尾の "." と空白は落とす(Windows は
+    黙って削るので、付けたままだと思った名前と違うファイルになる)。
+    CON などの予約語は後ろに "_" を足して避ける。空になったら fallback。"""
+    s = "".join("_" if (c in _BAD_NAME_CHARS or ord(c) < 32) else c
+                for c in str(text or ""))
+    s = s.strip().rstrip(". ")
+    if not s:
+        s = str(fallback or "video")
+    if s.split(".")[0].upper() in _RESERVED_NAMES:
+        s += "_"
+    return s
+
+
 def probe_song_seconds(path: str) -> float:
     """曲の長さ(秒)を ffmpeg に聞く。分からなければ 0.0。
 
@@ -1745,7 +1769,7 @@ class VideoRecording:
                  offset=0.0, song_path="", start_sec=0.0, end_sec=None, fps=60,
                  canvas="720p", don_path="", ka_path="", song_volume=0.8,
                  sfx_volume=0.9, hit_sounds=True, crf=18, supersample=1,
-                 preset="medium", background=None):
+                 preset="medium", background=None, title=""):
         if plan is None:
             plan = prepare_recording(
                 preview_data=preview_data, offset=offset, song_path=song_path,
@@ -1793,8 +1817,14 @@ class VideoRecording:
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-shortest", "-movflags", "+faststart",
-            out_path,
         ]
+        # 動画タイトル(録画の窓で入れたもの)を mp4 の title に書く。再生ソフトや
+        # 投稿先がファイル名ではなくこちらを題名として出すことがあるため。
+        # 改行は1行に潰す(ffmpeg の metadata は1行の値として扱われる)。
+        title = " ".join(str(title or "").split())
+        if title:
+            cmd += ["-metadata", f"title={title}"]
+        cmd.append(out_path)
         try:
             self._proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,

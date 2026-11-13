@@ -220,7 +220,7 @@ class RecordDialog(QDialog):
 
     def __init__(self, main_window, preview_data, offset, song_path,
                  song_seconds, default_dir, parent=None, layout="game",
-                 multi_previews=None):
+                 multi_previews=None, title=""):
         super().__init__(parent or main_window)
         # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
         # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
@@ -433,6 +433,20 @@ class RecordDialog(QDialog):
         self._key_timer.timeout.connect(self._check_cost_key)
         self._key_timer.start()
 
+        # ---- 動画タイトル(利用者の指定 2026-11-13) ----
+        # 保存するファイル名・mp4 の title・背景の窓の PNG の名前を、この欄
+        # ひとつで揃える。既定は譜面の TITLE、無ければ譜面ファイルの名前。
+        # 欄を書き換えると保存先の**名前だけ**が付け直される(フォルダと
+        # 拡張子はそのまま)。保存先の名前を自分で書き換えた人の入力は、
+        # 次にタイトルを触るまでそのまま残す(_on_title_edited)。
+        chart_stem = os.path.splitext(
+            os.path.basename(self._mw.current_file or ""))[0]
+        self.ed_title = QLineEdit(str(title or "").strip() or chart_stem
+                                  or "chart")
+        self.ed_title.setPlaceholderText("動画の題名（ファイル名にも使います）")
+        self.ed_title.textEdited.connect(self._on_title_edited)
+        form.addRow("動画タイトル", self.ed_title)
+
         path_row = QHBoxLayout()
         self._auto_path = os.path.join(
             self._resolve_out_dir(main_window.config_data, default_dir),
@@ -546,6 +560,7 @@ class RecordDialog(QDialog):
                                      canvas_wh=self._canvas_now(),
                                      art_track=self._art_track,
                                      chart_path=self._mw.current_file or "",
+                                     file_title=self._file_title(),
                                      art_note=(
                                          "この譜面の基本ジャケット。歌詞に"
                                          "ジャケットを付けた所では、その絵に"
@@ -590,15 +605,39 @@ class RecordDialog(QDialog):
                 return cand
         return default_dir
 
-    def _default_name(self):
-        base = os.path.splitext(os.path.basename(self._mw.current_file or "chart"))[0]
-        course = self._preview.get("course_key") or ""
-        # 区間を切ったときだけ小節番号を足す。曲全体なら従来どおりの名前のまま
-        # にしておかないと、いつもの書き出しでファイル名が変わってしまう。
+    def _title_text(self):
+        """動画タイトル(前後の空白は落とす)。"""
+        return self.ed_title.text().strip()
+
+    def _file_title(self):
+        """動画タイトルをファイル名に使える形にしたもの(PNG の名前にも使う)。"""
+        fallback = os.path.splitext(
+            os.path.basename(self._mw.current_file or "chart"))[0] or "chart"
+        return recorder.safe_file_stem(self._title_text(), fallback)
+
+    def _default_name(self, ext=".mp4"):
+        """既定のファイル名「<動画タイトル>.mp4」。
+
+        区間を切ったときだけ小節番号を足す。曲全体と同じ名前にすると、
+        サビだけ書き出したときに全体の動画を上書きしかねないため。"""
         tail = ""
         if not self._is_full_range():
             tail = f"_m{self.sp_start.value()}-{self.sp_end.value()}"
-        return f"{base}{('_' + course) if course else ''}{tail}.mp4"
+        return f"{self._file_title()}{tail}{ext}"
+
+    def _rename_path(self):
+        """保存先の名前だけをタイトル(と区間)から付け直す。フォルダと
+        拡張子は欄に入っているものを残す。"""
+        cur = self.ed_path.text().strip() or self._auto_path
+        folder = os.path.dirname(cur) or os.path.dirname(self._auto_path)
+        ext = os.path.splitext(cur)[1] or ".mp4"
+        self._auto_path = os.path.join(folder, self._default_name(ext))
+        self.ed_path.setText(self._auto_path)
+
+    def _on_title_edited(self, _text):
+        """タイトルを書き換えた。保存先の名前を必ず追従させる(ファイル名は
+        タイトルと同じ、が約束なので、自分で変えた名前より優先する)。"""
+        self._rename_path()
 
     def _compute_chart_end(self, offset, song_seconds):
         """最終小節が終わる時刻(音源時刻)。中身は recorder へ移した
@@ -670,9 +709,7 @@ class RecordDialog(QDialog):
         # 保存先を自分で書き換えた人の入力は壊さない。こちらが入れたままの
         # ときだけ、区間に合わせて名前を付け直す。
         if self.ed_path.text() == self._auto_path:
-            self._auto_path = os.path.join(
-                os.path.dirname(self._auto_path), self._default_name())
-            self.ed_path.setText(self._auto_path)
+            self._rename_path()
 
     def _update_range_label(self):
         """「12 〜 40 小節（23.4 〜 78.1 秒 / 54.7 秒間）」を出す。"""
@@ -1013,7 +1050,7 @@ class RecordDialog(QDialog):
             self._rec = recorder.VideoRecording(
                 self._widget, out, plan=plan, canvas=q["canvas"],
                 supersample=q["supersample"], preset=q["preset"],
-                background=bg)
+                background=bg, title=self._title_text())
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             plan.discard()
@@ -1100,7 +1137,8 @@ class RecordDialog(QDialog):
     def _set_running(self, running):
         # 画質も止めておく。始めた時点の値で走っているので、途中で変えられると
         # 表示と中身が食い違って見える。
-        for wdg in (self.chk_hit, self.ed_path, self.sp_start, self.sp_end,
+        for wdg in (self.chk_hit, self.ed_title, self.ed_path,
+                    self.sp_start, self.sp_end,
                     self.cb_quality):
             if wdg is not None:            # 小節が無いときは範囲の入力欄も無い
                 wdg.setEnabled(not running)

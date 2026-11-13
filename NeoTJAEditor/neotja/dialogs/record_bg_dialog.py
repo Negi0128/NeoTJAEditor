@@ -50,7 +50,7 @@ class RecordBackgroundDialog(QDialog):
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
                  song_path="", canvas_wh=None, art_track=None, art_note="",
-                 chart_path=""):
+                 chart_path="", file_title=""):
         super().__init__(parent)
         #: 基本ジャケット → 歌詞に合わせた切り替えの区切り、を作る呼び出し
         #: (録画の窓が渡す)。見本の1コマを「見ている時刻の絵」にするため。
@@ -66,6 +66,10 @@ class RecordBackgroundDialog(QDialog):
         #: 譜面ファイル。PNG に書き出すときの名前と、置き場所の候補に使う。
         #: まとめ録画からは渡らない(曲が1つに決まらない)。
         self._chart = str(chart_path or "")
+        #: 録画の窓で入れた動画タイトル(ファイル名に使える形にしたもの)。
+        #: 渡されたら PNG も動画と同じ名前「<タイトル>.png」にする(利用者の
+        #: 指定 2026-11-13)。まとめ録画からは渡らず、従来の名前のまま。
+        self._file_title = str(file_title or "")
         self._yt = None
         #: 出来上がりの大きさ (w, h)。見本を本番と同じ画面比で作るため。
         self._canvas_wh = tuple(canvas_wh) if canvas_wh else None
@@ -564,6 +568,8 @@ class RecordBackgroundDialog(QDialog):
     def _png_name(self):
         """既定のファイル名「譜面名_分-秒.png」。同じ曲で何コマか書き出しても
         見る位置で見分けられるように時刻を付ける(":" は名前に使えないので "-")。"""
+        if self._file_title:
+            return self._file_title + ".png"
         at = int(self.sl_at.value() / 100.0)
         base = (os.path.splitext(os.path.basename(self._chart))[0]
                 if self._chart else "背景")

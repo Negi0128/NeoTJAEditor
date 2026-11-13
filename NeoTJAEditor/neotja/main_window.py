@@ -4459,6 +4459,8 @@ class MainWindow(QMainWindow):
             self, preview_data, pd.spin_offset.value(), wave,
             pd.song_duration_seconds(), out_dir, layout=layout,
             multi_previews=multi_previews,
+            # 動画タイトルの既定(譜面の TITLE)。
+            title=parse_preview_headers(content).get("title", ""),
         )
         # 閉じられたら参照を手放す。持ったままだと画面外の描画用ウィジェット
         # (スキンのピクスマップ一式)が居座る。

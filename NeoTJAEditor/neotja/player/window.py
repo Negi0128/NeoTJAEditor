@@ -266,9 +266,11 @@ class PlayerWindow(QMainWindow):
         # 録画を始めたときのモードで、何を録るかが決まる(Editor と同じ)。
         layout = "wave" if pd.bottom_stack.currentIndex() == pd.MODE_WAVE else "game"
         from neotja.dialogs.record_dialog import RecordDialog
+        from neotja.preview_dock import parse_preview_headers
         dlg = RecordDialog(self, preview, pd.spin_offset.value(), wave,
                            pd.song_duration_seconds(), out_dir,
-                           layout=layout)
+                           layout=layout,
+                           title=parse_preview_headers(content).get("title", ""))
         dlg.finished.connect(self._on_record_dialog_finished)
         self._record_dialog = dlg
         dlg.show()
