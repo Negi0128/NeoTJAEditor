@@ -575,9 +575,11 @@ class BatchPage(QWidget):
             return None
 
         song_sec = recorder.probe_song_seconds(wave)
-        end_sec = recorder.chart_end_seconds(preview, self._offset,
-                                             fallback=song_sec)
-        if end_sec <= 0.1:
+        # 長さは Player の再生と同じ: 音源と譜面の遅いほうが終わってから
+        # 5 秒(recorder.full_record_end)。見積もり(job.seconds)もこの長さ。
+        end_sec = recorder.full_record_end(preview, self._offset, song_sec)
+        # 足した 5 秒を除いた中身(音源も譜面も長さが取れない)で判断する。
+        if end_sec - recorder.RECORD_TAIL_SEC <= 0.1:
             self._fail(job, "書き出す長さがありません")
             return None
 

@@ -127,6 +127,25 @@ def chart_end_seconds(preview_data, offset, fallback=0.0):
     return max(0.0, last_t + bar_len - float(offset))
 
 
+#: 曲全体を録るときに、終わりのあとへ足す秒数。Player の再生(PlayerCore の
+#: postroll_sec)と同じ 5 秒。
+RECORD_TAIL_SEC = 5.0
+
+
+def full_record_end(preview_data, offset, song_seconds):
+    """曲全体を録るときの終わり(音源時刻)。Player と同じ決め方にする
+    (利用者の指定 2026-11-13): 音源と譜面の**遅いほう**が終わってから
+    RECORD_TAIL_SEC 秒。
+
+    以前は譜面の終わりで切っていて、後奏の途中でぶつ切りになっていた。逆に
+    譜面のほうが長い(音源が途中で切れている等)ときは譜面の終わりまで録る。
+    曲が終わったあとは無音で、画面はそのまま流れ続ける(prepare_recording
+    が音源の後ろへ無音を継ぎ足す)。"""
+    song = max(0.0, float(song_seconds or 0.0))
+    chart = chart_end_seconds(preview_data, offset, fallback=song)
+    return max(song, chart) + RECORD_TAIL_SEC
+
+
 def make_offline_widget(preview_data, offset, se_text_enabled=True):
     """録画専用の画面を1つ、画面外に組み立てる。
 
@@ -1723,6 +1742,18 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
         song_for_audio = np.vstack(
             [np.zeros((pad_n, ch), dtype=np.float32), song]) if song.size             else np.zeros((pad_n, 2), dtype=np.float32)
         at_times = [t + pad_sec for t in hit_times]
+    # 終わりが音源より後ろ(曲全体の録画は「遅いほう + 5 秒」まで録る)なら、
+    # 後ろにも無音を継ぎ足す。ミキサーは曲の終わりで止まり、そこから先の
+    # 打音の予定も鳴らさなくなるので、譜面が音源より長いと終わりの音符の
+    # 打音が消えてしまう。無音を足しておけば曲は「鳴り続けて」打音も鳴る。
+    need_n = int(round((end_sec + pad_sec) * SAMPLE_RATE)) + 1
+    have_n = song_for_audio.shape[0]
+    if need_n > have_n:
+        ch = song_for_audio.shape[1] if song_for_audio.ndim > 1 else 2
+        song_for_audio = np.vstack(
+            [song_for_audio.reshape(have_n, ch) if have_n else
+             np.zeros((0, ch), dtype=np.float32),
+             np.zeros((need_n - have_n, ch), dtype=np.float32)])
     audio = render_audio(song_for_audio, at_times, hit_kinds,
                          start_sec=start_sec + pad_sec,
                          end_sec=end_sec + pad_sec,

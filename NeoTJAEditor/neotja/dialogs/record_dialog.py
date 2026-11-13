@@ -300,16 +300,20 @@ class RecordDialog(QDialog):
         # 終わりは自分で足す必要がある。1小節の長さは 240/BPM × 拍子 なので、
         # 最後の小節線の BPM と、その時点の #MEASURE から出す。
         #
-        # これを「曲全体」の終わりに使う。音源は譜面が終わったあとも
-        # 鳴り続けていることが多く(フェードアウトや後奏)、そこまで録ると
-        # 何も起きない映像が延々と続くため。
+        # 区間で最終小節を選んだときの終わりに使う。
         self._chart_end_sec = self._compute_chart_end(offset, song_seconds)
+        # 曲全体を録るときの終わり。Player と同じく、音源と譜面の遅いほうが
+        # 終わってから 5 秒(recorder.full_record_end、利用者の指定
+        # 2026-11-13)。曲が終わったあとは無音で、画面はそのまま流れる。
+        self._full_end_sec = recorder.full_record_end(
+            self._preview, offset, song_seconds)
 
         layout = QVBoxLayout(self)
         course = self._preview.get("course_label") or self._preview.get("course_key") or "-"
         head = QLabel(
             f"対象コース: {course}    曲の長さ: {song_seconds:.1f} 秒"
-            f"    譜面の長さ: {self._chart_end_sec:.1f} 秒")
+            f"    譜面の長さ: {self._chart_end_sec:.1f} 秒"
+            f"    録画: {self._full_end_sec:.1f} 秒まで")
         head.setStyleSheet("font-weight: bold;")
         layout.addWidget(head)
 
@@ -350,7 +354,7 @@ class RecordDialog(QDialog):
             form.addRow("範囲", box)
         else:
             self.lbl_range.setText(
-                f"譜面全体（0 〜 {self._chart_end_sec:.1f} 秒）")
+                f"曲全体（0 〜 {self._full_end_sec:.1f} 秒）")
             self.lbl_range.setStyleSheet("font-weight: bold;")
             form.addRow("範囲", self.lbl_range)
         self._update_range_label()
@@ -675,13 +679,13 @@ class RecordDialog(QDialog):
     def _range_secs(self):
         """書き出す区間を音源時刻の (start_sec, end_sec) で返す。
 
-        全体のときは (0.0, 譜面の終わり)。以前はここで (0.0, None) を返して
-        「音源そのものの長さ」に任せていたが、譜面が終わったあとも鳴り続ける
-        音源だと、何も起きない映像が後奏のぶんだけ続いてしまう。"""
+        全体のときは (0.0, 音源と譜面の遅いほう + 5 秒)。Player の再生と
+        同じ終わり方(recorder.full_record_end)。以前は譜面の終わりで切って
+        いたので、後奏の途中でぶつ切りになっていた。
+
+        区間を選んだときは、その区間のまま(+5 秒は足さない)。"""
         if self._is_full_range():
-            # 譜面の終わりで切る。音源が続いていても、最終小節が終わったら
-            # そこで終わり(後奏の無音を延々と録らないため)。
-            return 0.0, self._chart_end_sec
+            return 0.0, self._full_end_sec
         s = self.sp_start.value()
         e = self.sp_end.value()
         start = self._bar_starts[s - 1]
