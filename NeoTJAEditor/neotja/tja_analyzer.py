@@ -242,31 +242,26 @@ class TJACourseAnalyzer:
         return want
 
     def _roll_hits(self, duration: float) -> int:
-        """Estimated tap count for a roll/big-roll of the given duration
-        (seconds), honoring the short-roll compensation setting. Shared by
-        _analyze() (sidebar stats) and build_preview_timeline() (live
-        preview) so the two never drift out of sync.
+        """連打の打数。長さ(秒) × 連打秒速 の切り捨て。
+
+        コースカード(_analyze)とプレビュー(build_preview_timeline)の両方が
+        ここを通るので、2つの数字がずれない。打音・太鼓の光・スコアの加算も
+        プレビューの区間に入ったこの打数をそのまま使う。
 
         **どんなに短くても1打は返す**(利用者の指定 2026-10-31
         「すごく短い連打でも1打は叩いてほしい」)。切り捨てだけだと
-        秒速より短い連打が 0打になり、音も打数も出なかった。"""
-        short_roll = self.config_data.get("short_roll_comp", "段階的補正 (60fps理論値)")
+        秒速より短い連打が 0打になり、音も打数も出なかった。
+
+        以前あった「短い連打の補正」(0.15秒以下だけ秒速50〜60で数える
+        short_roll_comp)はやめた(利用者の報告 2026-11-13)。BPM 200 以上の
+        2マスの連打がその枠に入り、連打秒速より速く数えられていたうえ、
+        短い連打のほうが長い連打より打数が多くなることまであった。今は
+        長さに対して打数が必ず増える一本の式だけにしてある。
+        1e-6 は浮動小数の丸めで 0.125×40 が 4.999… になり1打減るのを防ぐ。"""
         rs = self.config_data.get("roll_speed", 45)
         if duration <= 0:
             return 0
-        if short_roll == "段階的補正 (60fps理論値)":
-            if duration <= 0.10:
-                return max(1, int(duration * max(60, rs)))
-            elif duration <= 0.15:
-                return max(1, int(duration * max(55, rs)))
-            return max(1, int(duration * rs))
-        elif short_roll == "段階的補正 (理論値-1)":
-            if duration <= 0.10:
-                return max(1, int(duration * max(55, rs)))
-            elif duration <= 0.15:
-                return max(1, int(duration * max(50, rs)))
-            return max(1, int(duration * rs))
-        return max(1, int(duration * rs))
+        return max(1, int(duration * rs + 1e-6))
 
     def _analyze(self, data, all_lines, branch_level: str = "M",
                  balloon_defs=None):

@@ -56,14 +56,17 @@ class ShortBalloonTicksTest(unittest.TestCase):
                             self.assertEqual(count(t - 1e-5), i)
                     self.assertEqual(count(spans[0][1] + 1), expected)
 
-    def test_normal_roll_compensation_is_preserved(self):
+    def test_short_roll_counts_at_roll_speed(self):
+        # 短い連打の補正(0.1秒以下は秒速60など)は 2026-11-13 にやめた。
+        # 0.1秒 × 45打/秒 = 4.5 → 4打。補正があった頃は 6打だった。
         from neotja.tja_analyzer import TJACourseAnalyzer
         from neotja.chart_preview_widget import ChartPreviewWidget
-        analyzer = TJACourseAnalyzer({'roll_speed': 45})
-        self.assertEqual(analyzer._roll_hits(0.1), 6)
-        view = SimpleNamespace(_rolls=[(0, 0.1, '5', 120, 1, 6)],
+        analyzer = TJACourseAnalyzer({'roll_speed': 45,
+                                      'short_roll_comp': '段階的補正 (60fps理論値)'})
+        self.assertEqual(analyzer._roll_hits(0.1), 4)
+        view = SimpleNamespace(_rolls=[(0, 0.1, '5', 120, 1, 4)],
                                _balloons=[], _kusudamas=[], _roll_hit_speed=45)
-        self.assertEqual(ChartPreviewWidget._cumulative_hits(view, 0.1), 6)
+        self.assertEqual(ChartPreviewWidget._cumulative_hits(view, 0.1), 4)
 
 
 if __name__ == '__main__':

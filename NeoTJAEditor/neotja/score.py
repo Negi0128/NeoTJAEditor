@@ -133,8 +133,16 @@ class ScoreTimeline:
         # 合計は連打秒速の設定で上下する(利用者の選択)。
         speed = max(1.0, float(data.get("roll_hit_speed") or 45))
         for span in (data.get("rolls") or []):
-            dur = max(0.0, float(span[1]) - float(span[0]))
-            events += self._tick_events(span[0], span[1], int(dur * speed))
+            # 打数は区間に入っている値(tja_analyzer._roll_hits)をそのまま使う。
+            # ここで 長さ×秒速 を数え直すと、1打を保証する max(1, …) や丸めの
+            # 扱いが打音と食い違い、鳴った回数と加算の回数がずれていた
+            # (利用者の報告 2026-11-13)。
+            if len(span) >= 6:
+                hits = int(span[-1])
+            else:
+                dur = max(0.0, float(span[1]) - float(span[0]))
+                hits = int(dur * speed + 1e-6)
+            events += self._tick_events(span[0], span[1], hits)
         # 風船・くす玉は「叩ききって割れた時点」で打音が止まる(tja_analyzer の
         # balloon_pop_spans と同じ切り詰め)。加算だけを区間の終わりまで薄く
         # 引き伸ばすと、音が止まったあとも点が入り続けて見た目と食い違うので、

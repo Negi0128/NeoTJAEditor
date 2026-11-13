@@ -40,7 +40,7 @@ class SettingsDialog(QDialog):
         "run_config", "custom_shortcuts",
         "font_family", "font_size",
         "resize_ext", "resize_wrap_16", "resize_wrap_12",
-        "short_roll_comp", "check_updates_on_startup", "auto_save_enabled",
+        "check_updates_on_startup", "auto_save_enabled",
         "se_text_enabled", "note_input_sound",
         "record_output_dir",
         "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
@@ -345,19 +345,10 @@ class SettingsDialog(QDialog):
         form.addRow(self._hint("ゲーム風プレビューのレーン下段に、各音符の打音(ド/ドン/コ/カ/カッ)を"
                                "自動判定して表示します。判定は PeepoDrumKit と同じアルゴリズムです。"))
 
-        # --- 連打の計算 ---
-        form = self._group(outer, "連打の計算")
-        self.comp_combo = QComboBox()
-        self.comp_combo.addItems(["通常計算", "段階的補正 (60fps理論値)", "段階的補正 (理論値-1)"])
-        self.comp_combo.setCurrentText(cfg.get("short_roll_comp", "段階的補正 (60fps理論値)"))
-        self.comp_combo.setToolTip("極端に短い連打に対するシミュレータの仕様を再現する補正モードです。")
-        form.addRow("0.1秒未満の連打処理", self.comp_combo)
-        form.addRow(self._hint(
-            "極端に短い連打に対するシミュレータの仕様を再現する補正モードです。\n"
-            "・通常計算 : 常に (秒数 × 左パネルの連打秒速) で計算します。\n"
-            "・60fps理論値 : 0.1秒以下=秒速60、0.15秒以下=秒速55 で計算します。\n"
-            "・理論値-1 : 0.1秒以下=秒速55、0.15秒以下=秒速50 で計算します。\n"
-            "※設定した「連打秒速」が上記の補正値を上回る場合は、設定値（高い方）が優先されます。"))
+        # 「連打の計算」(短い連打の補正)の欄は 2026-11-13 に外した。
+        # 短い連打だけ秒速50〜60で数えるため、BPM の速い2マスの連打で打数が
+        # 増えすぎ、長い連打より短い連打のほうが多くなることもあった
+        # (利用者の報告)。今は常に 長さ×連打秒速 で数える。
 
         # --- 動画書き出し ---
         # 動画書き出し(NeoTJAPlayer の録画ボタン)の保存先の既定。
@@ -1032,7 +1023,6 @@ class SettingsDialog(QDialog):
         w12 = self.wrap12_combo.currentText()
         cfg["resize_wrap_12"] = int(w12) if w12.isdigit() else "改行なし"
 
-        cfg["short_roll_comp"] = self.comp_combo.currentText()
         cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
         cfg["auto_save_enabled"] = self.auto_save_check.isChecked()
         cfg["se_text_enabled"] = self.se_text_check.isChecked()

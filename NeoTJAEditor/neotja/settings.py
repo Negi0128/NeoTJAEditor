@@ -173,6 +173,9 @@ def default_settings() -> dict:
         "resize_wrap_16": 16,
         "resize_wrap_12": 24,
         "roll_speed": 45,
+        # 短い連打の補正。2026-11-13 にやめたので**どこからも読まない**
+        # (連打の打数は tja_analyzer._roll_hits の一本の式)。古い設定ファイルに
+        # 残っていても読み込みで困らないよう、キーだけ残してある。
         "short_roll_comp": "段階的補正 (60fps理論値)",
         "preview_volume": 0.8,
         "last_project_folder": "",
