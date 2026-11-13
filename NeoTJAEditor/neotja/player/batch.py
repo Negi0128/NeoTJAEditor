@@ -514,10 +514,12 @@ class BatchPage(QWidget):
         from neotja.dialogs.record_bg_dialog import RecordBackgroundDialog
         dlg = RecordBackgroundDialog(self, lambda: None, 60.0, self._bg,
                                      out_dir=self._out_dir())
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self._bg = dlg.background()
-        self.ed_bg.setText(self._bg.path)
+        accepted = dlg.exec() == QDialog.Accepted
+        if accepted:
+            self._bg = dlg.background()
+            self.ed_bg.setText(self._bg.path)
+        # 閉じた窓は消す(Editor の録画の窓と同じ。開くたびに溜まらないように)。
+        dlg.deleteLater()
 
     def _bg_for(self, job):
         """この曲の背景。全曲共通の指定が無ければ、曲の BGMOVIE: を使う。"""

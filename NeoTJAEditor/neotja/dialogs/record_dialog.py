@@ -589,6 +589,10 @@ class RecordDialog(QDialog):
                 if setter is not None:
                     setter(self._bg.art)
                 self._art_shown = self._bg.art
+        # 閉じた窓は消す。この窓を親にしたまま残すと、開くたびに1つずつ
+        # 溜まり、どれも画面外の画面を見張ったまま生き続ける
+        # (利用者の報告 2026-11-13 の固まり・落ち)。
+        dlg.deleteLater()
         # 道が同じでもジャケットや暗さが変わっていることがある(textChanged
         # は道しか見ていない)ので、鍵で確かめる。
         self._check_cost_key()

@@ -15,8 +15,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QVBoxLayout,
@@ -25,10 +26,141 @@ from PySide6.QtWidgets import (
 from neotja import recorder
 
 
-def _bg_frame(bg, at_sec, w, h):
+#: 「まだ取れていない」の印。待たない呼び方(wait=False)で、背景の動画の
+#: コマを取り出している最中に返す。None(取れなかった)とは別物 —
+#: 見本は前の絵を出したまま、取れたら描き直せばよい。
+PENDING = object()
+
+
+def _extract_video_frame(path, at_sec):
+    """動画の at_sec 秒のコマを ffmpeg で1枚取る。取れなければ None。
+
+    **GUI のスレッドからは呼ばない**(_FrameLoader が別のスレッドで呼ぶ)。
+    ffmpeg は長い動画の途中へ飛ぶと何秒もかかることがあり、見本を描く
+    たびにこれを待っていたので、つまみを動かすと窓が「応答なし」になって
+    いた(利用者の報告 2026-11-13)。QImage は GUI の外で作ってもよい。"""
+    tmp = tempfile.mkdtemp(prefix="neotja_bgchk_")
+    png = os.path.join(tmp, "f.png")
+    src = None
+    try:
+        subprocess.run(
+            [recorder._ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+             "-ss", "%.3f" % max(0.0, at_sec), "-i", path,
+             "-frames:v", "1", png],
+            capture_output=True, timeout=20, **recorder._no_window())
+        if os.path.exists(png):
+            src = QImage(png)
+            if src.isNull():
+                src = None
+    except (OSError, subprocess.SubprocessError):
+        src = None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return src
+
+
+class _FrameLoader(QObject):
+    """背景の動画のコマを、GUI を止めずに取ってくる係(アプリに1つ)。
+
+    - 取ったコマは (道, 更新時刻, 0.01 秒に丸めた時刻) で何枚か覚える。
+      見る位置を行ったり来たりしても、同じ所なら ffmpeg を起こさない。
+    - 一度に走らせる ffmpeg は**1つだけ**。つまみを速く動かしている
+      あいだに頼まれた分は、最後の1つだけを覚えておいて、今のが済んだら
+      それを取る(途中の位置を全部取っても、見る前に次へ行ってしまう)。
+    - 取れたら ready を出す。窓が閉じて消えていれば Qt がつなぎを外す
+      ので、残った仕事が消えた窓を触ることはない。窓ごとではなく
+      アプリに1つにしたのも、窓より長生きさせるため。"""
+
+    ready = Signal()
+    CACHE_MAX = 8
+
+    def __init__(self):
+        super().__init__()
+        self._lock = threading.Lock()
+        self._cache = {}            # key -> QImage(取れなければ None)
+        self._order = []
+        self._busy = False
+        self._next = None           # (key, 道, 秒)
+
+    @staticmethod
+    def key_for(path, at_sec):
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            mt = 0.0
+        return (path, mt, round(max(0.0, float(at_sec)), 2))
+
+    def get(self, key):
+        """(覚えているか, 絵)。"""
+        with self._lock:
+            if key in self._cache:
+                return True, self._cache[key]
+        return False, None
+
+    def request(self, key, path, at_sec):
+        with self._lock:
+            if key in self._cache:
+                return
+            if self._busy:
+                self._next = (key, path, at_sec)
+                return
+            self._busy = True
+        self._start(key, path, at_sec)
+
+    def _start(self, key, path, at_sec):
+        t = threading.Thread(target=self._run, args=(key, path, at_sec),
+                             name="neotja-bgframe", daemon=True)
+        t.start()
+
+    def _run(self, key, path, at_sec):
+        while True:
+            img = None
+            try:
+                img = _extract_video_frame(path, at_sec)
+            except Exception:  # noqa: BLE001
+                from neotja import crashlog
+                crashlog.log_handled("背景のコマの取り出し")
+            with self._lock:
+                self._cache[key] = img
+                self._order.append(key)
+                while len(self._order) > self.CACHE_MAX:
+                    self._cache.pop(self._order.pop(0), None)
+                nxt, self._next = self._next, None
+                if nxt is None:
+                    self._busy = False
+            try:
+                self.ready.emit()
+            except RuntimeError:
+                return              # アプリの終わりで係が先に消えた
+            if nxt is None:
+                return
+            key, path, at_sec = nxt
+            with self._lock:
+                if key in self._cache:
+                    self._busy = False
+                    return
+
+
+_LOADER = None
+
+
+def frame_loader():
+    """コマを取る係。最初に呼んだ所(GUI のスレッド)で作る。"""
+    global _LOADER
+    if _LOADER is None:
+        _LOADER = _FrameLoader()
+    return _LOADER
+
+
+def _bg_frame(bg, at_sec, w, h, wait=True):
     """背景の1コマを (w, h) に敷き詰めて返す。取れなければ None。
 
     at_sec は**背景の中の秒**。負のとき(まだ始まっていない)は黒を返す。
+
+    wait=False なら、動画のコマが覚えに無いときは取りに行かせて
+    PENDING を返す(見本の窓はこちら。GUI を ffmpeg で止めない)。
+    wait=True は今までどおりその場で取る(PNG の書き出しなど、押して
+    待つことが分かっている所だけ)。
     """
     img = QImage(w, h, QImage.Format_RGB32)
     img.fill(Qt.black)
@@ -40,27 +172,14 @@ def _bg_frame(bg, at_sec, w, h):
         if src.isNull():
             src = None
     else:
-        tmp = tempfile.mkdtemp(prefix="neotja_bgchk_")
-        png = os.path.join(tmp, "f.png")
-        try:
-            subprocess.run(
-                [recorder._ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-                 "-ss", "%.3f" % max(0.0, at_sec), "-i", bg.path,
-                 "-frames:v", "1", png],
-                capture_output=True, timeout=20, **recorder._no_window())
-            if os.path.exists(png):
-                src = QImage(png)
-                if src.isNull():
-                    src = None
-        except (OSError, subprocess.SubprocessError):
-            src = None
-        finally:
-            try:
-                if os.path.exists(png):
-                    os.remove(png)
-                os.rmdir(tmp)
-            except OSError:
-                pass
+        loader = frame_loader()
+        key = loader.key_for(bg.path, at_sec)
+        known, src = loader.get(key)
+        if not known:
+            if not wait:
+                loader.request(key, bg.path, at_sec)
+                return PENDING
+            src = _extract_video_frame(bg.path, at_sec)
     if src is None:
         return None
     # 本番と同じ「**上下を合わせて、余る左右は黒**」(利用者の指定
@@ -226,7 +345,8 @@ def _draw_wave(p, bg, song, at, w, h):
     p.restore()
 
 
-def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
+def compose_check_frame(widget, bg, song_sec, canvas=None, song="",
+                        wait=True):
     """背景の上に譜面画面を1コマ重ねた絵を作る。駄目なら None。
 
     song_sec は**音源の時刻**。背景の中の秒は offset + song_sec
@@ -236,6 +356,9 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
     組み立てる — 画面は縦横比のままその中へ収め、余りは背景が見える
     (利用者の指定 2026-10-26「全部プレビューしてほしい」)。渡さなければ
     今までどおりウィジェットの大きさで作る。
+
+    wait=False なら、背景の動画のコマがまだ取れていないとき PENDING を
+    返す(_bg_frame)。画面は描かずに返すので、待つあいだ何も重くない。
     """
     sw, sh = widget.width(), widget.height()
     if sw <= 0 or sh <= 0:
@@ -245,9 +368,9 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
         return None
     if not bg:
         return _compose_plain_frame(widget, bg, song_sec, w, h)
-    base = _bg_frame(bg, bg.offset + float(song_sec), w, h)
-    if base is None:
-        return None
+    base = _bg_frame(bg, bg.offset + float(song_sec), w, h, wait=wait)
+    if base is None or base is PENDING:
+        return base
     # 画面は背景を描かずに透明のまま。重ねるのはこちらでやる。
     shot = QImage(sw, sh, QImage.Format_ARGB32_Premultiplied)
     shot.fill(0)

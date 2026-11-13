@@ -8,6 +8,8 @@
 QPainter で重ねているが、縮め方・暗さ・位置の出し方は本番と同じ式。
 押してすぐ出るほうが大事なので、確認の1枚に ffmpeg を起こさない。
 """
+import functools
+import inspect
 import os
 
 from PySide6.QtCore import Qt, QTimer
@@ -20,13 +22,76 @@ from PySide6.QtWidgets import (
 
 from neotja import recorder
 from neotja import settings as settings_mod
-from neotja.dialogs.record_bg_check import _bg_frame, compose_check_frame
+from neotja.dialogs.record_bg_check import (
+    PENDING, _bg_frame, compose_check_frame, frame_loader,
+)
 
 #: 見本を焼き直すまでの間合い(ms)。つまみを動かしているあいだは焼かない。
 PREVIEW_MS = 150
 
 FILE_FILTER = ("動画と画像 (*.mp4 *.webm *.mov *.mkv *.avi *.m4v"
                " *.png *.jpg *.jpeg *.bmp *.webp);;すべて (*.*)")
+
+
+def _guarded(fn):
+    """Qt から呼ばれる関数を包み、Python の例外で窓が固まったり落ちたり
+    しないようにする(利用者の報告 2026-11-13「背景の画面で落ちた」)。
+
+    拾った例外は crash.log へ残す(crashlog.log_handled)。つまみ1つの
+    見本が出ないほうが、アプリごと落ちるよりずっとましなため。
+
+    渡す引数は fn が受け取れる数までに切る。包むと PySide から引数の数が
+    見えなくなり、clicked(bool) の checked まで渡されて TypeError になる。"""
+    try:
+        ps = list(inspect.signature(fn).parameters.values())
+        n = (None if any(p.kind == p.VAR_POSITIONAL for p in ps)
+             else sum(1 for p in ps if p.kind in (p.POSITIONAL_ONLY,
+                                                  p.POSITIONAL_OR_KEYWORD)))
+    except (TypeError, ValueError):
+        n = None                      # 組み込みの関数などは数えられない
+
+    @functools.wraps(fn)
+    def run(*a, **k):
+        if n is not None:
+            a = a[:n]
+        try:
+            return fn(*a, **k)
+        except Exception:  # noqa: BLE001
+            from neotja import crashlog
+            crashlog.log_handled("録画の背景の窓: %s" % fn.__name__)
+            return None
+    return run
+
+
+#: YouTube から落としている途中の係。窓より長生きさせるためにここで持つ
+#: (窓を親にすると、落としている最中に窓が消えたとき係も一緒に消され、
+#: Qt が「QThread: Destroyed while thread is still running」で落とす)。
+_YT_ALIVE = set()
+
+
+def _keep_worker(worker):
+    """係を窓から切り離して、終わったら片づける。"""
+    from PySide6.QtWidgets import QApplication
+    _YT_ALIVE.add(worker)
+
+    def gone():
+        _YT_ALIVE.discard(worker)
+    # finished は係のスレッドから出るが、受け手(deleteLater)は係自身で
+    # GUI のスレッドに住んでいるので、GUI のほうで順に片づく。QThread の
+    # 終わりかけで消しても待ってくれる(Qt の決まった使い方)。
+    worker.finished.connect(worker.deleteLater)
+    worker.destroyed.connect(gone)
+    app = QApplication.instance()
+    if app is not None:
+        # アプリを閉じるときにまだ落としていたら、止めて少しだけ待つ。
+        # 待たずに抜けると、後始末で走っている係が消されて落ちる。
+        def quit_wait():
+            try:
+                worker.cancel()
+                worker.wait(3000)
+            except RuntimeError:
+                pass
+        app.aboutToQuit.connect(quit_wait)
 
 
 def _tight(widget):
@@ -71,6 +136,10 @@ class RecordBackgroundDialog(QDialog):
         #: 指定 2026-11-13)。まとめ録画からは渡らず、従来の名前のまま。
         self._file_title = str(file_title or "")
         self._yt = None
+        #: YouTube の係へつないだ (知らせ, 受け手)。窓を閉じたら外す。
+        self._yt_links = []
+        #: 閉じたか。閉じた窓は見本を描かない(done の説明)。
+        self._closed = False
         #: 出来上がりの大きさ (w, h)。見本を本番と同じ画面比で作るため。
         self._canvas_wh = tuple(canvas_wh) if canvas_wh else None
         self._duration = max(0.1, float(duration or 0.1))
@@ -314,14 +383,66 @@ class RecordBackgroundDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._render)
+        # 背景の動画のコマが別のスレッドで取れたら描き直す(見本は ffmpeg を
+        # 待たない — record_bg_check._FrameLoader)。窓が消えれば Qt が
+        # このつなぎを外す。
+        frame_loader().ready.connect(self._frame_ready)
         self._sync_enabled()
         self._schedule()
 
     # ------------------------------------------------------------------
+    def done(self, r):
+        """閉じる(OK・キャンセル・×のどれでも通る)。
+
+        閉じた窓も、呼び手が消すまでは生きている。そのあいだに見本の
+        時計が鳴ると、録画の窓が再開した見積もりと**同じ画面外の画面**を
+        取り合って描いてしまう(利用者の報告 2026-11-13 の固まり・落ち)。
+        閉じたらすぐ時計と見張りを止め、YouTube の係からも手を離す。"""
+        try:
+            self._closed = True
+            self._timer.stop()
+            self.view.removeEventFilter(self)
+            try:
+                frame_loader().ready.disconnect(self._frame_ready)
+            except (RuntimeError, TypeError):
+                pass
+            self._release_yt()
+        except Exception:  # noqa: BLE001
+            from neotja import crashlog
+            crashlog.log_handled("録画の背景の窓: done")
+        super().done(r)
+
+    def _release_yt(self):
+        """落としている途中の係から手を離す(止めるよう頼むだけ。待たない)。"""
+        worker, self._yt = self._yt, None
+        for sig, slot in self._yt_links:
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._yt_links = []
+        if worker is not None:
+            try:
+                worker.cancel()
+            except RuntimeError:
+                pass
+
+    @_guarded
+    def _frame_ready(self):
+        """背景のコマが1枚取れた。開いていれば見本を描き直す。"""
+        if not self._closed:
+            self._timer.start(0)
+
+    # ------------------------------------------------------------------
     def eventFilter(self, obj, ev):
-        from PySide6.QtCore import QEvent
-        if obj is self.view and ev.type() == QEvent.Resize:
-            self._timer.start(PREVIEW_MS)
+        try:
+            from PySide6.QtCore import QEvent
+            if (not self._closed and obj is self.view
+                    and ev.type() == QEvent.Resize):
+                self._timer.start(PREVIEW_MS)
+        except Exception:  # noqa: BLE001
+            from neotja import crashlog
+            crashlog.log_handled("録画の背景の窓: eventFilter")
         return super().eventFilter(obj, ev)
 
     # ------------------------------------------------------------------
@@ -401,6 +522,7 @@ class RecordBackgroundDialog(QDialog):
         self.btn_art_color.setStyleSheet(
             "QPushButton{background:%s;color:%s}" % (self._art_color, fg))
 
+    @_guarded
     def _pick_art_color(self):
         from PySide6.QtWidgets import QColorDialog
         c = QColorDialog.getColor(QColor(self._art_color), self, "枠の色")
@@ -409,6 +531,7 @@ class RecordBackgroundDialog(QDialog):
             self._show_art_color()
             self._schedule()
 
+    @_guarded
     def _browse_art(self):
         got, _ = QFileDialog.getOpenFileName(
             self, "ジャケット写真",
@@ -417,6 +540,7 @@ class RecordBackgroundDialog(QDialog):
         if got:
             self.ed_art.setText(got)
 
+    @_guarded
     def _browse(self):
         got, _ = QFileDialog.getOpenFileName(
             self, "背景に使う動画・画像",
@@ -424,6 +548,7 @@ class RecordBackgroundDialog(QDialog):
         if got:
             self.ed_path.setText(got)
 
+    @_guarded
     def _from_youtube(self):
         """URL を貼って、背景に敷く動画を落とす(利用者の指定 2026-10-25
         「新規作成の時と同じように YouTube からダウンロードしたい」)。
@@ -448,8 +573,13 @@ class RecordBackgroundDialog(QDialog):
         prog.setWindowModality(Qt.WindowModal)
         prog.setAutoClose(False)
         prog.setAutoReset(False)
-        worker = YtDlpDownloadWorker(url, out_dir, parent=self, want="video")
-        self._yt = worker                      # 途中で捨てられないよう持つ
+        # 親は付けない(_keep_worker が窓より長く持つ)。窓を親にすると、
+        # 落としている最中に窓を閉じて消したとき、走っている係ごと消されて
+        # 落ちる。
+        worker = YtDlpDownloadWorker(url, out_dir, parent=None, want="video")
+        _keep_worker(worker)
+        self._release_yt()                     # 前の係がいれば手を離す
+        self._yt = worker
 
         def on_pct(v):
             if v is None or v < 0:
@@ -458,23 +588,35 @@ class RecordBackgroundDialog(QDialog):
                 prog.setRange(0, 100)
                 prog.setValue(int(v))
 
+        @_guarded
         def done(path, title, _uploader, _thumb):
             prog.close()
+            if self._closed:
+                return
             self.ed_path.setText(path)
             self.setWindowTitle("録画の背景 — %s" % (title or ""))
 
+        @_guarded
         def failed(msg):
             prog.close()
+            if self._closed:
+                return
             QMessageBox.warning(self, "YouTube から",
                                 "落とせませんでした。\n%s" % msg)
 
-        worker.progress.connect(prog.setLabelText)
-        worker.progress_pct.connect(on_pct)
-        worker.finished_ok.connect(done)
-        worker.failed.connect(failed)
+        on_pct = _guarded(on_pct)
+        label = _guarded(prog.setLabelText)
+        # どれも窓(と進み具合の窓)を触るので、窓を閉じたら外す(_release_yt)。
+        self._yt_links = [(worker.progress, label),
+                          (worker.progress_pct, on_pct),
+                          (worker.finished_ok, done),
+                          (worker.failed, failed)]
+        for sig, slot in self._yt_links:
+            sig.connect(slot)
         prog.canceled.connect(worker.cancel)
         worker.start()
 
+    @_guarded
     def _guess_offset(self):
         """背景の音と曲の音源を見比べて、ずれを当てる。
 
@@ -503,17 +645,23 @@ class RecordBackgroundDialog(QDialog):
                              % (got, int(round(sure * 100))))
 
     # ------------------------------------------------------------------
+    @_guarded
     def _schedule(self):
+        if self._closed:
+            return
         self._sync_enabled()
         at = self.sl_at.value() / 100.0
         self.lb_at.setText("%6.2f 秒" % at)
         self._timer.start(PREVIEW_MS)
 
-    def _frame(self):
+    def _frame(self, wait=True):
         """いまの設定と見る位置の1コマ。(絵, 出せないときの文言) を返す。
 
         見本も PNG の書き出しも**ここ1か所**で作る。別々に組むと、
-        見本と保存した絵が食い違っても気づけない。"""
+        見本と保存した絵が食い違っても気づけない。
+
+        wait=False(見本)は背景の動画のコマを待たない。まだ取れていなければ
+        (PENDING, "") を返す。"""
         bg = self.background()
         plain = not bg and recorder.wants_art_only(bg)
         if not plain and (not bg or not os.path.exists(bg.path)):
@@ -530,18 +678,28 @@ class RecordBackgroundDialog(QDialog):
             # 背景だけを出す(暗さと位置はここで見られる)。
             cw, ch = self._canvas_wh or (960, 540)
             img = _bg_frame(bg, bg.offset + self.sl_at.value() / 100.0,
-                            cw, ch)
+                            cw, ch, wait=wait)
         else:
             img = compose_check_frame(self._widget, bg,
                                       self.sl_at.value() / 100.0,
                                       canvas=self._canvas_wh,
-                                      song=self._song)
+                                      song=self._song, wait=wait)
+        if img is PENDING:
+            return PENDING, ""
         if img is None:
             return None, "背景のコマを取り出せませんでした。"
         return img, ""
 
+    @_guarded
     def _render(self):
-        img, msg = self._frame()
+        # 閉じた窓・隠れた窓では描かない(done の説明)。
+        if self._closed or not self.isVisible():
+            return
+        img, msg = self._frame(wait=False)
+        if img is PENDING:
+            # 背景のコマを取りに行っている。前の絵を出したまま待つ — 取れたら
+            # _frame_ready がもう一度ここへ来る。
+            return
         if img is None:
             self.view.setText(msg)
             return
@@ -580,6 +738,7 @@ class RecordBackgroundDialog(QDialog):
                 if self._chart else "背景")
         return "%s_%02d-%02d.png" % (base, at // 60, at % 60)
 
+    @_guarded
     def _save_png(self):
         """見ているコマを出来上がりの大きさで焼いて PNG に保存する。
 

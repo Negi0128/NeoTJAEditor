@@ -147,6 +147,26 @@ def install():
     return LOG
 
 
+def log_handled(where):
+    """try/except で拾った例外を、落とさずにログへ残す(except の中で呼ぶ)。
+
+    Qt のつまみや時計から呼ばれる関数で Python の例外が抜けると、PySide6
+    では窓が固まったり、運が悪いと落ちたりする(録画の背景の窓で実際に
+    起きた 2026-11-13)。そういう所は例外を拾って続けるが、黙って捨てると
+    次に何かあったときに手がかりが無いので、ここで書き残す。"""
+    try:
+        import datetime
+        import traceback
+        if LOG is not None:
+            LOG.write("\n--- 拾った例外(%s) %s ---\n"
+                      % (where, datetime.datetime.now()))
+            traceback.print_exc(file=LOG)
+        else:
+            traceback.print_exc()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def install_qt():
     """Qt が言い残すこともログへ流す。Qt を import したあとに呼ぶ。
 
