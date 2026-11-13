@@ -1186,134 +1186,284 @@ def _new_frame_image(pw, ph, ss, alpha=False):
     return img
 
 
+def _record_cmd(pw, ph, fps, canvas_wh, bg, start_sec, total_frames,
+                audio_in, queue=64):
+    """録画の ffmpeg コマンドの前半(入力・フィルタ・map)を組む。
+
+    **本番(VideoRecording)と見積もり(FrameCostProbe)で同じ関数を使う。**
+    以前は見積もりのほうに別の組み立てを持っていて、ジャケットの切り替え・
+    背景なしのジャケット・フェードが本番だけに入り、見積もりは古い形の
+    まま測っていた。組み立てを1つにしておけば、この先フィルタが増えても
+    見積もりは勝手に本番と同じものを測る。
+
+    audio_in は音声の入力の引数(本番は合成した f32、見積もりは無音)。
+    違うのは呼び手が足す後ろ(エンコードの出力先)だけ。"""
+    # 背景なしでもジャケットがあれば、画面はいつもどおり(背景も描いた
+    # 不透明な絵)のまま、ffmpeg でその上へ重ねる(_art_only_filter_complex)。
+    art_only = wants_art_only(bg)
+    vf = None if (bg or art_only) else _video_filter(canvas_wh, pw, ph)
+    cmd = [
+        _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
+        # bgra = QImage.Format_RGB32 のメモリ配置そのまま(リトルエンディアンで
+        # B,G,R,X の順)。_new_frame_image の説明を参照。
+        "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
+        # 入力キューを深くしておくと、こちらの書き込みとエンコードが
+        # 重なりやすくなる(既定は浅くて待ちが生じる)。
+        "-thread_queue_size", str(int(queue)),
+        "-r", str(fps), "-i", "-",
+    ]
+    pre = 0.0
+    if bg:
+        # 入力 1 が背景、2 が音声。**背景の音は map しない**
+        # (利用者の決定: 音は譜面の曲 + 打音だけ)。
+        args, pre = _bg_input_args(bg, start_sec)
+        cmd += args
+    cmd += list(audio_in)
+    # ジャケットは**音のうしろ**。前に入れると -map 2:a がずれる。
+    # 歌詞に合わせて切り替えるときは絵の数だけ入力が並ぶ(3, 4, …)。
+    art_args, arts = (
+        _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1])
+        if (bg or art_only) else ([], []))
+    cmd += art_args
+    if bg:
+        dur = total_frames / float(fps or 60)
+        # 棒を出すときは音を asplit で分けるので、出力の音は
+        # 入力そのものではなく [aout] のほうを map する。
+        a_out = "[aout]" if wants_wave(bg, 2) else "2:a"
+        cmd += ["-filter_complex",
+                _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur,
+                                   aud_idx=2, t0=start_sec,
+                                   arts=[(3 + i, b, wnd) for i, (b, wnd)
+                                         in enumerate(arts)]),
+                "-map", "[v]", "-map", a_out]
+    elif art_only:
+        # 背景の入力が無いので、音が 1、ジャケットが 2 から。
+        cmd += ["-filter_complex",
+                _art_only_filter_complex(
+                    canvas_wh, pw, ph, bg,
+                    [(2 + i, b, wnd) for i, (b, wnd) in enumerate(arts)],
+                    t0=start_sec, fps=fps),
+                "-map", "[v]", "-map", "1:a"]
+    if vf:
+        cmd += ["-vf", vf]
+    return cmd
+
+
+def cost_key(bg):
+    """見積もりを測り直すべきかを決める鍵。1コマの重さを変える所だけ。
+
+    背景の有無・種類(動画か絵か)・暗さ・フェード・棒、ジャケットの枚数と
+    切り替えの回数、ジャケットの大きさ。置き場所や色、切り替わりの**時刻**は
+    入れない — 重さは変わらないのに、歌詞の帯を少し動かすたびに測り直す
+    ことになるため。"""
+    bg = as_background(bg)
+    try:
+        fades = _art_fades(bg)
+    except Exception:  # noqa: BLE001
+        fades = []
+    return repr((
+        bool(bg), bg.is_image if bg else None,
+        round(float(bg.dim), 3) if bg else None,
+        round(float(bg.lane), 3) if bg else None,
+        (bg.fade_in, bg.fade_out, bg.fade_target) if bg else None,
+        (bool(bg.wave), bg.wave_pct) if bg else None,
+        len(fades), tuple(len(r) for _p, _w, r in fades),
+        (round(float(bg.art_pct), 3), int(bg.art_edge)) if fades else None))
+
+
+#: ジャケットで ffmpeg 側に増える重さ(1コマあたりの倍率)。2026-11-13 に
+#: 72 秒の譜面で測った本番の値から: 背景なしでジャケット1枚は +3〜18%
+#: (平均 +10%)、切り替え6回(フェード込み)はさらに +1〜12%。背景あり
+#: でも同じくらい(+7〜15%)。見積もりの捨て描きでは測れない分(上の
+#: FrameCostProbe.ms_per_frame の説明)なので、ここだけ数字で足す。
+ART_COST_BASE = 0.10
+ART_COST_PER_SWITCH = 0.01
+ART_COST_SWITCH_MAX = 0.10
+
+
+def art_cost_factor(bg):
+    """ジャケットの重ね(と切り替えのフェード)で1コマが何倍になるか。"""
+    bg = as_background(bg)
+    try:
+        fades = _art_fades(bg)
+    except Exception:  # noqa: BLE001
+        return 1.0
+    if not fades:
+        return 1.0
+    switches = sum(len(r) for _p, _w, r in fades)
+    return (1.0 + ART_COST_BASE
+            + min(ART_COST_SWITCH_MAX, ART_COST_PER_SWITCH * switches))
+
+
 # 描画の前後にかかる、コマ数によらない分。曲のデコードと音声合成(曲の長さに
-# ほぼ比例する)と、最後に ffmpeg がファイルを閉じきるまでの待ち。描画に比べれば
-# 小さいが、短い曲だと無視できない。
+# ほぼ比例する)と、仕上げで mp4 の頭へ索引を書き直す(+faststart、ファイルの
+# 大きさ = 長さにほぼ比例)ぶん。ffmpeg の中に溜まっていたコマを吐き切るまでの
+# 待ちは、見積もりの捨て描きで実際に測る(FrameCostProbe.drain_sec)。
 SETUP_PER_SONG_SEC = 0.030
-SETUP_FIXED_SEC = 2.5
+SETUP_FIXED_SEC = 1.5
 
 
-def estimate_seconds(ms_per_frame, song_seconds, fps):
+def estimate_seconds(ms_per_frame, song_seconds, fps, drain_sec=1.0):
     """1コマの実測(ms)から、書き出し全体にかかる秒数を見積もる。
 
-    ffmpeg のエンコードはこちらが描いているあいだ別プロセスで並走していて、
-    veryfast なら常に描画のほうが遅い。だからエンコード時間そのものは足さない
-    (足すと二重に数えることになる)。並走ぶん描画が重くなる分は、
-    FrameCostProbe が実際に x264 を回しながら測っているので ms_per_frame に
-    もう入っている。"""
+    ms_per_frame は FrameCostProbe の値で、**描く側と ffmpeg の遅いほう**に
+    なっている(ffmpeg が追いつかなければパイプへの書き込みが待たされ、その
+    待ちごと測るため)。だからエンコードの時間を別に足すと二重に数えることに
+    なる。最後に ffmpeg が溜めていたコマを吐き切る待ち(drain_sec)だけは
+    コマ数によらないので、別に足す。"""
     frames = max(0.0, float(song_seconds)) * float(fps)
     draw = frames * (max(0.0, float(ms_per_frame)) / 1000.0)
     setup = SETUP_FIXED_SEC + SETUP_PER_SONG_SEC * max(0.0, float(song_seconds))
-    return draw + setup
+    return draw + setup + max(0.0, float(drain_sec))
 
 
 class FrameCostProbe:
-    """「この PC・この譜面・この画質で1コマ何ms か」をその場で測る。
+    """「この PC・この譜面・この画質・この背景とジャケットで1コマ何ms か」を
+    その場で測る。
 
     固定の係数表(以前の time_factor)を捨てたのは、1コマの重さが PC の速さだけ
     でなく譜面の密度・スキンの有無・supersample・解像度で何倍も動くため。
     書いた本人の PC で測った数字は他所ではまるで当たらない。
 
-    **本番と同じ形で測る**のが肝。ここでは本番とまったく同じ大きさの QImage へ
-    描き、しかも同じ設定の x264 を裏で回してそこへ流し込む(出力は -f null で
-    捨てる)。これをしないと数字が半分以下に出てしまう: ふだんの描画は
-    メモリ帯域で頭打ちになっていて、x264 が同じ帯域を食い始めた途端に 2〜3倍
-    重くなる。しかもその倍率は解像度で変わる(1080p で約2.6倍、720p で約1.9倍)
-    ので、係数で後から補正するのは無理だった。裏で本物を回してしまえば、
-    パイプへの書き込み待ちも含めて丸ごと実測になる。
+    **本番とまったく同じ ffmpeg を裏で回して測る**のが肝。コマンドは本番と
+    同じ _record_cmd で組む(違うのは音が無音なのと、出力を -f null で捨てる
+    ことだけ)。背景・歌詞ごとのジャケット・切り替わりのフェードも、本番と
+    同じ入力・同じフィルタ・同じ時刻で入る。
 
-    UI を固めないよう step() で少しずつ進める。最初の数コマ(warmup)は必ず
-    捨てる: フォントやスキンの初回読み込みで 100ms〜1秒かかるうえ、x264 も
-    走り出すまで数コマかかる。
+    **ffmpeg が立ち上がってから測る**。立ち上がり(入力を開く・x264 の
+    用意。重い PC だと数秒)のあいだは書き込みが待たされたり、逆に全部が
+    入力キューに溜まったりして、数字が何倍にも振れる。ffmpeg の
+    -progress の最初の知らせを合図に時計を回す(_ff_started)。
+
+    ジャケットの重ねで ffmpeg 側に増える分は、数十コマの捨て描きでは
+    測れない(本番の入力キュー 64 コマに収まってしまい、切り替えのフェード
+    は始まりにまとめて絵を作るので逆に何倍にも見える)。そこは本番で
+    測った倍率(art_cost_factor)を見積もり側で掛ける。
+
+    測る時間は**時計の経過**で取る(コマとコマのあいだにイベントループへ
+    戻っている時間も含む)。本番も同じようにイベントループを挟みながら
+    描くので、描画そのものの時間だけを足すと短く出る。
+
+    描く時刻は、区間の中へ散らした数か所で**続けて**数コマずつ。頭は音符が
+    無くて軽いので散らす。一方で1コマずつ飛び飛びにすると、x264 には毎コマ
+    場面が変わったように見えて本番より重く出るので、続きのコマで描く。
+
+    UI を固めないよう step() で少しずつ進める。描き終えたら ffmpeg が溜めた
+    分を吐き切るまでの時間も、待たずに(step のたびに覗いて)測る。
     """
 
+    #: 1か所で続けて描くコマ数。
+    _RUN = 6
+    #: 吐き切りを待つ上限(秒)。これを過ぎたら殺して、そこまでの値を使う。
+    _DRAIN_LIMIT = 8.0
+    #: ffmpeg の立ち上がりを待つ上限(秒)。過ぎたら待たずに測り始める。
+    _START_LIMIT = 10.0
+
     def __init__(self, widget, *, supersample=1.0, song_seconds=0.0,
-                 warmup=8, samples=24, crf=18, preset="veryfast",
-                 background=None, canvas="720p", fps=60):
+                 warmup=30, samples=36, crf=18, preset="veryfast",
+                 background=None, canvas="720p", fps=60, start_sec=0.0):
         self.widget = widget
         self.warmup = max(1, int(warmup))
         self.samples = max(1, int(samples))
+        fps = int(fps or 60)
+        self.fps = fps
         pw, ph, ss = frame_pixel_size(widget, supersample)
-        # 背景ありは ffmpeg 側でデコードと重ね合わせが増える。**同じ入力を
-        # 付けて測る**(付けないと見積もりが短く出る)。
         bg = as_background(background)
         self._bg_alpha = bool(bg)
         self._img = _new_frame_image(pw, ph, ss, alpha=self._bg_alpha)
         if bg:
             set_background_passthrough(widget, True, bg.lane)
         self._passthrough = bool(bg)
-        # 測る時刻は曲の中ほどへ散らす。頭は音符が無くて軽く、そこだけ測ると
-        # 見積もりが短く出てしまう。
+        # 描く時刻: 区間の 20%〜80% に散らした数か所で、_RUN コマずつ続けて。
+        start = float(start_sec)
         span = max(1.0, float(song_seconds))
-        total = self.warmup + self.samples
-        self._times = [span * (0.2 + 0.6 * i / max(1, total - 1))
-                       for i in range(total)]
+        # warmup のコマを渡したら、ffmpeg が最初のコマを吐き出すまで待って
+        # から時計を回す(_ff_started)。ffmpeg の立ち上がり(入力を開く・
+        # x264 の用意と先読み。重い PC だと数秒)のあいだは書き込みが待た
+        # されたり、逆に全部キューに溜まったりして、描く側の数字が何倍にも
+        # 振れた。本番は数千コマあるので、立ち上がりの分は無視できる。
+        total = self._max_total = self.warmup + self.samples
+        runs = max(1, -(-total // self._RUN))
+        self._times = []
+        for r in range(runs):
+            at = start + span * (0.2 + 0.6 * r / max(1, runs - 1))
+            self._times += [at + k / float(fps) for k in range(self._RUN)]
+        self._times = self._times[:total]
         self._i = 0
+        self._t_mark = None
+        self._first_timed = None
         self._elapsed = 0.0
         self._started = False
+        self._closed_at = None
+        self.drain_sec = 0.0
         self.done = False
-        # 出力は -f null で捨てる。音声も多重化もしないが、x264 のエンコードは
-        # 本番どおり行われるので CPU とメモリ帯域の食われ方は同じになる。
-        cmd = [
-            _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-            "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
-            "-thread_queue_size", "64", "-r", "60", "-i", "-",
-        ]
-        if bg:
-            args, pre = _bg_input_args(bg, 0.0)
-            cmd += args
-            art_args, arts = _art_plan(
-                bg, _bg_out_size(CANVAS_PRESETS.get(canvas), pw, ph)[1])
-            cmd += art_args
-            # 棒のぶんも見積もりに入れる。ここには音の入力が無いので、
-            # 無音を1本足して同じ組み立てにする(重さはほぼ同じ)。
-            probe_aud = None
-            if getattr(bg, "wave", False):
-                cmd += ["-f", "lavfi", "-i",
-                        "anullsrc=r=%d:cl=stereo" % SAMPLE_RATE]
-                probe_aud = 2 + len(arts)
-            dur = max(1.0, (self.warmup + self.samples) / float(fps or 60))
-            cmd += ["-filter_complex",
-                    _bg_filter_complex(CANVAS_PRESETS.get(canvas),
-                                       pw, ph, fps or 60, bg, pre, dur,
-                                       aud_idx=probe_aud,
-                                       arts=[(2 + i, b, wnd) for i, (b, wnd)
-                                             in enumerate(arts)]),
-                    "-map", "[v]"]
-        elif wants_art_only(bg):
-            # 背景なしでジャケットだけ。重ねるぶん重くなるので同じ形で測る。
-            art_args, arts = _art_plan(
-                bg, _bg_out_size(CANVAS_PRESETS.get(canvas), pw, ph)[1])
-            cmd += art_args
-            cmd += ["-filter_complex",
-                    _art_only_filter_complex(
-                        CANVAS_PRESETS.get(canvas), pw, ph, bg,
-                        [(1 + i, b, wnd) for i, (b, wnd) in enumerate(arts)]),
-                    "-map", "[v]"]
+        # ffmpeg の時刻の 0 秒は本番と同じく録画の頭(start_sec)。ジャケットの
+        # 出す区間・フェードもその基準で入る。
+        #
+        # 音は本番と同じく**有限の f32 ファイル**(無音)にして -shortest で
+        # 止める。背景なしのジャケットは画面の入力が終わっても絵の入力
+        # (-loop 1)が続くので、本番は音の長さで止まっている。以前の見積もり
+        # は音を付けておらず、ここで ffmpeg が止まらなかった(親が先に落ちると
+        # 誰にも殺されず、CPU を食い続けて残る)。無限の無音(lavfi)を
+        # -shortest で止める形も試したが、まれに止まらなくなった。
+        # -t は念のための保険。
+        dur = total / float(fps)
+        self._tmp_dir = tempfile.mkdtemp(prefix="neotja_probe_")
+        silent = os.path.join(self._tmp_dir, "silent.f32")
+        try:
+            with open(silent, "wb") as f:
+                f.write(b"\x00" * (8 * int(SAMPLE_RATE * (dur + 1.0))))
+        except OSError:
+            pass
+        cmd = _record_cmd(
+            pw, ph, fps, CANVAS_PRESETS.get(canvas), bg, start, total,
+            ["-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2",
+             "-i", silent])
         cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
-            "-pix_fmt", "yuv420p", "-f", "null", "-",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-t", "%.3f" % dur, "-f", "null", "-",
+            # 0.1 秒ごとの知らせ。立ち上がったかを見るのに使う(_ff_started)。
+            "-progress", "pipe:1", "-stats_period", "0.1", "-nostats",
         ]
+        #: ffmpeg が知らせてきた [(時刻, 処理し終えたコマ数)]。
+        self._progress = []
         try:
             self._proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, **_no_window())
         except OSError:
             # ffmpeg が起動できなくても見積もりは出したい。描画だけの数字に
             # なるぶん短めに出るが、無いよりはるかにまし。
             self._proc = None
+        else:
+            # 読み手が居ないとパイプが詰まって ffmpeg が止まるので、
+            # 別スレッドで読み続ける(Qt には触らない)。
+            threading.Thread(target=self._read_progress,
+                             args=(self._proc.stdout,), daemon=True).start()
+        self._t_begin = time.perf_counter()
 
     def step(self, count=3) -> bool:
         """最大 count コマ測る。まだ続きがあれば True。"""
         if self.done:
             return False
+        if self._closed_at is not None:
+            return self._poll_drain()
         if not self._started:
             self.widget.begin_offline_render()
             self._started = True
-        total = self.warmup + self.samples
+        total = self._max_total
         end = min(self._i + max(1, int(count)), total)
         while self._i < end:
-            t0 = time.perf_counter()
+            if self._first_timed is None and self._i >= self.warmup:
+                if (not self._ff_started() and time.perf_counter()
+                        - self._t_begin < self._START_LIMIT):
+                    break            # まだ立ち上がり中。次の step でまた見る
+                # ここから時計を回す。前の step から今までの、イベント
+                # ループへ戻っていた時間は数えない(まだ warmup の続き)。
+                self._t_mark = time.perf_counter()
+                self._first_timed = self._i
             self.widget.set_render_time(self._times[self._i])
             if self._bg_alpha:
                 self._img.fill(0)        # 透明。背景は ffmpeg が敷く
@@ -1321,18 +1471,87 @@ class FrameCostProbe:
             if self._proc is not None:
                 try:
                     self._proc.stdin.write(self._img.constBits())
-                except (BrokenPipeError, OSError):
-                    self._proc = None
-            if self._i >= self.warmup:
-                self._elapsed += time.perf_counter() - t0
+                except (BrokenPipeError, OSError, ValueError):
+                    self._kill()     # 以後は描画だけ測る
             self._i += 1
-        if self._i >= total:
-            self._teardown()
+        if self._t_mark is not None:
+            # 時計の経過(イベントループへ戻っていた時間も込み)。
+            now = time.perf_counter()
+            self._elapsed += now - self._t_mark
+            self._t_mark = now
+        if self._i < total:
+            return True
+        self._t_mark = None
+        self._release_widget()
+        if self._proc is None:
+            self._finish()
             return False
-        return True
+        try:
+            self._proc.stdin.close()
+        except OSError:
+            pass
+        self._closed_at = time.perf_counter()
+        return self._poll_drain()
 
-    def _teardown(self):
-        self.done = True
+    def _timed(self):
+        """時計を回してから描いたコマ数。"""
+        return 0 if self._first_timed is None else self._i - self._first_timed
+
+    def _ff_started(self):
+        """ffmpeg が立ち上がって入力を読み始めたか(ffmpeg が無ければ True)。
+
+        -progress の最初の知らせ(frame=0 でもよい)で判断する。x264 は先読みの
+        ぶん 20〜40 コマ溜めてから吐き出すので、「1コマ吐いた」を待つと
+        warmup を渡しきっても来ないことがある。"""
+        return self._proc is None or bool(self._progress)
+
+    def _read_progress(self, pipe):
+        """-progress の行から frame=N を拾って、届いた時刻と一緒に貯める。"""
+        try:
+            for raw in iter(pipe.readline, b""):
+                if raw.startswith(b"frame="):
+                    try:
+                        n = int(raw[6:].strip())
+                    except ValueError:
+                        continue
+                    self._progress.append((time.perf_counter(), n))
+        except (OSError, ValueError):
+            pass
+
+    def _kill(self):
+        """ffmpeg を止めて片付ける(待たない)。"""
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.kill()
+                proc.wait(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if self._tmp_dir:
+            _cleanup(self._tmp_dir)
+            self._tmp_dir = None
+
+    def _poll_drain(self):
+        """ffmpeg が溜めた分を吐き切ったか覗く。終わっていなければ True。"""
+        if self._proc is None:
+            self._finish()
+            return False
+        waited = time.perf_counter() - self._closed_at
+        if self._proc.poll() is None and waited < self._DRAIN_LIMIT:
+            return True
+        self.drain_sec = waited
+        self._kill()
+        self._finish()
+        return False
+
+    def _release_widget(self):
+        if not self._started:
+            return
+        self._started = False
         try:
             self.widget.end_offline_render()
         except RuntimeError:
@@ -1341,28 +1560,54 @@ class FrameCostProbe:
             set_background_passthrough(self.widget, False)
             self._passthrough = False
         self._img = None
-        if self._proc is not None:
-            # 溜まっているぶんを最後まで encode させる必要はない。閉じてから
-            # 少しだけ待ち、居座るようなら殺す(見積もりで待たされたら本末転倒)。
-            try:
-                self._proc.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
-            self._proc = None
+
+    def _finish(self):
+        self.done = True
+        self._t_end = time.perf_counter()
+        self._kill()
+        self._release_widget()
+
+    def _teardown(self):
+        # 打ち切り。吐き切るのを待つ必要はないので、すぐ殺す(見積もりで
+        # 待たされたら本末転倒)。ffmpeg を先に止めてから絵の入れ物を手放す
+        # (書き込み中のスレッドが入れ物を読んでいることがあるため)。
+        self._kill()
+        self._release_widget()
+        self.done = True
+        self._t_end = time.perf_counter()
 
     def cancel(self):
         if not self.done:
             self._teardown()
 
     @property
+    def draw_ms_per_frame(self) -> float:
+        n = self._timed()
+        if n:
+            return self._elapsed / n * 1000.0
+        # warmup のうちに ffmpeg が固まって打ち切った等で、測った分が無い。
+        # 頭からの経過で割る(初回の読み込みぶん重く出るが、出ないよりよい)。
+        if self.done and self._i:
+            return (self._t_end - self._t_begin) / self._i * 1000.0
+        return 0.0
+
+    @property
     def ms_per_frame(self) -> float:
-        n = max(0, self._i - self.warmup)
-        return (self._elapsed / n * 1000.0) if n else 0.0
+        """1コマの重さ(ms)。時計の経過で測った描く側の数字。
+
+        裏で同じ ffmpeg が走っているので、x264 や背景の重ねに CPU と
+        メモリ帯域を取られて描く側が遅くなる分はここに入る。ffmpeg 側の
+        速さそのもの(-progress)を採るのはやめた: 切り替えのあるジャケットは
+        フェードの流れ(trim)が始まりに絵を何百枚もまとめて作るので、
+        数十コマの捨て描きでは ffmpeg 側が本番の 2〜4倍遅く見えた(本番は
+        数千コマでならされる)。ジャケットで ffmpeg 側に増える分は
+        art_cost_factor で足す。"""
+        return self.draw_ms_per_frame
+
+    @property
+    def tail_sec(self) -> float:
+        """最後に ffmpeg が吐き切るのを待つ分(秒)。"""
+        return self.drain_sec
 
 
 class RecordingPlan:
@@ -1538,56 +1783,11 @@ class VideoRecording:
         bg = as_background(background)
         self._bg_alpha = bool(bg)
         self._passthrough = False
-        # 背景なしでもジャケットがあれば、画面はいつもどおり(背景も描いた
-        # 不透明な絵)のまま、ffmpeg でその上へ重ねる(_art_only_filter_complex)。
-        art_only = wants_art_only(bg)
-        vf = None if (bg or art_only) else _video_filter(canvas_wh, pw, ph)
-
-        cmd = [
-            _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-            # bgra = QImage.Format_RGB32 のメモリ配置そのまま(リトルエンディアンで
-            # B,G,R,X の順)。下の QImage の説明を参照。
-            "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{pw}x{ph}",
-            # 入力キューを深くしておくと、こちらの書き込みとエンコードが
-            # 重なりやすくなる(既定は浅くて待ちが生じる)。
-            "-thread_queue_size", "64",
-            "-r", str(fps), "-i", "-",
-        ]
-        if bg:
-            # 入力 1 が背景、2 が音声。**背景の音は map しない**
-            # (利用者の決定: 音は譜面の曲 + 打音だけ)。
-            args, pre = _bg_input_args(bg, self.start_sec)
-            cmd += args
-        cmd += [
-            "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
-        ]
-        # ジャケットは**音のうしろ**。前に入れると -map 2:a がずれる。
-        # 歌詞に合わせて切り替えるときは絵の数だけ入力が並ぶ(3, 4, …)。
-        art_args, arts = (
-            _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1])
-            if (bg or art_only) else ([], []))
-        cmd += art_args
-        if bg:
-            dur = self.total_frames / float(fps or 60)
-            # 棒を出すときは音を asplit で分けるので、出力の音は
-            # 入力そのものではなく [aout] のほうを map する。
-            a_out = "[aout]" if wants_wave(bg, 2) else "2:a"
-            cmd += ["-filter_complex",
-                    _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur,
-                                       aud_idx=2, t0=self.start_sec,
-                                       arts=[(3 + i, b, wnd) for i, (b, wnd)
-                                             in enumerate(arts)]),
-                    "-map", "[v]", "-map", a_out]
-        elif art_only:
-            # 背景の入力が無いので、音が 1、ジャケットが 2 から。
-            cmd += ["-filter_complex",
-                    _art_only_filter_complex(
-                        canvas_wh, pw, ph, bg,
-                        [(2 + i, b, wnd) for i, (b, wnd) in enumerate(arts)],
-                        t0=self.start_sec, fps=fps),
-                    "-map", "[v]", "-map", "1:a"]
-        if vf:
-            cmd += ["-vf", vf]
+        # 入力・フィルタ・map は見積もり(FrameCostProbe)と同じ関数で組む。
+        cmd = _record_cmd(
+            pw, ph, fps, canvas_wh, bg, self.start_sec, self.total_frames,
+            ["-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2",
+             "-i", audio_path])
         cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
             "-pix_fmt", "yuv420p",
@@ -1642,8 +1842,15 @@ class VideoRecording:
         return self.out_path
 
     def abort(self):
-        """中止する。書きかけの出力は残さない。"""
-        self._teardown()
+        """中止する。書きかけの出力は残さない。
+
+        ffmpeg は**待たずに殺す**。出来上がりは捨てるので吐き切らせる意味が
+        なく、しかも背景なし+ジャケットの経路は1コマも描かずに止めると
+        ffmpeg が終わらない(画面の入力が空のままでは、ジャケットの絵
+        (-loop 1)と音だけでは出力が始まらず、閉じもしない)。以前は
+        ここで終わりを待っていたので、書き出しの直後に中止すると後始末が
+        返らず「中止しています...」のまま固まった(2026-11-13 に見つけた)。"""
+        self._teardown(kill=True)
         _unlink(self.out_path)
 
     def detach_widget(self):
@@ -1665,12 +1872,19 @@ class VideoRecording:
         except RuntimeError:
             pass                      # ウィジェットが先に消えていた
 
-    def _teardown(self):
+    def _teardown(self, kill=False):
         if getattr(self, "_torn", False):
             return b"", self._proc.returncode
         self._torn = True
         self._done = True
         self.detach_widget()
+        if kill:
+            # 先に殺す(abort の説明)。stdin を閉じるより前にしないと、
+            # 閉じたあと stderr の読みで終わらない ffmpeg を待つことになる。
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
         try:
             self._proc.stdin.close()
         except OSError:

@@ -65,14 +65,25 @@ QUALITY_PRESETS = [
 ]
 DEFAULT_QUALITY = 1        # 既定は 60fps/1080p(速度と画質のつり合いが良い)
 
-# 見積もりの捨て描き。1コマ 5〜16ms なので、これだけ描いても 1画質あたり 0.6 秒
-# ほど。warmup を必ず捨てるのは、最初の1コマがフォント/スキンの初回読み込みで
-# 100ms〜1秒かかり、裏で回している x264 も走り出すまで数コマかかるため。
-_PROBE_WARMUP = 8
-_PROBE_SAMPLES = 24
+# 見積もりの捨て描き。warmup を必ず捨てるのは、最初の1コマがフォント/スキンの
+# 初回読み込みで 100ms〜1秒かかるうえ、裏で回している x264 が走り出して
+# 先読みの枠(20〜30コマ)を埋めきるまでは速さが落ち着かないため。ffmpeg 側の
+# 速さもこの後ろで数える(recorder.FrameCostProbe の説明)ので、以前の 8+24 コマ
+# では足りない。1コマ 10〜30ms なので 1画質あたり 1〜3 秒。
+_PROBE_WARMUP = 30
+_PROBE_SAMPLES = 48
 # 見積もり中に1回の QTimer で測るコマ数。これを跨いでイベントループへ戻るので
 # 「見積もり中...」の表示や閉じるボタンが効いたままになる。
 _PROBE_CHUNK = 3
+# 書き出し中の進み具合の表示を書き換える間隔(秒)。毎コマ書き換えると、
+# 文字と棒の描き直しが1コマごとに挟まり、書き出しそのものが2割ほど遅く
+# なっていた(見積もりの捨て描きにはこの描き直しが無いので、そのぶん
+# 見積もりとも合わなくなる)。
+_PROGRESS_SEC = 0.1
+# 見積もりに効く設定(背景・ジャケットの枚数・切り替えの回数)が変わって
+# いないかを見に行く間隔(ミリ秒)。歌詞のジャケットは作譜ペインで付け外し
+# するので、この窓からは変わった瞬間が分からない。
+_COST_KEY_POLL_MS = 1000
 
 
 class _Task(QThread):
@@ -237,13 +248,21 @@ class RecordDialog(QDialog):
         self._prep_task = None
         self._fin_task = None
         self._pending = None        # 下ごしらえ待ちのあいだ覚えておく (出力先, 画質)
-        # 所要時間の見積もり用。supersample ごとに「1コマ何ms か」の実測を貯める
-        # (720p と 1080p は supersample が違うので別々に測るが、1080p の 60fps と
-        # 120fps は同じ大きさを描くので測り直さない)。
+        # 所要時間の見積もり用。画質ごとに「1コマ何ms か」と「最後に ffmpeg が
+        # 吐き切るまで何秒か」の実測を貯める。鍵は (supersample, 出来上がりの
+        # 大きさ, fps)。以前は supersample だけで分けていて、1080p の 60fps と
+        # 120fps を同じ数字で済ませ、しかも測るときの大きさと fps は**その時
+        # 選んでいた画質**のものを使っていた(720p の数字を 1080p の ffmpeg で
+        # 測ることがあった)。ffmpeg 側の重さは大きさと fps で変わるので分ける。
         self._cost_ms = {}
         self._probe = None
-        self._probe_ss = None
+        self._probe_key = None
         self._probe_queue = []
+        #: 見積もりを測ったときの設定の鍵(recorder.cost_key)。変われば測り直す。
+        self._cost_key = None
+        self._bg_dialog_open = False
+        self._last_progress = 0.0
+        self._lead_sec = None
         self._probe_timer = QTimer(self)
         self._probe_timer.setInterval(0)
         self._probe_timer.timeout.connect(self._probe_tick)
@@ -405,8 +424,14 @@ class RecordDialog(QDialog):
         # ボタンへ残してしまった。空のときこそ開きたいので、押せなくなると
         # 一生選べない(利用者の報告 2026-10-25)。録画中かどうかは
         # _open_bg_dialog の中で見る。
-        self.ed_bg.textChanged.connect(self._on_bg_path_changed)
-        self._bg_measured = self.ed_bg.text().strip()
+        self.ed_bg.textChanged.connect(self._check_cost_key)
+        self._cost_key = recorder.cost_key(self._bg_now())
+        # 歌詞のジャケットは作譜ペインで付け外しされ、その知らせはここへ
+        # 来ないので、開いているあいだは鍵を時々見に行く(_check_cost_key)。
+        self._key_timer = QTimer(self)
+        self._key_timer.setInterval(_COST_KEY_POLL_MS)
+        self._key_timer.timeout.connect(self._check_cost_key)
+        self._key_timer.start()
 
         path_row = QHBoxLayout()
         self._auto_path = os.path.join(
@@ -444,15 +469,23 @@ class RecordDialog(QDialog):
         QTimer.singleShot(0, self._begin_measure)
 
     # ---- 背景 ----------------------------------------------------
-    def _on_bg_path_changed(self):
-        """背景を変えたら、見積もりを測り直す。
+    def _check_cost_key(self):
+        """1コマの重さに効く設定が変わっていたら、見積もりを測り直す。
 
-        背景ありは ffmpeg のデコードと重ね合わせが増えるので、1コマの
-        重さが変わる。前の数字を使い回すと見積もりが短く出る。"""
-        now = self.ed_bg.text().strip()
-        if now == self._bg_measured or self.is_busy():
+        背景の有無・ジャケットの枚数・切り替え(フェード)の回数で ffmpeg の
+        フィルタが変わり、1コマの重さが何割も動く。以前は背景の道が
+        変わったときしか測り直さず、ジャケットを付けても切り替えを足しても
+        前の数字のまま(=短く)出ていた。
+
+        背景の窓を閉じたとき・背景の欄が変わったとき・開いているあいだ
+        1秒ごと(作譜ペインでのジャケットの付け外し)に呼ぶ。鍵
+        (recorder.cost_key)が同じなら何もしない。"""
+        if self.is_busy() or self._bg_dialog_open:
             return
-        self._bg_measured = now
+        key = recorder.cost_key(self._bg_now())
+        if key == self._cost_key:
+            return
+        self._cost_key = key
         self._cost_ms.clear()
         self._cancel_measure()
         self._refresh_estimates()
@@ -517,17 +550,30 @@ class RecordDialog(QDialog):
                                          "この譜面の基本ジャケット。歌詞に"
                                          "ジャケットを付けた所では、その絵に"
                                          "切り替わります。"))
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self._bg = dlg.background()
-        self.ed_bg.setText(self._bg.path)
-        if self._bg.art != self._art_shown:
-            # 変えたときだけ譜面の基本へ(上の _art_shown の説明)。保存で
-            # .jacket.json に書かれ、未保存の印も付く。
-            setter = getattr(self._mw, "set_jacket_base", None)
-            if setter is not None:
-                setter(self._bg.art)
-            self._art_shown = self._bg.art
+        # 開いているあいだは見積もりの測り直しを仕掛けない(ウィジェットを
+        # 窓の見本と取り合うため)。閉じたら、変わっていれば測り直し、
+        # 変わっていなくても止めた測りの続きをやる(_schedule_measure)。
+        # 以前は「キャンセルで閉じる」と止めた見積もりがそのままになり、
+        # 画質の欄が「見積もり中...」から動かなかった。
+        self._bg_dialog_open = True
+        try:
+            accepted = dlg.exec() == QDialog.Accepted
+        finally:
+            self._bg_dialog_open = False
+        if accepted:
+            self._bg = dlg.background()
+            self.ed_bg.setText(self._bg.path)
+            if self._bg.art != self._art_shown:
+                # 変えたときだけ譜面の基本へ(上の _art_shown の説明)。保存で
+                # .jacket.json に書かれ、未保存の印も付く。
+                setter = getattr(self._mw, "set_jacket_base", None)
+                if setter is not None:
+                    setter(self._bg.art)
+                self._art_shown = self._bg.art
+        # 道が同じでもジャケットや暗さが変わっていることがある(textChanged
+        # は道しか見ていない)ので、鍵で確かめる。
+        self._check_cost_key()
+        self._schedule_measure()
 
     @staticmethod
     def _resolve_out_dir(cfg, default_dir):
@@ -645,10 +691,9 @@ class RecordDialog(QDialog):
     # 固定の係数表(以前の time_factor)はやめた。同じ「1080p 60fps」でも、PC の
     # 速さ・譜面の密度・スキンの有無で1コマの重さが数倍変わるので、書いた本人の
     # PC で測った数字は他所ではまるで当たらない。代わりに、ダイアログを開いた
-    # ところで本番とまったく同じ形(同じ大きさ・同じ譜面・裏で同じ x264)で
-    # 30コマほど捨て描きして「1コマ何ms か」をその場で測る。詳しくは
-    # recorder.FrameCostProbe。1画質あたり 1秒足らずで、実測との誤差は
-    # SUPERNOVA(2分31秒)で 720p -1%, 1080p +16% だった。
+    # ところで本番とまったく同じ形(同じ大きさ・同じ譜面・同じ背景とジャケット・
+    # 裏で同じ ffmpeg)で数十コマ捨て描きして「1コマ何ms か」をその場で測る。
+    # 詳しくは recorder.FrameCostProbe。
     # ------------------------------------------------------------------
     def _begin_measure(self):
         """描画用ウィジェットを用意し、画質ごとの1コマの重さを測り始める。"""
@@ -657,8 +702,8 @@ class RecordDialog(QDialog):
         # コマ送り(GameScreenWidget が render() の呼ばれ方で進める)まで
         # ずれて、出来上がりの絵が変わってしまう。ダイアログを開いた直後に
         # 書き出しを始めたときだけ起こりうる(この singleShot が届く前に
-        # ボタンが押された場合)。
-        if self.is_busy():
+        # ボタンが押された場合)。背景の窓が開いているあいだも同じ理由で測らない。
+        if self.is_busy() or self._bg_dialog_open:
             return
         # 既に測っている最中なら二重に始めない(_finish から測り直しを仕掛ける
         # ようになったので、走っているところへ重ねて来ることがある)。
@@ -666,30 +711,57 @@ class RecordDialog(QDialog):
             return
         if self._widget is None:
             self._widget = self._make_widget()
-        # 測るのは supersample 違いだけ。1080p の 60fps と 120fps は同じ大きさを
-        # 描くので(違うのはコマ数だけ)、測り直しても同じ数字にしかならない。
+        # いま選んでいる画質から先に測る(いちばん見られる数字を早く出す)。
+        cur = self.cb_quality.currentIndex()
+        order = [cur] + [i for i in range(len(QUALITY_PRESETS)) if i != cur]
         seen = []
-        for _label, q in QUALITY_PRESETS:
-            ss = float(q["supersample"])
-            if ss not in seen:
-                seen.append(ss)
+        for i in order:
+            key = self._quality_key(QUALITY_PRESETS[i][1])
+            if key not in seen:
+                seen.append(key)
         self._probe_queue = seen
         self._next_probe()
 
+    @staticmethod
+    def _quality_key(q):
+        """見積もりの数字を分ける鍵。描く大きさ・出来上がりの大きさ・fps。"""
+        return (float(q["supersample"]), q.get("canvas", "720p"),
+                int(q.get("fps", 60)))
+
+    def _record_window(self):
+        """本番で描く区間 (録画の頭の音源の秒, 長さ秒)。
+
+        頭から録るときは助走(recorder.RECORD_LEAD_SEC、音源より前に音符が
+        あればそこから)が付くので、そのぶん前から・長く描く。見積もりの
+        ffmpeg の時刻(ジャケットの出す区間)もこの頭を 0 秒として合わせる。"""
+        start, end = self._range_secs()
+        if start <= 0.0:
+            if self._lead_sec is None:
+                try:
+                    hits, _k = recorder.hit_schedule_from_preview(
+                        self._preview, self._offset)
+                    first = min(hits) if hits else 0.0
+                except Exception:  # noqa: BLE001
+                    first = 0.0
+                self._lead_sec = (recorder.RECORD_LEAD_SEC
+                                  - min(0.0, float(first)))
+            start = -self._lead_sec
+        return start, max(0.0, end - start)
+
     def _next_probe(self):
-        """まだ測っていない supersample があれば次を測り始める。"""
+        """まだ測っていない画質があれば次を測り始める。"""
         while self._probe_queue:
-            ss = self._probe_queue.pop(0)
-            if ss in self._cost_ms or self._widget is None:
+            key = self._probe_queue.pop(0)
+            if key in self._cost_ms or self._widget is None:
                 continue
-            q0 = self.cb_quality.currentData() or {}
+            ss, canvas, fps = key
+            start, span = self._record_window()
             self._probe = recorder.FrameCostProbe(
-                self._widget, supersample=ss, song_seconds=self._song_seconds,
+                self._widget, supersample=ss, song_seconds=span,
+                start_sec=start,
                 warmup=_PROBE_WARMUP, samples=_PROBE_SAMPLES,
-                background=self._bg_now(),
-                canvas=q0.get("canvas", "720p"),
-                fps=int(q0.get("fps", 60)))
-            self._probe_ss = ss
+                background=self._bg_now(), canvas=canvas, fps=fps)
+            self._probe_key = key
             self._probe_timer.start()
             return
         self._probe = None
@@ -703,7 +775,8 @@ class RecordDialog(QDialog):
             return
         if self._probe.step(_PROBE_CHUNK):
             return
-        self._cost_ms[self._probe_ss] = self._probe.ms_per_frame
+        self._cost_ms[self._probe_key] = (self._probe.ms_per_frame,
+                                          self._probe.tail_sec)
         self._probe = None
         self._probe_timer.stop()
         # 1つ測れるたびに表示を差し替える(全部揃うのを待たない)。
@@ -724,13 +797,18 @@ class RecordDialog(QDialog):
         q = self.cb_quality.itemData(index)
         if q is None:
             return None
-        ms = self._cost_ms.get(float(q["supersample"]))
-        if not ms:
+        got = self._cost_ms.get(self._quality_key(q))
+        if not got or not got[0]:
             return None
-        # 曲全体ではなく「実際に書き出す区間の長さ」で見積もる。描くコマ数は
-        # 区間の長さに比例するので、20小節だけ書き出すのに曲全体の目安を出すと
-        # 何倍も長く見えてしまう。
-        return recorder.estimate_seconds(ms, self._range_span(), q["fps"])
+        ms, drain = got
+        # 曲全体ではなく「実際に書き出す区間の長さ」(頭からなら助走込み)で
+        # 見積もる。描くコマ数は区間の長さに比例するので、20小節だけ書き出す
+        # のに曲全体の目安を出すと何倍も長く見えてしまう。
+        # ジャケットで ffmpeg 側に増える分は捨て描きでは測れないので、本番で
+        # 測った倍率を掛ける(recorder.art_cost_factor)。
+        ms *= recorder.art_cost_factor(self._bg_now())
+        return recorder.estimate_seconds(ms, self._record_window()[1],
+                                         q["fps"], drain_sec=drain)
 
     def _refresh_estimates(self):
         """コンボの各項目と下の説明文を、いま分かっている実測で書き直す。"""
@@ -945,6 +1023,7 @@ class RecordDialog(QDialog):
         # 見積もりの目安ではなく実測で残り時間を出したいので、時計はここで
         # 引き直す(下ごしらえのぶんを1コマ目の所要に混ぜない)。
         self._t0 = time.perf_counter()
+        self._last_progress = 0.0
         self._timer.start()
 
     def _tick(self):
@@ -971,7 +1050,11 @@ class RecordDialog(QDialog):
         per = spent / max(1, self._batch)
         if per > 0:
             self._batch = max(1, min(60, int(_SLICE_SEC / per)))
-        self._on_progress(self._rec.frame, self._rec.total_frames)
+        # 表示の書き換えは _PROGRESS_SEC ごとに間引く(説明はそこ)。
+        now = time.perf_counter()
+        if not more or now - self._last_progress >= _PROGRESS_SEC:
+            self._last_progress = now
+            self._on_progress(self._rec.frame, self._rec.total_frames)
 
         if more:
             return
