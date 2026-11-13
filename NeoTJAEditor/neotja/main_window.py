@@ -972,6 +972,9 @@ class MainWindow(QMainWindow):
         _ce = getattr(self.preview_dock, "chart_edit", None)
         if _ce is not None:
             _ce.set_tool_cb(self.run_chart_tool)
+            # 歌詞の帯の右クリック →「ジャケットを挿入…/外す」。
+            if hasattr(_ce, "set_jacket_cb"):
+                _ce.set_jacket_cb(self._on_pane_jacket)
             # 上の目盛りで選んだ小節を Delete で消す(利用者の希望 2026-11-05)。
             _ce.measuresDeleteRequested.connect(self.delete_pane_measures)
         # マスターが先。曲/SE はマスターに対する「比率」なので、マスターを
@@ -2199,6 +2202,34 @@ class MainWindow(QMainWindow):
             self._jackets_changed()
             return True
         return False
+
+    def _on_pane_jacket(self, text, insert):
+        """作譜ペインの右クリックから。付ける(窓を出す)か外すか。"""
+        if insert:
+            return self.edit_lyric_jacket(text)
+        if self.set_lyric_jacket(text, ""):
+            self.statusBar().showMessage(
+                "歌詞「%s」のジャケットを外しました" % text, 3000)
+            return True
+        return False
+
+    def edit_lyric_jacket(self, text):
+        """歌詞 text に付ける絵を選んでもらう。変わったら True。
+
+        付ける単位は歌詞の文字なので、同じ文字の帯がいくつあるか(全コース)
+        を窓に添える。"""
+        from neotja.dialogs.lyric_jacket_dialog import LyricJacketDialog
+        from neotja.lyric_jacket import count_lyric
+        cur = self.lyric_jackets.image_for(text)
+        start_dir = (os.path.dirname(cur) if cur else
+                     os.path.dirname(self.current_file) if self.current_file
+                     else "")
+        dlg = LyricJacketDialog(text, cur,
+                                count_lyric(self.editor.toPlainText(), text),
+                                start_dir, self)
+        if dlg.exec() != QDialog.Accepted or not dlg.path():
+            return False
+        return self.set_lyric_jacket(text, dlg.path())
 
     def _save_jackets(self):
         """TJA を書いた直後に呼ぶ。対応表を譜面の隣へ書く。

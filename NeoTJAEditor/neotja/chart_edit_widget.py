@@ -583,6 +583,13 @@ class ChartEditWaveform(WaveformWidget):
         f = self.font()
         f.setPixelSize(self.fpx(11))
         p.setFont(f)
+        # 小さな絵の一辺。行の高さに合わせて縮む(表示倍率)。帯は上下 3px
+        # ずつ内側なので、それより 2px ずつ小さく。
+        ts = max(6, min(self.spx(self.JACKET_THUMB_PX), h - 10))
+        # 絵を出すのは「絵 + 2文字ぶん」より広い帯だけ。狭い帯では絵を
+        # 諦めて字を残す(何の歌詞かが読めるほうが大事)。
+        room = ts + 6 + 2 * p.fontMetrics().horizontalAdvance("あ") + 10
+        jackets = self._lyric_jackets
         for start, end, _, txt in self._lyric_spans(t0, t1):
             if self._lyric_drag and self._lyric_drag["span"][0] == start:
                 end = self._lyric_drag["end"]
@@ -591,9 +598,93 @@ class ChartEditWaveform(WaveformWidget):
             p.fillRect(x, y + 3, w, h - 6, fill)
             p.drawRect(x, y + 3, w, h - 6)
             p.fillRect(r - min(3, w), y + 5, min(3, w), h - 10, col)
-            if w > 10:
-                p.drawText(x + 5, y, w - 10, h, Qt.AlignVCenter | Qt.AlignLeft, txt)
+            tx = x + 5
+            if jackets and w >= room:
+                pm = self._jacket_thumb(jackets.get(txt.strip()), ts)
+                if pm is not None:
+                    p.drawPixmap(x + 4, y + (h - ts) // 2, pm)
+                    tx = x + 4 + ts + 4
+            if r - 5 - tx > 0:
+                p.drawText(tx, y, r - 5 - tx, h,
+                           Qt.AlignVCenter | Qt.AlignLeft, txt)
         p.restore()
+
+    # ------------------------------------------------------------------
+    # 歌詞に付けたジャケット(利用者の承認 2026-11-13)
+    # ------------------------------------------------------------------
+    #: 帯の左に出す小さな絵の一辺(px、原寸)。
+    JACKET_THUMB_PX = 18
+    #: 歌詞の文字 → 絵の道。MainWindow が set_lyric_jackets で入れる。
+    _lyric_jackets = {}
+    #: 絵の更新日時 {道: mtime}。set_lyric_jackets のときに1回だけ見る —
+    #: 帯を焼くたび(=描くたび)にファイルを見に行かないため。
+    _jacket_mtimes = {}
+    #: 縮めた絵 {(道, mtime, 一辺, 倍率): QPixmap か None}。
+    _jacket_thumbs = None
+    _jacket_cb = None
+
+    def set_lyric_jackets(self, mapping):
+        """歌詞ごとの絵を入れ替える。帯を焼き直して小さな絵に反映する。"""
+        mapping = {str(k).strip(): str(v) for k, v in dict(mapping or {}).items()
+                   if str(k).strip() and v}
+        mt = {}
+        for path in set(mapping.values()):
+            try:
+                mt[path] = os.path.getmtime(path)
+            except OSError:
+                mt[path] = None          # 無い絵。帯には出さない
+        self._lyric_jackets = mapping
+        self._jacket_mtimes = mt
+        if self._jacket_thumbs is None:
+            self._jacket_thumbs = {}
+        # 使われなくなった絵は捨てる(付け替えを繰り返しても溜まらない)。
+        for key in [k for k in self._jacket_thumbs if k[0] not in mt]:
+            del self._jacket_thumbs[key]
+        self._bump_strip()
+        self.update()
+
+    def set_jacket_cb(self, cb):
+        """右クリックの「ジャケットを挿入…/外す」の出口。cb(歌詞, 付けるか)。"""
+        self._jacket_cb = cb
+
+    def _jacket_thumb(self, path, side):
+        """帯に出す小さな絵。読めない・無いなら None。覚えて使い回す。"""
+        if not path:
+            return None
+        mtime = self._jacket_mtimes.get(path)
+        if mtime is None:
+            return None
+        dpr = self.devicePixelRatioF()
+        key = (path, mtime, int(side), round(dpr, 3))
+        cache = self._jacket_thumbs
+        if cache is None:
+            cache = self._jacket_thumbs = {}
+        if key not in cache:
+            from neotja.dialogs.lyric_jacket_dialog import square_pixmap
+            cache[key] = square_pixmap(path, side, max(2, side // 5), dpr)
+        return cache[key]
+
+    def lyric_band_at(self, x=None, y=None):
+        """右クリックした歌詞の帯 (開始, 終了, 文字)。無ければ None。
+
+        マウスの位置(x, y)を渡せば**その下の帯**(カーソルの位置では
+        ない — 帯を右クリックしたのに、カーソルが別の帯にあってそちらに
+        付く、ということが無いように)。y が歌詞の行の外なら None。
+        x を渡さなければカーソルの位置の帯(窓の「作譜」メニュー用)。
+        空の #LYRIC は帯にならないので、ここでも返らない。"""
+        if x is not None and y is not None:
+            top, height = self._row_rects()["lyric"]
+            if not top <= y < top + height:
+                return None
+            t = self._x_to_sec(x)
+        elif x is not None:
+            t = self._x_to_sec(x)
+        else:
+            t = self.cursor_time()
+        for start, end, _limit, txt in self._lyric_spans(t - 1e-6, t + 1e-6):
+            if start <= t < end:
+                return start, end, txt
+        return None
 
     def lyric_at(self, t, tol=None):
         """その時刻に置いてある歌詞。無ければ None。"""
@@ -625,6 +716,29 @@ class ChartEditWaveform(WaveformWidget):
             popup.edit.setFixedWidth(260)
             popup.adjustSize()
         return popup
+
+    def _jacket_menu(self, menu, at_x=None, at_y=None):
+        """歌詞の帯の上なら「ジャケットを挿入…」「ジャケットを外す」を足す。
+
+        右クリックならマウスの下の帯、窓のメニューならカーソルの帯。
+        帯の外(と空の #LYRIC)では出さない — 付ける相手が無い。"""
+        if self._jacket_cb is None:
+            return
+        band = self.lyric_band_at(at_x, at_y)
+        if band is None:
+            return
+        txt = band[2]
+        has = bool(self._lyric_jackets.get(txt.strip()))
+        menu.addSeparator()
+        ins = menu.addAction("ジャケットを変更…" if has else "ジャケットを挿入…")
+        ins.setData("lyric_jacket")
+        ins.triggered.connect(lambda _c=False, t=txt: self._jacket_cb(t, True))
+        # 付いていないときは灰色にして、右に理由を添える(見本どおり)。
+        rm = menu.addAction("ジャケットを外す" if has
+                            else "ジャケットを外す\t(付いていない)")
+        rm.setData("lyric_jacket_remove")
+        rm.setEnabled(has)
+        rm.triggered.connect(lambda _c=False, t=txt: self._jacket_cb(t, False))
 
     def place_lyric_stop(self):
         """カーソルの所に「ここで歌詞を消す」印(文字の無い #LYRIC)を置く。
@@ -1405,7 +1519,7 @@ class ChartEditWaveform(WaveformWidget):
                 # (利用者の指定 2026-10-01)。囲って選ぶほうは今までどおり。
                 self.update()
                 self._exec_menu(
-                    self._build_command_menu(self._band_x0(bd)),
+                    self._build_command_menu(self._band_x0(bd), bd["y0"]),
                     event.globalPosition().toPoint())
                 return
             self.update()
@@ -2206,13 +2320,13 @@ class ChartEditWaveform(WaveformWidget):
     _COMMAND_LABELS = {"BPMCHANGE": "BPM", "SCROLL": "スクロール(HS)",
                        "LYRIC": "歌詞"}
 
-    def _build_command_menu(self, at_x=None):
+    def _build_command_menu(self, at_x=None, at_y=None):
         """右クリックのメニュー(と、窓の「作譜」メニューの中身)。"""
         menu = QMenu(self)
-        self.populate_command_menu(menu, at_x)
+        self.populate_command_menu(menu, at_x, at_y)
         return menu
 
-    def populate_command_menu(self, menu, at_x=None):
+    def populate_command_menu(self, menu, at_x=None, at_y=None):
         """命令の項目を menu へ足す。カーソルの位置で内容が変わるので、
         窓のメニュー側は出す直前に clear() して呼び直す。
 
@@ -2256,6 +2370,7 @@ class ChartEditWaveform(WaveformWidget):
         stop.setData("lyric_stop")
         stop.setToolTip("文字の無い #LYRIC を置きます。ここで歌詞が消えます。")
         stop.triggered.connect(self.place_lyric_stop)
+        self._jacket_menu(menu, at_x, at_y)
         menu.addSeparator()
         ins = menu.addAction("小節を前に挿入…")
         ins.triggered.connect(self.open_measure_insert)
