@@ -34,7 +34,7 @@ from neotja.ai_chart_gen import build_ai_variant_content
 from neotja.audio_engine import BpmOffsetDetectWorker, ChartGenWorker
 from neotja.preview_dock import PreviewDock, parse_preview_headers
 from neotja.ruler_widget import RulerWidget
-from neotja.start_screen import StartScreen, GlassCard
+from neotja.start_screen import StartScreen, GlassCard, dropped_tja_path
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
 from neotja.lyric_jacket import LyricJackets
@@ -838,6 +838,7 @@ class MainWindow(QMainWindow):
         self.start_screen.recent_activated.connect(self._open_recent)
         self.start_screen.help_requested.connect(self.open_help)
         self.start_screen.settings_requested.connect(self.open_settings)
+        self.start_screen.file_dropped.connect(self._open_dropped)
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.start_screen)   # 0
         self.central_stack.addWidget(splitter)            # 1
@@ -3187,14 +3188,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     @staticmethod
     def _dropped_tja_path(event):
-        md = event.mimeData()
-        if not md.hasUrls():
-            return None
-        for url in md.urls():
-            p = url.toLocalFile()
-            if p and p.lower().endswith((".tja", ".txt")):
-                return p
-        return None
+        # 判定は起動画面と共通(start_screen.dropped_tja_path)。
+        return dropped_tja_path(event)
 
     def dragEnterEvent(self, event):
         if self._dropped_tja_path(event):
@@ -3202,12 +3197,26 @@ class MainWindow(QMainWindow):
         else:
             super().dragEnterEvent(event)
 
+    def dragMoveEvent(self, event):
+        # Enter だけ受けても、Move を QMainWindow 既定(断る)に任せると
+        # カーソルが禁止マークに戻り、落とせない(起動画面で実測)。Move
+        # でも同じ判定で受け付ける。
+        if self._dropped_tja_path(event):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
     def dropEvent(self, event):
         path = self._dropped_tja_path(event)
         if not path:
             super().dropEvent(event)
             return
         event.acceptProposedAction()
+        self._open_dropped(path)
+
+    def _open_dropped(self, path):
+        """落とされた TJA を開く。窓へのドロップと起動画面へのドロップの
+        両方がここへ来る(未保存の確認を挟む所まで同じにするため)。"""
         if not self._unsaved_check():
             return
         self._open_path(path)

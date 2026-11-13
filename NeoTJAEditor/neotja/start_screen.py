@@ -57,6 +57,21 @@ ACTION_CARD_HEIGHT = 196
 #: 起動が遅くならないよう上限を置く。
 HEADER_READ_LIMIT = 2 * 1024 * 1024
 
+
+def dropped_tja_path(event):
+    """ドラッグ中/落とされたものから、開ける TJA のパスを1つ取り出す。
+    無ければ None。起動画面と MainWindow の両方がこれで判定する(受け付
+    ける条件を1か所にしておかないと、画面によって開けたり開けなかったり
+    がずれるため)。"""
+    md = event.mimeData()
+    if not md.hasUrls():
+        return None
+    for url in md.urls():
+        p = url.toLocalFile()
+        if p and p.lower().endswith((".tja", ".txt")):
+            return p
+    return None
+
 #: COURSE: の表記ゆれを、画面に出す名前へそろえる。TJA の仕様では数字と
 #: 英語名のどちらも許される。
 COURSE_NAMES = {
@@ -404,10 +419,18 @@ class StartScreen(QWidget):
     recent_activated = Signal(str)
     help_requested = Signal()
     settings_requested = Signal()
+    #: TJA が落とされた(パス)。開く処理は MainWindow が窓へのドロップと
+    #: 同じ道(未保存の確認 → _open_path)で行う。
+    file_dropped = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("startScreen")
+        # 起動画面にも落とせるようにする(利用者の指定 2026-11-13)。窓
+        # (MainWindow)任せにせず起動画面が自分で受ける。窓の作り(再生
+        # 画面の GL が別の窓になる等)に左右されず、落とした所で受け取れる
+        # ようにするため。
+        self.setAcceptDrops(True)
         self._revealed = False
         self._rows = []
 
@@ -558,6 +581,31 @@ class StartScreen(QWidget):
         h.addStretch(1)
         cv.addLayout(h)
         return f
+
+    # ------------------------------------------------------------------
+    def dragEnterEvent(self, ev):
+        if dropped_tja_path(ev):
+            ev.acceptProposedAction()
+        else:
+            super().dragEnterEvent(ev)
+
+    def dragMoveEvent(self, ev):
+        # Enter だけでなく Move でも受け付けると言い続けないと、カーソルが
+        # 禁止マークに戻り落とせない。前は窓(QMainWindow)が Enter だけ
+        # 受けて Move を既定のまま断っていたのが、起動画面に落とせなかった
+        # 原因だった(試験で窓へ送って実測)。
+        if dropped_tja_path(ev):
+            ev.acceptProposedAction()
+        else:
+            super().dragMoveEvent(ev)
+
+    def dropEvent(self, ev):
+        path = dropped_tja_path(ev)
+        if not path:
+            super().dropEvent(ev)
+            return
+        ev.acceptProposedAction()
+        self.file_dropped.emit(path)
 
     # ------------------------------------------------------------------
     def paintEvent(self, ev):
