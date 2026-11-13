@@ -36,6 +36,15 @@ _SETTINGS_KEYS = (
     # 一覧と default_settings() の**両方**に要る — 片方だけだと
     # 次の起動で読み戻せない(上の record_output_dir が実際にそうなっていた)。
     "rec_bg_default",
+    # 録画の背景そのもの(絵の道・開始位置・暗さ・ジャケット…)。録画の窓と
+    # Player のまとめ録画が書き込んでいたのに、ここに無かったので再起動の
+    # たびに読み戻されず、毎回「背景なし」から選び直しになっていた
+    # (2026-11-13 に見つけた)。default_settings() と両方に要る。
+    "rec_bg_path", "rec_bg_offset", "rec_bg_dim", "rec_bg_lane",
+    "rec_bg_fade_in", "rec_bg_fade_out", "rec_bg_fade_target",
+    "rec_bg_art", "rec_bg_art_pct", "rec_bg_art_pad",
+    "rec_bg_art_x", "rec_bg_art_y", "rec_bg_art_edge", "rec_bg_art_edge_color",
+    "rec_bg_wave", "rec_bg_wave_pct", "rec_bg_wave_color", "rec_bg_wave_alpha",
     # 利用者が用意した TNDE の System フォルダ。ここと default_settings() の
     # 両方に書くこと(片方だけだと再起動のたびに空へ戻る。上の
     # record_output_dir が実際にそうなっていた)。
@@ -71,6 +80,28 @@ def default_settings() -> dict:
         "record_output_dir": "",
         # 録画の背景の既定(「既定にする」で入る)。空なら覚えていない。
         "rec_bg_default": {},
+        # 録画の背景。値の形(整数か小数か)は録画の窓が書き込む形に合わせる —
+        # _coerce は既定の型へ寄せるので、ここが違うと読み戻しで丸まる。
+        # 暗さ(dim)と地の濃さ(lane)は % の整数、ほかは recorder.RecordBackground
+        # の既定と同じ数字。
+        "rec_bg_path": "",
+        "rec_bg_offset": 0.0,
+        "rec_bg_dim": 0,
+        "rec_bg_lane": 100,
+        "rec_bg_fade_in": 0.0,
+        "rec_bg_fade_out": 0.0,
+        "rec_bg_fade_target": "all",
+        "rec_bg_art": "",
+        "rec_bg_art_pct": 30.0,
+        "rec_bg_art_pad": 24,
+        "rec_bg_art_x": 24,
+        "rec_bg_art_y": -24,
+        "rec_bg_art_edge": 6,
+        "rec_bg_art_edge_color": "#ffffff",
+        "rec_bg_wave": False,
+        "rec_bg_wave_pct": 15.0,
+        "rec_bg_wave_color": "#ffb300",
+        "rec_bg_wave_alpha": 70,
         # 動画書き出しで最後に実際に使った場所。録画のたびに書き換わる履歴で、
         # 上の record_output_dir(ユーザーの指定)とは別に持つ。一緒にしていた
         # ころは、環境設定で保存先を決めても一度別の場所へ書き出すだけで
