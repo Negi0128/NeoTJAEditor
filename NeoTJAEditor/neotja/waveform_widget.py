@@ -717,6 +717,17 @@ class WaveformWidget(QWidget):
         return max(0.05, self._visible_span() * self.SCROLL_FRAC
                    * self.WHEEL_STEP_FRAC)
 
+    @staticmethod
+    def _wheel_delta(event):
+        """ホイールの量(上 = 正)。縦が 0 なら横の値を使う。
+
+        Windows では Alt を押しながら回すと Qt が**横のホイール**として
+        届ける(angleDelta の y が 0 で x に ±120)。縦だけを見ていたので
+        Alt+ホイールの拡大縮小が片方にしか効かなかった(利用者の報告
+        2026-11-13)。向きの符号は縦のときと同じに入っている。"""
+        d = event.angleDelta()
+        return d.y() or d.x()
+
     def _wheel_notches(self, event):
         """そのホイール操作が何目盛ぶんか。
 
@@ -724,7 +735,7 @@ class WaveformWidget(QWidget):
         刻んで送ってくるので、端数のまま使う — 1イベント=1目盛に丸めると、
         少し回しただけで1小節飛んで「滑らかでない」(利用者の指定
         2026-11-05)。向きはそのまま符号で入る。"""
-        d = float(event.angleDelta().y())
+        d = float(self._wheel_delta(event))
         if d == 0.0:
             return 0.0
         n = d / 120.0
@@ -761,7 +772,7 @@ class WaveformWidget(QWidget):
 
         向きは譜面レーンに合わせる: 上に回すと先へ進む。以前は逆で、レーンの
         上で回すのと波形の上で回すのとで譜面が反対に動いていた。"""
-        up = event.angleDelta().y() > 0
+        d = self._wheel_delta(event)
         if not (event.modifiers() & self.ZOOM_MODIFIERS):
             # レーンと繋がっているとき(作譜モードの波形)は、レーンの小節移動を
             # そのまま呼ぶ。向きもトゥイーンもレーンと完全に同じになる — 秒数で
@@ -779,7 +790,11 @@ class WaveformWidget(QWidget):
             event.accept()
             return
 
-        factor = 1.25 if up else 1 / 1.25
+        if d == 0:
+            # 量の無いホイール(タッチパッドの終わりの合図など)で縮めない。
+            event.accept()
+            return
+        factor = 1.25 if d > 0 else 1 / 1.25
         if self._follow_window:
             # 追従モードでは窓幅そのものを増減(上スクロールで拡大表示=窓を狭く)。
             self._follow_window = max(1.0, min(self._follow_window / factor, 60.0))
