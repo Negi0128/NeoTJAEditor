@@ -1696,6 +1696,25 @@ class PreviewDock(QDockWidget):
             heights.append(pg.minimumHeight() if pg is self.info_bar
                            else pg.sizeHint().height())
         bottom_h = max(heights)
+        # 統合画面では、作譜のときの再生画面ぜんたいの高さを通常再生と同じに
+        # そろえる(利用者の決定 2026-11-13、案A)。作譜は画面が上半分(360)に
+        # 縮むかわりにペインが下に付くが、ペインの段が 720-360 に足りないと
+        # そのぶん再生画面が低くなり、右下の段がモードを替えるたびに伸び縮み
+        # していた。足りないぶんは作譜ペインの「音符」の行にだけ足す(音符の
+        # 行は ChartEditWaveform._row_rects で余りを全部もらう行なので、
+        # ペインを高くすればそのまま音符の行が高くなる)。数字は決め打ちせず、
+        # 画面の高さの差と実際のページの高さから出す。倍率がかかっても、
+        # 画面とページは同じ倍率で縮むので差は残らない。別窓(Player)は
+        # 窓ごと伸び縮みしてよいので今までどおり。
+        ce = getattr(self, "chart_edit", None)
+        if self._embedded and ce is not None and self.MODE_EDIT is not None:
+            from neotja.game_screen import SCREEN_H_COMPACT, SCREEN_H_FULL
+            extra = (SCREEN_H_FULL - SCREEN_H_COMPACT) - bottom_h
+            if extra > 0:
+                ce.setFixedHeight(ce.minimumHeight() + extra)
+                bottom_h += extra
+                #: 作譜ペインに足した高さ(試験と報告用)。
+                self._edit_extra_h = extra
         #: ページを出すときのスタックの高さ。ペインをゲーム画面の中へ移した
         #: ときは、そのぶん縮める(_apply_bottom_height)。
         self._bottom_h_stack = bottom_h

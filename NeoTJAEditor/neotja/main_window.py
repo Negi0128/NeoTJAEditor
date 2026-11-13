@@ -311,6 +311,11 @@ class CourseCard(GlassCard):
                 f"　ドン {don} / カッ {ka}"
                 f"　({don / tot * 100:.2f}% : {ka / tot * 100:.2f}%)")
             self.lbl_breakdown.setVisible(True)
+            # 隠れていたあいだに set_scale の字を当てても、出したときの磨き
+            # (polish)でスタイルシートの大きさに戻ってしまう。出してから
+            # 隣の行と同じ字に当て直す(この行だけ小さく、行間がずれていた)。
+            self.lbl_breakdown.ensurePolished()
+            self.lbl_breakdown.setFont(self.lbl_time.font())
         else:
             self.lbl_breakdown.setVisible(False)
 
@@ -1112,11 +1117,10 @@ class MainWindow(QMainWindow):
     def _scale_bottom_block(self):
         """下の段の高さに合わせて部品を大きくする(等倍〜1.4 倍)。
 
-        再生画面の高さはモードで違う(作譜 360+ペイン、通常 720)。前は
-        低いモードで再生画面の下を暗い地で埋めて段の位置をそろえていたが、
-        シークバーと情報のあいだの空き地が気になる(利用者の指定
-        2026-11-12)ので、埋めるのをやめて余りを段に渡し、段の部品を
-        大きくして使う。モード切替で段が上下に動くのは承知のうえ。
+        再生画面の高さは、作譜ペインを高くして(PreviewDock の
+        _edit_extra_h)どのモードでも同じにしてある(利用者の決定
+        2026-11-13、案A)。前は作譜だけ画面が低く、段がモードを替えるたびに
+        伸び縮みしていた。余りは段に渡し、段の部品を大きくして使う。
 
         縦(部品の高さ・段間・タップの直径・カードの字)は余りの高さの比で、
         横(BPM測定の箱とカードの幅)は余りの幅の比で決める。横は別に見る
@@ -1144,6 +1148,16 @@ class MainWindow(QMainWindow):
         if need.width() > row.width() and fw > 1.0:
             fw = max(1.0, fw - (need.width() - row.width()) / grow - 0.01)
             self._apply_bottom_scale(f, fw)
+        # 拡大しているあいだは、段の最小の高さを等倍のときの値で押さえる。
+        # 押さえないと、拡大した部品の minimumSizeHint がそのまま窓の最小の
+        # 高さになり、一度大きくなると「段が高い → 部品が大きい → 窓が
+        # 縮めない」で戻らなくなる(実測: 1920x1040 で開くと窓が 1058 まで
+        # 伸びた)。押さえておけば、縮められたときに上の「溢れたら一段戻す」で
+        # 部品のほうが小さくなる。等倍に戻ったら押さえを外して、いまの中身の
+        # 要る高さ(minimumSizeHint)に任せる。
+        lo = base_h if getattr(self, "_bottom_scale", 1.0) > 1.0 else 0
+        if row.minimumHeight() != lo:
+            row.setMinimumHeight(lo)
 
     def _apply_bottom_scale(self, f, fw):
         f = round(float(f), 2)
