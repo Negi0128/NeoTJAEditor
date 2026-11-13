@@ -2178,8 +2178,7 @@ class PreviewDock(QDockWidget):
         self._speed_row.setVisible(visible)
         if visible:
             idx = self.bottom_stack.currentIndex()
-            self.record_button.setVisible(
-                idx in (self.MODE_TITLE, self.MODE_WAVE, self.MODE_MULTI))
+            self.record_button.setVisible(self._record_shown_in(idx))
             self._place_command_panel(
                 self.MODE_EDIT is not None and idx == self.MODE_EDIT)
         self._apply_bottom_height()
@@ -3532,6 +3531,23 @@ class PreviewDock(QDockWidget):
             self.set_bottom_mode(idx)
             return
 
+    def _record_shown_in(self, idx):
+        """そのモードで録画ボタンを出すか。
+
+        書き出しの中身はモードに一切左右されない(recorder は画面外に専用
+        の GameScreenWidget(1280x720)を作って描く)ので、これは純粋に
+        「どこから始められるか」の話。音声波形は譜面を見ながら録りたい
+        場面がそのまま録画したい場面なので出す。
+
+        作譜も統合画面では出す(利用者の指定 2026-11-13)。統合画面は作譜が
+        ふだんの居場所で、録画のたびに通常再生へ切り替えるのは手間なため。
+        Player は今までどおり出さない — 下が別物なので、そこから始めると
+        何が録れるのか紛らわしい。情報のときも出さない。"""
+        if idx in (self.MODE_TITLE, self.MODE_WAVE, self.MODE_MULTI):
+            return True
+        return bool(self._embedded and self.MODE_EDIT is not None
+                    and idx == self.MODE_EDIT)
+
     def set_bottom_mode(self, idx: int):
         """下部パネルのモードを切り替える。
 
@@ -3568,14 +3584,7 @@ class PreviewDock(QDockWidget):
         # 下の「ふつうのゲーム画面向けの支度」へ進む(入っているあいだは
         # ゲーム画面は隠れているだけなので、支度はそのまま通してよい)。
         self._apply_multi_mode(idx == self.MODE_MULTI)
-        # 録画ボタンを出すモード。書き出しの中身はモードに一切左右されない
-        # (recorder は画面外に専用の GameScreenWidget(1280x720)を作って描く)
-        # ので、これは純粋に「どこから始められるか」の話。音声波形は譜面を
-        # 見ながら録りたい場面がそのまま録画したい場面なので出す。作譜と情報の
-        # ときは出さない — 画面下が別物なので、そこから始めると何が録れるのか
-        # 紛らわしい。
-        self.record_button.setVisible(
-            idx in (self.MODE_TITLE, self.MODE_WAVE, self.MODE_MULTI))
+        self.record_button.setVisible(self._record_shown_in(idx))
         # 軽量は下にペインを置かないので 1280x720 のまま(縦横比を通常再生と
         # 揃えたいという要望)。縮めるのはペインを置くモードだけ。
         self.game_screen.set_compact(
