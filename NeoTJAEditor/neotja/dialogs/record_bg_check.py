@@ -96,9 +96,11 @@ _ART_CACHE = {}
 _ART_CACHE_MAX = 4
 
 
-def _baked_art(bg, h):
-    """枠まで付けて焼いたジャケット。作れなければ None。"""
-    path = getattr(bg, "art", "")
+def _baked_art(bg, h, path=None):
+    """枠まで付けて焼いたジャケット。作れなければ None。
+
+    path を渡せばその絵(歌詞ごとのジャケット)、無ければ bg.art。"""
+    path = getattr(bg, "art", "") if path is None else path
     if not path or not os.path.exists(path):
         return None
     ah = max(8, int(round(h * bg.art_pct / 100.0)))
@@ -135,12 +137,16 @@ def _baked_art(bg, h):
     return img
 
 
-def _draw_art(p, bg, w, h):
+def _draw_art(p, bg, w, h, song_sec=None):
     """ジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。
 
     置き場所は art_x / art_y(出来上がりの絵の中の座標)。負は反対の端
-    からの距離。既定 (24, -24) は左下。"""
-    img = _baked_art(bg, h)
+    からの距離。既定 (24, -24) は左下。歌詞に合わせて切り替えるときは
+    **見ている時刻の絵**(song_sec、音源の秒)を出す。"""
+    path = None
+    if song_sec is not None and hasattr(bg, "art_at"):
+        path = bg.art_at(song_sec)
+    img = _baked_art(bg, h, path)
     if img is None:
         return
     x = bg.art_x if bg.art_x >= 0 else w - img.width() + bg.art_x
@@ -249,7 +255,7 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
     # 画面の下のほうにある歌詞(#LYRIC)が棒やジャケットに隠れる
     # (利用者の指定 2026-10-26)。
     _draw_wave(p, bg, song, bg.offset + float(song_sec), w, h)
-    _draw_art(p, bg, w, h)
+    _draw_art(p, bg, w, h, float(song_sec))
     if (sw, sh) == (w, h):
         p.drawImage(0, 0, shot)
     else:

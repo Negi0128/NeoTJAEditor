@@ -49,8 +49,12 @@ class RecordBackgroundDialog(QDialog):
     MAX_VIEW_W = 900
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
-                 song_path="", canvas_wh=None):
+                 song_path="", canvas_wh=None, art_track=None, art_note=""):
         super().__init__(parent)
+        #: 基本ジャケット → 歌詞に合わせた切り替えの区切り、を作る呼び出し
+        #: (録画の窓が渡す)。見本の1コマを「見ている時刻の絵」にするため。
+        #: まとめ録画からは渡らない(切り替えない)。
+        self._art_track = art_track
         self.setWindowTitle("録画の背景")
         self._make_widget = make_widget
         self._widget = None
@@ -181,6 +185,8 @@ class RecordBackgroundDialog(QDialog):
         art_row = QHBoxLayout()
         self.ed_art = QLineEdit(getattr(bg, "art", "") if bg else "")
         self.ed_art.setPlaceholderText("なし（png / jpg）")
+        if art_note:
+            self.ed_art.setToolTip(art_note)
         self.ed_art.textChanged.connect(self._schedule)
         btn_art = QPushButton("選ぶ...")
         btn_art.clicked.connect(self._browse_art)
@@ -334,7 +340,9 @@ class RecordBackgroundDialog(QDialog):
             wave=False,
             wave_pct=15.0,
             wave_color=self._wave_color,
-            wave_alpha=70)
+            wave_alpha=70,
+            art_track=(self._art_track(self.ed_art.text().strip())
+                       if self._art_track else None))
 
     def _sync_enabled(self):
         on = bool(self.ed_path.text().strip())

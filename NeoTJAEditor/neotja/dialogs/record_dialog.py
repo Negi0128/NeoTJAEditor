@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from neotja import recorder
 from neotja import settings as settings_mod
+from neotja.lyric_jacket import LyricJackets, jacket_segments
 from neotja.theme import COLORS
 
 # step() 1回あたりに使う時間の目安。絵を描くのは GUI スレッドでしかできないので
@@ -377,6 +378,18 @@ class RecordDialog(QDialog):
         # (利用者の指定 2026-11-06)。絵の道はそのまま。
         self._bg = recorder.bg_with_defaults(
             self._bg, cfg0.get("rec_bg_default"))
+        # ジャケットの欄は**この譜面の基本ジャケット**(利用者の決定
+        # 2026-11-13)。譜面の隣の .jacket.json の base に覚え、無ければ
+        # 今までの共通の設定(rec_bg_art)を出す。歌詞ごとの絵との切り替えは
+        # _bg_now が組み立てる。
+        self._art_global = str(cfg0.get("rec_bg_art", "") or "")
+        jk = getattr(main_window, "lyric_jackets", None)
+        self._bg.art = (jk.base if jk is not None and jk.base
+                        else self._art_global)
+        #: 窓を開いたときに欄に出した値。変えたときだけ譜面へ書く(見て
+        #: 閉じただけで共通の値が譜面の基本へ写り、対応表ができてしまう
+        #: のを防ぐ)。
+        self._art_shown = self._bg.art
         bg_row = QHBoxLayout()
         self.ed_bg = QLineEdit(self._bg.path)
         self.ed_bg.setReadOnly(True)      # 触るのは窓のほう
@@ -451,8 +464,34 @@ class RecordDialog(QDialog):
         return recorder.CANVAS_PRESETS.get(q.get("canvas", "720p"))
 
     def _bg_now(self):
-        """いま決まっている背景。path が空なら「背景なし」。"""
+        """いま決まっている背景。path が空なら「背景なし」。
+
+        歌詞に合わせたジャケットの切り替え(art_track)はここで付け直す —
+        窓を開いたまま作譜ペインで付け外しされても、書き出すときの表を使う。"""
+        self._bg.art_track = self._art_track(self._bg.art)
         return self._bg
+
+    def _art_track(self, base):
+        """録るコースの歌詞から、ジャケットの区切り(音源の秒)を作る。
+
+        歌詞は preview_data の "lyrics"(譜面時刻)なので、打音の予定と
+        同じく OFFSET を引いて音源の秒にする(recorder の
+        hit_schedule_from_preview と同じ直し方)。録画の頭(助走)からの
+        秒へ直すのは recorder 側(VideoRecording の start_sec)。
+        切り替えるものが無ければ [](今までどおり base を1枚)。
+        見つからない絵は付いていない扱い(その帯は基本ジャケット)。"""
+        jk = getattr(self._mw, "lyric_jackets", None)
+        lyrics = self._preview.get("lyrics") or []
+        if jk is None or not jk.lyrics or not lyrics:
+            return []
+        use = LyricJackets(base, {k: v for k, v in jk.lyrics.items()
+                                  if os.path.exists(v)})
+        if not use.lyrics:
+            return []
+        off = float(self._offset or 0.0)
+        segs = jacket_segments([(float(t) - off, txt) for t, txt in lyrics],
+                               use)
+        return segs if len(segs) > 1 else []
 
     def _open_bg_dialog(self):
         """背景を決める窓を開く。
@@ -471,11 +510,23 @@ class RecordDialog(QDialog):
                                      max(0.1, end_sec - start_sec), self._bg,
                                      out_dir=os.path.dirname(self._auto_path),
                                      song_path=self._song,
-                                     canvas_wh=self._canvas_now())
+                                     canvas_wh=self._canvas_now(),
+                                     art_track=self._art_track,
+                                     art_note=(
+                                         "この譜面の基本ジャケット。歌詞に"
+                                         "ジャケットを付けた所では、その絵に"
+                                         "切り替わります。"))
         if dlg.exec() != QDialog.Accepted:
             return
         self._bg = dlg.background()
         self.ed_bg.setText(self._bg.path)
+        if self._bg.art != self._art_shown:
+            # 変えたときだけ譜面の基本へ(上の _art_shown の説明)。保存で
+            # .jacket.json に書かれ、未保存の印も付く。
+            setter = getattr(self._mw, "set_jacket_base", None)
+            if setter is not None:
+                setter(self._bg.art)
+            self._art_shown = self._bg.art
 
     @staticmethod
     def _resolve_out_dir(cfg, default_dir):
@@ -768,7 +819,9 @@ class RecordDialog(QDialog):
         cfg["rec_bg_fade_in"] = bg.fade_in
         cfg["rec_bg_fade_out"] = bg.fade_out
         cfg["rec_bg_fade_target"] = bg.fade_target
-        cfg["rec_bg_art"] = bg.art
+        # ジャケットは譜面ごとに持つようになったので、共通の値は書き換えない
+        # (書くと、この譜面の基本が次に開く別の譜面にも写ってしまう)。
+        cfg["rec_bg_art"] = self._art_global
         cfg["rec_bg_art_pct"] = bg.art_pct
         cfg["rec_bg_art_pad"] = bg.art_pad
         cfg["rec_bg_art_x"] = bg.art_x

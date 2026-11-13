@@ -525,7 +525,7 @@ class RecordBackground:
                  art_x=24, art_y=-24,
                  art_edge=6, art_edge_color="#ffffff",
                  wave=False, wave_pct=15.0, wave_color="#ffb300",
-                 wave_alpha=70):
+                 wave_alpha=70, art_track=None):
         self.path = str(path or "")
         try:
             self.offset = float(offset or 0.0)
@@ -576,6 +576,12 @@ class RecordBackground:
                 return d
         self.art_x = _pos(art_x, 24)
         self.art_y = _pos(art_y, -24)
+        #: 歌詞に合わせて切り替えるジャケット(利用者の承認 2026-11-13)。
+        #: [(始まり, 終わり, 道)] で、時刻は**音源の秒**(None は頭から /
+        #: 最後まで)。lyric_jacket.jacket_segments で作る。空なら今までどおり
+        #: art をずっと出す。道の "" はその区間は何も出さない。
+        #: 見た目の項目ではないので DEFAULT_KEYS には入れない。
+        self.art_track = list(art_track or ())
         #: 画面の下に出す「音に合わせて動く棒」(利用者の指定 2026-10-26)。
         #: wave_pct は画面の高さに対する高さ、wave_alpha は濃さ(%)。
         self.wave = bool(wave)
@@ -595,6 +601,15 @@ class RecordBackground:
     @property
     def is_image(self):
         return os.path.splitext(self.path)[1].lower() in BG_IMAGE_EXT
+
+    def art_at(self, song_sec):
+        """その時刻(音源の秒)に出すジャケットの道。出さないなら ""。
+
+        途中から見ても区切りだけで決まる(確認の1コマもこれを使う)。"""
+        if not self.art_track:
+            return self.art
+        from neotja.lyric_jacket import image_at
+        return image_at(self.art_track, song_sec)
 
 
 def as_background(bg):
@@ -620,7 +635,8 @@ def as_background(bg):
             art_edge_color=bg.get("art_edge_color", "#ffffff"),
             wave=bg.get("wave", False), wave_pct=bg.get("wave_pct", 15.0),
             wave_color=bg.get("wave_color", "#ffb300"),
-            wave_alpha=bg.get("wave_alpha", 70))
+            wave_alpha=bg.get("wave_alpha", 70),
+            art_track=bg.get("art_track"))
     return RecordBackground(str(bg))
 
 
@@ -642,9 +658,62 @@ def _bg_input_args(bg, start_sec):
 
 def _art_input_args(bg):
     """ジャケットの入力ぶん(焼かない版)。置かないなら空。"""
-    if not getattr(bg, "art", "") or not os.path.exists(bg.art):
-        return []
-    return ["-loop", "1", "-i", bg.art]
+    args = []
+    for path, _windows in _art_layers(bg):
+        args += ["-loop", "1", "-i", path]
+    return args
+
+
+def _art_layers(bg):
+    """重ねるジャケット [(道, 出す区間 か None)]。None は「ずっと出す」。
+
+    切り替えが無ければ今までどおり art を1枚。切り替えがあれば、
+    **出てくる絵ごとに入力を1つ**(同じ絵が何度出ても1つ)にして、
+    出す区間を並べる。ffmpeg は入力の数だけ絵を読むので、帯の数ではなく
+    絵の数にしておけば、合作で同じ人が何十回出てきても重くならない。
+    無い絵は飛ばす(その区間には何も出ない)。"""
+    track = getattr(bg, "art_track", None)
+    if not track:
+        art = getattr(bg, "art", "")
+        return [(art, None)] if art and os.path.exists(art) else []
+    order, windows = [], {}
+    for start, end, path in track:
+        if not path or not os.path.exists(path):
+            continue
+        if path not in windows:
+            order.append(path)
+            windows[path] = []
+        windows[path].append((start, end))
+    out = []
+    for path in order:
+        ws = windows[path]
+        # 頭から最後までずっと = 区間の印は要らない(式を短く)。
+        out.append((path, None if ws == [(None, None)] else ws))
+    return out
+
+
+def _enable_expr(windows, t0):
+    """出す区間 → overlay の enable の式。t0 は録画の 0 秒の音源の秒。
+
+    録画は助走(RECORD_LEAD_SEC)の分だけ曲より前から始まるので、
+    動画の秒 = 音源の秒 - t0(t0 は負)。区間は [始まり, 終わり) で、
+    between(t,a,b) ではなく gte*lt にしている — between は終わりも含む
+    ので、切り替わりの瞬間のコマで前後の2枚が両方「出す」になり、後に
+    重ねたほうが1コマ早く見える。区間が複数なら足し合わせる(0 以外 =
+    出す)。"""
+    parts = []
+    for start, end in windows:
+        a = None if start is None else float(start) - float(t0)
+        b = None if end is None else float(end) - float(t0)
+        if a is not None and b is not None:
+            parts.append("gte(t,%.4f)*lt(t,%.4f)" % (a, b))
+        elif a is not None:
+            parts.append("gte(t,%.4f)" % a)
+        elif b is not None:
+            parts.append("lt(t,%.4f)" % b)
+        else:
+            return ""
+    return "+".join(parts) if parts else "0"
 
 
 def _bg_out_size(canvas, src_w, src_h):
@@ -671,7 +740,8 @@ def bg_with_defaults(bg, saved):
     for k in RecordBackground.DEFAULT_KEYS:
         if k in saved:
             kw[k] = saved[k]
-    return RecordBackground(path=bg.path, offset=bg.offset, art=bg.art, **kw)
+    return RecordBackground(path=bg.path, offset=bg.offset, art=bg.art,
+                            art_track=getattr(bg, "art_track", None), **kw)
 
 
 def art_total_h(bg, out_h):
@@ -684,13 +754,16 @@ def art_total_h(bg, out_h):
 _ART_BAKED = {}
 
 
-def _bake_art(bg, out_h):
+def _bake_art(bg, out_h, path=None):
     """出来上がりの大きさ・枠つきで1枚だけ焼いて、その道を返す。
 
     **毎コマの scale/pad をやめるため。** 焼けなければ空を返して、
-    呼び手は今までどおり元の絵を渡す(見た目は同じ、少し重いだけ)。"""
+    呼び手は今までどおり元の絵を渡す(見た目は同じ、少し重いだけ)。
+    path を渡せばその絵を(歌詞ごとのジャケット)、無ければ bg.art を焼く。
+    大きさ・枠は同じ bg の値なので、切り替えても見た目はそろう。"""
+    src = path or bg.art
     try:
-        key = (bg.art, os.path.getmtime(bg.art), int(out_h),
+        key = (src, os.path.getmtime(src), int(out_h),
                round(float(bg.art_pct), 3), int(bg.art_edge),
                bg.art_edge_color)
     except OSError:
@@ -711,7 +784,7 @@ def _bake_art(bg, out_h):
                        "neotja_art_%08x.png" % (abs(hash(key)) & 0xffffffff))
     try:
         subprocess.run([_ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
-                        "-i", bg.art, "-vf", vf, "-frames:v", "1", out],
+                        "-i", src, "-vf", vf, "-frames:v", "1", out],
                        capture_output=True, timeout=60, **_no_window())
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -748,18 +821,26 @@ def _wave_chain(bg, aud_idx, w, h, cur):
 
 
 def _art_plan(bg, out_h):
-    """(入力の引数, 焼いてあるか)。焼けていれば毎コマの scale が要らない。"""
-    if not getattr(bg, "art", "") or not os.path.exists(bg.art):
-        return [], False
-    baked = _bake_art(bg, out_h)
-    if baked:
-        return ["-loop", "1", "-i", baked], True
-    return ["-loop", "1", "-i", bg.art], False
+    """(入力の引数, [(焼いてあるか, 出す区間 か None)])。
+
+    ジャケット1枚につき入力が1つ(_art_layers)。焼けていれば毎コマの
+    scale が要らない。置かないなら ([], [])。"""
+    args, arts = [], []
+    for path, windows in _art_layers(bg):
+        baked = _bake_art(bg, out_h, path)
+        args += ["-loop", "1", "-i", baked or path]
+        arts.append((bool(baked), windows))
+    return args, arts
 
 
 def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
-                       art_idx=None, art_baked=False, aud_idx=None):
+                       art_idx=None, art_baked=False, aud_idx=None,
+                       arts=None, t0=0.0):
     """背景の上に画面を重ねるフィルタ。入力 0 が画面、1 が背景。
+
+    ジャケットは arts = [(入力の番号, 焼いてあるか, 出す区間 か None)]。
+    区間の時刻は音源の秒で、t0(録画の 0 秒の音源の秒)を引いて動画の
+    秒に直す。art_idx / art_baked は1枚だけの古い渡し方(区間なし)。
 
     画面の側は **premultiplied のまま** ffmpeg へ渡しているので、
     overlay に alpha=premultiplied を付ける(付け忘れると縁が黒ずむ)。"""
@@ -812,29 +893,39 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
     if wants_wave(bg, aud_idx):
         chain, cur = _wave_chain(bg, aud_idx, w, h, cur)
         graph += chain
-    if art_idx is not None and _art_input_args(bg):
-        # 置き場所は art_x / art_y(余白の内側を 0〜100%)。高さは画面に
-        # 対する割合、横は縦横比のまま。既定は左下。
-        ah = max(8, int(round(h * bg.art_pct / 100.0)))
-        e = int(bg.art_edge)
-        if art_baked:
+    if arts is None:
+        arts = ([(art_idx, art_baked, None)]
+                if art_idx is not None and _art_input_args(bg) else [])
+    # 置き場所は art_x / art_y(出来上がりの絵の中の座標)。高さは画面に
+    # 対する割合、横は縦横比のまま。既定は左下。歌詞ごとのジャケットも
+    # 同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置がぶれない。
+    ah = max(8, int(round(h * bg.art_pct / 100.0)))
+    e = int(bg.art_edge)
+    # W,H は下の絵、w,h は乗せる絵の大きさ(ffmpeg の overlay の式)。
+    # 負の座標は反対の端から数える。横幅は縦横比で決まって先には
+    # 分からないので、式のまま渡す。
+    ex = ("%d" % bg.art_x) if bg.art_x >= 0 else ("W-w%d" % bg.art_x)
+    ey = ("%d" % bg.art_y) if bg.art_y >= 0 else ("H-h%d" % bg.art_y)
+    for k, (idx, baked, windows) in enumerate(arts):
+        if baked:
             # もう出来上がりの大きさで焼いてある。触らずに重ねるだけ。
-            art_chain = "[%d:v]null" % art_idx
+            art_chain = "[%d:v]null" % idx
         else:
             art_chain = ("[%d:v]crop='min(iw,ih)':'min(iw,ih)',"
-                         "scale=%d:%d" % (art_idx, ah, ah))
+                         "scale=%d:%d" % (idx, ah, ah))
             if e > 0:
                 art_chain += (",pad=iw+%d:ih+%d:%d:%d:color=%s"
                               % (e * 2, e * 2, e, e, bg.art_edge_color))
-        total_h = ah + e * 2
-        nxt = cur + "a"
-        # W,H は下の絵、w,h は乗せる絵の大きさ(ffmpeg の overlay の式)。
-        # 負の座標は反対の端から数える。横幅は縦横比で決まって先には
-        # 分からないので、式のまま渡す。
-        ex = ("%d" % bg.art_x) if bg.art_x >= 0 else ("W-w%d" % bg.art_x)
-        ey = ("%d" % bg.art_y) if bg.art_y >= 0 else ("H-h%d" % bg.art_y)
-        graph += (art_chain + "[art];"
-                  + "[%s][art]overlay=x=%s:y=%s[%s];" % (cur, ex, ey, nxt))
+        # 1枚目は今までと同じ名札(art / 末尾 a)。2枚目からは番号を足す。
+        tag = "art" if k == 0 else "art%d" % k
+        nxt = cur + ("a" if k == 0 else "a%d" % k)
+        # 区間があれば、そのあいだだけ出す。区間どうしは重ならないので
+        # (lyric_jacket.jacket_segments)、どの瞬間も出ているのは1枚だけ。
+        en = _enable_expr(windows, t0) if windows else ""
+        en = (":enable='%s'" % en) if en else ""
+        graph += (art_chain + "[%s];" % tag
+                  + "[%s][%s]overlay=x=%s:y=%s%s[%s];"
+                  % (cur, tag, ex, ey, en, nxt))
         cur = nxt
     graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
               % cur + tail + ",format=yuv420p[v]")
@@ -996,7 +1087,7 @@ class FrameCostProbe:
         if bg:
             args, pre = _bg_input_args(bg, 0.0)
             cmd += args
-            art_args, art_baked = _art_plan(
+            art_args, arts = _art_plan(
                 bg, _bg_out_size(CANVAS_PRESETS.get(canvas), pw, ph)[1])
             cmd += art_args
             # 棒のぶんも見積もりに入れる。ここには音の入力が無いので、
@@ -1005,14 +1096,14 @@ class FrameCostProbe:
             if getattr(bg, "wave", False):
                 cmd += ["-f", "lavfi", "-i",
                         "anullsrc=r=%d:cl=stereo" % SAMPLE_RATE]
-                probe_aud = 2 + (1 if art_args else 0)
+                probe_aud = 2 + len(arts)
             dur = max(1.0, (self.warmup + self.samples) / float(fps or 60))
             cmd += ["-filter_complex",
                     _bg_filter_complex(CANVAS_PRESETS.get(canvas),
                                        pw, ph, fps or 60, bg, pre, dur,
-                                       art_idx=2 if art_args else None,
-                                       art_baked=art_baked,
-                                       aud_idx=probe_aud),
+                                       aud_idx=probe_aud,
+                                       arts=[(2 + i, b, wnd) for i, (b, wnd)
+                                             in enumerate(arts)]),
                     "-map", "[v]"]
         cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
@@ -1283,9 +1374,10 @@ class VideoRecording:
             "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", audio_path,
         ]
         # ジャケットは**音のうしろ**。前に入れると -map 2:a がずれる。
-        art_args, art_baked = (
+        # 歌詞に合わせて切り替えるときは絵の数だけ入力が並ぶ(3, 4, …)。
+        art_args, arts = (
             _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1]) if bg
-            else ([], False))
+            else ([], []))
         cmd += art_args
         if bg:
             dur = self.total_frames / float(fps or 60)
@@ -1294,8 +1386,9 @@ class VideoRecording:
             a_out = "[aout]" if wants_wave(bg, 2) else "2:a"
             cmd += ["-filter_complex",
                     _bg_filter_complex(canvas_wh, pw, ph, fps, bg, pre, dur,
-                                       art_idx=3 if art_args else None,
-                                       art_baked=art_baked, aud_idx=2),
+                                       aud_idx=2, t0=self.start_sec,
+                                       arts=[(3 + i, b, wnd) for i, (b, wnd)
+                                             in enumerate(arts)]),
                     "-map", "[v]", "-map", a_out]
         if vf:
             cmd += ["-vf", vf]
