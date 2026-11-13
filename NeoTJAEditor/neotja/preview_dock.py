@@ -1240,11 +1240,14 @@ def hit_notes_from_preview(preview_data):
     data = preview_data or {}
     out = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
     out += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
+    # 割れる風船の最後の1打はドンではなく割れる音(balloon_tick_notes)。
+    # 以前はここだけ _roll_tick_notes を直に使っていたため、本文を読み直した
+    # 経路(refresh_from_content)では 必要打数ぶんのドン と割れる音が同じ
+    # 時刻に重なって鳴り、set_preview_data の経路と音が違っていた
+    # (利用者の報告 2026-11-13)。両方ともここを通すようにしてある。
     spd = data.get("roll_hit_speed", 45)
-    out += _roll_tick_notes(balloon_pop_spans(data.get("balloons", []), spd),
-                            bpm_index=2, speed=spd)
-    out += _roll_tick_notes(balloon_pop_spans(data.get("kusudamas", []), spd),
-                            bpm_index=2, speed=spd)
+    out += balloon_tick_notes(data.get("balloons", []), spd)
+    out += balloon_tick_notes(data.get("kusudamas", []), spd)
     return out
 
 
@@ -4470,14 +4473,9 @@ class PreviewDock(QDockWidget):
 
     def set_preview_data(self, data, course_stats=None):
         data = data or {}
-        self._editor_notes = [(t, c, bpm) for t, c, bpm, _sc, _se in data.get("notes", [])]
-        self._editor_notes += _roll_tick_notes(data.get("rolls", []), bpm_index=3)
-        # 風船は「割れる時刻」まででしか鳴らさない。表示(レーン)と
-        # 同じ切り詰めを通さないと、数字が 0 なのに音だけ続く。
-        # 割れる風船は最後の1打を打音にしない(そこは風船の音)。
-        _spd = data.get("roll_hit_speed", 45)
-        self._editor_notes += balloon_tick_notes(data.get("balloons", []), _spd)
-        self._editor_notes += balloon_tick_notes(data.get("kusudamas", []), _spd)
+        # 打音の組み立ては hit_notes_from_preview 1か所にまとめてある
+        # (refresh_from_content と同じ音になるように)。
+        self._editor_notes = hit_notes_from_preview(data)
         self._preview_notes = list(data.get("notes", []))
         self._preview_spans = (list(data.get("rolls", [])),
                                list(data.get("balloons", [])),

@@ -1081,6 +1081,7 @@ class ChartPreviewWidget(QWidget):
                 interval = self._span_interval(spans, start, end, hits)
                 if interval <= 0.0:
                     continue
+                hits = self._span_hits(spans, start, end, hits)
                 i_hi = min(int((min(now, end) - start) / interval), hits - 1)
                 i_lo = max(0, int((max(t0, start) - start) / interval))
                 for i in range(i_hi, i_lo - 1, -1):
@@ -1113,6 +1114,7 @@ class ChartPreviewWidget(QWidget):
             interval = self._span_interval(spans, start, end, hits)
             if interval <= 0.0:
                 continue
+            hits = self._span_hits(spans, start, end, hits)
             i = int((now - start) / interval)
             if i >= hits:
                 continue
@@ -1129,6 +1131,19 @@ class ChartPreviewWidget(QWidget):
         if spans is self._rolls:
             return (end - start) / float(hits) if hits else 0.0
         return 1.0 / self._roll_hit_speed
+
+    def _span_hits(self, spans, start, end, hits):
+        """その区間で実際に叩く打数。打音(preview_dock._roll_tick_notes)と同じ数え方。
+
+        連打は区間の打数そのまま。風船・くす玉は 1/秒速 おきに頭から叩くので、
+        区間に入るのは 切り捨て(長さ×秒速) 打までで、必要打数で頭打ち。
+        これを通さずに「区間の終わりより前の打」を全部光らせていたため、
+        叩ききれない短い風船では打音より1回多く太鼓が光っていた
+        (利用者の報告 2026-11-13。7080 を BPM240・秒速45 で音5回・光6回)。"""
+        if spans is self._rolls:
+            return int(hits)
+        fit = int(max(0.0, end - start) * self._roll_hit_speed + 1e-6)
+        return min(int(hits), fit)
 
     BALLOON_BROKE_SEC = 0.30     # 割れたあと、その絵を出しておく時間
     # --- 叩ききれなかったとき(本家の実測。60fps の映像を1コマずつ数えた) ---
@@ -3898,7 +3913,10 @@ class ChartPreviewWidget(QWidget):
                 if start <= now < end:
                     # 秒速どおりに叩いた数を引く。叩ききれない区間では
                     # 0 に届かず、残りを抱えたまま終わる(本家と同じ)。
-                    done = int((now - start) * self._roll_hit_speed)
+                    # 最初の1打は区間の頭で入る(打音・_cumulative_hits と同じ)
+                    # ので +1。無いと頭から 1/秒速 のあいだ、もう1打叩いて
+                    # いるのに必要打数のまま減らなかった(2026-11-13)。
+                    done = int((now - start) * self._roll_hit_speed + 1e-6) + 1
                     return max(0, int(hits) - done)
         return None
 

@@ -151,7 +151,9 @@ class ScoreTimeline:
             for span in data.get(group) or []:
                 need = int(span[4]) if len(span) > 4 else 0
                 start, end = float(span[0]), float(span[1])
-                hits = int(max(0.0, end - start) * speed)
+                # +1e-6 は打音(_roll_tick_notes)と同じ丸め。無いと区間の長さが
+                # ちょうど打の間隔の倍数のとき、加算だけ1回少なくなる。
+                hits = int(max(0.0, end - start) * speed + 1e-6)
                 if need > 0:
                     hits = min(need, hits)
                     end = min(end, start + hits / speed)
