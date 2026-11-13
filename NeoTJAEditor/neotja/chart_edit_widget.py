@@ -687,13 +687,19 @@ class ChartEditWaveform(WaveformWidget):
         return None
 
     def lyric_at(self, t, tol=None):
-        """その時刻に置いてある歌詞。無ければ None。"""
+        """その時刻に置いてある歌詞。無ければ None。
+
+        t は**このペインの時刻**(cursor_time / 帯 / 波形と同じ、譜面時刻 -
+        self.offset)。_lyrics_raw は譜面時刻のままなので、比べる前に
+        offset を引く。以前は引いておらず、self.offset は OFFSET に頭の
+        余白も足した値なので OFFSET:0 の譜面でもずれて、歌詞の頭に
+        カーソルを置いても「歌詞を直す…」にならなかった(2026-11-13)。"""
         if not self._lyrics_raw:
             return None
         tol = self.SYNC_TOLERANCE_SEC if tol is None else float(tol)
         best, bd = None, None
         for tt, txt in self._lyrics_raw:
-            d = abs(float(tt) - float(t))
+            d = abs(float(tt) - self.offset - float(t))
             if d <= tol and (bd is None or d < bd):
                 best, bd = txt, d
         return best
@@ -712,6 +718,34 @@ class ChartEditWaveform(WaveformWidget):
             return True
 
         popup = self._show_command_popup("歌詞", cur or "", accept)
+        if popup is not None:
+            popup.edit.setFixedWidth(260)
+            popup.adjustSize()
+        return popup
+
+    def open_lyric_fix_popup(self):
+        """カーソルが乗っている帯の歌詞を直す欄(帯の**頭の #LYRIC** を直す)。
+
+        カーソルが帯の途中にあるときの「歌詞を直す…」。直す相手はカーソルの
+        位置ではなく帯の頭の行なので、その位置(分数)から住所を作る。
+        分割数はその位置の分母にする — 今の目盛りに乗っていない所に
+        置いた歌詞でも、同じ行を指せる(新しい行を増やさない)。"""
+        band = self.lyric_band_at()
+        if band is None:
+            return None
+        pos = self._pos_of_time(band[0])
+        if pos is None:
+            return None
+        m = int(pos)
+        frac = pos - m
+
+        def accept(txt):
+            self._run_op({"kind": "command", "a": (m, frac.numerator),
+                          "grid": frac.denominator, "name": "LYRIC",
+                          "value": None if txt == "" else txt})
+            return True
+
+        popup = self._show_command_popup("歌詞", band[2], accept)
         if popup is not None:
             popup.edit.setFixedWidth(260)
             popup.adjustSize()
@@ -2362,10 +2396,18 @@ class ChartEditWaveform(WaveformWidget):
         # あると、どちらを使えばいいのか分からなくなる。
         # 歌詞は値が文字なので、命令パネル(数の欄しか無い)ではなく
         # ここから置く(利用者の要望 2026-11-07)。
+        # 比べる時刻はどれも**このペインの時刻**(cursor_time / 帯と同じ)。
         here = self.lyric_at(self.cursor_time())
         lyr = menu.addAction("歌詞…" if here is None else "歌詞を直す…")
         lyr.setData("lyric")
         lyr.triggered.connect(self.open_lyric_popup)
+        if here is None and self.lyric_band_at() is not None:
+            # 帯の途中: 「歌詞…」はここへ新しく置く(歌詞は切れ目なく続く
+            # ので、帯の中に置けないと次の歌詞を足せない)。帯の歌詞を直す
+            # 道も別に出す。直すのは帯の頭の行。
+            fix = menu.addAction("歌詞を直す…")
+            fix.setData("lyric_fix")
+            fix.triggered.connect(self.open_lyric_fix_popup)
         stop = menu.addAction("歌詞をここで消す")
         stop.setData("lyric_stop")
         stop.setToolTip("文字の無い #LYRIC を置きます。ここで歌詞が消えます。")
