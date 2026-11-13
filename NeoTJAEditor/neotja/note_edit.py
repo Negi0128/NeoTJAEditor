@@ -764,6 +764,47 @@ def op_key(text, course_range, m, slot, grid, char):
     return _result(text, new, sound=char, visual=[(m, slot, grid, char)])
 
 
+def op_place(text, course_range, m, slot, grid, char):
+    """数字キー(1〜4 と 0)でカーソル位置に置く/消す。
+
+    普通の位置は今までどおり set_slot で1文字だけ書き換える。ただし
+    **連打・風船の頭**(5/6/7/9)の上なら、終端の 8 ごと消してから書く。
+    1文字だけ書き換えていたので終端の 8 が取り残され、風船なら BALLOON: の
+    打数も残っていた(利用者の報告 2026-11-13)。F/D(op_key)と同じく
+    _removal_writes と _update_balloons で片付ける。0 で頭を消すときも同じ
+    (利用者の承認 2026-11-13)。"""
+    body = course_body_span(text, course_range)
+    if body is None or char not in "01234":
+        return None
+    k = _key(m, slot, grid)
+    head = None
+    for it in chart_items(text, body):
+        if _is_long(it) and it["k0"] == k:
+            head = it
+            break
+        if it["k0"] > k:
+            break
+    sound = char if char != "0" else None
+    if head is None:
+        r = set_slot(text, body, m, slot, grid, char)
+        if r is None:
+            return None
+        a, b, rep, _cur = r
+        new = text[:a] + rep + text[b:]
+        return _result(text, new, sound=sound, visual=[(m, slot, grid, char)])
+    writes = _removal_writes(head)
+    if char != "0":
+        # 頭の位置へそのまま新しい音符を書く(0 にしてから書くと、間の
+        # 畳み直しで小節の分割が無駄に変わることがある)。
+        hm, hs, hg = head["head"]
+        writes[0] = (hm, hs, hg, char)
+    new = _apply_writes(text, body, writes)
+    removed = [head["ord"]] if head["ord"] is not None else []
+    new = _update_balloons(new, course_range, removed)
+    return _result(text, new, sound=sound, visual=[(m, slot, grid, char)],
+                   reparse=True)
+
+
 def _range_keys(a, b, grid):
     """(小節, スロット) 2つを小さい順に並べ替えて返す。
 
@@ -1830,6 +1871,7 @@ def run_op(text, course_range, op):
 
     op の形:
       {"kind": "key",    "a": (小節, スロット), "grid": G, "char": "1"〜"4"}
+      {"kind": "place",  "a": ..., "grid": G, "char": "0"〜"4"}  (数字キー)
       {"kind": "long",   "a": ..., "b": ..., "grid": G, "char": "5"/"6"/"7"/"9"}
       {"kind": "delete", "a": ..., "b": None か住所, "grid": G}
       {"kind": "transform_items", "items": [...], "mode": "flip"/"size"}
@@ -1886,6 +1928,8 @@ def run_op(text, course_range, op):
     ga = g.at(a[0])
     if kind == "key":
         return op_key(text, course_range, a[0], a[1], ga, op["char"])
+    if kind == "place":
+        return op_place(text, course_range, a[0], a[1], ga, op["char"])
     if kind == "long" and b is not None:
         return op_long(text, course_range, a, b, g, op["char"])
     if kind == "delete":

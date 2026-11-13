@@ -3098,6 +3098,15 @@ class ChartEditWaveform(WaveformWidget):
         暫定表示(_pending)だけで、再解析が届いて暫定表示が消えると同じキーが
         配置になったり削除になったりして安定しなかった。消すのは 0 /
         Delete / BackSpace に一本化してある。"""
+        # 1〜4 と 0 は操作(note_edit の "place")として通す。連打・風船の頭を
+        # 上書き/消したときに終端の 8 と BALLOON: の打数も一緒に片付ける
+        # ため(1文字だけ書き換えると 8 が取り残されていた。利用者の報告
+        # 2026-11-13)。暫定表示と打音は _run_op と窓の側が今までどおり出す。
+        if char in "01234" and self._op_cb is not None:
+            self._run_op({"kind": "place",
+                          "a": (self._cur_measure, self._cur_slot),
+                          "char": char})
+            return
         addr = (self._cur_measure, self._cur_slot,
                 self._measure_grid(self._cur_measure))
         self._pending[addr] = char

@@ -3735,7 +3735,7 @@ class MainWindow(QMainWindow):
             return self._chart_op_in_branch(text, rng, op)
 
     #: 音符を置く操作(置けなかった理由を出す相手)。
-    _PLACING_OPS = ("key", "long", "fill")
+    _PLACING_OPS = ("key", "place", "long", "fill")
 
     def _warn_if_too_fine(self, text, rng, op):
         """置けなかったのが「細かすぎる」せいなら、黙らずに理由を出す。
