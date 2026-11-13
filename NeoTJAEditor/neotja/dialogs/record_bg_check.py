@@ -142,16 +142,27 @@ def _draw_art(p, bg, w, h, song_sec=None):
 
     置き場所は art_x / art_y(出来上がりの絵の中の座標)。負は反対の端
     からの距離。既定 (24, -24) は左下。歌詞に合わせて切り替えるときは
-    **見ている時刻の絵**(song_sec、音源の秒)を出す。"""
-    path = None
-    if song_sec is not None and hasattr(bg, "art_at"):
-        path = bg.art_at(song_sec)
-    img = _baked_art(bg, h, path)
-    if img is None:
-        return
-    x = bg.art_x if bg.art_x >= 0 else w - img.width() + bg.art_x
-    y = bg.art_y if bg.art_y >= 0 else h - img.height() + bg.art_y
-    p.drawImage(int(x), int(y), img)
+    **見ている時刻の絵**(song_sec、音源の秒)を出す。
+
+    切り替わりのフェードの中なら、本番と同じく2枚を混ぜる(前の絵を
+    不透明で描き、その上に次の絵を薄く)。見ている時刻がちょうど
+    切り替わりの近くでも、出来上がりと違う絵にならないように。"""
+    if song_sec is not None and hasattr(bg, "art_blend_at"):
+        layers = bg.art_blend_at(song_sec)
+    elif song_sec is not None and hasattr(bg, "art_at"):
+        layers = [(bg.art_at(song_sec), 1.0)]
+    else:
+        layers = [(None, 1.0)]
+    for path, opacity in layers:
+        img = _baked_art(bg, h, path)
+        if img is None or opacity <= 0.0:
+            continue
+        x = bg.art_x if bg.art_x >= 0 else w - img.width() + bg.art_x
+        y = bg.art_y if bg.art_y >= 0 else h - img.height() + bg.art_y
+        p.save()
+        p.setOpacity(min(1.0, float(opacity)))
+        p.drawImage(int(x), int(y), img)
+        p.restore()
 
 
 #: 焼いた棒の覚え。つまみを動かすたびに ffmpeg を呼ばないため。

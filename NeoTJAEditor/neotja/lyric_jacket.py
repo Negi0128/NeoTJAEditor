@@ -29,6 +29,13 @@ import tempfile
 SIDECAR_SUFFIX = ".jacket.json"
 #: 書く形の版。
 VERSION = 1
+#: ジャケットが切り替わるときに重ねて入れ替える(クロスフェード)秒数
+#: (利用者の指定 2026-11-13「ジャケット切り替わりの時フェードで切り返して
+#: 欲しい」)。切り替わりの時刻を**真ん中**にして、前後へ半分ずつ。
+#: パッと替わると目がちらつくが、長すぎると2枚が混ざって誰の絵か
+#: 分からない時間が延びる。0.3 秒は「替わったのは分かるが、ちらつかない」
+#: くらい。帯がこれより短いときは帯の長さまで縮める(jacket_switches)。
+JACKET_FADE_SEC = 0.3
 #: 選べる画像。録画(ffmpeg)と作譜ペイン(Qt)のどちらでも読める形だけ。
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 IMAGE_FILTER = "画像 (*.png *.jpg *.jpeg *.webp *.bmp)"
@@ -265,3 +272,67 @@ def image_at(segments, t):
         if (start is None or start <= t) and (end is None or t < end):
             return path
     return ""
+
+
+def drop_missing(segments, exists=os.path.exists):
+    """無い絵の区間を「何も出さない」("")にして、隣り合う同じ絵をつなぐ。
+
+    フェードは「前に見えていた物 → 次に見える物」で決まる。消えた絵の
+    区間を残したままだと、見えない絵へ向かって薄くなったり、""どうしの
+    あいだで切り替わりを数えたりしてしまう。"""
+    out = []
+    for start, end, path in segments or ():
+        path = path if (path and exists(path)) else ""
+        if out and out[-1][2] == path:
+            out[-1] = (out[-1][0], end, path)
+        else:
+            out.append((start, end, path))
+    return out
+
+
+def jacket_switches(segments, fade=JACKET_FADE_SEC):
+    """切り替わりごとの [(時刻, フェードの秒数, 前の絵, 次の絵)]。
+
+    フェードは切り替わりの時刻を真ん中にして [時刻 - d/2, 時刻 + d/2]。
+    d は fade と、前後の区間の長さのうち一番短いもの — 短い帯でも、
+    両側の切り替わりのフェードが半分ずつしか食わないので重ならない
+    (多くても端で接するだけ)。頭からの区間(始まり None)・最後までの
+    区間(終わり None)は長さ無限として数える。動画の頭には切り替わりが
+    無いので、最初の絵はフェードせずにそのまま出る。"""
+    out = []
+    segs = list(segments or ())
+    for i in range(len(segs) - 1):
+        s0, t, old = segs[i]
+        _t, e1, new = segs[i + 1]
+        if t is None or old == new:
+            continue
+        d = float(fade)
+        if s0 is not None:
+            d = min(d, float(t) - float(s0))
+        if e1 is not None:
+            d = min(d, float(e1) - float(t))
+        if d <= 0.0:
+            continue
+        out.append((float(t), d, old, new))
+    return out
+
+
+def blend_at(segments, t, fade=JACKET_FADE_SEC):
+    """その時刻に重ねる絵 [(道, 不透明度)]。下から順に描けば録画と同じ。
+
+    フェードの中なら「前の絵を不透明で → 次の絵を a で」(a は 0→1)。
+    描いた結果は a*次 + (1-a)*前 で、真ん中(a=0.5)はちょうど半々。
+    片方が無い(基本ジャケットも無い)ときは、ある方だけを薄くする。
+    フェードの外は image_at と同じ1枚(無ければ空のリスト)。"""
+    t = float(t)
+    for when, d, old, new in jacket_switches(segments, fade):
+        a0 = when - d / 2.0
+        if a0 <= t < a0 + d:
+            a = (t - a0) / d
+            if old and new:
+                return [(old, 1.0), (new, a)]
+            if new:
+                return [(new, a)]
+            return [(old, 1.0 - a)] if old else []
+    path = image_at(segments, t)
+    return [(path, 1.0)] if path else []

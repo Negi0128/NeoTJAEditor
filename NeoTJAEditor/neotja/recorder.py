@@ -611,6 +611,17 @@ class RecordBackground:
         from neotja.lyric_jacket import image_at
         return image_at(self.art_track, song_sec)
 
+    def art_blend_at(self, song_sec):
+        """その時刻に重ねるジャケット [(道, 不透明度)](下から順)。
+
+        切り替わりのフェードの中なら2枚(録画の _art_fades と同じ決まり)。
+        確認の1コマが本番と同じ混ざり方になるように。"""
+        if not self.art_track:
+            return ([(self.art, 1.0)]
+                    if self.art and os.path.exists(self.art) else [])
+        from neotja.lyric_jacket import blend_at, drop_missing
+        return blend_at(drop_missing(self.art_track), song_sec)
+
 
 def as_background(bg):
     """None / dict / RecordBackground のどれで渡されても受ける。
@@ -689,6 +700,75 @@ def _art_layers(bg):
         ws = windows[path]
         # 頭から最後までずっと = 区間の印は要らない(式を短く)。
         out.append((path, None if ws == [(None, None)] else ws))
+    return out
+
+
+def _art_fades(bg):
+    """[(道, 出す区間 か None, 薄くする所)] — _art_layers と同じ並び。
+
+    切り替わりでフェードする(利用者の指定 2026-11-13)ための下ごしらえ。
+    薄くする所は [(始まり, 終わり, "in" か "out")](音源の秒)。
+
+    **2枚の混ぜ方**: 重ねる順は絵ごとに決まっていて(_art_layers の並び)、
+    時間の順ではない。そこで切り替わりのたびに「下にいる方はフェードの
+    あいだ**不透明のまま**出しておき、上にいる方だけを薄くする」。上が
+    次の絵なら 0→1、上が前の絵なら 1→0。どちらでも結果は
+        a*次 + (1-a)*前
+    になり、真ん中で半々。両方を薄くすると(1-a と a)、あいだから下の
+    画面や背景が透けて暗く沈むので、そうはしない。片方が無い(基本
+    ジャケットも無い)ときは、ある方を薄くする = フェードイン/アウト。
+
+    そのために、どの絵も出す区間をフェードの半分ずつ前後へ広げる
+    (前の絵はフェードが終わるまで、次の絵はフェードの始まりから出す)。
+    返す「出す区間」は**不透明で出す所だけ** — 薄くする所はそこから
+    くり抜いてあり、そちらは _art_overlay_chain が別に重ねる。"""
+    from neotja.lyric_jacket import (JACKET_FADE_SEC, drop_missing,
+                                     jacket_switches)
+    layers = _art_layers(bg)
+    track = getattr(bg, "art_track", None)
+    if not track:
+        return [(p, w, []) for p, w in layers]
+    segs = drop_missing(track)
+    rank = {p: i for i, (p, _w) in enumerate(layers)}
+    sw = {t: (d, old, new)
+          for t, d, old, new in jacket_switches(segs, JACKET_FADE_SEC)}
+    wins = {p: [] for p in rank}
+    ramps = {p: [] for p in rank}
+    for start, end, path in segs:
+        if path not in wins:
+            continue
+        a = start - sw[start][0] / 2 if start in sw else start
+        b = end + sw[end][0] / 2 if end in sw else end
+        wins[path].append((a, b))
+    for t, (d, old, new) in sw.items():
+        a, b = t - d / 2.0, t + d / 2.0
+        if old and new:
+            up_new = rank.get(new, -1) > rank.get(old, -1)
+            if up_new:
+                ramps[new].append((a, b, "in"))
+            else:
+                ramps[old].append((a, b, "out"))
+        elif new:
+            ramps[new].append((a, b, "in"))
+        elif old:
+            ramps[old].append((a, b, "out"))
+    out = []
+    for p, w in layers:
+        rs = sorted(ramps[p])
+        ws = []
+        for a, b in wins[p]:
+            # 薄くする所は広げた区間の端にある(入りは頭、抜けは尻)。
+            # そこを削った残りが不透明で出す所。帯がフェードより短いと
+            # 何も残らないこともある(入ってすぐ抜ける)。
+            for ra, rb, kind in rs:
+                if kind == "in" and a == ra:
+                    a = rb
+                elif kind == "out" and b == rb:
+                    b = ra
+            if a is None or b is None or a < b:
+                ws.append((a, b))
+        out.append((p, None if (w is None or ws == [(None, None)]) else ws,
+                    rs))
     return out
 
 
@@ -826,10 +906,12 @@ def _art_plan(bg, out_h):
     ジャケット1枚につき入力が1つ(_art_layers)。焼けていれば毎コマの
     scale が要らない。置かないなら ([], [])。"""
     args, arts = [], []
-    for path, windows in _art_layers(bg):
+    for path, windows, ramps in _art_fades(bg):
         baked = _bake_art(bg, out_h, path)
         args += ["-loop", "1", "-i", baked or path]
-        arts.append((bool(baked), windows))
+        # 薄くする所があれば (区間, 薄くする所) の組で渡す。無ければ今までの
+        # 形(区間だけ)— 切り替えの無いジャケットのフィルタは1文字も変えない。
+        arts.append((bool(baked), (windows, ramps) if ramps else windows))
     return args, arts
 
 
@@ -896,14 +978,14 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
     if arts is None:
         arts = ([(art_idx, art_baked, None)]
                 if art_idx is not None and _art_input_args(bg) else [])
-    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0)
+    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0, fps)
     graph += chain
     graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
               % cur + tail + ",format=yuv420p[v]")
     return graph
 
 
-def _art_overlay_chain(bg, h, cur, arts, t0):
+def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
     """cur の上へジャケットを重ねる一節と、次の名札を返す。
 
     背景ありの経路(背景の上・画面の下)と、背景なしの経路(画面の上)で
@@ -921,6 +1003,10 @@ def _art_overlay_chain(bg, h, cur, arts, t0):
     ex = ("%d" % bg.art_x) if bg.art_x >= 0 else ("W-w%d" % bg.art_x)
     ey = ("%d" % bg.art_y) if bg.art_y >= 0 else ("H-h%d" % bg.art_y)
     for k, (idx, baked, windows) in enumerate(arts):
+        # 切り替わりでフェードする絵は (区間, 薄くする所) の組で来る。
+        ramps = ()
+        if isinstance(windows, tuple):
+            windows, ramps = windows
         if baked:
             # もう出来上がりの大きさで焼いてある。触らずに重ねるだけ。
             art_chain = "[%d:v]null" % idx
@@ -933,14 +1019,59 @@ def _art_overlay_chain(bg, h, cur, arts, t0):
         # 1枚目は今までと同じ名札(art / 末尾 a)。2枚目からは番号を足す。
         tag = "art" if k == 0 else "art%d" % k
         nxt = cur + ("a" if k == 0 else "a%d" % k)
+        if ramps:
+            # 不透明の分と、フェードごとの分へ分ける。
+            art_chain += ",split=%d[%s]" % (len(ramps) + 1, tag)
+            art_chain += "".join("[%sf%d]" % (tag, n)
+                                 for n in range(len(ramps)))
         # 区間があれば、そのあいだだけ出す。区間どうしは重ならないので
-        # (lyric_jacket.jacket_segments)、どの瞬間も出ているのは1枚だけ。
-        en = _enable_expr(windows, t0) if windows else ""
+        # (lyric_jacket.jacket_segments)、どの瞬間も不透明で出ているのは
+        # 1枚だけ。フェードのあいだは下の絵が不透明・上の絵が薄く(_art_fades)。
+        en = _enable_expr(windows, t0) if windows is not None else ""
         en = (":enable='%s'" % en) if en else ""
-        graph += (art_chain + "[%s];" % tag
-                  + "[%s][%s]overlay=x=%s:y=%s%s[%s];"
-                  % (cur, tag, ex, ey, en, nxt))
+        graph += ((art_chain + ";") if ramps else (art_chain + "[%s];" % tag)
+                  ) + ("[%s][%s]overlay=x=%s:y=%s%s[%s];"
+                       % (cur, tag, ex, ey, en, nxt))
         cur = nxt
+        # フェード(利用者の指定 2026-11-13): 切り替わり1回ごとに、その
+        # 0.3 秒だけの短い流れを作って重ねる。
+        # - fps: -loop 1 の絵は 25fps で来るので、そのままだと薄くなる
+        #   のが 0.04 秒刻みでカクつく。録画と同じ fps にそろえてから切る
+        #   (切ってからだと、切り口が 25fps の刻みにずれて頭のコマが抜ける)。
+        # - trim: フェードのあいだのコマだけにする。時刻は動画の秒のまま。
+        #   終わったら overlay は eof_action=pass で下をそのまま通す。
+        #   こうすると不透明度つきの重ねは 0.3 秒ぶんしか動かない。
+        #   ずっと流す形(geq / blend を enable で切る)も試したが、フェード
+        #   の外でも毎コマ変換と重ねが走り、10 秒 720p で 0.8 秒ほど重く
+        #   なった。出番ごとに流れを分けるのもこのため。
+        # - 不透明度: 「1画素の白」を同じ時刻だけ作り、geq で時刻の式
+        #   (入りは (t-始まり)/長さ、抜けは (終わり-t)/長さ)を不透明度に
+        #   して、絵の大きさへ広げ、blend で**不透明度の面だけ**掛け合わせる。
+        #   色の面は絵のまま = 枠も絵も色は変わらず、元から透ける所は
+        #   透けたまま。式を解くのは1コマ1回(1画素)で済む。
+        #   fade=alpha=1 は使わない — 「st 以後の最初のコマ」から数え直す
+        #   ので、切り替わりの時刻がコマの刻みに乗っていないと1コマぶん
+        #   遅れ、真ん中が半々にならなかった(実測 10fps: 0.33)。
+        side = ah + e * 2
+        for n, (a, b, kind) in enumerate(ramps):
+            a, b = float(a) - float(t0), float(b) - float(t0)
+            d = max(b - a, 1e-6)
+            ftag = "%sf%d" % (tag, n)
+            fnxt = "%sf%d" % (cur, n)
+            ramp = (("(T-%.4f)/%.4f" % (a, d)) if kind == "in"
+                    else ("(%.4f-T)/%.4f" % (b, d)))
+            cut = "trim=start=%.4f:end=%.4f" % (a, b)
+            graph += ("[%s]fps=%s,%s,format=gbrap[%sx];"
+                      "color=c=white:s=1x1:r=%s,%s,format=gbrap,"
+                      "geq=r=255:g=255:b=255:a='255*clip(%s,0,1)',"
+                      "scale=%d:%d:flags=neighbor[%sm];"
+                      "[%sx][%sm]blend=c3_mode=multiply:shortest=1[%sy];"
+                      "[%s][%sy]overlay=x=%s:y=%s:eof_action=pass[%s];"
+                      % (ftag, fps, cut, ftag,
+                         fps, cut, ramp, side, side, ftag,
+                         ftag, ftag, ftag,
+                         cur, ftag, ex, ey, fnxt))
+            cur = fnxt
     return graph, cur
 
 
@@ -953,7 +1084,8 @@ def wants_art_only(bg):
     return (not bg) and bool(_art_layers(bg))
 
 
-def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0):
+def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0,
+                             fps=60):
     """背景なしで、いつもの画面の**上**へジャケットを重ねるフィルタ。
 
     入力 0 が画面(背景も描いた不透明な絵)。arts は _bg_filter_complex と
@@ -969,7 +1101,7 @@ def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0):
     h = _bg_out_size(canvas, src_w, src_h)[1]
     vf = _video_filter(canvas, src_w, src_h)
     graph = "[0:v]%s[base];" % (vf or "null")
-    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0)
+    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0, fps)
     graph += chain
     graph += "[%s]format=yuv420p[v]" % cur
     return graph
@@ -1452,7 +1584,7 @@ class VideoRecording:
                     _art_only_filter_complex(
                         canvas_wh, pw, ph, bg,
                         [(2 + i, b, wnd) for i, (b, wnd) in enumerate(arts)],
-                        t0=self.start_sec),
+                        t0=self.start_sec, fps=fps),
                     "-map", "[v]", "-map", "1:a"]
         if vf:
             cmd += ["-vf", vf]
