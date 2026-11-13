@@ -20,6 +20,7 @@
 中間ファイル(PNG の山)は作らない。音声だけ一時ファイルを1つ使う。
 """
 
+import math
 import os
 import subprocess
 import sys
@@ -815,7 +816,22 @@ def _art_fades(bg):
     return out
 
 
-def _enable_expr(windows, t0):
+def _frame_index(vt, fps):
+    """動画の秒 vt の**そこ以後で最初のコマ**の番号(コマ k は k/fps 秒)。
+
+    ジャケットの切り替わり・フェードの区切りは、どれもこれでコマの刻みへ
+    寄せる(利用者の報告 2026-11-13「切り替わりで一瞬前の絵が出る」)。
+    以前はフェードの流れを trim(秒)で切り、隣の不透明な重ねは enable の
+    lt(t,b) / gte(t,b) で切っていた。trim は秒をコマの刻みへ**四捨五入**
+    するのに、enable は生の秒と比べるので、区切りが刻みの途中にあると
+    両者が1コマずれ、フェードの終わりに前の絵が丸ごと1コマ出ていた。
+    両方を同じ番号から作れば、どのコマも必ずどちらか一方に入る。
+    1e-6 は 1.35*20 = 27.000000000000004 のような小数の誤差で、刻みに
+    ちょうど乗っている区切りが次のコマへ逃げないための遊び。"""
+    return int(math.ceil(float(vt) * float(fps) - 1e-6))
+
+
+def _enable_expr(windows, t0, fps=None):
     """出す区間 → overlay の enable の式。t0 は録画の 0 秒の音源の秒。
 
     録画は助走(RECORD_LEAD_SEC)の分だけ曲より前から始まるので、
@@ -823,11 +839,22 @@ def _enable_expr(windows, t0):
     between(t,a,b) ではなく gte*lt にしている — between は終わりも含む
     ので、切り替わりの瞬間のコマで前後の2枚が両方「出す」になり、後に
     重ねたほうが1コマ早く見える。区間が複数なら足し合わせる(0 以外 =
-    出す)。"""
+    出す)。
+
+    fps を渡すと、区切りを _frame_index でコマへ寄せてから**半コマ手前**
+    ((k-0.5)/fps)と比べる。コマの時刻 k/fps と比べると、小数の誤差で
+    ちょうどその境のコマがどちらへ転ぶか分からないが、半コマずらせば
+    コマとコマの真ん中なので迷わない。フェードの流れ(trim の start_pts /
+    end_pts)も同じ番号で切るので、区切りが必ずそろう。"""
+    def at(x):
+        vt = float(x) - float(t0)
+        if fps:
+            return (_frame_index(vt, fps) - 0.5) / float(fps)
+        return vt
     parts = []
     for start, end in windows:
-        a = None if start is None else float(start) - float(t0)
-        b = None if end is None else float(end) - float(t0)
+        a = None if start is None else at(start)
+        b = None if end is None else at(end)
         if a is not None and b is not None:
             parts.append("gte(t,%.4f)*lt(t,%.4f)" % (a, b))
         elif a is not None:
@@ -1035,6 +1062,17 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
     同じものを使う — 大きさ・置き場所・枠・切り替えの区間がどちらでも
     1画素も違わないようにするため。"""
     graph = ""
+    # フェードの区切りをコマの番号へ直しておく(_frame_index)。録画の頭より
+    # 前に済むもの・1コマにも満たないものは、流れを作っても1コマも出ない
+    # ので最初から作らない(隣の不透明な区間が同じ番号で接している)。
+    def _ramp_frames(ramps):
+        out = []
+        for a, b, kind in ramps:
+            ka = _frame_index(float(a) - float(t0), fps)
+            kb = _frame_index(float(b) - float(t0), fps)
+            if kb > max(0, ka):
+                out.append((a, b, kind, max(0, ka), kb))
+        return out
     # 置き場所は art_x / art_y(出来上がりの絵の中の座標)。高さは画面に
     # 対する割合、横は縦横比のまま。既定は左下。歌詞ごとのジャケットも
     # 同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置がぶれない。
@@ -1050,6 +1088,7 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
         ramps = ()
         if isinstance(windows, tuple):
             windows, ramps = windows
+            ramps = _ramp_frames(ramps)
         if baked:
             # もう出来上がりの大きさで焼いてある。触らずに重ねるだけ。
             art_chain = "[%d:v]null" % idx
@@ -1070,7 +1109,7 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
         # 区間があれば、そのあいだだけ出す。区間どうしは重ならないので
         # (lyric_jacket.jacket_segments)、どの瞬間も不透明で出ているのは
         # 1枚だけ。フェードのあいだは下の絵が不透明・上の絵が薄く(_art_fades)。
-        en = _enable_expr(windows, t0) if windows is not None else ""
+        en = _enable_expr(windows, t0, fps) if windows is not None else ""
         en = (":enable='%s'" % en) if en else ""
         graph += ((art_chain + ";") if ramps else (art_chain + "[%s];" % tag)
                   ) + ("[%s][%s]overlay=x=%s:y=%s%s[%s];"
@@ -1082,6 +1121,9 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
         #   のが 0.04 秒刻みでカクつく。録画と同じ fps にそろえてから切る
         #   (切ってからだと、切り口が 25fps の刻みにずれて頭のコマが抜ける)。
         # - trim: フェードのあいだのコマだけにする。時刻は動画の秒のまま。
+        #   切るのは**コマの番号**(start_pts / end_pts。fps の後は1コマ =
+        #   pts 1)。秒で切ると ffmpeg が刻みへ四捨五入し、enable の区切りと
+        #   1コマずれて前の絵がちらついた(_frame_index の説明)。
         #   終わったら overlay は eof_action=pass で下をそのまま通す。
         #   こうすると不透明度つきの重ねは 0.3 秒ぶんしか動かない。
         #   ずっと流す形(geq / blend を enable で切る)も試したが、フェード
@@ -1096,14 +1138,16 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
         #   ので、切り替わりの時刻がコマの刻みに乗っていないと1コマぶん
         #   遅れ、真ん中が半々にならなかった(実測 10fps: 0.33)。
         side = ah + e * 2
-        for n, (a, b, kind) in enumerate(ramps):
+        for n, (a, b, kind, ka, kb) in enumerate(ramps):
             a, b = float(a) - float(t0), float(b) - float(t0)
             d = max(b - a, 1e-6)
             ftag = "%sf%d" % (tag, n)
             fnxt = "%sf%d" % (cur, n)
-            ramp = (("(T-%.4f)/%.4f" % (a, d)) if kind == "in"
-                    else ("(%.4f-T)/%.4f" % (b, d)))
-            cut = "trim=start=%.4f:end=%.4f" % (a, b)
+            # 濃さは生の秒の式のまま(確認の1コマ lyric_jacket.blend_at と
+            # 同じ値になる)。区切りだけがコマへ寄っている。
+            ramp = (("(T-%.6f)/%.6f" % (a, d)) if kind == "in"
+                    else ("(%.6f-T)/%.6f" % (b, d)))
+            cut = "trim=start_pts=%d:end_pts=%d" % (ka, kb)
             graph += ("[%s]fps=%s,%s,format=gbrap[%sx];"
                       "color=c=white:s=1x1:r=%s,%s,format=gbrap,"
                       "geq=r=255:g=255:b=255:a='255*clip(%s,0,1)',"
