@@ -19,7 +19,7 @@ from fractions import Fraction
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QPainter, QPen, QPixmap,
-                           QPolygon)
+                           QPolygon, QKeySequence)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QSlider, QVBoxLayout,
                                QWidget)  # noqa: F401  (QWidget は型注釈用)
@@ -2422,6 +2422,11 @@ class ChartEditWaveform(WaveformWidget):
         # 比べる時刻はどれも**このペインの時刻**(cursor_time / 帯と同じ)。
         here = self.lyric_at(self.cursor_time())
         lyr = menu.addAction("歌詞…" if here is None else "歌詞を直す…")
+        # 右に「L」を出す。キーでも同じ欄が出るという案内(2026-11-13)。
+        # 名前に \t で足すと項目の文字が変わるので、ショートカットとして
+        # 持たせる(メニューを開いている間に L を押しても同じ物が選ばれる)。
+        lyr.setShortcut(QKeySequence(Qt.Key_L))
+        lyr.setShortcutVisibleInContextMenu(True)
         lyr.setData("lyric")
         lyr.triggered.connect(self.open_lyric_popup)
         if here is None and self.lyric_band_at() is not None:
@@ -2908,7 +2913,7 @@ class ChartEditWaveform(WaveformWidget):
     _OWN_KEYS = frozenset((
         Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Home, Qt.Key_End,
         Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
-        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_G, Qt.Key_S,
+        Qt.Key_W, Qt.Key_Q, Qt.Key_H, Qt.Key_G, Qt.Key_S, Qt.Key_L,
     )) | frozenset(_PLAIN_KEYS) | frozenset(_PEEPO_NOTE_KEYS) | frozenset(_PEEPO_LONG_KEYS)
 
     def event(self, e):
@@ -3044,6 +3049,18 @@ class ChartEditWaveform(WaveformWidget):
                                             | Qt.MetaModifier)):
             if not event.isAutoRepeat():
                 self.toggle_barline_at_cursor()
+            return
+        # L で歌詞の欄を出す(利用者の指定 2026-11-13)。右クリックの
+        # 「歌詞…」と同じ物で、カーソルの所へ置く/直す。歌詞は譜面を流し
+        # ながら続けて打つので、毎回メニューを開かずに済むようにする。
+        # 修飾キー付きは窓のショートカットに残すため取らない。押しっぱなし
+        # の自動連射で欄を出し直さない。
+        if key == Qt.Key_L and not mods & (Qt.ControlModifier
+                                           | Qt.AltModifier
+                                           | Qt.MetaModifier
+                                           | Qt.ShiftModifier):
+            if not event.isAutoRepeat():
+                self.open_lyric_popup()
             return
         # ほかの命令(BPM / HS)はキーでは置かない。右クリックの
         # メニューか、窓の「作譜」メニューから置く(利用者の希望 2026-09-25)。
