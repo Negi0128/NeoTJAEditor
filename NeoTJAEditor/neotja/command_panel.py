@@ -112,7 +112,7 @@ class CommandPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 種類 → (枠, ボタン)。「追加」と「変更」を切り替えるために持つ。
-        # 値をいじるだけで入る欄(BPM)にはボタンが無く、None。
+        # ボタンの無い枠なら None(いまは3つともボタンがある)。
         self._boxes = {}
         # 値をいじってから入れるまでの待ち。種類 → QTimer。
         self._auto_timers = {}
@@ -157,9 +157,14 @@ class CommandPanel(QFrame):
         self.sp_bpm.setValue(120.0)
         self.sp_bpm.setFixedWidth(108)
         # BPM の「!」は使い道が無いので出さない(利用者の指定 2026-10-31)。
+        # 「追加」ボタンは戻す(利用者の報告 2026-11-13「BPM追加ボタンが右上の
+        # パネルから消えちゃった」)。13.0.9 で欄をいじれば入る形にしたとき
+        # ボタンごと外したが、それだと**いまと同じ BPM をもう一か所へ置く**
+        # 手が無い。スクロールと同じく auto のままボタンも出す。
+        # 枠の中 198px に 108 + 4 + 52 でおさまる。
         grid.addWidget(self._box("bpm", "BPM", [self.sp_bpm], "BPMCHANGE",
                                  lambda: self.sp_bpm.value(), auto=True,
-                                 mark=None),
+                                 mark=None, button=True),
                        0, 0)
 
         # --- 拍子記号 ---
@@ -423,7 +428,7 @@ class CommandPanel(QFrame):
             btn.setFixedWidth(btn_w)
             # 音符を選んでいれば選んだ全部へ。**スクロールだけ**
             # (利用者の指定 2026-11-05)。拍子は小節のものなので音符ごとには
-            # 付けない。BPM の箱には「追加」ボタンがもともと無い。
+            # 付けない。BPM もカーソルの所だけ(Enter で入れるのと同じ)。
             to_sel = name == "SCROLL"
             btn.setToolTip("カーソルの位置に置きます。"
                            + (chr(10) + "音符を選んでいるときは、"
@@ -676,8 +681,7 @@ class CommandPanel(QFrame):
         その位置に同じ命令が置いてある枠だけ、ボタンが「変更」に変わり、枠の
         線が明るくなる。欄の値は set_values でその命令自身の値になっている。
 
-        ボタンの無い欄(BPM)は枠の線だけで示す — そちらは値をいじった時点で、
-        置いてあればその行を書き換え、無ければ足す。"""
+        ボタンの無い欄があれば枠の線だけで示す。"""
         kinds = set(kinds or ())
         if kinds == self._editing:
             return
