@@ -1977,11 +1977,12 @@ class MainWindow(QMainWindow):
         tm.addAction("ノーツ間隔リサイズ", self.open_measure_converter)
         tm.addSeparator()
         tm.addAction("あべこべ反転  Ctrl+M", self.reverse_don_ka)
-        tm.addSeparator()
         # 「同時再生」はここには置かない。再生ウィンドウの**モード**なので、
         # 入り口はモード切替ボタン1つに寄せる(利用者の指定 2026-10-04)。
-        tm.addAction("BPM/OFFSET自動検出(実験的)", self.auto_detect_bpm_offset)
-        tm.addAction("AI譜面生成(実験的)", self.open_auto_chart_generator)
+        # 「BPM/OFFSET自動検出(実験的)」「AI譜面生成(実験的)」はメニューから
+        # 外した(利用者の指定 2026-11-13)。BPM/OFFSET は新規作成の窓で音源から
+        # 自動入力するようになったため。処理そのもの(auto_detect_bpm_offset /
+        # open_auto_chart_generator)は残してある。
 
         # 窓の「作譜」メニューは置かない(利用者の指定 2026-10-04)。同じ中身は
         # 作譜ペインの右クリックから出る(populate_command_menu)ので、
