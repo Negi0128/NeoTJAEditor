@@ -1326,6 +1326,8 @@ class ChartEditWaveform(WaveformWidget):
         count = self._measure_count()
         if count <= 0:
             return
+        if self._free_time is not None and delta and self._move_free(delta):
+            return
         m, slot = self._cur_measure, self._cur_slot
         step = 1 if delta > 0 else -1
         for _ in range(abs(int(delta))):
@@ -1719,18 +1721,79 @@ class ChartEditWaveform(WaveformWidget):
         t = self._x_to_sec(x)
         t0 = self._bar_time(0)
         if t0 is not None and t < t0 - 1e-6:
-            self._free_seek(t)
+            self._lead_seek(t)
             return
         # 一番近いグリッドへ合わせる(利用者の指定 2026-09-25)。切り捨てだと
         # 音符の少し右を押したときに1つ手前へ落ちて、置く場所がずれる。
         addr = self._address_from_time(max(0.0, t), nearest=True)
         if addr is None:
             return
-        if addr == (self._cur_measure, self._cur_slot):
+        if (addr == (self._cur_measure, self._cur_slot)
+                and self._free_time is None):
             return          # 同じグリッドの中で動いただけならシークし直さない
         self._cur_measure, self._cur_slot = addr
         self._clamp_cursor()
         self._cursor_changed()
+
+    def _lead_step(self):
+        """1小節目の頭 (0,0) の時刻と、今の分割での1グリッドの長さ。
+
+        助走の中(1小節目より前)には小節もグリッドも無いが、1小節目の
+        グリッドを左へそのまま伸ばしたものを目盛りとして使う。取れなければ
+        (None, None)。"""
+        g = self._measure_grid(0)
+        t0 = self._address_time(0, 0, g)
+        t1 = self._address_time(0, 1, g)
+        if t0 is None or t1 is None or t1 - t0 <= 1e-9:
+            return None, None
+        return t0, t1 - t0
+
+    def _lead_seek(self, t):
+        """1小節目より前を押した/そこを歩いた。伸ばしたグリッドへ合わせて置く。
+
+        以前は押した時刻へそのまま置いていたので、1小節目の頭のすぐ左を
+        押すと線が頭からわずかに離れたままになり、1小節目の最初の音符の
+        所へぴったり置けなかった。そこから押し直すと (0,1) へ飛ぶことも
+        あった(利用者の報告 2026-11-13)。1小節目のグリッドを左へ伸ばして
+        一番近い目盛りへ合わせ、それが頭 (0,0) かその先なら、ふつうの
+        カーソルとして (0,0) へ置く。0 秒より前へは行かない。"""
+        t0, step = self._lead_step()
+        if step is None:
+            self._free_seek(t)
+            return
+        k = int(round((float(t) - t0) / step))
+        if k >= 0:
+            self.set_cursor_address(0, 0)
+            return
+        self._free_seek(max(0.0, t0 + k * step))
+
+    def _move_free(self, delta):
+        """助走の中に置いた赤い線を ←→ で1グリッドずつ歩かせる。
+
+        目盛りは _lead_step の伸ばしたグリッド。1小節目の頭に着いたら
+        ふつうのカーソル (0,0) に戻り、残りの歩数はそこから先を歩く
+        (頭の手前から → で (0,1) まで飛ばない。利用者の報告 2026-11-13)。"""
+        t0, step = self._lead_step()
+        if step is None:
+            return False
+        t = self._free_time
+        sgn = 1 if delta > 0 else -1
+        for i in range(abs(int(delta))):
+            # 0 秒に寄せた半端な位置からでも、隣の目盛りへ歩く。
+            k = (t - t0) / step
+            if sgn > 0:
+                k = math.floor(k + 1e-6) + 1
+            else:
+                k = math.ceil(k - 1e-6) - 1
+            if k >= 0:
+                rest = abs(int(delta)) - i - 1
+                self.set_cursor_address(0, 0)
+                if rest:
+                    self.move_cursor(rest)
+                return True
+            t = max(0.0, t0 + k * step)
+        self._free_seek(t)
+        return True
 
     def set_cursor_from_time(self, t):
         """再生位置などからカーソルを合わせる。"""
@@ -2941,6 +3004,7 @@ class ChartEditWaveform(WaveformWidget):
             return
         g0 = self._measure_grid(self._cur_measure)
         frac = self._cur_slot / g0 if g0 else 0.0
+        free = self._free_time
         self._grid = GRID_CHOICES[j]
         g1 = self._measure_grid(self._cur_measure)
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
@@ -2950,6 +3014,11 @@ class ChartEditWaveform(WaveformWidget):
         # 少し巻き戻っていた(利用者の報告 2026-11-02)。再生中のカーソルは
         # 再生位置に付いていくので、ここで合わせ直す必要もない。
         if self._playing:
+            return
+        if free is not None:
+            # 助走の中に置いた線は、新しい分割の伸ばしたグリッドへ合わせ直す
+            # (古い分割の目盛りのままだと、→ で歩いても頭に乗らない)。
+            self._lead_seek(free)
             return
         # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
         # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
@@ -4287,6 +4356,7 @@ class ChartEditWaveform(WaveformWidget):
             return
         g0 = self._measure_grid(self._cur_measure)
         frac = self._cur_slot / g0 if g0 else 0.0
+        free = self._free_time
         self._grid = grid
         g1 = self._measure_grid(self._cur_measure)
         self._cur_slot = min(int(round(frac * g1)), g1 - 1)
@@ -4296,6 +4366,11 @@ class ChartEditWaveform(WaveformWidget):
         # 少し巻き戻っていた(利用者の報告 2026-11-02)。再生中のカーソルは
         # 再生位置に付いていくので、ここで合わせ直す必要もない。
         if self._playing:
+            return
+        if free is not None:
+            # 助走の中に置いた線は、新しい分割の伸ばしたグリッドへ合わせ直す
+            # (古い分割の目盛りのままだと、→ で歩いても頭に乗らない)。
+            self._lead_seek(free)
             return
         # **赤い線も動かす。** 1/16 → 1/24 のように割り切れない分割へ
         # 変えるとカーソルの時刻が少しずれるのに、線を引き直していな
