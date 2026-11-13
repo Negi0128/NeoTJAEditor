@@ -37,6 +37,7 @@ from neotja.ruler_widget import RulerWidget
 from neotja.start_screen import StartScreen, GlassCard
 from neotja.theme import apply_theme
 from neotja.tja_analyzer import TJACourseAnalyzer
+from neotja.lyric_jacket import LyricJackets
 
 
 def find_non_cp932_chars(content: str):
@@ -438,6 +439,12 @@ class MainWindow(QMainWindow):
 
         self.analyzer = TJACourseAnalyzer(self.config_data)
         self.current_file = None
+        # 歌詞に合わせて切り替えるジャケット(neotja/lyric_jacket.py、利用者の
+        # 承認 2026-11-13)。譜面の隣の .jacket.json から読み、TJA を保存する
+        # ときに一緒に書く。本文は変わらないので、「変えたか」は本文の
+        # modified_lines とは別に持つ(_jacket_dirty)。
+        self.lyric_jackets = LyricJackets()
+        self._jacket_dirty = False
         self.courses_info = []
         self._preview_course_override = None
         # 譜面分岐。既定は「自動」= 本家と同じく #BRANCHSTART の条件で区間
@@ -2117,7 +2124,7 @@ class MainWindow(QMainWindow):
         # 切り替える。
         # setWindowModified は毎回呼ぶとウィンドウタイトルの組み立てが走るので
         # (打鍵ごとに 0.2ms ほど)、状態が変わったときだけ呼ぶ。
-        dirty = bool(self.editor.modified_lines)
+        dirty = bool(self.editor.modified_lines) or self._jacket_dirty
         if dirty != self.isWindowModified():
             self.setWindowModified(dirty)
         # On large real-world charts, one heavy pass (full re-highlight +
@@ -2150,8 +2157,62 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(base + " [*]")
 
     def _mark_saved(self):
-        """保存済み/新規/読込直後に呼ぶ。タイトルの * を消す。"""
-        self.setWindowModified(False)
+        """保存済み/新規/読込直後に呼ぶ。タイトルの * を消す。
+
+        ジャケットの対応表だけ書けなかったとき(_save_jackets が失敗)は
+        * を残す — 本文は保存できても、まだ失われうる変更があるため。"""
+        self.setWindowModified(bool(getattr(self, "_jacket_dirty", False)))
+
+    # ------------------------------------------------------------------
+    # 歌詞に合わせたジャケット
+    # ------------------------------------------------------------------
+    def _set_jackets(self, jackets):
+        """譜面を開いた/新しくしたときに対応表を入れ替える(変更なしの状態)。"""
+        self.lyric_jackets = jackets if jackets is not None else LyricJackets()
+        self._jacket_dirty = False
+        self._push_jackets_to_pane()
+
+    def _push_jackets_to_pane(self):
+        """作譜ペインの歌詞の帯へ、いまの対応表を渡す(小さな絵を出すため)。"""
+        dock = getattr(self, "preview_dock", None)
+        ce = getattr(dock, "chart_edit", None) if dock is not None else None
+        if ce is not None and hasattr(ce, "set_lyric_jackets"):
+            ce.set_lyric_jackets(dict(self.lyric_jackets.lyrics))
+
+    def _jackets_changed(self):
+        """対応表が変わった。本文と同じく「未保存」にする(利用者の指定
+        2026-11-13「変えたら変更あり扱い」)。保存で .jacket.json に書く。"""
+        self._jacket_dirty = True
+        self.setWindowModified(True)
+        self._push_jackets_to_pane()
+
+    def set_lyric_jacket(self, text, path):
+        """その歌詞の絵を付ける/替える(path が空なら外す)。変わったら True。"""
+        if self.lyric_jackets.set_image(text, path):
+            self._jackets_changed()
+            return True
+        return False
+
+    def set_jacket_base(self, path):
+        """この譜面の基本ジャケットを替える。変わったら True。"""
+        if self.lyric_jackets.set_base(path):
+            self._jackets_changed()
+            return True
+        return False
+
+    def _save_jackets(self):
+        """TJA を書いた直後に呼ぶ。対応表を譜面の隣へ書く。
+
+        書けなくても TJA の保存は成り立っているので、窓は出さずに
+        ステータスバーで知らせ、* を残して次の保存でもう一度書く。"""
+        try:
+            self.lyric_jackets.save(self.current_file)
+        except Exception as e:  # noqa: BLE001
+            self.statusBar().showMessage(
+                "ジャケットの対応表を書けませんでした: %s" % e, 10000)
+            return False
+        self._jacket_dirty = False
+        return True
 
     def _push_recent(self, path):
         if not path:
@@ -2631,7 +2692,9 @@ class MainWindow(QMainWindow):
     # File I/O
     # ------------------------------------------------------------------
     def _unsaved_check(self) -> bool:
-        if not self.editor.modified_lines:
+        # ジャケットの付け外しも「変更」(本文は変わらないが、保存しないと
+        # 失われる)。
+        if not self.editor.modified_lines and not self._jacket_dirty:
             return True
         ans = QMessageBox.question(
             self, "確認", "変更を保存しますか？",
@@ -2650,6 +2713,7 @@ class MainWindow(QMainWindow):
         text = new_file_text()
         self.editor.setPlainText(text)
         self.current_file = None
+        self._set_jackets(LyricJackets())
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
         # 別のファイルになったので、プレビュー側に残っている印も消す。
@@ -2743,6 +2807,7 @@ class MainWindow(QMainWindow):
 
         self.editor.setPlainText(content)
         self.current_file = tja_path
+        self._set_jackets(LyricJackets.load(tja_path))
         self.editor.modified_lines.clear()
         self.editor.checkpoints.clear()
         # 別のファイルになったので、プレビュー側に残っている印も消す。
@@ -2857,6 +2922,8 @@ class MainWindow(QMainWindow):
             self._precompute_for_load(content)
             self.editor.setPlainText(content)
             self.current_file = path
+            # 隣の .jacket.json。無い・壊れているなら空のまま開く。
+            self._set_jackets(LyricJackets.load(path))
             self.editor.modified_lines.clear()
             # 別のファイルになったので、前の譜面で付けた ▶ は消す
             # (new_file / _apply_youtube_project と同じ扱い)。残しておくと
@@ -2943,6 +3010,7 @@ class MainWindow(QMainWindow):
                 return False
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
+            self._save_jackets()
             self._mark_saved()
             self._set_preview_content(content)
             self._refresh_preview()
@@ -2956,6 +3024,7 @@ class MainWindow(QMainWindow):
             self._write_text_atomic(self.current_file, content, "cp932")
             self.editor.modified_lines.clear()
             self.editor.gutter.update()
+            self._save_jackets()
             self._mark_saved()
             self._set_preview_content(content)
             self._refresh_preview()
@@ -3002,7 +3071,8 @@ class MainWindow(QMainWindow):
     def _auto_save_tick(self):
         if not self.config_data.get("auto_save_enabled", False):
             return
-        if not self.current_file or not self.editor.modified_lines:
+        if not self.current_file or not (self.editor.modified_lines
+                                         or self._jacket_dirty):
             return
 
         # 自動保存はデバウンスタイマ上(=入力中)に走るので、モーダルは絶対に
