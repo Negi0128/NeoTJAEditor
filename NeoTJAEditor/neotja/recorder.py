@@ -896,6 +896,20 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
     if arts is None:
         arts = ([(art_idx, art_baked, None)]
                 if art_idx is not None and _art_input_args(bg) else [])
+    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0)
+    graph += chain
+    graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
+              % cur + tail + ",format=yuv420p[v]")
+    return graph
+
+
+def _art_overlay_chain(bg, h, cur, arts, t0):
+    """cur の上へジャケットを重ねる一節と、次の名札を返す。
+
+    背景ありの経路(背景の上・画面の下)と、背景なしの経路(画面の上)で
+    同じものを使う — 大きさ・置き場所・枠・切り替えの区間がどちらでも
+    1画素も違わないようにするため。"""
+    graph = ""
     # 置き場所は art_x / art_y(出来上がりの絵の中の座標)。高さは画面に
     # 対する割合、横は縦横比のまま。既定は左下。歌詞ごとのジャケットも
     # 同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置がぶれない。
@@ -927,8 +941,37 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
                   + "[%s][%s]overlay=x=%s:y=%s%s[%s];"
                   % (cur, tag, ex, ey, en, nxt))
         cur = nxt
-    graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
-              % cur + tail + ",format=yuv420p[v]")
+    return graph, cur
+
+
+def wants_art_only(bg):
+    """背景は無いがジャケットはある(利用者の指定 2026-11-13「背景なしで
+    デフォルト背景でもジャケットつけられるようにしてほしい」)。
+
+    このときだけ「いつもの画面 + ジャケット」の経路にする。ジャケットも
+    無ければ False で、**今までの経路(-vf)がそのまま**使われる。"""
+    return (not bg) and bool(_art_layers(bg))
+
+
+def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0):
+    """背景なしで、いつもの画面の**上**へジャケットを重ねるフィルタ。
+
+    入力 0 が画面(背景も描いた不透明な絵)。arts は _bg_filter_complex と
+    同じ [(入力の番号, 焼いてあるか, 出す区間 か None)]。
+
+    いつもの背景(スキンの上下の絵・提灯・踊り子)は**画面が自分で描く**
+    ので、背景ありのときのように「背景 → ジャケット → 画面」と下へ敷く
+    ことはできない(画面の下半分は不透明な下背景で埋まっていて、下に
+    敷いても1画素も見えない)。下背景を透明にすると今度は「いつもの見た目」
+    でなくなる。なので画面を出来上がりの大きさへ合わせたあと(余白の色も
+    今までと同じ)、**同じ座標・同じ大きさ・同じ枠**で上から重ねる。既定の
+    左下はいつもの画面では下背景と踊り子の所で、レーンも点数も無い。"""
+    h = _bg_out_size(canvas, src_w, src_h)[1]
+    vf = _video_filter(canvas, src_w, src_h)
+    graph = "[0:v]%s[base];" % (vf or "null")
+    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0)
+    graph += chain
+    graph += "[%s]format=yuv420p[v]" % cur
     return graph
 
 
@@ -1104,6 +1147,16 @@ class FrameCostProbe:
                                        aud_idx=probe_aud,
                                        arts=[(2 + i, b, wnd) for i, (b, wnd)
                                              in enumerate(arts)]),
+                    "-map", "[v]"]
+        elif wants_art_only(bg):
+            # 背景なしでジャケットだけ。重ねるぶん重くなるので同じ形で測る。
+            art_args, arts = _art_plan(
+                bg, _bg_out_size(CANVAS_PRESETS.get(canvas), pw, ph)[1])
+            cmd += art_args
+            cmd += ["-filter_complex",
+                    _art_only_filter_complex(
+                        CANVAS_PRESETS.get(canvas), pw, ph, bg,
+                        [(1 + i, b, wnd) for i, (b, wnd) in enumerate(arts)]),
                     "-map", "[v]"]
         cmd += [
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
@@ -1353,7 +1406,10 @@ class VideoRecording:
         bg = as_background(background)
         self._bg_alpha = bool(bg)
         self._passthrough = False
-        vf = None if bg else _video_filter(canvas_wh, pw, ph)
+        # 背景なしでもジャケットがあれば、画面はいつもどおり(背景も描いた
+        # 不透明な絵)のまま、ffmpeg でその上へ重ねる(_art_only_filter_complex)。
+        art_only = wants_art_only(bg)
+        vf = None if (bg or art_only) else _video_filter(canvas_wh, pw, ph)
 
         cmd = [
             _ffmpeg_exe(), "-v", "error", "-y", "-nostdin",
@@ -1376,8 +1432,8 @@ class VideoRecording:
         # ジャケットは**音のうしろ**。前に入れると -map 2:a がずれる。
         # 歌詞に合わせて切り替えるときは絵の数だけ入力が並ぶ(3, 4, …)。
         art_args, arts = (
-            _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1]) if bg
-            else ([], []))
+            _art_plan(bg, _bg_out_size(canvas_wh, pw, ph)[1])
+            if (bg or art_only) else ([], []))
         cmd += art_args
         if bg:
             dur = self.total_frames / float(fps or 60)
@@ -1390,6 +1446,14 @@ class VideoRecording:
                                        arts=[(3 + i, b, wnd) for i, (b, wnd)
                                              in enumerate(arts)]),
                     "-map", "[v]", "-map", a_out]
+        elif art_only:
+            # 背景の入力が無いので、音が 1、ジャケットが 2 から。
+            cmd += ["-filter_complex",
+                    _art_only_filter_complex(
+                        canvas_wh, pw, ph, bg,
+                        [(2 + i, b, wnd) for i, (b, wnd) in enumerate(arts)],
+                        t0=self.start_sec),
+                    "-map", "[v]", "-map", "1:a"]
         if vf:
             cmd += ["-vf", vf]
         cmd += [

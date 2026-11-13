@@ -233,6 +233,8 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
     w, h = (canvas if canvas else (sw, sh))
     if w <= 0 or h <= 0:
         return None
+    if not bg:
+        return _compose_plain_frame(widget, bg, song_sec, w, h)
     base = _bg_frame(bg, bg.offset + float(song_sec), w, h)
     if base is None:
         return None
@@ -262,6 +264,39 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song=""):
         # 本番(ffmpeg)と同じ「縦横比のまま収めて、余りは透明」。
         fit = shot.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         p.drawImage((w - fit.width()) // 2, (h - fit.height()) // 2, fit)
+    p.end()
+    return base
+
+
+def _compose_plain_frame(widget, bg, song_sec, w, h):
+    """背景なし(いつもの見た目)の1コマに、ジャケットを上から重ねる。
+
+    本番の recorder._art_only_filter_complex と同じ組み立て: 画面は背景も
+    自分で描いた不透明な絵のまま縦横比で収め、余白は今までの -vf と同じ
+    #0d1117。ジャケットは**画面の上**(いつもの下背景は不透明なので、下へ
+    敷いても見えない)。"""
+    sw, sh = widget.width(), widget.height()
+    shot = QImage(sw, sh, QImage.Format_RGB32)
+    shot.fill(QColor("#0d1117"))
+    recorder.set_background_passthrough(widget, False)
+    try:
+        widget.begin_offline_render()
+        widget.set_render_time(float(song_sec))
+        widget.render(shot)
+    finally:
+        try:
+            widget.end_offline_render()
+        except RuntimeError:
+            pass
+    base = QImage(w, h, QImage.Format_RGB32)
+    base.fill(QColor("#0d1117"))
+    p = QPainter(base)
+    if (sw, sh) == (w, h):
+        p.drawImage(0, 0, shot)
+    else:
+        fit = shot.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawImage((w - fit.width()) // 2, (h - fit.height()) // 2, fit)
+    _draw_art(p, bg, w, h, float(song_sec))
     p.end()
     return base
 

@@ -71,7 +71,7 @@ class RecordBackgroundDialog(QDialog):
 
         # ---- ファイル ----
         row = QHBoxLayout()
-        self.ed_path = QLineEdit(bg.path if bg else "")
+        self.ed_path = QLineEdit(bg.path if bg is not None else "")
         self.ed_path.setPlaceholderText("なし（動画 mp4/webm/mov・画像 png/jpg）")
         self.ed_path.textChanged.connect(self._schedule)
         btn_pick = QPushButton("選ぶ...")
@@ -113,7 +113,7 @@ class RecordBackgroundDialog(QDialog):
         self.sp_offset.setRange(-3600.0, 3600.0)
         self.sp_offset.setSingleStep(0.1)
         self.sp_offset.setSuffix(" 秒")
-        self.sp_offset.setValue(bg.offset if bg else 0.0)
+        self.sp_offset.setValue(bg.offset if bg is not None else 0.0)
         self.sp_offset.setToolTip(
             "曲の 0 秒のときに、背景動画の何秒目を出すか。\n"
             "録画は曲の %.0f 秒前から始まるので、そのあいだは黒くなります。"
@@ -132,7 +132,7 @@ class RecordBackgroundDialog(QDialog):
         self.sp_dim = QSpinBox()
         self.sp_dim.setRange(0, 80)
         self.sp_dim.setSuffix(" %")
-        self.sp_dim.setValue(int(round((bg.dim if bg else 0.0) * 100)))
+        self.sp_dim.setValue(int(round((bg.dim if bg is not None else 0.0) * 100)))
         self.sp_dim.setToolTip("背景を暗くして譜面を見やすくします。")
         self.sp_dim.valueChanged.connect(self._schedule)
         form.addRow("暗さ", _tight(self.sp_dim))
@@ -140,7 +140,7 @@ class RecordBackgroundDialog(QDialog):
         self.sp_lane = QSpinBox()
         self.sp_lane.setRange(0, 100)
         self.sp_lane.setSuffix(" %")
-        self.sp_lane.setValue(int(round((bg.lane if bg else 1.0) * 100)))
+        self.sp_lane.setValue(int(round((bg.lane if bg is not None else 1.0) * 100)))
         self.sp_lane.setToolTip(
             "譜面レーンの地の濃さ。下げると背景が透けます。\n"
             "音符・文字・枠はそのままです。")
@@ -182,8 +182,12 @@ class RecordBackgroundDialog(QDialog):
         lay.addLayout(form)
 
         # ---- 飾り(ジャケット写真) ----
+        # 以下の欄は **bg is not None** で見る。背景の道が空の bg は偽に
+        # なるが、ジャケットは背景なしでも付けられるようになった
+        # (2026-11-13)ので、偽だからと既定へ戻すと、窓を開いて閉じる
+        # だけで大きさ・位置・枠が初期値へ戻ってしまう。
         art_row = QHBoxLayout()
-        self.ed_art = QLineEdit(getattr(bg, "art", "") if bg else "")
+        self.ed_art = QLineEdit(getattr(bg, "art", "") if bg is not None else "")
         self.ed_art.setPlaceholderText("なし（png / jpg）")
         if art_note:
             self.ed_art.setToolTip(art_note)
@@ -202,13 +206,13 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_pct.setRange(2, 60)
         self.sp_art_pct.setSuffix(" %")
         self.sp_art_pct.setValue(int(round(getattr(bg, "art_pct", 20.0)
-                                           if bg else 20.0)))
+                                           if bg is not None else 20.0)))
         self.sp_art_pct.setToolTip("画面の高さに対する大きさ。")
         self.sp_art_pct.valueChanged.connect(self._schedule)
         self.sp_art_pad = QSpinBox()
         self.sp_art_pad.setRange(0, 400)
         self.sp_art_pad.setSuffix(" px")
-        self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg else 24))
+        self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg is not None else 24))
         self.sp_art_pad.setToolTip("左と下の端からの余白。")
         self.sp_art_pad.valueChanged.connect(self._schedule)
         # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。左上が 0,0。
@@ -216,13 +220,13 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_x = QSpinBox()
         self.sp_art_x.setRange(-9999, 9999)
         self.sp_art_x.setSuffix(" px")
-        self.sp_art_x.setValue(int(getattr(bg, "art_x", 24) if bg else 24))
+        self.sp_art_x.setValue(int(getattr(bg, "art_x", 24) if bg is not None else 24))
         self.sp_art_x.setToolTip("左からの位置。負の数は右端からの距離。")
         self.sp_art_x.valueChanged.connect(self._schedule)
         self.sp_art_y = QSpinBox()
         self.sp_art_y.setRange(-9999, 9999)
         self.sp_art_y.setSuffix(" px")
-        self.sp_art_y.setValue(int(getattr(bg, "art_y", -24) if bg else -24))
+        self.sp_art_y.setValue(int(getattr(bg, "art_y", -24) if bg is not None else -24))
         self.sp_art_y.setToolTip("上からの位置。負の数は下端からの距離。")
         self.sp_art_y.valueChanged.connect(self._schedule)
         art_opt.addWidget(QLabel("大きさ"))
@@ -234,11 +238,11 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_edge = QSpinBox()
         self.sp_art_edge.setRange(0, 40)
         self.sp_art_edge.setSuffix(" px")
-        self.sp_art_edge.setValue(int(getattr(bg, "art_edge", 6) if bg else 6))
+        self.sp_art_edge.setValue(int(getattr(bg, "art_edge", 6) if bg is not None else 6))
         self.sp_art_edge.setToolTip("写真のまわりの枠の太さ。0 で枠なし。")
         self.sp_art_edge.valueChanged.connect(self._schedule)
         self._art_color = str(getattr(bg, "art_edge_color", "#ffffff")
-                              if bg else "#ffffff")
+                              if bg is not None else "#ffffff")
         self.btn_art_color = QPushButton("枠の色")
         self.btn_art_color.clicked.connect(self._pick_art_color)
         art_opt.addWidget(QLabel("枠"))
@@ -347,12 +351,18 @@ class RecordBackgroundDialog(QDialog):
     def _sync_enabled(self):
         on = bool(self.ed_path.text().strip())
         for wdg in (self.sp_offset, self.sp_dim, self.sp_lane, self.chk_in,
-                    self.chk_out, self.cb_target, self.sl_at,
-                    self.ed_art, self.sp_art_pct, self.sp_art_pad,
-                    self.sp_art_x, self.sp_art_y,
-                    self.sp_art_edge, self.btn_art_color,
+                    self.chk_out, self.cb_target,
                     ):
             wdg.setEnabled(on)
+        # ジャケットは**背景が無くても**付けられる(利用者の指定 2026-11-13
+        # 「背景なしでデフォルト背景でもジャケットつけられるようにしてほしい」)。
+        # いつもの画面の上へ重ねる(recorder._art_only_filter_complex)。
+        # 見る時刻のつまみも、ジャケットの切り替えを確かめるのに要る。
+        for wdg in (self.ed_art, self.sp_art_pct, self.sp_art_pad,
+                    self.sp_art_x, self.sp_art_y,
+                    self.sp_art_edge, self.btn_art_color):
+            wdg.setEnabled(True)
+        self.sl_at.setEnabled(on or bool(self.ed_art.text().strip()))
         self.sp_in.setEnabled(on and self.chk_in.isChecked())
         self.sp_out.setEnabled(on and self.chk_out.isChecked())
         # 「音から推定」は動画(＝音が入りうるもの)で、曲の音源があるときだけ。
@@ -476,11 +486,18 @@ class RecordBackgroundDialog(QDialog):
 
     def _render(self):
         bg = self.background()
-        if not bg or not os.path.exists(bg.path):
-            self.view.setText("背景を選ぶと、ここに重なった1コマが出ます。")
+        plain = not bg and recorder.wants_art_only(bg)
+        if not plain and (not bg or not os.path.exists(bg.path)):
+            self.view.setText("背景かジャケットを選ぶと、ここに重なった"
+                              "1コマが出ます。")
             return
         if self._widget is None:
             self._widget = self._make_widget()
+        if plain and self._widget is None:
+            # まとめ録画から開いたとき(重ねる譜面が決まらない)は、背景が
+            # 無ければ出す絵が無い。
+            self.view.setText("背景を選ぶと、ここに重なった1コマが出ます。")
+            return
         if self._widget is None:
             # まとめ録画から開いたときは、重ねる譜面が1つに決まらない。
             # 背景だけを出す(暗さと位置はここで見られる)。
