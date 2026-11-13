@@ -179,14 +179,36 @@ class WaveformWidget(QWidget):
             return
         self._wave_lead = sec
         if self.mips is not None:
-            self.duration = max(0.0, self.mips.duration + sec)
+            self.duration = max(0.0, self.mips.duration + sec
+                                + self._wave_tail)
+        self.update()
+
+    #: 音源の後ろに足した無音(余韻)の秒数。preview_dock が入れる。
+    _wave_tail = 0.0
+
+    def set_wave_tail(self, sec):
+        """音源の後ろに足した無音の秒数を決める。
+
+        曲の終わりより後ろにも赤い線を置いて流せるよう、ミキサーへ渡す
+        PCM の後ろにも無音を足してある(利用者の報告 2026-11-13)。後ろは
+        時刻がずれないので、描き方は変わらない。長さ(= 景色を送れる所・
+        拡大縮小の範囲)だけそのぶん伸びる。範囲の外はミップが 0 を返すので
+        平らな線になる。"""
+        sec = max(0.0, float(sec or 0.0))
+        if abs(sec - self._wave_tail) < 1e-9:
+            return
+        self._wave_tail = sec
+        if self.mips is not None:
+            self.duration = max(0.0, self.mips.duration + self._wave_lead
+                                + sec)
         self.update()
 
     def set_mips(self, mips: WaveformMips):
         """両方の波形インスタンス(ドック側とゲーム窓側)で同じ WaveformMips を
         共有する前提。ここでは参照を持つだけでコピーはしない。"""
         self.mips = mips
-        self.duration = max(0.0, (mips.duration + self._wave_lead)
+        self.duration = max(0.0, (mips.duration + self._wave_lead
+                                  + self._wave_tail)
                             if mips else 0.0)
         # 開いたときは**音源の頭**から見せる。頭に足した助走は左へ
         # 置いておく(左へ送れば出てくる)。

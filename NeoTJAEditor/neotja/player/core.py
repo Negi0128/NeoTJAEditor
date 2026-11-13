@@ -132,6 +132,9 @@ class PlayerCore:
             audio_output_device=self.cfg.get("audio_output_device", ""),
             waveform_stereo=bool(self.cfg.get("waveform_stereo", True)),
             se_text_enabled=bool(self.cfg.get("se_text_enabled", True)),
+            # 曲の終わりの後ろに足す無音は 5 秒(エディタは 10 秒。
+            # 利用者の指定 2026-11-13)。
+            postroll_sec=5.0,
         )
         self.dock.hide()
         # 「読めたら鳴らす」の予約を回収する口。

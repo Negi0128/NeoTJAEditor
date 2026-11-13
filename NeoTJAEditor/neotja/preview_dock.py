@@ -1380,10 +1380,15 @@ class PreviewDock(QDockWidget):
                  chart_op_cb=None,
                  config_data=None, save_settings_cb=None,
                  checkpoint_lines_cb=None, undo_cb=None, redo_cb=None,
-                 demostart_cb=None, header_edit_cb=None, embedded=False):
+                 demostart_cb=None, header_edit_cb=None, embedded=False,
+                 postroll_sec=None):
         super().__init__("音源プレビュー", parent)
         #: v15 統合画面か(再生窓をメインウィンドウの右に埋める)。
         self._embedded = bool(embedded)
+        #: 曲の終わりの後ろに足す無音の秒数。エディタ 10 秒・Player 5 秒
+        #: (利用者の指定 2026-11-13)。Player は player/core.py から渡す。
+        self._postroll_sec = (self._POSTROLL_SEC if postroll_sec is None
+                              else max(0.0, float(postroll_sec)))
         self.apply_offset_cb = apply_offset_cb
         #: DEMOSTART を本文へ書く口(MainWindow が持つ)。
         self.demostart_cb = demostart_cb
@@ -1512,6 +1517,12 @@ class PreviewDock(QDockWidget):
         #: そのうち、ミキサーへ渡す PCM の頭へ足すぶん。無音 WAV に助走を
         #: 焼いてあるレガシー経路では 0(二重に足さないため)。
         self._pcm_lead_sec = 0.0
+        #: 音源の後ろに足した無音(余韻)の秒数。曲の長さ・時刻の表示から
+        #: 引く(_on_decoded で決める)。
+        self._tail_sec = 0.0
+        #: 譜面の終わり(音源の時刻)。音源より譜面が長いと、そのぶん余韻を
+        #: 伸ばす。refresh_from_content で控える。
+        self._chart_end_audio = 0.0
         #: 次の読み直しで「道筋が同じでも読む」合図。
         self._wave_reload = False
         # 選曲画面の試聴で読んだ音源(load_wave_only 参照)。
@@ -2980,7 +2991,7 @@ class PreviewDock(QDockWidget):
             mm.set_position(ms / 1000.0)
             lead_ms = int(self._lead_sec * 1000)
             self.lbl_mm_now.setText(_fmt_time(ms - lead_ms))
-            self.lbl_mm_all.setText(_fmt_time(self._duration_ms - lead_ms))
+            self.lbl_mm_all.setText(_fmt_time(self._song_ms()))
         ce = getattr(self, "chart_edit", None)
         if ce is not None and self.bottom_stack.currentIndex() == self.MODE_EDIT:
             try:
@@ -3733,6 +3744,15 @@ class PreviewDock(QDockWidget):
         headers = parse_preview_headers(content)
         self._editor_bpm = headers["bpm"]
         self._editor_offset = headers["offset"]
+        if preview_data is not None:
+            # 余韻の長さを決めるのに使う(_post_roll_for)。録画の終わりと
+            # 同じ求め方。
+            from neotja.recorder import chart_end_seconds
+            try:
+                self._chart_end_audio = float(chart_end_seconds(
+                    preview_data, headers["offset"] or 0.0, 0.0))
+            except Exception:  # noqa: BLE001
+                self._chart_end_audio = 0.0
         # 音源が同じでも本文のOFFSETは変わり得る。音源読込の早期returnより先に
         # 同期し、下のグリッド・打音・プレビューも新しい値で組み立てる。
         self.spin_offset.blockSignals(True)
@@ -3942,14 +3962,42 @@ class PreviewDock(QDockWidget):
         選曲画面の試聴/BGM(load_wave_only)には足さない — 譜面と関係なく
         音だけ鳴らすので、助走は意味を持たない。"""
         lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
-        if pcm is None or lead <= 0 or not sr:
+        tail = self._pcm_tail_sec if path == self._current_wave_path else 0.0
+        if pcm is None or (lead <= 0 and tail <= 0) or not sr:
             return pcm
         import numpy as np
-        n = int(round(float(lead) * float(sr)))
-        if n <= 0:
+        n = max(0, int(round(float(lead) * float(sr))))
+        k = max(0, int(round(float(tail) * float(sr))))
+        if n <= 0 and k <= 0:
             return pcm
-        pad = np.zeros((n,) + tuple(pcm.shape[1:]), dtype=pcm.dtype)
-        return np.concatenate((pad, pcm), axis=0)
+        shape = tuple(pcm.shape[1:])
+        parts = []
+        if n > 0:
+            parts.append(np.zeros((n,) + shape, dtype=pcm.dtype))
+        parts.append(pcm)
+        if k > 0:
+            # 後ろにも無音(余韻)。曲の終わりより先へ線を置いても、
+            # ミキサーが曲の長さで止めて頭へ戻していた(利用者の報告
+            # 2026-11-13)。
+            parts.append(np.zeros((k,) + shape, dtype=pcm.dtype))
+        return np.concatenate(parts, axis=0)
+
+    #: 曲の終わりの後ろに足す無音の秒数(エディタ)。Player は 5 秒。
+    _POSTROLL_SEC = 10.0
+    #: ミキサーへ渡す PCM の後ろへ足すぶん(_on_decoded で決める)。
+    _pcm_tail_sec = 0.0
+
+    def _post_roll_for(self, song_sec):
+        """その音源の後ろに足す無音の秒数。
+
+        いつもの余韻(_postroll_sec)に、譜面が音源より長いぶんを足す —
+        音源が先に終わる譜面でも、譜面の終わりまで流して見られるように。
+        助走と同じく、ミキサー経路でないとき(PCM を触れない)と、無音の
+        譜面(無音 WAV に後ろの余白を焼いてある)には足さない。"""
+        if not self._mixer_active or self._silent_note:
+            return 0.0
+        over = max(0.0, float(self._chart_end_audio or 0.0) - float(song_sec))
+        return self._postroll_sec + over
 
     def _start_waveform_decode(self, wave_path):
         self._decoding_path = wave_path
@@ -3985,10 +4033,21 @@ class PreviewDock(QDockWidget):
         # 渡し忘れると duration が 0 のままになり、波形が出ないだけでなく
         # 追従表示の view_start が曲頭にクランプされて位置が動かなくなる。
         lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
+        tail = 0.0
+        if path == self._current_wave_path:
+            # 後ろの余韻は音源の長さが分かったここで決める。
+            if pcm is not None and sr:
+                song = len(pcm) / float(sr)
+            else:
+                song = float(duration or 0.0)
+            tail = self._post_roll_for(song)
+            self._pcm_tail_sec = tail
+            self._tail_sec = tail
         for wf in self._waveforms():
             if wf is None:
                 continue
             wf.set_wave_lead(lead)
+            wf.set_wave_tail(tail)
             wf.set_mips(mips)
         # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
@@ -4093,7 +4152,7 @@ class PreviewDock(QDockWidget):
         lead_ms = int(self._lead_sec * 1000)
         self.time_label.setText(
             "%s / %s" % (_fmt_time(ms - lead_ms),
-                         _fmt_time(self._duration_ms - lead_ms)))
+                         _fmt_time(self._song_ms())))
         if not self.seek_slider.isSliderDown():
             self.seek_slider.blockSignals(True)
             self.seek_slider.setValue(ms)
@@ -4106,8 +4165,7 @@ class PreviewDock(QDockWidget):
         mm = getattr(self, "minimap", None)
         if mm is not None:
             mm.set_duration(ms / 1000.0)
-            lead_ms = int(self._lead_sec * 1000)
-            self.lbl_mm_all.setText(_fmt_time(ms - lead_ms))
+            self.lbl_mm_all.setText(_fmt_time(self._song_ms()))
         if self.duration_ready_cb:
             self.duration_ready_cb()
 
@@ -4116,11 +4174,16 @@ class PreviewDock(QDockWidget):
         return self._duration_ms / 1000.0
 
     def song_duration_seconds(self) -> float:
-        """音源そのものの長さ(助走を含まない)。
+        """音源そのものの長さ(助走も後ろの余韻も含まない)。
 
         「曲の長さ」が要る所(録画の尺など)はこちら。録画は元の音源ファイルを
         そのまま使うので、助走ぶん長い値を渡すと後ろに空白が付く。"""
-        return max(0.0, self.duration_seconds() - self._lead_sec)
+        return max(0.0, self.duration_seconds() - self._lead_sec
+                   - self._tail_sec)
+
+    def _song_ms(self):
+        """時刻の表示の分母(曲の長さ, ms)。助走と後ろの余韻は数えない。"""
+        return max(0, int(round(self.song_duration_seconds() * 1000)))
 
     def wave_path(self):
         """いま読み込んでいる音源(WAVE)のフルパス。未読込なら None。
