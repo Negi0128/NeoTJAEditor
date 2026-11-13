@@ -1574,17 +1574,28 @@ class ChartEditWaveform(WaveformWidget):
 
     #: 赤い線をつかめる幅(px)。線の左右それぞれにこのぶん。
     PLAYHEAD_GRAB_PX = 6
+    #: 音符の行などではその半分。線のすぐ横のマスを押したつもりが線を
+    #: つかんでしまい、カーソルが動かなかった(利用者の報告 2026-11-13
+    #: 「赤い線の判定が広すぎる」)。命令の札がまばらな BPM・拍子記号の行は
+    #: 線をつかむ場所として使われているので今までの幅のまま。
+    PLAYHEAD_GRAB_PX_NARROW = 3
+    _PLAYHEAD_WIDE_ROWS = ("bpm", "measure")
 
     def near_playhead(self, x, y=None):
         """赤い線をつかめる所か(利用者の指定 2026-11-05)。
 
-        目盛りの帯は小節を選ぶ所なので、つかめるのはその下だけ。"""
+        目盛りの帯は小節を選ぶ所なので、つかめるのはその下だけ。
+        幅は行で変わる(BPM・拍子記号の行は広く、ほかは半分)。押したときと
+        カーソルの形(手の形)で同じ判定を使う。"""
         if y is not None and y < self.RULER_H:
             return False
         if self._visible_span() <= 0:
             return False
+        px = self.PLAYHEAD_GRAB_PX
+        if y is not None and self._row_at(y) not in self._PLAYHEAD_WIDE_ROWS:
+            px = self.PLAYHEAD_GRAB_PX_NARROW
         return (abs(float(x) - self._sec_to_x(self.position_sec))
-                <= self.spx(self.PLAYHEAD_GRAB_PX))
+                <= self.spx(px))
 
     def _free_seek(self, t):
         """グリッドに合わせず、その時刻へ赤い線を置いてシークを頼む。
