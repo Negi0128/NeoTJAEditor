@@ -512,6 +512,7 @@ class RecordDialog(QDialog):
                                      song_path=self._song,
                                      canvas_wh=self._canvas_now(),
                                      art_track=self._art_track,
+                                     chart_path=self._mw.current_file or "",
                                      art_note=(
                                          "この譜面の基本ジャケット。歌詞に"
                                          "ジャケットを付けた所では、その絵に"

@@ -49,7 +49,8 @@ class RecordBackgroundDialog(QDialog):
     MAX_VIEW_W = 900
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
-                 song_path="", canvas_wh=None, art_track=None, art_note=""):
+                 song_path="", canvas_wh=None, art_track=None, art_note="",
+                 chart_path=""):
         super().__init__(parent)
         #: 基本ジャケット → 歌詞に合わせた切り替えの区切り、を作る呼び出し
         #: (録画の窓が渡す)。見本の1コマを「見ている時刻の絵」にするため。
@@ -62,6 +63,9 @@ class RecordBackgroundDialog(QDialog):
         self._out_dir = str(out_dir or "")
         #: 曲の音源。「音から推定」で背景の音と見比べる相手。
         self._song = str(song_path or "")
+        #: 譜面ファイル。PNG に書き出すときの名前と、置き場所の候補に使う。
+        #: まとめ録画からは渡らない(曲が1つに決まらない)。
+        self._chart = str(chart_path or "")
         self._yt = None
         #: 出来上がりの大きさ (w, h)。見本を本番と同じ画面比で作るため。
         self._canvas_wh = tuple(canvas_wh) if canvas_wh else None
@@ -103,6 +107,16 @@ class RecordBackgroundDialog(QDialog):
         at_row.addWidget(QLabel("見る位置"))
         at_row.addWidget(self.sl_at, 1)
         at_row.addWidget(self.lb_at)
+        # 見ているコマを PNG に書き出す(利用者の指定 2026-11-13「この画面を
+        # png で保存ボタンでいいや その場で生成した方がいいね」)。
+        # 窓に出ている縮めた絵を取るのではなく、押したときに**出来上がりの
+        # 大きさ**で焼き直す。サムネや告知に使うので、縮んだ絵では足りない。
+        self.btn_png = QPushButton("この画面をPNGで保存…")
+        self.btn_png.setToolTip(
+            "いまの設定と見る位置で、出来上がりと同じ大きさの1コマを"
+            + chr(10) + "PNG で保存します。")
+        self.btn_png.clicked.connect(self._save_png)
+        at_row.addWidget(self.btn_png)
         lay.addLayout(at_row)
 
         # ---- つまみ ----
@@ -363,6 +377,8 @@ class RecordBackgroundDialog(QDialog):
                     self.sp_art_edge, self.btn_art_color):
             wdg.setEnabled(True)
         self.sl_at.setEnabled(on or bool(self.ed_art.text().strip()))
+        # 見本が出せるときだけ押せる(出ないときに押しても書くものが無い)。
+        self.btn_png.setEnabled(self.sl_at.isEnabled())
         self.sp_in.setEnabled(on and self.chk_in.isChecked())
         self.sp_out.setEnabled(on and self.chk_out.isChecked())
         # 「音から推定」は動画(＝音が入りうるもの)で、曲の音源があるときだけ。
@@ -484,20 +500,22 @@ class RecordBackgroundDialog(QDialog):
         self.lb_at.setText("%6.2f 秒" % at)
         self._timer.start(PREVIEW_MS)
 
-    def _render(self):
+    def _frame(self):
+        """いまの設定と見る位置の1コマ。(絵, 出せないときの文言) を返す。
+
+        見本も PNG の書き出しも**ここ1か所**で作る。別々に組むと、
+        見本と保存した絵が食い違っても気づけない。"""
         bg = self.background()
         plain = not bg and recorder.wants_art_only(bg)
         if not plain and (not bg or not os.path.exists(bg.path)):
-            self.view.setText("背景かジャケットを選ぶと、ここに重なった"
-                              "1コマが出ます。")
-            return
+            return None, ("背景かジャケットを選ぶと、ここに重なった"
+                          "1コマが出ます。")
         if self._widget is None:
             self._widget = self._make_widget()
         if plain and self._widget is None:
             # まとめ録画から開いたとき(重ねる譜面が決まらない)は、背景が
             # 無ければ出す絵が無い。
-            self.view.setText("背景を選ぶと、ここに重なった1コマが出ます。")
-            return
+            return None, "背景を選ぶと、ここに重なった1コマが出ます。"
         if self._widget is None:
             # まとめ録画から開いたときは、重ねる譜面が1つに決まらない。
             # 背景だけを出す(暗さと位置はここで見られる)。
@@ -510,7 +528,13 @@ class RecordBackgroundDialog(QDialog):
                                       canvas=self._canvas_wh,
                                       song=self._song)
         if img is None:
-            self.view.setText("背景のコマを取り出せませんでした。")
+            return None, "背景のコマを取り出せませんでした。"
+        return img, ""
+
+    def _render(self):
+        img, msg = self._frame()
+        if img is None:
+            self.view.setText(msg)
             return
         # **入る大きさに収める。** 幅だけで縮めていたので、窓が低いと
         # 下が切れて「レーンの所だけ」に見えていた(利用者の報告
@@ -521,3 +545,53 @@ class RecordBackgroundDialog(QDialog):
         pm = QPixmap.fromImage(img).scaled(bw, bh, Qt.KeepAspectRatio,
                                            Qt.SmoothTransformation)
         self.view.setPixmap(pm)
+
+    # ------------------------------------------------------------------
+    # PNG の書き出し
+    # ------------------------------------------------------------------
+    def _png_dir(self):
+        """保存の窓を最初に開く場所。録画の書き出し先 → 譜面のフォルダ →
+        前回 PNG を置いた場所 → ホーム、の順で、実在するものを使う
+        (外付けを外したなどで無くなったフォルダは飛ばす)。"""
+        cfg = settings_mod.load_settings()
+        for cand in (self._out_dir,
+                     os.path.dirname(self._chart) if self._chart else "",
+                     str(cfg.get("rec_bg_png_dir", "") or "")):
+            if cand and os.path.isdir(cand):
+                return cand
+        return os.path.expanduser("~")
+
+    def _png_name(self):
+        """既定のファイル名「譜面名_分-秒.png」。同じ曲で何コマか書き出しても
+        見る位置で見分けられるように時刻を付ける(":" は名前に使えないので "-")。"""
+        at = int(self.sl_at.value() / 100.0)
+        base = (os.path.splitext(os.path.basename(self._chart))[0]
+                if self._chart else "背景")
+        return "%s_%02d-%02d.png" % (base, at // 60, at % 60)
+
+    def _save_png(self):
+        """見ているコマを出来上がりの大きさで焼いて PNG に保存する。
+
+        欄も見本も触らない(焼くだけ)。保存の窓でやめたら何もしない。"""
+        img, msg = self._frame()
+        if img is None:
+            self.lbl_def.setText(msg)
+            return
+        got, _ = QFileDialog.getSaveFileName(
+            self, "この画面をPNGで保存",
+            os.path.join(self._png_dir(), self._png_name()),
+            "PNG 画像 (*.png)")
+        if not got:
+            return
+        if not got.lower().endswith(".png"):
+            got += ".png"
+        if not img.save(got, "PNG"):
+            self.lbl_def.setText("保存できませんでした: %s" % got)
+            return
+        # 置いた場所を覚える。譜面も書き出し先も分からない(まとめ録画)
+        # ときに、次はここから開けるように。
+        cfg = settings_mod.load_settings()
+        cfg["rec_bg_png_dir"] = os.path.dirname(got)
+        settings_mod.save_settings(cfg)
+        self.lbl_def.setText("保存しました: %s（%d×%d）"
+                             % (os.path.basename(got), img.width(), img.height()))

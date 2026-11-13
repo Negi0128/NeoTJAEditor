@@ -45,6 +45,9 @@ _SETTINGS_KEYS = (
     "rec_bg_art", "rec_bg_art_pct", "rec_bg_art_pad",
     "rec_bg_art_x", "rec_bg_art_y", "rec_bg_art_edge", "rec_bg_art_edge_color",
     "rec_bg_wave", "rec_bg_wave_pct", "rec_bg_wave_color", "rec_bg_wave_alpha",
+    # 録画の背景の窓で「この画面をPNGで保存」した場所(次に開く場所)。
+    # これも default_settings() と両方に要る。
+    "rec_bg_png_dir",
     # 利用者が用意した TNDE の System フォルダ。ここと default_settings() の
     # 両方に書くこと(片方だけだと再起動のたびに空へ戻る。上の
     # record_output_dir が実際にそうなっていた)。
@@ -102,6 +105,8 @@ def default_settings() -> dict:
         "rec_bg_wave_pct": 15.0,
         "rec_bg_wave_color": "#ffb300",
         "rec_bg_wave_alpha": 70,
+        # 録画の背景の窓で PNG を最後に置いたフォルダ。空なら覚えていない。
+        "rec_bg_png_dir": "",
         # 動画書き出しで最後に実際に使った場所。録画のたびに書き換わる履歴で、
         # 上の record_output_dir(ユーザーの指定)とは別に持つ。一緒にしていた
         # ころは、環境設定で保存先を決めても一度別の場所へ書き出すだけで
