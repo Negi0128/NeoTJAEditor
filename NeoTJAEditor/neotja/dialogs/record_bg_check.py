@@ -140,8 +140,8 @@ def _baked_art(bg, h, path=None):
 def _draw_art(p, bg, w, h, song_sec=None):
     """ジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。
 
-    置き場所は art_x / art_y(出来上がりの絵の中の座標)。負は反対の端
-    からの距離。既定 (24, -24) は左下。歌詞に合わせて切り替えるときは
+    置き場所は art_x / art_y(真ん中が 0、1080p の画素)。座標は本番と
+    同じ recorder.art_xy で出す。歌詞に合わせて切り替えるときは
     **見ている時刻の絵**(song_sec、音源の秒)を出す。
 
     切り替わりのフェードの中なら、本番と同じく2枚を混ぜる(前の絵を
@@ -157,8 +157,7 @@ def _draw_art(p, bg, w, h, song_sec=None):
         img = _baked_art(bg, h, path)
         if img is None or opacity <= 0.0:
             continue
-        x = bg.art_x if bg.art_x >= 0 else w - img.width() + bg.art_x
-        y = bg.art_y if bg.art_y >= 0 else h - img.height() + bg.art_y
+        x, y = recorder.art_xy(bg, w, h, img.width())
         p.save()
         p.setOpacity(min(1.0, float(opacity)))
         p.drawImage(int(x), int(y), img)

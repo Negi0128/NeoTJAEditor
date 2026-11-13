@@ -45,6 +45,11 @@ _SETTINGS_KEYS = (
     "rec_bg_art", "rec_bg_art_pct", "rec_bg_art_pad",
     "rec_bg_art_x", "rec_bg_art_y", "rec_bg_art_edge", "rec_bg_art_edge_color",
     "rec_bg_wave", "rec_bg_wave_pct", "rec_bg_wave_color", "rec_bg_wave_alpha",
+    # ジャケットの位置の決まりの印。"center" なら rec_bg_art_x / y は
+    # 「真ん中が 0、1080p の画素」(2026-11-13 から)。無ければ古い決まり
+    # (左上が 0、負は反対の端から)の値なので、読むときに一度だけ (0, 0) へ
+    # 戻す(_migrate_art_pos)。default_settings() と両方に要る。
+    "rec_bg_art_pos",
     # 録画の背景の窓で「この画面をPNGで保存」した場所(次に開く場所)。
     # これも default_settings() と両方に要る。
     "rec_bg_png_dir",
@@ -97,8 +102,9 @@ def default_settings() -> dict:
         "rec_bg_art": "",
         "rec_bg_art_pct": 30.0,
         "rec_bg_art_pad": 24,
-        "rec_bg_art_x": 24,
-        "rec_bg_art_y": -24,
+        "rec_bg_art_x": 0,
+        "rec_bg_art_y": 0,
+        "rec_bg_art_pos": "center",
         "rec_bg_art_edge": 6,
         "rec_bg_art_edge_color": "#ffffff",
         "rec_bg_wave": False,
@@ -500,10 +506,32 @@ def _coerce(default, loaded):
 _BASELINE = None
 
 
+def _migrate_art_pos(data: dict, loaded: dict) -> None:
+    """ジャケットの位置を新しい決まり(真ん中が 0)へ移す。印が無いときだけ。
+
+    古い値(既定 24, -24 = 左下)は新しい決まりで読むと真ん中から少し
+    ずれた所になり、どちらの意味でも利用者が置いた場所ではない。換算は
+    書き出しの大きさで変わるので正しく直せず、**真ん中へ戻す**ことにした
+    (利用者の決定 2026-11-13「まかせる」)。「既定にする」で覚えた見た目
+    (rec_bg_default)の中の位置も同じく戻す。"""
+    if loaded.get("rec_bg_art_pos") == "center":
+        return
+    data["rec_bg_art_x"] = 0
+    data["rec_bg_art_y"] = 0
+    saved = data.get("rec_bg_default")
+    if isinstance(saved, dict) and ("art_x" in saved or "art_y" in saved):
+        saved = dict(saved)            # 控え(_BASELINE)と同じ物を触らない
+        saved["art_x"] = 0
+        saved["art_y"] = 0
+        data["rec_bg_default"] = saved
+    data["rec_bg_art_pos"] = "center"
+
+
 def load_settings() -> dict:
     global _BASELINE
     data = default_settings()
     path = settings_path()
+    loaded = None
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -521,6 +549,12 @@ def load_settings() -> dict:
         # ファイル側(古い空のパス)を書き戻していた(利用者の報告 2026-11-05
         # 「一回保存して戻ると消える」)。
         _BASELINE = copy.deepcopy(data)
+    # 位置の移し替えは**控えを取ったあと**。控えがファイルと同じ古い値の
+    # ままなら、保存のとき _merge_for_save が「自分で変えた」と見て新しい
+    # 値を書く。先に移すと「よそが変えた」と見てファイルの古い値へ戻して
+    # しまい、印だけが付いて位置が古いまま残る。
+    if isinstance(loaded, dict):
+        _migrate_art_pos(data, loaded)
     return data
 
 

@@ -233,19 +233,24 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg is not None else 24))
         self.sp_art_pad.setToolTip("左と下の端からの余白。")
         self.sp_art_pad.valueChanged.connect(self._schedule)
-        # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。左上が 0,0。
-        # 負の数は反対の端からの距離(-24 なら右端/下端から 24px)。
+        # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。0,0 が画面の
+        # 真ん中(利用者の決定 2026-11-13「まかせる」)。数字は 1080p の画素で、
+        # 720p で書き出すときは同じ割合で縮める(recorder.art_xy)ので、
+        # 画質を替えても置き場所は変わらない。
+        lim_x, lim_y = recorder.ART_POS_LIMIT
+        pos_tip = (chr(10) + "0 で画面の真ん中。数字は 1080p の画素で、"
+                   + chr(10) + "720p などで書き出すときは同じ割合で縮めます。")
         self.sp_art_x = QSpinBox()
-        self.sp_art_x.setRange(-9999, 9999)
+        self.sp_art_x.setRange(-lim_x, lim_x)
         self.sp_art_x.setSuffix(" px")
-        self.sp_art_x.setValue(int(getattr(bg, "art_x", 24) if bg is not None else 24))
-        self.sp_art_x.setToolTip("左からの位置。負の数は右端からの距離。")
+        self.sp_art_x.setValue(int(getattr(bg, "art_x", 0) if bg is not None else 0))
+        self.sp_art_x.setToolTip("横の位置。右へ +、左へ −。" + pos_tip)
         self.sp_art_x.valueChanged.connect(self._schedule)
         self.sp_art_y = QSpinBox()
-        self.sp_art_y.setRange(-9999, 9999)
+        self.sp_art_y.setRange(-lim_y, lim_y)
         self.sp_art_y.setSuffix(" px")
-        self.sp_art_y.setValue(int(getattr(bg, "art_y", -24) if bg is not None else -24))
-        self.sp_art_y.setToolTip("上からの位置。負の数は下端からの距離。")
+        self.sp_art_y.setValue(int(getattr(bg, "art_y", 0) if bg is not None else 0))
+        self.sp_art_y.setToolTip("縦の位置。下へ +、上へ −。" + pos_tip)
         self.sp_art_y.valueChanged.connect(self._schedule)
         art_opt.addWidget(QLabel("大きさ"))
         art_opt.addWidget(self.sp_art_pct)
@@ -406,7 +411,7 @@ class RecordBackgroundDialog(QDialog):
 
     def _browse_art(self):
         got, _ = QFileDialog.getOpenFileName(
-            self, "左下へ置くジャケット写真",
+            self, "ジャケット写真",
             self.ed_art.text().strip() or "",
             "画像 (*.png *.jpg *.jpeg *.bmp *.webp);;すべて (*.*)")
         if got:

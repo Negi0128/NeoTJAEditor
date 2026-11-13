@@ -566,7 +566,7 @@ class RecordBackground:
     def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
                  fade_in=0.0, fade_out=0.0, fade_target="all",
                  art="", art_pct=30.0, art_pad=24,
-                 art_x=24, art_y=-24,
+                 art_x=0, art_y=0,
                  art_edge=6, art_edge_color="#ffffff",
                  wave=False, wave_pct=15.0, wave_color="#ffb300",
                  wave_alpha=70, art_track=None):
@@ -609,17 +609,19 @@ class RecordBackground:
         except (TypeError, ValueError):
             self.art_edge = 6
         self.art_edge_color = _hex_color(art_edge_color, "#ffffff")
-        #: 置く場所。**出来上がりの絵の中の座標(画素)**で持つ
-        #: (利用者の指定 2026-10-31「ジャケットは座標でよくないか」)。
-        #: 左上が (0, 0)。**負の数は反対の端からの距離** — -24 なら
-        #: 右端(下端)から 24px。既定 (24, -24) は今までどおり左下。
-        def _pos(v, d):
+        #: 置く場所(利用者の決定 2026-11-13「まかせる」)。**(0, 0) が画面の
+        #: 真ん中**で、右・下が +。数字は **1080p の画素**で持ち、出来上がりの
+        #: 高さに合わせて縮める(art_xy)。以前は左上が原点・負は反対の端から、
+        #: の出来上がりの画素だったが、それだと 720p と 1080p で同じ数字でも
+        #: 置き場所がずれ、ジャケットの大きさ(高さの割合)とも釣り合わなかった。
+        #: 古い値は settings の rec_bg_art_pos の印で一度だけ (0, 0) へ戻す。
+        def _pos(v, lim):
             try:
-                return int(round(float(v)))
+                return max(-lim, min(lim, int(round(float(v)))))
             except (TypeError, ValueError):
-                return d
-        self.art_x = _pos(art_x, 24)
-        self.art_y = _pos(art_y, -24)
+                return 0
+        self.art_x = _pos(art_x, ART_POS_LIMIT[0])
+        self.art_y = _pos(art_y, ART_POS_LIMIT[1])
         #: 歌詞に合わせて切り替えるジャケット(利用者の承認 2026-11-13)。
         #: [(始まり, 終わり, 道)] で、時刻は**音源の秒**(None は頭から /
         #: 最後まで)。lyric_jacket.jacket_segments で作る。空なら今までどおり
@@ -685,7 +687,7 @@ def as_background(bg):
             fade_target=bg.get("fade_target", "all"),
             art=bg.get("art", ""), art_pct=bg.get("art_pct", 30.0),
             art_pad=bg.get("art_pad", 24),
-            art_x=bg.get("art_x", 24), art_y=bg.get("art_y", -24),
+            art_x=bg.get("art_x", 0), art_y=bg.get("art_y", 0),
             art_edge=bg.get("art_edge", 6),
             art_edge_color=bg.get("art_edge_color", "#ffffff"),
             wave=bg.get("wave", False), wave_pct=bg.get("wave_pct", 15.0),
@@ -894,6 +896,28 @@ def bg_with_defaults(bg, saved):
                             art_track=getattr(bg, "art_track", None), **kw)
 
 
+#: ジャケットの位置の数字を何 p の画素で数えるか。どの大きさで書き出しても
+#: 同じ数字なら同じ所に来るよう、ここを基準にして出来上がりの高さで縮める。
+ART_POS_REF_H = 1080
+#: 位置の数字の幅(1080p の半分ずつ)。真ん中から端まで動かせる。
+ART_POS_LIMIT = (960, 540)
+
+
+def art_xy(bg, out_w, out_h, side):
+    """ジャケット(枠まで入れて side 四方)を置く左上の座標(整数)。
+
+    (0, 0) で画面の真ん中、art_x / art_y は 1080p の画素で右・下が +。
+    **確認の1コマ(Qt)と書き出し(ffmpeg)はどちらもこれを使う** — 式を
+    2か所に書くと、見本と出来上がりで1画素ずつずれても気づけない。
+    偶数へ寄せるのは、ffmpeg の overlay が yuv420 で重ねるときに奇数の
+    座標を切り捨てるため(寄せておけば見本と同じ所に来る)。"""
+    s = float(out_h) / ART_POS_REF_H
+    x = (float(out_w) - side) / 2.0 + float(bg.art_x) * s
+    y = (float(out_h) - side) / 2.0 + float(bg.art_y) * s
+    return (2 * int(math.floor(x / 2.0 + 0.5)),
+            2 * int(math.floor(y / 2.0 + 0.5)))
+
+
 def art_total_h(bg, out_h):
     """枠まで入れたジャケットの高さ(画素)。"""
     ah = max(8, int(round(out_h * bg.art_pct / 100.0)))
@@ -1048,14 +1072,14 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
     if arts is None:
         arts = ([(art_idx, art_baked, None)]
                 if art_idx is not None and _art_input_args(bg) else [])
-    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0, fps)
+    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0, fps, w=w)
     graph += chain
     graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
               % cur + tail + ",format=yuv420p[v]")
     return graph
 
 
-def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
+def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None):
     """cur の上へジャケットを重ねる一節と、次の名札を返す。
 
     背景ありの経路(背景の上・画面の下)と、背景なしの経路(画面の上)で
@@ -1073,16 +1097,17 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60):
             if kb > max(0, ka):
                 out.append((a, b, kind, max(0, ka), kb))
         return out
-    # 置き場所は art_x / art_y(出来上がりの絵の中の座標)。高さは画面に
-    # 対する割合、横は縦横比のまま。既定は左下。歌詞ごとのジャケットも
-    # 同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置がぶれない。
+    # 置き場所は art_x / art_y(真ん中が 0、1080p の画素 — art_xy)。高さは
+    # 画面に対する割合で、絵は正方形に切ってある。既定は真ん中。歌詞ごとの
+    # ジャケットも同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置が
+    # ぶれない。
     ah = max(8, int(round(h * bg.art_pct / 100.0)))
     e = int(bg.art_edge)
-    # W,H は下の絵、w,h は乗せる絵の大きさ(ffmpeg の overlay の式)。
-    # 負の座標は反対の端から数える。横幅は縦横比で決まって先には
-    # 分からないので、式のまま渡す。
-    ex = ("%d" % bg.art_x) if bg.art_x >= 0 else ("W-w%d" % bg.art_x)
-    ey = ("%d" % bg.art_y) if bg.art_y >= 0 else ("H-h%d" % bg.art_y)
+    # 大きさ(枠込みで ah+2e 四方)は先に分かるので、座標は数字で渡す。
+    # ffmpeg の式((W-w)/2 …)にすると、丸め方が確認の1コマと食い違う。
+    if w is None:
+        w = h * 16 // 9
+    ex, ey = ("%d" % v for v in art_xy(bg, w, h, ah + e * 2))
     for k, (idx, baked, windows) in enumerate(arts):
         # 切り替わりでフェードする絵は (区間, 薄くする所) の組で来る。
         ramps = ()
@@ -1185,10 +1210,10 @@ def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0,
     でなくなる。なので画面を出来上がりの大きさへ合わせたあと(余白の色も
     今までと同じ)、**同じ座標・同じ大きさ・同じ枠**で上から重ねる。既定の
     左下はいつもの画面では下背景と踊り子の所で、レーンも点数も無い。"""
-    h = _bg_out_size(canvas, src_w, src_h)[1]
+    w, h = _bg_out_size(canvas, src_w, src_h)
     vf = _video_filter(canvas, src_w, src_h)
     graph = "[0:v]%s[base];" % (vf or "null")
-    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0, fps)
+    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0, fps, w=w)
     graph += chain
     graph += "[%s]format=yuv420p[v]" % cur
     return graph
