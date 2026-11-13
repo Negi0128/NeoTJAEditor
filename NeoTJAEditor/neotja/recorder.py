@@ -547,6 +547,20 @@ def _fade_secs(v):
         return 0.0
 
 
+#: ジャケットの置き場所の既定(1080p の画素、真ん中が 0)。以前の既定
+#: (左上が原点の (24, -24) = 左端から 24px・下端から 24px)と、1080p・
+#: 大きさ 30%・枠 6px で同じ所に来る数字(利用者の決定 2026-11-13
+#: 「まかせる」)。背景ありではジャケットが画面の下に敷かれるので、真ん中
+#: だとレーンにほとんど隠れる。左下ならいつもの画面の下背景と踊り子の所で
+#: 見える。720p では同じ割合で縮むので、端からの余白も 2/3(16px 前後)。
+#: 真ん中に置きたいときは 0, 0 と打てばよい。
+#:   x: (1920 - 336) / 2 + x = 24          → x = -768
+#:   y: (1080 - 336) / 2 + y = 1080-336-24 → y = 348
+#: settings.default_settings() にも同じ数字を書いている(あちらは recorder を
+#: 読み込まないので)。変えるときは両方。
+ART_POS_DEFAULT = (-768, 348)
+
+
 class RecordBackground:
     """録画の下に敷くもの。path が空なら「背景なし」= 今までどおりの経路。
 
@@ -566,7 +580,7 @@ class RecordBackground:
     def __init__(self, path="", offset=0.0, dim=0.0, lane=1.0,
                  fade_in=0.0, fade_out=0.0, fade_target="all",
                  art="", art_pct=30.0, art_pad=24,
-                 art_x=0, art_y=0,
+                 art_x=ART_POS_DEFAULT[0], art_y=ART_POS_DEFAULT[1],
                  art_edge=6, art_edge_color="#ffffff",
                  wave=False, wave_pct=15.0, wave_color="#ffb300",
                  wave_alpha=70, art_track=None):
@@ -614,14 +628,15 @@ class RecordBackground:
         #: 高さに合わせて縮める(art_xy)。以前は左上が原点・負は反対の端から、
         #: の出来上がりの画素だったが、それだと 720p と 1080p で同じ数字でも
         #: 置き場所がずれ、ジャケットの大きさ(高さの割合)とも釣り合わなかった。
-        #: 古い値は settings の rec_bg_art_pos の印で一度だけ (0, 0) へ戻す。
-        def _pos(v, lim):
+        #: 既定は左下(ART_POS_DEFAULT)。古い値は settings の rec_bg_art_pos の
+        #: 印で一度だけ既定へ戻す。
+        def _pos(v, lim, d):
             try:
                 return max(-lim, min(lim, int(round(float(v)))))
             except (TypeError, ValueError):
-                return 0
-        self.art_x = _pos(art_x, ART_POS_LIMIT[0])
-        self.art_y = _pos(art_y, ART_POS_LIMIT[1])
+                return d
+        self.art_x = _pos(art_x, ART_POS_LIMIT[0], ART_POS_DEFAULT[0])
+        self.art_y = _pos(art_y, ART_POS_LIMIT[1], ART_POS_DEFAULT[1])
         #: 歌詞に合わせて切り替えるジャケット(利用者の承認 2026-11-13)。
         #: [(始まり, 終わり, 道)] で、時刻は**音源の秒**(None は頭から /
         #: 最後まで)。lyric_jacket.jacket_segments で作る。空なら今までどおり
@@ -687,7 +702,8 @@ def as_background(bg):
             fade_target=bg.get("fade_target", "all"),
             art=bg.get("art", ""), art_pct=bg.get("art_pct", 30.0),
             art_pad=bg.get("art_pad", 24),
-            art_x=bg.get("art_x", 0), art_y=bg.get("art_y", 0),
+            art_x=bg.get("art_x", ART_POS_DEFAULT[0]),
+            art_y=bg.get("art_y", ART_POS_DEFAULT[1]),
             art_edge=bg.get("art_edge", 6),
             art_edge_color=bg.get("art_edge_color", "#ffffff"),
             wave=bg.get("wave", False), wave_pct=bg.get("wave_pct", 15.0),
@@ -1098,7 +1114,7 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None):
                 out.append((a, b, kind, max(0, ka), kb))
         return out
     # 置き場所は art_x / art_y(真ん中が 0、1080p の画素 — art_xy)。高さは
-    # 画面に対する割合で、絵は正方形に切ってある。既定は真ん中。歌詞ごとの
+    # 画面に対する割合で、絵は正方形に切ってある。既定は左下。歌詞ごとの
     # ジャケットも同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置が
     # ぶれない。
     ah = max(8, int(round(h * bg.art_pct / 100.0)))

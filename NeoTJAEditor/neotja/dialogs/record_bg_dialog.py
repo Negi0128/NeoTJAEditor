@@ -307,18 +307,22 @@ class RecordBackgroundDialog(QDialog):
         # 720p で書き出すときは同じ割合で縮める(recorder.art_xy)ので、
         # 画質を替えても置き場所は変わらない。
         lim_x, lim_y = recorder.ART_POS_LIMIT
+        # 既定は左下(recorder.ART_POS_DEFAULT。背景ありだと真ん中はレーンに
+        # 隠れるので)。
+        dx, dy = recorder.ART_POS_DEFAULT
         pos_tip = (chr(10) + "0 で画面の真ん中。数字は 1080p の画素で、"
-                   + chr(10) + "720p などで書き出すときは同じ割合で縮めます。")
+                   + chr(10) + "720p などで書き出すときは同じ割合で縮めます。"
+                   + chr(10) + "既定は左下(%d, %d)。" % (dx, dy))
         self.sp_art_x = QSpinBox()
         self.sp_art_x.setRange(-lim_x, lim_x)
         self.sp_art_x.setSuffix(" px")
-        self.sp_art_x.setValue(int(getattr(bg, "art_x", 0) if bg is not None else 0))
+        self.sp_art_x.setValue(int(getattr(bg, "art_x", dx) if bg is not None else dx))
         self.sp_art_x.setToolTip("横の位置。右へ +、左へ −。" + pos_tip)
         self.sp_art_x.valueChanged.connect(self._schedule)
         self.sp_art_y = QSpinBox()
         self.sp_art_y.setRange(-lim_y, lim_y)
         self.sp_art_y.setSuffix(" px")
-        self.sp_art_y.setValue(int(getattr(bg, "art_y", 0) if bg is not None else 0))
+        self.sp_art_y.setValue(int(getattr(bg, "art_y", dy) if bg is not None else dy))
         self.sp_art_y.setToolTip("縦の位置。下へ +、上へ −。" + pos_tip)
         self.sp_art_y.valueChanged.connect(self._schedule)
         art_opt.addWidget(QLabel("大きさ"))

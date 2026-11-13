@@ -47,8 +47,8 @@ _SETTINGS_KEYS = (
     "rec_bg_wave", "rec_bg_wave_pct", "rec_bg_wave_color", "rec_bg_wave_alpha",
     # ジャケットの位置の決まりの印。"center" なら rec_bg_art_x / y は
     # 「真ん中が 0、1080p の画素」(2026-11-13 から)。無ければ古い決まり
-    # (左上が 0、負は反対の端から)の値なので、読むときに一度だけ (0, 0) へ
-    # 戻す(_migrate_art_pos)。default_settings() と両方に要る。
+    # (左上が 0、負は反対の端から)の値なので、読むときに一度だけ既定
+    # (左下)へ戻す(_migrate_art_pos)。default_settings() と両方に要る。
     "rec_bg_art_pos",
     # 録画の背景の窓で「この画面をPNGで保存」した場所(次に開く場所)。
     # これも default_settings() と両方に要る。
@@ -102,8 +102,10 @@ def default_settings() -> dict:
         "rec_bg_art": "",
         "rec_bg_art_pct": 30.0,
         "rec_bg_art_pad": 24,
-        "rec_bg_art_x": 0,
-        "rec_bg_art_y": 0,
+        # 真ん中が 0・1080p の画素で、以前の既定の左下と同じ所
+        # (recorder.ART_POS_DEFAULT と同じ数字。ここは recorder を読まない)。
+        "rec_bg_art_x": ART_POS_DEFAULT[0],
+        "rec_bg_art_y": ART_POS_DEFAULT[1],
         "rec_bg_art_pos": "center",
         "rec_bg_art_edge": 6,
         "rec_bg_art_edge_color": "#ffffff",
@@ -505,24 +507,29 @@ def _coerce(default, loaded):
 #: 「よそが変えた」の判定材料が消えてしまう。
 _BASELINE = None
 
+#: ジャケットの位置の既定(recorder.ART_POS_DEFAULT と同じ。変えるときは両方)。
+ART_POS_DEFAULT = (-768, 348)
+
 
 def _migrate_art_pos(data: dict, loaded: dict) -> None:
     """ジャケットの位置を新しい決まり(真ん中が 0)へ移す。印が無いときだけ。
 
     古い値(既定 24, -24 = 左下)は新しい決まりで読むと真ん中から少し
     ずれた所になり、どちらの意味でも利用者が置いた場所ではない。換算は
-    書き出しの大きさで変わるので正しく直せず、**真ん中へ戻す**ことにした
-    (利用者の決定 2026-11-13「まかせる」)。「既定にする」で覚えた見た目
-    (rec_bg_default)の中の位置も同じく戻す。"""
+    書き出しの大きさで変わるので正しく直せず、**既定(左下)へ戻す**ことに
+    した(利用者の決定 2026-11-13「まかせる」)。真ん中だと背景ありのとき
+    レーンの下に隠れるので、以前の既定と同じ左下にする。「既定にする」で
+    覚えた見た目(rec_bg_default)の中の位置も同じく戻す。"""
     if loaded.get("rec_bg_art_pos") == "center":
         return
-    data["rec_bg_art_x"] = 0
-    data["rec_bg_art_y"] = 0
+    dx, dy = ART_POS_DEFAULT
+    data["rec_bg_art_x"] = dx
+    data["rec_bg_art_y"] = dy
     saved = data.get("rec_bg_default")
     if isinstance(saved, dict) and ("art_x" in saved or "art_y" in saved):
         saved = dict(saved)            # 控え(_BASELINE)と同じ物を触らない
-        saved["art_x"] = 0
-        saved["art_y"] = 0
+        saved["art_x"] = dx
+        saved["art_y"] = dy
         data["rec_bg_default"] = saved
     data["rec_bg_art_pos"] = "center"
 
