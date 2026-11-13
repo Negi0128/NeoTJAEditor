@@ -17,20 +17,20 @@
 ように「角丸に沿って一部だけ描く」ことができないので、カードは自前の
 paintEvent で描く(GlassCard)。ボタンと札は QSS の rgba() で足りる。
 
-最近使った項目は、曲名とパスを**モザイクにして**出す。配信や画面共有で
-起動したとき、作りかけの曲名やフォルダ名が映ってしまうため。「表示する」
-で全部見えるようにする。一方通行で、設定にも残さない — 起動し直せば
-また隠れる。モザイクは文字をいったん絵に描いて 8 分の 1 に縮め、
-最近傍で元の大きさへ戻す(見本と同じ作り)。ぼかしでなくモザイクなのは、
-ぼかしだと短い曲名が読めてしまうから。
+最近使った項目は、最初は**見出しと件数だけ**出して中身(カード)を
+並べない。配信や画面共有で起動したとき、作りかけの曲名やフォルダ名が
+映ってしまうため。「表示する」で全部見えるようにする。一方通行で、設定
+にも残さない — 起動し直せばまた隠れる。前はモザイクをかけて並べていたが、
+件数や札の色・並びまで見えるうえ、隠すならそもそも出さないほうが早い
+(利用者の指定 2026-11-13)。
 """
 
 import os
 import datetime
 
-from PySide6.QtCore import Qt, Signal, QSize, QRect, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QSize, QRectF, QPointF
 from PySide6.QtGui import (
-    QFont, QFontMetrics, QFontDatabase, QPainter, QPixmap, QColor, QPen,
+    QFont, QFontMetrics, QFontDatabase, QPainter, QColor, QPen,
     QBrush, QLinearGradient, QRadialGradient, QPainterPath,
 )
 from PySide6.QtWidgets import (
@@ -52,8 +52,6 @@ RECENT_COLUMNS = 2
 RECENT_CARD_HEIGHT = 92
 #: 新規作成 / TJA を開く のカードの高さ(見本 196)。
 ACTION_CARD_HEIGHT = 196
-#: モザイクの粗さ(縮小の倍率)。
-MOSAIC_BLOCK = 8
 #: ヘッダを読むのに頭から何バイトまで見るか。TITLE: は先頭にあり、COURSE:
 #: は本文の途中にも出るので、譜面全体を読む。ただし異常に大きいファイルで
 #: 起動が遅くならないよう上限を置く。
@@ -162,13 +160,12 @@ def wordmark_family():
 # ----------------------------------------------------------------------
 # 部品
 # ----------------------------------------------------------------------
-class MosaicText(QWidget):
-    """曲名・パス用の文字。隠している間はモザイクで描く。
+class ElidedText(QWidget):
+    """曲名・パス用の文字。幅に収まらなければ省略して描く。
 
-    QLabel に描かせてから絵を加工する手もあるが、隠れている間だけ別の
-    描き方をしたいだけなので、自分で paintEvent を持つほうが短い。
-    文字の色と大きさは COLORS とテーマ替え(refresh)に追従する。
-    パスは幅に収まらなければ真ん中を省略する(ElideMiddle)。"""
+    QLabel は省略(elide)を持たないので自前で描く。文字の色と大きさは
+    COLORS とテーマ替え(refresh)に追従する。パスは真ん中を省略する
+    (ElideMiddle)、曲名は末尾を省略する。"""
 
     def __init__(self, text, color_key, px, bold=False, elide=False, parent=None):
         super().__init__(parent)
@@ -177,8 +174,6 @@ class MosaicText(QWidget):
         self._px = px
         self._bold = bold
         self._elide = elide
-        self._revealed = False
-        self._cache = None       # (鍵, QPixmap)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         pol = QSizePolicy(QSizePolicy.Expanding if elide else QSizePolicy.Preferred,
                           QSizePolicy.Fixed)
@@ -205,13 +200,7 @@ class MosaicText(QWidget):
         w = 40 if self._elide else min(fm.horizontalAdvance(self._text) + 2, 160)
         return QSize(w, fm.height() + 2)
 
-    def set_revealed(self, on):
-        self._revealed = bool(on)
-        self._cache = None
-        self.update()
-
     def refresh(self):
-        self._cache = None
         self.update()
 
     def _shown_text(self, width):
@@ -223,34 +212,10 @@ class MosaicText(QWidget):
 
     def paintEvent(self, ev):
         p = QPainter(self)
-        font = self._font()
-        color = QColor(COLORS.get(self._color_key, COLORS["fg"]))
-        text = self._shown_text(self.width())
-        if self._revealed:
-            p.setFont(font)
-            p.setPen(color)
-            p.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter, text)
-            p.end()
-            return
-        key = (text, self.width(), self.height(), color.name(), self._px)
-        if self._cache is None or self._cache[0] != key:
-            fm = QFontMetrics(font)
-            w = max(1, min(self.width(), fm.horizontalAdvance(text) + 2))
-            h = max(1, self.height())
-            src = QPixmap(w, h)
-            # 背景は透明。モザイク化で文字の色が周りの透明と混ざって、
-            # 行の背景(カードの色)の上でちょうど薄く見える。
-            src.fill(Qt.transparent)
-            q = QPainter(src)
-            q.setFont(font)
-            q.setPen(color)
-            q.drawText(QRect(0, 0, w, h), Qt.AlignLeft | Qt.AlignVCenter, text)
-            q.end()
-            small = src.scaled(max(1, w // MOSAIC_BLOCK), max(1, h // MOSAIC_BLOCK),
-                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            big = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
-            self._cache = (key, big)
-        p.drawPixmap(0, 0, self._cache[1])
+        p.setFont(self._font())
+        p.setPen(QColor(COLORS.get(self._color_key, COLORS["fg"])))
+        p.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter,
+                   self._shown_text(self.width()))
         p.end()
 
 
@@ -359,7 +324,7 @@ class RecentRow(GlassCard):
         v.setSpacing(8)
         top = QHBoxLayout()
         top.setSpacing(12)
-        self.title = MosaicText(title, "fg_bright", 16, bold=True)
+        self.title = ElidedText(title, "fg_bright", 16, bold=True)
         top.addWidget(self.title, 1)
         self.date = QLabel(date_text)
         self.date.setObjectName("dim12")
@@ -378,7 +343,7 @@ class RecentRow(GlassCard):
             self.chips.append(chip)
         if self.chips:
             bottom.addSpacing(6)
-        self.path_label = MosaicText(path, "fg_dim", 12, elide=True)
+        self.path_label = ElidedText(path, "fg_dim", 12, elide=True)
         bottom.addWidget(self.path_label, 1)
         v.addLayout(bottom)
         v.addStretch(1)
@@ -403,10 +368,6 @@ class RecentRow(GlassCard):
 
     def bar_color(self):
         return QColor(self._bar_color) if self._bar_color is not None else None
-
-    def set_revealed(self, on):
-        self.title.set_revealed(on)
-        self.path_label.set_revealed(on)
 
     def refresh_theme(self):
         self._restyle()
@@ -519,27 +480,30 @@ class StartScreen(QWidget):
         v.addLayout(cards)
         v.addSpacing(40)
 
+        # 見出しの行。隠している間は「N 件あります」と「表示する」だけ、
+        # 1 件も無ければ「まだありません」だけを出す。
         rh = QHBoxLayout()
         rh.setSpacing(8)
-        rh.addWidget(self._label("最近使った項目", "h2"))
+        rh.addWidget(self._label("最近使った項目", "h2"), 0, Qt.AlignVCenter)
+        rh.addSpacing(8)
+        self.lbl_note = self._label("", "dim13")
+        rh.addWidget(self.lbl_note, 0, Qt.AlignVCenter)
         rh.addStretch(1)
-        self.lbl_hidden = self._label("曲名とパスを隠しています", "dim13")
-        rh.addWidget(self.lbl_hidden)
         self.btn_reveal = QPushButton("表示する")
         self.btn_reveal.setObjectName("link")
-        self.btn_reveal.setToolTip("曲名とパスのモザイクを外します(次に起動するまで)")
+        self.btn_reveal.setToolTip("最近使った項目を並べます(次に起動するまで)")
         self.btn_reveal.clicked.connect(self.reveal)
         rh.addWidget(self.btn_reveal)
         v.addLayout(rh)
-        v.addSpacing(12)
 
         # 2 列のカードを並べる格子。枠は持たない(カードが各自ガラスを描く)。
         # 件数が奇数でも最後のカードが半分の幅のままになるよう、両列の
-        # 伸び率をそろえる。
+        # 伸び率をそろえる。見出しとの間の 12 は格子の側に持たせ、隠して
+        # いる間は間ごと消えるようにする。
         self.list_frame = QWidget()
         self.list_frame.setObjectName("recentGrid")
         self.list_layout = QGridLayout(self.list_frame)
-        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setContentsMargins(0, 12, 0, 0)
         self.list_layout.setHorizontalSpacing(16)
         self.list_layout.setVerticalSpacing(12)
         for c in range(RECENT_COLUMNS):
@@ -626,7 +590,8 @@ class StartScreen(QWidget):
     # ------------------------------------------------------------------
     def set_recent(self, paths):
         """最近使った項目を並べ直す。設定に残っている順(新しい順)のまま、
-        存在するものだけ、上限 RECENT_ROWS 件。左→右、上→下の順に置く。"""
+        存在するものだけ、上限 RECENT_ROWS 件。左→右、上→下の順に置く。
+        カードは作っておくが、「表示する」までは格子ごと隠しておく。"""
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             w = item.widget()
@@ -634,31 +599,31 @@ class StartScreen(QWidget):
                 w.deleteLater()
         self._rows = []
         paths = [p for p in paths if p and os.path.exists(p)][:RECENT_ROWS]
-        if not paths:
-            empty = self._label("まだありません。開いた譜面がここに並びます。", "dim13")
-            empty.setContentsMargins(4, 10, 4, 10)
-            self.list_layout.addWidget(empty, 0, 0, 1, RECENT_COLUMNS)
-            self.lbl_hidden.setVisible(False)
-            self.btn_reveal.setVisible(False)
-            return
         for i, p in enumerate(paths):
             title, courses = scan_tja_header(p)
             date = format_mtime(p)
             row = RecentRow(p, title, courses, ("更新 " + date) if date else "")
-            row.set_revealed(self._revealed)
             row.activated.connect(self.recent_activated)
             self.list_layout.addWidget(row, i // RECENT_COLUMNS, i % RECENT_COLUMNS)
             self._rows.append(row)
-        self.lbl_hidden.setVisible(not self._revealed)
-        self.btn_reveal.setVisible(not self._revealed)
+        self._update_recent_state()
+
+    def _update_recent_state(self):
+        """見出しの行の文言・「表示する」・格子の出し入れをそろえる。"""
+        n = len(self._rows)
+        if n == 0:
+            self.lbl_note.setText("まだありません。開いた譜面がここに並びます。")
+            self.lbl_note.setVisible(True)
+        else:
+            self.lbl_note.setText("%d 件あります" % n)
+            self.lbl_note.setVisible(not self._revealed)
+        self.btn_reveal.setVisible(n > 0 and not self._revealed)
+        self.list_frame.setVisible(n > 0 and self._revealed)
 
     def reveal(self):
-        """曲名とパスのモザイクを外す。戻す道は無い(起動し直すまで)。"""
+        """最近使った項目を並べる。戻す道は無い(起動し直すまで)。"""
         self._revealed = True
-        for row in self._rows:
-            row.set_revealed(True)
-        self.lbl_hidden.setVisible(False)
-        self.btn_reveal.setVisible(False)
+        self._update_recent_state()
 
     def is_revealed(self):
         return self._revealed
