@@ -87,10 +87,17 @@ class _CommandInput(QFrame):
 
     Enter で決定、Esc で取り消し。空欄で決定するとその位置の命令を消す。
     決定の中身は on_accept(文字列) が決め、False を返したら閉じない
-    (数値でないときなど、入れ直してもらう)。"""
+    (数値でないときなど、入れ直してもらう)。
+
+    **Qt.Popup ではなく枠なしの Tool 窓。** Windows では Popup は
+    「アクティブな窓」にならないので、日本語入力(IME)の変換中の文字が
+    この欄ではなく後ろのペイン(IME を切ってある)へ行ってしまい、歌詞に
+    日本語が打てなかった(利用者の報告 2026-11-13)。自分で窓として前に
+    出てアクティブになる。Popup がしてくれていた「外を押したら閉じる」は、
+    窓がアクティブでなくなったら閉じることで代わりにする。"""
 
     def __init__(self, parent, title, text, on_accept):
-        super().__init__(parent, Qt.Popup)
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
         self.setObjectName("chartEditCommandInput")
         self.setStyleSheet(
             "#chartEditCommandInput { background: #20232b; border: 1px solid #ffd23c; }"
@@ -103,6 +110,8 @@ class _CommandInput(QFrame):
         lay.setSpacing(6)
         lay.addWidget(QLabel(title))
         self.edit = QLineEdit(text)
+        # ペインは IME を切っているが、この欄では日本語を打つ。
+        self.edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.edit.setFixedWidth(84)
         self.edit.selectAll()
         lay.addWidget(self.edit)
@@ -110,7 +119,18 @@ class _CommandInput(QFrame):
         hint.setObjectName("hint")
         lay.addWidget(hint)
         self._on_accept = on_accept
+        #: 一度アクティブになったか。なる前の「アクティブでない」で閉じない。
+        self._was_active = False
         self.edit.returnPressed.connect(self.accept)
+
+    def open_at(self, global_pos):
+        """global_pos に出して、前に出し、入力欄へ打てるようにする。"""
+        self.adjustSize()
+        self.move(global_pos)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.edit.setFocus(Qt.ActiveWindowFocusReason)
 
     def accept(self):
         if self._on_accept(self.edit.text().strip()):
@@ -124,6 +144,26 @@ class _CommandInput(QFrame):
             self.close()
             return
         super().keyPressEvent(e)
+
+    def event(self, e):
+        t = e.type()
+        if t == QEvent.WindowActivate:
+            self._was_active = True
+        elif t == QEvent.WindowDeactivate and self._was_active and self.isVisible():
+            # 外(ペインやほかの窓)を押した = Popup のときと同じく、決めずに閉じる。
+            # このイベントの最中に消すと Qt が嫌うので、ひと呼吸おく。
+            QTimer.singleShot(0, self.close)
+        return super().event(e)
+
+    def closeEvent(self, e):
+        # Enter / Esc で閉じたとき(まだこちらがアクティブ)は、打鍵を
+        # ペインへ戻す。外を押して閉じたときは押した先に任せる
+        # (ほかのアプリへ移ったのに、こちらの窓を前へ戻したりしない)。
+        pane = self.parentWidget()
+        if self.isActiveWindow() and pane is not None:
+            pane.window().activateWindow()
+            pane.setFocus(Qt.OtherFocusReason)
+        super().closeEvent(e)
 
 
 class _GridPicker(QFrame):
@@ -2712,10 +2752,8 @@ class ChartEditWaveform(WaveformWidget):
         x = self._sec_to_x(self.cursor_time())
         _wh, top, _strip, _b, _c = self._strip_rects()
         popup.adjustSize()
-        popup.move(self.mapToGlobal(QPoint(max(0, x - popup.width() // 2),
-                                           max(0, top - popup.height() - 4))))
-        popup.show()
-        popup.edit.setFocus(Qt.PopupFocusReason)
+        popup.open_at(self.mapToGlobal(QPoint(max(0, x - popup.width() // 2),
+                                              max(0, top - popup.height() - 4))))
         self._cmd_popup = popup
         return popup
 
@@ -2977,9 +3015,7 @@ class ChartEditWaveform(WaveformWidget):
         popup.adjustSize()
         pos = self.mapToGlobal(QPoint(max(0, x - popup.width() // 2),
                                       max(0, top - popup.height() - 4)))
-        popup.move(pos)
-        popup.show()
-        popup.edit.setFocus(Qt.PopupFocusReason)
+        popup.open_at(pos)
         self._cmd_popup = popup
         return popup
 
