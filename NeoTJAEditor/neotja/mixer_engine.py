@@ -305,6 +305,10 @@ class MixerCore:
         self.vol_sfx = 0.9
         self.vol_metro = 0.9
         self.vol_master = 1.0
+        # 打音だけに掛ける倍率(メトロノームには掛けない)。同時再生で 1.5 に
+        # する(preview_dock.MULTI_HIT_GAIN)。vol_* と違って 1.0 を超えてよい
+        # ので別に持つ。超えたぶんは最後のリミッターが 0.98 に収める。
+        self.hit_gain = 1.0
         # リミッターがいま掛けているゲイン。1.0 = 何もしていない。
         self._lim_gain = 1.0
 
@@ -385,6 +389,8 @@ class MixerCore:
                 self.rate = max(0.25, min(2.0, float(cmd[1])))
             elif op == "vol":
                 setattr(self, "vol_" + cmd[1], max(0.0, min(1.0, float(cmd[2]))))
+            elif op == "hit_gain":
+                self.hit_gain = max(0.0, min(2.0, float(cmd[1])))
             elif op == "hit_sched":
                 self.hit_times = cmd[1]
                 self.hit_kinds = cmd[2]
@@ -553,7 +559,7 @@ class MixerCore:
         if self.voices:
             master = self.vol_master
             fade_total = max(1, int(self.device_sr * _EVICT_FADE_SEC))
-            gain_sfx = self.vol_sfx * master
+            gain_sfx = self.vol_sfx * self.hit_gain * master
             gain_metro = self.vol_metro * master
             remaining = []
             for v in self.voices:
@@ -1071,6 +1077,10 @@ class MixerAudioEngine(QObject):
         v = max(0.0, min(1.0, float(volume)))
         self.core.post(("vol", "sfx", v))
         self.core.post(("vol", "metro", v))
+
+    def set_hit_gain(self, gain: float):
+        """打音だけの倍率(1.0 = そのまま)。同時再生のときに使う。"""
+        self.core.post(("hit_gain", float(gain)))
 
     def set_master_volume(self, volume: float):
         """マスターボリューム。MixerCore.render() が曲にもボイス(打音/メトロ

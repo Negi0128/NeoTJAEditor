@@ -1250,6 +1250,44 @@ def hit_notes_from_preview(preview_data):
     return out
 
 
+#: 同時再生の打音の倍率(1本のときの SE に対して)。利用者の指定
+#: 2026-11-14「同時再生の時は打音が合計で150%になるくらいがちょうどいい」。
+MULTI_HIT_GAIN = 1.5
+#: 同時再生で「同じ時刻」とみなす幅(秒)。難易度が違っても同じ位置の音符は
+#: 同じ時刻に計算されるので、ずれは丸め程度しかない。
+MULTI_MERGE_SEC = 0.001
+
+
+def hit_sound_kind(char):
+    """打音の文字 → 鳴る音の種類。ミキサー(_HitSoundAdapter)と同じ分け方で、
+    "1"/"3" は面(ドン)、ほかは縁(カッ)。大音符も同じ音を鳴らす。"""
+    return "don" if char in "13" else "ka"
+
+
+def merge_multi_hit_notes(lists, tol=MULTI_MERGE_SEC):
+    """同時再生の打音を合流させる。**同じ時刻・同じ音は1つにまとめる。**
+
+    以前は全部を足してから本数で割っていた。それだと難易度によって音符の
+    ある所とない所で大きさが変わり、全体としては1本のときより 6〜12dB 小さく
+    聞こえていた(利用者の報告 2026-11-14)。まとめてしまえば重ねて大きく
+    なることがないので、割らずに済む。"""
+    allnotes = []
+    for notes in lists:
+        allnotes += notes
+    allnotes.sort(key=lambda n: n[0])
+    last = {}
+    out = []
+    for note in allnotes:
+        kind = hit_sound_kind(note[1])
+        t = note[0]
+        prev = last.get(kind)
+        if prev is not None and t - prev <= tol:
+            continue
+        last[kind] = t
+        out.append(note)
+    return out
+
+
 def _roll_tick_notes(spans, bpm_index, speed=None):
     """Expands roll/balloon/kusudama spans - (start, end, ..., hits) tuples,
     as returned in build_preview_timeline()'s "rolls"/"balloons"/"kusudamas"
@@ -2443,7 +2481,7 @@ class PreviewDock(QDockWidget):
     _multi_keys = None
     #: 同時再生で鳴らす打音(難易度ぶんを合流させたもの)。None なら今までどおり。
     _multi_notes = None
-    #: 同時再生で並べている本数。打音の音量をこれで割る。
+    #: 同時再生で鳴らしている本数。2本以上なら打音を MULTI_HIT_GAIN 倍にする。
     _multi_count = 1
     #: refresh_from_content が受け取った譜面のテキスト。難易度ごとの譜面を
     #: ここから組み立てる(エディタでもプレイヤーでも同じ道を通る)。
@@ -2605,24 +2643,23 @@ class PreviewDock(QDockWidget):
         """同時再生の打音を組み立て直す。
 
         打音は**並べた難易度を全部鳴らす**(利用者の指定 2026-10-03)。同じ
-        時刻に重なるぶん大きくなるので、本数で割って小さくする。ミキサーは
+        時刻・同じ音は1つにまとめ(merge_multi_hit_notes)、音量は1本のときの
+        MULTI_HIT_GAIN 倍にする(利用者の指定 2026-11-14)。ミキサーは
         打音をサンプル単位で先に並べているので、合流した一覧を渡すだけでよい。
 
         コース記号を押して切ってある難易度は混ぜない(利用者の指定
-        2026-10-15)。割る本数も**鳴らす本数**にするので、3本切って1本だけに
-        すれば、その1本はふつうの大きさで鳴る。"""
+        2026-10-15)。鳴らすのが1本だけになれば、その1本はふつうの大きさで
+        鳴る。"""
         previews = self._multi_built or []
         keys = self._multi_keys or []
         muted = self._multi_muted or set()
-        merged = []
-        live = 0
+        lists = []
         for i, data in enumerate(previews):
             if i < len(keys) and keys[i] in muted:
                 continue
-            merged += hit_notes_from_preview(data)
-            live += 1
-        merged.sort(key=lambda n: n[0])
-        self._multi_notes = merged
+            lists.append(hit_notes_from_preview(data))
+        live = len(lists)
+        self._multi_notes = merge_multi_hit_notes(lists)
         self._multi_count = max(1, live)
         self._apply_hit_schedule(self._grid_offset())
         self._apply_sfx_volume()
@@ -2665,18 +2702,26 @@ class PreviewDock(QDockWidget):
         self.hit_sounds.set_schedule(self._hit_notes(), offset)
 
     def _sfx_effective(self):
-        """実際に出す効果音の比率。
+        """実際に出す効果音の比率(メトロノームもこれ)。
 
-        同時再生のあいだは**並べた本数で割る**(利用者の指定 2026-10-03)。
-        同じ時刻に本数ぶん重なるので、割らないとそのぶん大きくなる。
-        利用者が決めた音量(_sfx_ratio)はそのまま持っておき、窓を閉じれば
-        元の音量に戻る。"""
-        return self._sfx_ratio / max(1, self._multi_count)
+        同時再生でも本数では割らない。以前は割っていたが(2026-10-03)、
+        小さくなりすぎた。重なりは merge_multi_hit_notes でまとめ、打音の
+        大きさは _hit_gain で決める(利用者の指定 2026-11-14)。"""
+        return self._sfx_ratio
+
+    def _hit_gain(self):
+        """打音だけに掛ける倍率。同時再生で2本以上鳴らしているときだけ
+        MULTI_HIT_GAIN、ほかは 1.0。利用者が決めた音量(_sfx_ratio)には
+        手を付けないので、窓を閉じれば元の大きさに戻る。"""
+        return MULTI_HIT_GAIN if self._multi_count >= 2 else 1.0
 
     def _apply_sfx_volume(self):
         """効果音の音量を音の出口へ当てる。"""
         if self._mixer_active and hasattr(self.audio, "set_sfx_volume"):
             self.audio.set_sfx_volume(self._sfx_effective())
+            setter = getattr(self.audio, "set_hit_gain", None)
+            if setter is not None:
+                setter(self._hit_gain())
         self._apply_legacy_sfx_volume()
 
     def _on_preview_frame(self, t):
@@ -4769,7 +4814,7 @@ class PreviewDock(QDockWidget):
         レガシーのときだけ。**風船の破裂音は両方の経路でミキサーを通らない**
         (QSoundEffect で直に鳴らしている)ので、必ずここで渡す。
         """
-        # 風船の破裂音は1本ぶんしか鳴らないので、同時再生でも割らない。
+        # 風船の破裂音は1本ぶんしか鳴らないので、同時再生でも倍率を掛けない。
         try:
             self.chart_preview.set_pop_volume(
                 self._master_volume * self._sfx_ratio)
@@ -4778,10 +4823,12 @@ class PreviewDock(QDockWidget):
         if self._mixer_active:
             return
         v = self._master_volume * self._sfx_effective()
-        for engine in (self.hit_sounds, self.metronome):
+        # レガシー経路は 1.0 を超えられないので、打音の倍率はそこで頭打ち。
+        for engine, g in ((self.hit_sounds, self._hit_gain()),
+                          (self.metronome, 1.0)):
             setter = getattr(engine, "set_volume", None)
             if setter is not None:
-                setter(v)
+                setter(min(1.0, v * g))
 
     # ------------------------------------------------------------------
     # 音声出力の開き直し / ワイヤレス調整
