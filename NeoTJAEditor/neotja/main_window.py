@@ -3910,27 +3910,44 @@ class MainWindow(QMainWindow):
             self._warn_if_too_fine(text, rng, op)
             return None
         new = res["text"]
+        # 置き換えは「操作そのもの」と「末尾の空の小節」の2段に分ける。
+        # まとめて1回の差分にすると、打った所から譜面の終わりまでが丸ごと
+        # 置き換わり(色の塗り直しも全部)、密な譜面では秒単位で止まる。
+        steps = [(text, new)]
         # 末尾には空の小節を常に1つ置いておく(利用者の指定 2026-10-04)。
         # 打つ場所が見えていないと、譜面の続きを書き始められない。
+        # 足しても同期の解析(_force_update)はしない。小節が1つ増えるだけ
+        # なので、ほかの1音と同じく少し後の解析で画面に出れば足りる。
+        # 以前は同期でやっていたため、開いて最初の1音で 3 秒止まっていた
+        # (密な譜面。実測 2026-11-14)。
         if self.config_data.get("chart_edit_tail_measure", True):
             rng2 = (rng[0], rng[1] + new.count(chr(10)) - text.count(chr(10)))
             tail = note_edit.ensure_trailing_measure(new, rng2)
             if tail is not None:
+                steps.append((new, tail))
                 new = tail
                 res = dict(res)
                 res["text"] = new
-                res["reparse"] = True
         # 先頭と末尾の一致を削って、変わった範囲だけを置き換える。
         # 1文字ずつ比べていたころは、28万字の譜面で 1操作あたり 66ms を
         # ここで使っていた(実測 2026-11-14)。
-        p, old_end, new_end = note_edit.text_diff_range(text, new)
+        # 2段目は joinPreviousEditBlock で1段目に繋ぐ(Undo は1回で戻る)。
+        # 1つの編集の塊にすると、文書の変化の知らせ(contentsChange)が
+        # 2か所をまたいだ1つの範囲になり、色の塗り直しが全体に及ぶ。
         tc = self.editor.textCursor()
-        tc.beginEditBlock()
-        tc.setPosition(p)
-        tc.setPosition(old_end, QTextCursor.KeepAnchor)
-        tc.insertText(new[p:new_end])
-        tc.endEditBlock()
-        block = self.editor.document().findBlock(min(p, len(new)))
+        first = None
+        for before, after in steps:
+            p, old_end, new_end = note_edit.text_diff_range(before, after)
+            if first is None:
+                first = p
+                tc.beginEditBlock()
+            else:
+                tc.joinPreviousEditBlock()
+            tc.setPosition(p)
+            tc.setPosition(old_end, QTextCursor.KeepAnchor)
+            tc.insertText(after[p:new_end])
+            tc.endEditBlock()
+        block = self.editor.document().findBlock(min(first, len(new)))
         self.editor.modified_lines.add(block.blockNumber() + 1)
         self.setWindowModified(True)
         if self.config_data.get("note_input_sound", True) and res.get("sound"):

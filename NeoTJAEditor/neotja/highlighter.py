@@ -240,7 +240,53 @@ class TJAHighlighter(QSyntaxHighlighter):
         #: apply_data の途中なら True。塗り直しでも文書の textChanged が出るので、
         #: 受け手(main_window)が「本文が変わった」と取り違えないための印。
         self.applying = False
+        # 前回 apply_data してからの本文の変化 [(最初の行, 最後の行, 増えた行数)]。
+        # 行番号はその変化の直後の数え方。行が増えた/減ったときに、どの行が
+        # 前のどの行だったかを辿るのに使う(apply_data で読んで空にする)。
+        self._edits = []
+        self._edits_lost = False
+        self._block_count = document.blockCount()
+        # 前回塗り終えたときの文書の revision。変化の知らせが1つも無いのに
+        # revision が進んでいたら(知らせを取りこぼした)、辿らずに前のやり方で塗る。
+        self._applied_rev = None
+        document.contentsChange.connect(self._on_contents_change)
         self.rebuild_formats()
+
+    #: 覚えておく変化の数の上限。超えたら辿るのをやめて前のやり方に戻す。
+    _EDITS_MAX = 256
+
+    def _on_contents_change(self, pos, removed, added):
+        doc = self.document()
+        if doc is None:
+            return
+        cnt = doc.blockCount()
+        net = cnt - self._block_count
+        self._block_count = cnt
+        if self.applying or self._edits_lost:
+            return
+        if len(self._edits) >= self._EDITS_MAX:
+            self._edits_lost = True
+            self._edits = []
+            return
+        # Qt はこの範囲を**古い色の情報のまま**すぐ塗り直す(消した字があれば
+        # 1字先の行まで)。その行は次の apply_data で必ず塗り直すよう、
+        # 「変化にかかった行」に入れておく。念のため1行余分に取る。
+        first = doc.findBlock(pos).blockNumber() + 1
+        end = doc.findBlock(pos + added + (1 if removed > 0 else 0))
+        last = (end.blockNumber() + 2) if end.isValid() else cnt
+        self._edits.append((first, max(first, min(last, cnt)), net))
+
+    @staticmethod
+    def _old_line(ln, edits):
+        """いまの ln 行目が、前回塗ったときの何行目だったか。変化に
+        かかった行なら None。"""
+        for first, last, net in reversed(edits):
+            if ln < first:
+                continue
+            if ln <= last:
+                return None
+            ln -= net
+        return ln
 
     @staticmethod
     def _line_signature(data: "HighlightData", line: int):
@@ -274,8 +320,56 @@ class TJAHighlighter(QSyntaxHighlighter):
             self._apply_data(new_data)
         finally:
             self.applying = False
+            doc = self.document()
+            self._applied_rev = doc.revision() if doc is not None else None
 
     def _apply_data(self, new_data: "HighlightData"):
+        edits, lost = self._edits, self._edits_lost
+        self._edits = []
+        self._edits_lost = False
+        doc = self.document()
+        self._block_count = doc.blockCount()
+        missed = (not edits and self._applied_rev is not None
+                  and doc.revision() != self._applied_rev)
+        if (not lost and not missed and self._applied_rev is not None
+                and self.data.line_count and new_data.line_count
+                and new_data.line_count == doc.blockCount()
+                and self.data.line_count + sum(e[2] for e in edits)
+                == new_data.line_count):
+            self._apply_tracked(new_data, edits)
+            return
+        self._apply_untracked(new_data)
+
+    def _apply_tracked(self, new_data, edits):
+        """本文の変化を辿れるときの塗り直し。行が増えた/減った所が何か所
+        あっても、**中身か色が変わった行だけ**を塗る。
+
+        以前のやり方(下の _apply_untracked)は行数が変わると変わった所から
+        文書の終わりまでを全部塗っていて、密な譜面の末尾に小節を1つ足した
+        だけで全体の塗り直し(2秒近く)になっていた。Qt の書式は行(ブロック)
+        ごとに付いていて、行が上下にずれても一緒に動くので、ずれただけの行は
+        前の色のままで正しい。"""
+        old_data = self.data
+        self.data = new_data
+        sig = self._line_signature
+        old_line = self._old_line
+        todo = []
+        for ln in range(1, new_data.line_count + 1):
+            o = old_line(ln, edits) if edits else ln
+            if o is None or sig(old_data, o) != sig(new_data, ln):
+                todo.append(ln)
+        if not todo:
+            return
+        doc = self.document()
+        if len(todo) > max(50, doc.blockCount() // 4):
+            self.rehighlight()
+            return
+        for ln in todo:
+            block = doc.findBlockByNumber(ln - 1)
+            if block.isValid():
+                self.rehighlightBlock(block)
+
+    def _apply_untracked(self, new_data: "HighlightData"):
         old_data = self.data
         self.data = new_data
 
