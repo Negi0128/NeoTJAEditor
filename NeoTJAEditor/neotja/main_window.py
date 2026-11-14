@@ -141,8 +141,12 @@ class CourseCard(GlassCard):
     見出しの札に出す — 以前はカードの枠と見出しの帯をコース色で塗って
     いたが、半透明のカードにべた塗りの帯が乗ると札だけ別の部品に見える。"""
 
-    #: 見出しを押した。本文のそのコースの所へ跳ぶ(コースの key)。
+    #: 右クリックの「本文のこのコースへ移動」。本文のそのコースの所へ
+    #: 跳ぶ(コースの key)。
     jumpRequested = Signal(str)
+    #: 見出しを押した。レーン左上の「コース」ボタンと同じ(映すコースを
+    #: 順に切り替える。同時再生では並べる難易度を選ぶ)。
+    courseClicked = Signal()
 
     def __init__(self, course, parent=None):
         super().__init__(radius=12, parent=parent)
@@ -166,15 +170,14 @@ class CourseCard(GlassCard):
         header.setFocusPolicy(Qt.NoFocus)
         self.header = header
         self.refresh_theme()
-        # **押したら本文のそのコースへ跳ぶ**(利用者の指定 2026-10-17)。
-        # 畳むほうは右クリックへ移した — 跳ぶほうが使う回数が多い。
-        header.clicked.connect(
-            lambda: self.jumpRequested.emit(self._key))
+        # **押したらコースを切り替える**(レーン左上の「コース」ボタンと
+        # 同じ。利用者の承認 2026-11-14)。以前の「本文のこのコースへ跳ぶ」
+        # (2026-10-17)と「畳む」は右クリックのメニューへ。
+        header.clicked.connect(lambda: self.courseClicked.emit())
         header.setContextMenuPolicy(Qt.CustomContextMenu)
-        header.customContextMenuRequested.connect(
-            lambda _p: self.toggle_body())
-        header.setToolTip("押すと本文のこのコースへ跳びます"
-                          "（右クリックで畳む）")
+        header.customContextMenuRequested.connect(self._show_header_menu)
+        header.setToolTip("押すと映すコースを切り替えます"
+                          "（右クリックで、本文のこのコースへ移動 / 畳む）")
         outer.addWidget(header)
         self.body_visible = True
 
@@ -278,6 +281,22 @@ class CourseCard(GlassCard):
             wd.setFont(font)
         # 行間は 0 → 3px まで。字だけ大きくすると詰まって見えるので。
         self.body.layout().setSpacing(int(round(12 * (f - 1.0))))
+
+    def header_menu(self):
+        """見出しの右クリックのメニュー。試験からも中身を確かめられるよう
+        組み立てだけを分けてある。"""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_jump = menu.addAction("本文のこのコースへ移動")
+        act_jump.triggered.connect(lambda: self.jumpRequested.emit(self._key))
+        act_fold = menu.addAction("畳む／開く")
+        act_fold.triggered.connect(lambda: self.toggle_body())
+        return menu
+
+    def _show_header_menu(self, pos):
+        menu = self.header_menu()
+        menu.exec(self.header.mapToGlobal(pos))
+        menu.deleteLater()
 
     def toggle_body(self, on=None):
         """カードの中身を開閉する。on を渡せばその状態にする。"""
@@ -686,6 +705,10 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.sb_scroll, 1)
 
         self._course_cards = {}
+
+    def _on_course_card_clicked(self):
+        """難易度カードの見出しを押した → レーンの「コース」ボタンと同じ。"""
+        self.preview_dock._on_course_button()
 
     def jump_to_course(self, key):
         """本文のそのコースの `COURSE:` の行へカーソルを移す。
@@ -2727,6 +2750,7 @@ class MainWindow(QMainWindow):
             else:
                 card = CourseCard(course)
                 card.jumpRequested.connect(self.jump_to_course)
+                card.courseClicked.connect(self._on_course_card_clicked)
                 card.set_scale(getattr(self, "_bottom_scale_w", 1.0))
                 QTimer.singleShot(0, self._sync_card_button_height)
                 self._course_cards[k] = card
