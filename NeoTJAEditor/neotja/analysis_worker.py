@@ -26,6 +26,7 @@ Qt のウィジェットは GUI スレッド以外から触ると即クラッシ
 from PySide6.QtCore import QMutex, QMutexLocker, QObject, Signal, Slot
 
 from neotja.highlighter import compute_highlight_data
+from neotja.note_timing import timing_for
 
 
 class AnalysisWorker(QObject):
@@ -97,4 +98,8 @@ class AnalysisWorker(QObject):
             content, job["cursor_line"], job["course_override"],
             branch_level=job["branch_level"],
         )
+        # 作譜の位置変換。音符を打っただけなら前のものが返る(timing_for)。
+        res["note_timing"] = timing_for(
+            self._analyzer, content, res["preview"].get("course_key"),
+            job["branch_level"], res["preview"].get("branch_path"))
         return res

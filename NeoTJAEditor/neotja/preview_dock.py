@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import time as _time
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, Signal
@@ -1361,13 +1362,21 @@ def balloon_pop_schedule(data, speed=None):
     return sorted(out)
 
 
+#: parse_preview_headers が見る行(行頭がこの5つのどれか)。
+_PREVIEW_HEADER_RE = re.compile(r"^(?:TITLE|SUBTITLE|WAVE|BPM|OFFSET):.*$",
+                                re.MULTILINE)
+
+
 def parse_preview_headers(content: str) -> dict:
     title = ""
     subtitle = ""
     wave = ""
     bpm = None
     offset = 0.0
-    for l in content.split("\n"):
+    # 全行を Python で回すと、3万行の譜面で1回 13ms かかっていた(実測
+    # 2026-11-14)。見る行だけを正規表現で拾う(後の行が勝つのは同じ)。
+    for m in _PREVIEW_HEADER_RE.finditer(content):
+        l = m.group(0)
         if l.startswith("TITLE:"):
             title = l[6:].strip()
         elif l.startswith("SUBTITLE:"):
@@ -3227,6 +3236,9 @@ class PreviewDock(QDockWidget):
     #: が差す。
     course_label_cb = None
 
+    #: _game_grid_clicks を作った元 (bar_times, bpm_changes)。
+    _game_grid_src = None
+
     def _set_lane_course_label(self, label, color):
         """レーン上のコースボタンの表示を、いま映しているコースに合わせる。
         情報バーのコースボタンと同じ内容(あちらは情報モードでしか見えない)。"""
@@ -3238,7 +3250,10 @@ class PreviewDock(QDockWidget):
         self.course_button.setText(f"コース: {label or '-'}")
         if color:
             self._course_button_css = f"color: {color}; font-weight: bold;"
-            self.course_button.setStyleSheet(self._course_button_css)
+            # 同じ指定を当て直すだけでも、スタイルの組み直しで 1回 16ms
+            # かかっていた(解析を貼るたびに呼ばれる。実測 2026-11-14)。
+            if self.course_button.styleSheet() != self._course_button_css:
+                self.course_button.setStyleSheet(self._course_button_css)
         self._fit_course_button()
 
     #: コースボタンの色の指定(倍率を当て直すときに残すため)。
@@ -3946,9 +3961,13 @@ class PreviewDock(QDockWidget):
                                       list(preview_data.get("measure_changes", [])),
                                       list(preview_data.get("gogo_regions", [])),
                                       list(preview_data.get("lyrics", [])))
-            self._game_grid_clicks = self._bar_grid_clicks(
-                preview_data.get("bar_times", []),
-                preview_data.get("bpm_changes", []))
+            # 小節時刻と BPM が前と同じなら作り直さない(音符を打っただけの
+            # ときは同じ。密な譜面で1回 16ms。実測 2026-11-14)。
+            src = (preview_data.get("bar_times", []),
+                   preview_data.get("bpm_changes", []))
+            if src != self._game_grid_src:
+                self._game_grid_clicks = self._bar_grid_clicks(*src)
+                self._game_grid_src = src
 
         self.waveform.set_beat_grid(headers["bpm"], self._grid_offset(),
                                     self._editor_metronome_clicks)

@@ -2509,7 +2509,8 @@ class MainWindow(QMainWindow):
             # 区間ごとの系統。作譜モードの書き込み先に要る(本家と同じ流れ方で
             # 編集するため)。
             self._preview_branch_path = list(result["preview"].get("branch_path") or [])
-            payload = (content, result["clicks"], result["preview"], cursor_line)
+            payload = (content, result["clicks"], result["preview"], cursor_line,
+                       result.get("note_timing", False))
             if self._preview_build_sec > self.PREVIEW_DEFER_SEC:
                 self._pending_preview = payload
                 self._preview_timer.start(120)
@@ -2524,13 +2525,20 @@ class MainWindow(QMainWindow):
                 result["preview"], self._find_course_stats(result["preview"].get("course_key")),
             )
             self._preview_build_sec = time.perf_counter() - t0
+            if "note_timing" in result:
+                self.preview_dock.chart_edit.note_timing = result["note_timing"]
             self.preview_dock.set_demostart(self.demostart_seconds())
             self._settle_preview_key(cursor_line)
 
     def _apply_preview_payload(self, payload):
         """プレビュー側の反映本体。_apply_analysis_result から直接、または
         重い譜面のときは _preview_tick から少し遅れて呼ばれる。"""
-        content, clicks, preview, cursor_line = payload
+        content, clicks, preview, cursor_line, timing = payload
+        # 作譜の位置変換(BPM・拍子・DELAY)も新しい本文のものへ。以前は同期の
+        # 道(_refresh_preview)でしか作り直しておらず、本文で BPM を変えても
+        # 次に同期で組み直すまで古いままだった。False は「作っていない」印。
+        if timing is not False:
+            self.preview_dock.chart_edit.note_timing = timing
         t0 = time.perf_counter()
         self.preview_dock.refresh_from_content(
             content, self.current_file, clicks, preview,
@@ -2678,15 +2686,11 @@ class MainWindow(QMainWindow):
         self._preview_branch_path = list(preview_data.get("branch_path") or [])
         course_stats = self._find_course_stats(preview_data.get("course_key"))
         # 作譜の位置変換も本文のBPM・拍子・DELAYを使う。小節内の線形補間はしない。
-        from .note_timing import NoteTiming
-        rng = self.analyzer.course_line_range(content, preview_data.get('course_key'))
-        try:
-            with note_edit.editing_branch(self._preview_branch_level, self._preview_branch_path):
-                body = note_edit.course_body_span(content, rng)
-                timing = NoteTiming(content, body, note_edit.measure_spans(content, body)) if body else None
-        except (ValueError, ZeroDivisionError):
-            timing = None
-        self.preview_dock.chart_edit.note_timing = timing
+        # 音符を打っただけなら前のものをそのまま使う(timing_for が覚えている)。
+        from .note_timing import timing_for
+        self.preview_dock.chart_edit.note_timing = timing_for(
+            self.analyzer, content, preview_data.get('course_key'),
+            self._preview_branch_level, self._preview_branch_path)
         self.preview_dock.refresh_from_content(content, self.current_file, metronome_clicks, preview_data, course_stats)
         # 今組み立てた条件を控える。この直後にカーソル移動で走る
         # _update_metronome_schedule が、同じ条件なら丸ごと省けるようにする。

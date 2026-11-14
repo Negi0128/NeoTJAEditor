@@ -107,3 +107,61 @@ class NoteTiming:
             if at <= time < at + (end - start) * duration:
                 return start + (time - at) / duration
         raise TimingError('DELAYの待ち時間には音符を配置できません。')
+
+
+# ---------------------------------------------------------------------------
+# 本文から作る(解析スレッドからも呼ぶ)
+# ---------------------------------------------------------------------------
+#: 音符の数字を全部 0 にする表。時刻の計算に効くのは「小節の中の何文字目か」
+#: だけで、どの音符かは効かない。
+_DIGITS_TO_ZERO = str.maketrans("123456789", "000000000")
+
+#: 直前に作ったもの (鍵, 結果)。音符を打っただけなら鍵が同じなので作り直さない
+#: (密な譜面では1回 0.4 秒かかる。実測 2026-11-14)。
+_timing_memo = (None, None)
+
+
+def _timing_key(text, body, level, path):
+    """NoteTiming の答えを決める物だけを並べた鍵。ヘッダはそのまま、本文は
+    命令・コメントの行をそのまま、音符の行は数字を 0 に揃えて使う
+    (数字の個数と位置、カンマ、命令の中身が同じなら時刻は同じ)。"""
+    lines = text[body[0]:body[1]].split("\n")
+    out = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("#") or s.startswith("//"):
+            out.append(line)
+        else:
+            out.append(line.translate(_DIGITS_TO_ZERO))
+    return (text[:body[0]], "\n".join(out), body[0], level,
+            tuple(path) if path else None)
+
+
+def timing_for(analyzer, text, course_key, branch_level, branch_path):
+    """作譜の位置変換に使う NoteTiming を本文から作る。作れなければ None。
+
+    見ている系統の小節だけを数えるのは作譜の編集と同じ(note_edit.editing_branch
+    と同じ決め方)。グローバルな editing_branch は使わない — 解析スレッドから
+    呼ぶので、GUI スレッドの編集と取り合いになる。"""
+    global _timing_memo
+    from neotja import note_edit
+    rng = analyzer.course_line_range(text, course_key)
+    body = note_edit.course_body_span(text, rng) if rng else None
+    if not body:
+        return None
+    if branch_level in note_edit.BRANCH_LEVELS:
+        level = branch_level
+    else:
+        level = note_edit.BRANCH_AUTO if branch_path else None
+    path = tuple(branch_path or ())
+    key = _timing_key(text, body, level, path)
+    mk, mv = _timing_memo
+    if mk == key:
+        return mv
+    try:
+        timing = NoteTiming(text, body,
+                            note_edit.measure_spans(text, body, level, path))
+    except (ValueError, ZeroDivisionError):
+        timing = None
+    _timing_memo = (key, timing)
+    return timing

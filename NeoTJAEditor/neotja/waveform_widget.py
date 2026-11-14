@@ -217,12 +217,38 @@ class WaveformWidget(QWidget):
         self._update_stereo_button_state()
         self.update()
 
+    # -- 同じ中身の差し替えを省く ----------------------------------------
+    # 解析を貼るたびに全部の set_* が呼ばれる。音符を1つ打っただけなら
+    # 小節線も命令も連打も同じなのに、どれも _apply_offset_local で全部を
+    # 作り直していて、密な譜面では1回の貼り付けに 250ms 以上かかっていた
+    # (実測 2026-11-14)。前回と同じ入力なら何もしない。
+    def _same_input(self, key, value):
+        """前回 key に渡されたものと value が同じなら True。違えば覚え直す。"""
+        memo = self.__dict__.get("_input_memo")
+        if memo is None:
+            memo = self._input_memo = {}
+        if key in memo and memo[key] == value:
+            return True
+        memo[key] = value
+        return False
+
+    def _forget_input(self, *keys):
+        """次の set_* を必ず通す(手元で中身を書き換えたときなど)。"""
+        memo = self.__dict__.get("_input_memo")
+        if memo:
+            for k in keys:
+                memo.pop(k, None)
+
     def set_beat_grid(self, bpm, offset: float, clicks=None):
         """`clicks`, when given (non-empty), is [(chart_time, is_measure_start), ...]
         as returned by TJACourseAnalyzer.build_metronome_clicks - drawn as-is
         so the grid tracks #MEASURE/#BPMCHANGE instead of assuming a single
         constant tempo for the whole song. Falls back to a plain bpm/offset
         grid when there's no chart data yet (e.g. a brand new file)."""
+        # OFFSET は別の道(set_time_offset 等)でも変わるので、いまの値とも比べる。
+        if (self._same_input("beat_grid", (bpm, offset, list(clicks) if clicks else None))
+                and offset == self.offset):
+            return
         self.bpm = bpm
         self._clicks_raw = list(clicks) if clicks else None
         self._apply_offset_local(offset)
@@ -232,13 +258,19 @@ class WaveformWidget(QWidget):
         build_preview_timeline() の "notes"（[(chart_time, char, bpm, scroll,
         se)]）と同じ形。None/空で消える。OFFSET は既存の offset を使って
         _apply_offset_local で audio 時刻に変換する。"""
-        self._notes_raw = [(n[0], n[1]) for n in notes] if notes else None
+        raw = [(n[0], n[1]) for n in notes] if notes else None
+        if self._same_input("notes", raw):
+            return
+        self._notes_raw = raw
         self._apply_offset_local(self.offset)
 
     def set_spans(self, rolls, balloons, kusudamas):
         """作譜モードの波形に描く連打/風船/くす玉のスパンを設定する。各引数は
         build_preview_timeline() の "rolls"([(s,e,char,bpm,scroll,hits)])/
         "balloons"/"kusudamas"([(s,e,bpm,scroll,hits)])と同じ形。"""
+        if self._same_input("spans", (list(rolls or []), list(balloons or []),
+                                      list(kusudamas or []))):
+            return
         raw = []
         for r in (rolls or []):
             raw.append((r[0], r[1], "roll_big" if len(r) > 2 and r[2] == "6" else "roll"))
@@ -265,6 +297,11 @@ class WaveformWidget(QWidget):
         (t,num,den)]/gogo_regions[(s,e)] と同じ形。"""
         # 4つめは種類("bpm"/"hs"/"measure")。作譜ペインが種類ごとの行へ
         # 振り分けるのに使う(色で見分けていたのをやめた)。
+        if self._same_input("commands", (list(bpm_changes or []),
+                                         list(scroll_changes or []),
+                                         list(measure_changes or []),
+                                         list(gogo_regions or []))):
+            return
         raw = []
         for t, bpm in (bpm_changes or [])[1:]:
             raw.append((t, f"BPM{bpm:g}", "#3aa0ff", "bpm"))

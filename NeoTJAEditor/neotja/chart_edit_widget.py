@@ -414,6 +414,11 @@ class ChartEditWaveform(WaveformWidget):
         親が音符を置くのと同じ変換(譜面時刻 - OFFSET)を必ず通すためで、
         ここで一度きり引き算してしまうと、後から OFFSET が変わったときに
         音符だけが動いてグリッドが取り残される。"""
+        # 同じ小節時刻なら何もしない(解析を貼るたびに呼ばれる。帯の焼き直しの
+        # 合図も出さない)。OFFSET を渡されたときは、いまの値と同じときだけ。
+        if (self._same_input("bar_times", list(times or []))
+                and (offset is None or offset == self.offset)):
+            return
         raw = []
         last_bpm = None
         vis = []
@@ -464,6 +469,9 @@ class ChartEditWaveform(WaveformWidget):
         札として出ず、選べない=消せなかった(利用者の報告 2026-11-05)。
         命令そのものを受け取って、1本ずつ札にする。
         """
+        if self._same_input("region_marks",
+                            list(marks) if marks is not None else None):
+            return
         self._region_raw = ([(float(t0), str(n)) for t0, n in marks]
                             if marks is not None else None)
         if self._region_raw is not None:
@@ -533,6 +541,17 @@ class ChartEditWaveform(WaveformWidget):
 
     def set_commands(self, bpm_changes, scroll_changes, measure_changes,
                      gogo_regions, *args, **kwargs):
+        lyrics_in = kwargs.get("lyrics")
+        if lyrics_in is None and args:
+            lyrics_in = args[0]
+        if self._same_input("ce_commands", (
+                list(bpm_changes or []), list(scroll_changes or []),
+                list(measure_changes or []), list(gogo_regions or []),
+                list(lyrics_in or []))):
+            return
+        # 下の親の set_commands は歌詞を知らないので、親の側で「同じ」と
+        # 省かれると、前の歌詞が入ったままの _cmd_raw に歌詞を足してしまう。
+        self._forget_input("commands")
         # ゴーゴーの薄い色と小節線は帯に焼いてある(_static_strip を参照)。
         # 拍子の変化点は**全部**覚えておく(親は先頭の基準値を落として
         # 「変わった所」だけを札にする)。グリッドを拍の長さで割るのに、
@@ -932,15 +951,38 @@ class ChartEditWaveform(WaveformWidget):
         return period if 0 < period < mg else 0
 
     def _rebuild_bar_times(self):
-        self._bump_strip()             # 小節線・目盛りは帯に焼いてある
-        self._bar_times = [max(0.0, t - self.offset)
-                           for t in (self._bar_times_raw or [])]
+        bars = [max(0.0, t - self.offset)
+                for t in (self._bar_times_raw or [])]
         raw = getattr(self, "_barline_raw", None)
-        self._barline_audio = ([(s - self.offset, e - self.offset) for s, e in raw]
-                               if raw else None)
+        barline = ([(s - self.offset, e - self.offset) for s, e in raw]
+                   if raw else None)
         rm = getattr(self, "_region_raw", None)
-        self._region_audio = ([(t0 - self.offset, n) for t0, n in rm]
-                              if rm is not None else None)
+        region = ([(t0 - self.offset, n) for t0, n in rm]
+                  if rm is not None else None)
+        self._bar_times = bars
+        self._barline_audio = barline
+        self._region_audio = region
+        self._bump_strip_if_changed()
+
+    def _strip_inputs(self):
+        """帯に焼いてあるもののうち、音符の打ち込みで作り直されるもの。"""
+        return (self._bar_times, getattr(self, "_barline_audio", None),
+                getattr(self, "_region_audio", None),
+                getattr(self, "_measure_time_list", None),
+                getattr(self, "_click_time_list", None),
+                getattr(self, "_gogo_audio", None),
+                getattr(self, "_cmd_kind_times", None),
+                getattr(self, "_cmd_by_kind", None), self.offset)
+
+    def _bump_strip_if_changed(self):
+        """帯の中身(小節線・目盛り・ゴーゴー・命令)が前と違うときだけ焼き直させる。
+
+        以前は作り直すたびに焼き直していて、音符を1つ打っただけでも密な譜面
+        (小節線 14000 本)の帯を焼き直していた(1回 60〜160ms。実測 2026-11-14)。"""
+        now = self._strip_inputs()
+        if now != getattr(self, "_strip_inputs_seen", None):
+            self._strip_inputs_seen = now
+            self._bump_strip()
 
     def _apply_offset_local(self, offset):
         super()._apply_offset_local(offset)
@@ -1241,6 +1283,12 @@ class ChartEditWaveform(WaveformWidget):
             self.update()
 
     def set_spans(self, rolls, balloons, kusudamas):
+        if self._same_input("ce_spans", (list(rolls or []), list(balloons or []),
+                                         list(kusudamas or []))):
+            return
+        # 親の _spans_raw は下で畳み直す(_collapse_open_spans)ので、親の
+        # 「同じなら省く」は使えない。
+        self._forget_input("spans")
         super().set_spans(rolls, balloons, kusudamas)
         self._spans_full = list(self._spans_raw or [])
         self._collapse_open_spans()
@@ -1252,6 +1300,8 @@ class ChartEditWaveform(WaveformWidget):
         """終端 8 が無い連打・風船を受け取る。要素は (譜面時刻, 文字)。
 
         時刻だけ(float)でも受ける。文字が分からないときは連打の色で描く。"""
+        if self._same_input("open_spans", list(starts or [])):
+            return
         out = []
         for it in (starts or []):
             if isinstance(it, (tuple, list)):
@@ -3372,6 +3422,8 @@ class ChartEditWaveform(WaveformWidget):
                 self._spans_raw = keep_spans or None
                 changed = True
         if changed:
+            # 手元で中身を書き換えたので、次の正式な結果は同じ入力でも通す。
+            self._forget_input("notes", "spans", "ce_spans", "open_spans")
             self._apply_offset_local(self.offset)
 
     # ------------------------------------------------------------------
