@@ -237,6 +237,9 @@ class TJAHighlighter(QSyntaxHighlighter):
         super().__init__(document)
         self.data: HighlightData = HighlightData()
         self.formats: dict = {}
+        #: apply_data の途中なら True。塗り直しでも文書の textChanged が出るので、
+        #: 受け手(main_window)が「本文が変わった」と取り違えないための印。
+        self.applying = False
         self.rebuild_formats()
 
     @staticmethod
@@ -262,7 +265,17 @@ class TJAHighlighter(QSyntaxHighlighter):
         突き合わせると「全行が変わった」と判定され、改行1回ごとに全文書の
         再ハイライト(数万行で約2秒)に落ちてしまう。そこで先頭から一致する
         範囲と末尾から一致する範囲(こちらは行数差 delta を補正して比較)を
-        求め、実際に変わった中央部分だけを塗り直す。"""
+        求め、実際に変わった中央部分だけを塗り直す。
+
+        塗り直しのあいだは applying を立てておく(textChanged の受け手が、
+        本文の変更ではないと分かるように)。"""
+        self.applying = True
+        try:
+            self._apply_data(new_data)
+        finally:
+            self.applying = False
+
+    def _apply_data(self, new_data: "HighlightData"):
         old_data = self.data
         self.data = new_data
 

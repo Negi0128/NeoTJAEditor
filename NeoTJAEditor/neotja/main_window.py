@@ -2170,6 +2170,12 @@ class MainWindow(QMainWindow):
     # Debounced analysis pass (mirrors the original's after(400, ...) pattern)
     # ------------------------------------------------------------------
     def _on_text_changed(self):
+        # 構文の色を塗り直しただけ(解析結果を貼ったとき)でも textChanged は
+        # 出る。本文は変わっていないので、ここで解析を予約し直すと、止まって
+        # から 600ms 後に同じ本文の解析と貼り付けをもう一度やることになる
+        # (密な譜面で 400ms 近く止まっていた。実測 2026-11-14)。
+        if getattr(getattr(self, "highlighter", None), "applying", False):
+            return
         # タイトルバー/タスクバーに未保存(*)を出す。dirty 判定はアプリ独自の
         # modified_lines(本文が実際に変わったときだけ増える)に合わせる。
         # 読み込み(setPlainText)直後は _open_path / new_file 側で clear して
