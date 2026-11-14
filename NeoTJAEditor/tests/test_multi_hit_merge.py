@@ -2,7 +2,7 @@
 
 以前は難易度ぶんの打音を全部足して、SE を本数で割っていた。そのせいで
 1本のときより 6〜12dB 小さく聞こえた。今は同じ時刻・同じ音を1つに
-まとめ、割らずに打音だけ MULTI_HIT_GAIN(1.5)倍にする。1本のときは
+まとめ、割らずに打音だけ MULTI_HIT_GAIN(1.2)倍にする。1本のときは
 今までどおり。"""
 import hashlib
 import json
@@ -92,8 +92,8 @@ class MultiHitMergeTest(unittest.TestCase):
         d, calls = self._dock(self._previews())
         d._rebuild_multi_notes()
         self.assertEqual(d._multi_count, 3)
-        self.assertEqual(MULTI_HIT_GAIN, 1.5)
-        self.assertEqual(calls[-2:], [('sfx', 0.9), ('gain', 1.5)])
+        self.assertEqual(MULTI_HIT_GAIN, 1.2)
+        self.assertEqual(calls[-2:], [('sfx', 0.9), ('gain', 1.2)])
 
     def test_single_live_band_is_unchanged(self):
         d, calls = self._dock(self._previews(), muted=('Oni', 'Hard'))
