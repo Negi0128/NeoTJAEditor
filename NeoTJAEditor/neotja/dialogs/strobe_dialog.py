@@ -44,7 +44,11 @@ class StrobeGeneratorDialog(QDialog):
         form.addRow("基準BPM", self.ed_bpm)
 
         self.cb_length = QComboBox()
-        self.cb_length.addItems(["1/8小節", "1/4小節", "1/2小節", "1小節"])
+        # 1小節より長いストロボも作れるように 2〜8小節を、短いほうに 1/16小節を
+        # 足した(利用者の指定 2026-11-14)。
+        self.cb_length.addItems(
+            ["1/16小節", "1/8小節", "1/4小節", "1/2小節"]
+            + ["%d小節" % n for n in range(1, 9)])
         self.cb_length.setCurrentText("1小節")
         form.addRow("生成長さ", self.cb_length)
 
@@ -113,10 +117,13 @@ class StrobeGeneratorDialog(QDialog):
 
         curve = self.cb_curve.currentText()
         # 生成する長さ(全音符 = 1 の単位。4/4 の1小節 = 1)。
-        total = {
-            "1/8小節": Fraction(1, 8), "1/4小節": Fraction(1, 4),
-            "1/2小節": Fraction(1, 2),
-        }.get(self.cb_length.currentText(), Fraction(1))
+        # 項目の字(「1/16小節」「3小節」など)から読む。
+        try:
+            total = Fraction(self.cb_length.currentText().replace("小節", ""))
+        except (ValueError, ZeroDivisionError):
+            total = Fraction(1)
+        if total <= 0:
+            total = Fraction(1)
 
         # 1小節をちょうど1フレームにする。#MEASURE a/b の長さは
         # (240 / BPM) × a/b 秒なので、1/FPS 秒にするには a/b = BPM / (240×FPS)。
