@@ -256,11 +256,13 @@ def _baked_art(bg, h, path=None):
     return img
 
 
-def _draw_art(p, bg, w, h, song_sec=None):
+def _draw_art(p, bg, w, h, song_sec=None, src=None):
     """ジャケット写真。本番(ffmpeg)と同じ置き方・同じ大きさ。
 
-    置き場所は art_x / art_y(真ん中が 0、1080p の画素)。座標は本番と
-    同じ recorder.art_xy で出す。歌詞に合わせて切り替えるときは
+    置き場所は art_x / art_y(ゲーム画面の下背景の真ん中が 0、1080p の
+    画素)。座標は本番と同じ recorder.art_xy で出す。src は録った画面の
+    大きさ (幅, 高さ) で、画面を収めた場所から下背景を出すのに使う。
+    歌詞に合わせて切り替えるときは
     **見ている時刻の絵**(song_sec、音源の秒)を出す。
 
     切り替わりのフェードの中なら、本番と同じく2枚を混ぜる(前の絵を
@@ -276,7 +278,8 @@ def _draw_art(p, bg, w, h, song_sec=None):
         img = _baked_art(bg, h, path)
         if img is None or opacity <= 0.0:
             continue
-        x, y = recorder.art_xy(bg, w, h, img.width())
+        sw, sh = src if src else (None, None)
+        x, y = recorder.art_xy(bg, w, h, img.width(), sw, sh)
         p.save()
         p.setOpacity(min(1.0, float(opacity)))
         p.drawImage(int(x), int(y), img)
@@ -390,7 +393,7 @@ def compose_check_frame(widget, bg, song_sec, canvas=None, song="",
     # 画面の下のほうにある歌詞(#LYRIC)が棒やジャケットに隠れる
     # (利用者の指定 2026-10-26)。
     _draw_wave(p, bg, song, bg.offset + float(song_sec), w, h)
-    _draw_art(p, bg, w, h, float(song_sec))
+    _draw_art(p, bg, w, h, float(song_sec), src=(sw, sh))
     if (sw, sh) == (w, h):
         p.drawImage(0, 0, shot)
     else:
@@ -429,7 +432,7 @@ def _compose_plain_frame(widget, bg, song_sec, w, h):
     else:
         fit = shot.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         p.drawImage((w - fit.width()) // 2, (h - fit.height()) // 2, fit)
-    _draw_art(p, bg, w, h, float(song_sec))
+    _draw_art(p, bg, w, h, float(song_sec), src=(sw, sh))
     p.end()
     return base
 

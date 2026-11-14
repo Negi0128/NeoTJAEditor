@@ -45,10 +45,11 @@ _SETTINGS_KEYS = (
     "rec_bg_art", "rec_bg_art_pct", "rec_bg_art_pad",
     "rec_bg_art_x", "rec_bg_art_y", "rec_bg_art_edge", "rec_bg_art_edge_color",
     "rec_bg_wave", "rec_bg_wave_pct", "rec_bg_wave_color", "rec_bg_wave_alpha",
-    # ジャケットの位置の決まりの印。"center" なら rec_bg_art_x / y は
-    # 「真ん中が 0、1080p の画素」(2026-11-13 から)。無ければ古い決まり
-    # (左上が 0、負は反対の端から)の値なので、読むときに一度だけ既定
-    # (左下)へ戻す(_migrate_art_pos)。default_settings() と両方に要る。
+    # ジャケットの位置の決まりの印。"lower_center" なら rec_bg_art_x / y は
+    # 「ゲーム画面の下背景の真ん中が 0、1080p の画素」(2026-11-14 から)。
+    # 違えば古い決まり("center" = 画面の真ん中が 0、無し = 左上が 0)の
+    # 値なので、読むときに一度だけ既定 (0, 0) へ戻す(_migrate_art_pos)。
+    # default_settings() と両方に要る。
     "rec_bg_art_pos",
     # 録画の背景の窓で「この画面をPNGで保存」した場所(次に開く場所)。
     # これも default_settings() と両方に要る。
@@ -102,11 +103,11 @@ def default_settings() -> dict:
         "rec_bg_art": "",
         "rec_bg_art_pct": 30.0,
         "rec_bg_art_pad": 24,
-        # 真ん中が 0・1080p の画素で、以前の既定の左下と同じ所
-        # (recorder.ART_POS_DEFAULT と同じ数字。ここは recorder を読まない)。
+        # 下背景の真ん中が 0・1080p の画素(recorder.ART_POS_DEFAULT と同じ
+        # 数字。ここは recorder を読まない)。
         "rec_bg_art_x": ART_POS_DEFAULT[0],
         "rec_bg_art_y": ART_POS_DEFAULT[1],
-        "rec_bg_art_pos": "center",
+        "rec_bg_art_pos": ART_POS_MARK,
         "rec_bg_art_edge": 6,
         "rec_bg_art_edge_color": "#ffffff",
         "rec_bg_wave": False,
@@ -508,19 +509,22 @@ def _coerce(default, loaded):
 _BASELINE = None
 
 #: ジャケットの位置の既定(recorder.ART_POS_DEFAULT と同じ。変えるときは両方)。
-ART_POS_DEFAULT = (-768, 348)
+#: (0, 0) = ゲーム画面の下背景(レーンより下)の真ん中。
+ART_POS_DEFAULT = (0, 0)
+#: いまの位置の決まりの印(rec_bg_art_pos)。決まりを変えたらここも変える。
+ART_POS_MARK = "lower_center"
 
 
 def _migrate_art_pos(data: dict, loaded: dict) -> None:
-    """ジャケットの位置を新しい決まり(真ん中が 0)へ移す。印が無いときだけ。
+    """ジャケットの位置を今の決まり(下背景の真ん中が 0)へ移す。印が今の
+    ものでないときだけ、一度だけ。
 
-    古い値(既定 24, -24 = 左下)は新しい決まりで読むと真ん中から少し
-    ずれた所になり、どちらの意味でも利用者が置いた場所ではない。換算は
-    書き出しの大きさで変わるので正しく直せず、**既定(左下)へ戻す**ことに
-    した(利用者の決定 2026-11-13「まかせる」)。真ん中だと背景ありのとき
-    レーンの下に隠れるので、以前の既定と同じ左下にする。「既定にする」で
-    覚えた見た目(rec_bg_default)の中の位置も同じく戻す。"""
-    if loaded.get("rec_bg_art_pos") == "center":
+    古い値は原点が違う(印なし = 左上が 0、"center" = 画面の真ん中が 0)
+    ので、今の決まりで読むと利用者が置いた場所にならない。換算は書き出しの
+    大きさで変わるので正しく直せず、**既定 (0, 0) へ戻す**(利用者の指定
+    2026-11-14「下側の背景の所の真ん中を0,0にしたい」— そこが新しい既定)。
+    「既定にする」で覚えた見た目(rec_bg_default)の中の位置も同じく戻す。"""
+    if loaded.get("rec_bg_art_pos") == ART_POS_MARK:
         return
     dx, dy = ART_POS_DEFAULT
     data["rec_bg_art_x"] = dx
@@ -531,7 +535,7 @@ def _migrate_art_pos(data: dict, loaded: dict) -> None:
         saved["art_x"] = dx
         saved["art_y"] = dy
         data["rec_bg_default"] = saved
-    data["rec_bg_art_pos"] = "center"
+    data["rec_bg_art_pos"] = ART_POS_MARK
 
 
 def load_settings() -> dict:

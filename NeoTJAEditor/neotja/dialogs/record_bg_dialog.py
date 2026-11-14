@@ -302,25 +302,25 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_pad.setValue(int(getattr(bg, "art_pad", 24) if bg is not None else 24))
         self.sp_art_pad.setToolTip("左と下の端からの余白。")
         self.sp_art_pad.valueChanged.connect(self._schedule)
-        # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。0,0 が画面の
-        # 真ん中(利用者の決定 2026-11-13「まかせる」)。数字は 1080p の画素で、
-        # 720p で書き出すときは同じ割合で縮める(recorder.art_xy)ので、
-        # 画質を替えても置き場所は変わらない。
-        lim_x, lim_y = recorder.ART_POS_LIMIT
-        # 既定は左下(recorder.ART_POS_DEFAULT。背景ありだと真ん中はレーンに
-        # 隠れるので)。
+        # 置き場所は**座標(画素)**(利用者の指定 2026-10-31)。0,0 がゲーム
+        # 画面の下背景(レーンより下)の真ん中(利用者の指定 2026-11-14)。
+        # 数字は 1080p の画素で、720p で書き出すときは同じ割合で縮める
+        # (recorder.art_xy)ので、画質を替えても置き場所は変わらない。
+        (lo_x, hi_x), (lo_y, hi_y) = recorder.ART_POS_RANGE
+        # 既定は 0,0(recorder.ART_POS_DEFAULT)。
         dx, dy = recorder.ART_POS_DEFAULT
-        pos_tip = (chr(10) + "0 で画面の真ん中。数字は 1080p の画素で、"
-                   + chr(10) + "720p などで書き出すときは同じ割合で縮めます。"
-                   + chr(10) + "既定は左下(%d, %d)。" % (dx, dy))
+        pos_tip = (chr(10) + "0, 0 でレーンより下の背景の真ん中。"
+                   + chr(10) + "数字は 1080p の画素で、"
+                   + "720p などで書き出すときは同じ割合で縮めます。"
+                   + chr(10) + "既定は (%d, %d)。" % (dx, dy))
         self.sp_art_x = QSpinBox()
-        self.sp_art_x.setRange(-lim_x, lim_x)
+        self.sp_art_x.setRange(lo_x, hi_x)
         self.sp_art_x.setSuffix(" px")
         self.sp_art_x.setValue(int(getattr(bg, "art_x", dx) if bg is not None else dx))
         self.sp_art_x.setToolTip("横の位置。右へ +、左へ −。" + pos_tip)
         self.sp_art_x.valueChanged.connect(self._schedule)
         self.sp_art_y = QSpinBox()
-        self.sp_art_y.setRange(-lim_y, lim_y)
+        self.sp_art_y.setRange(lo_y, hi_y)
         self.sp_art_y.setSuffix(" px")
         self.sp_art_y.setValue(int(getattr(bg, "art_y", dy) if bg is not None else dy))
         self.sp_art_y.setToolTip("縦の位置。下へ +、上へ −。" + pos_tip)

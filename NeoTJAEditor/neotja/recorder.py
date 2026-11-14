@@ -547,18 +547,20 @@ def _fade_secs(v):
         return 0.0
 
 
-#: ジャケットの置き場所の既定(1080p の画素、真ん中が 0)。以前の既定
-#: (左上が原点の (24, -24) = 左端から 24px・下端から 24px)と、1080p・
-#: 大きさ 30%・枠 6px で同じ所に来る数字(利用者の決定 2026-11-13
-#: 「まかせる」)。背景ありではジャケットが画面の下に敷かれるので、真ん中
-#: だとレーンにほとんど隠れる。左下ならいつもの画面の下背景と踊り子の所で
-#: 見える。720p では同じ割合で縮むので、端からの余白も 2/3(16px 前後)。
-#: 真ん中に置きたいときは 0, 0 と打てばよい。
-#:   x: (1920 - 336) / 2 + x = 24          → x = -768
-#:   y: (1080 - 336) / 2 + y = 1080-336-24 → y = 348
+#: ジャケットの置き場所の既定(1080p の画素)。(0, 0) は**ゲーム画面の
+#: 下背景(レーンの帯より下)の真ん中**(利用者の指定 2026-11-14「レーンに
+#: 重ならない下側の背景の所の真ん中を0,0にしたい」)なので、既定はそこ。
+#: 大きさ 30%・枠 6px なら 1080p で 336px 四方、下背景は 534px の高さが
+#: あるので、上(レーンとの間)に 100px・下(画面の端)に 98px 余る(偶数へ
+#: 寄せるぶん 1px ずれる)。720p は 228px 四方で上下とも 64px。
 #: settings.default_settings() にも同じ数字を書いている(あちらは recorder を
 #: 読み込まないので)。変えるときは両方。
-ART_POS_DEFAULT = (-768, 348)
+ART_POS_DEFAULT = (0, 0)
+#: 位置の数字の幅 ((横の最小, 最大), (縦の最小, 最大))。1080p で横 ±960、
+#: 縦 -813〜+267(下背景の真ん中 y=813 から画面の上端・下端まで)。
+#: recorder を読み込むだけで game_screen まで読ませないよう数字で書いて
+#: ある。art_pos_range() が下背景の数字から出したものと同じ(試験で確かめる)。
+ART_POS_RANGE = ((-960, 960), (-813, 267))
 
 
 class RecordBackground:
@@ -606,7 +608,7 @@ class RecordBackground:
         self.fade_in = _fade_secs(fade_in)
         self.fade_out = _fade_secs(fade_out)
         self.fade_target = "bg" if str(fade_target) == "bg" else "all"
-        #: 左下へ置くジャケット写真(利用者の指定 2026-10-26)。空なら置かない。
+        #: 下背景に置くジャケット写真(利用者の指定 2026-10-26)。空なら置かない。
         #: art_pct は画面の高さに対する割合、art_pad は端からの余白(画素)。
         self.art = str(art or "")
         try:
@@ -623,20 +625,19 @@ class RecordBackground:
         except (TypeError, ValueError):
             self.art_edge = 6
         self.art_edge_color = _hex_color(art_edge_color, "#ffffff")
-        #: 置く場所(利用者の決定 2026-11-13「まかせる」)。**(0, 0) が画面の
-        #: 真ん中**で、右・下が +。数字は **1080p の画素**で持ち、出来上がりの
-        #: 高さに合わせて縮める(art_xy)。以前は左上が原点・負は反対の端から、
-        #: の出来上がりの画素だったが、それだと 720p と 1080p で同じ数字でも
-        #: 置き場所がずれ、ジャケットの大きさ(高さの割合)とも釣り合わなかった。
-        #: 既定は左下(ART_POS_DEFAULT)。古い値は settings の rec_bg_art_pos の
+        #: 置く場所。**(0, 0) がゲーム画面の下背景(レーンの帯より下)の
+        #: 真ん中**で、右・下が +(利用者の指定 2026-11-14)。数字は
+        #: **1080p の画素**で持ち、出来上がりの高さに合わせて縮める
+        #: (art_xy)。720p と 1080p で同じ数字なら同じ所に来る。
+        #: 既定は (0, 0)。古い決まりの値は settings の rec_bg_art_pos の
         #: 印で一度だけ既定へ戻す。
-        def _pos(v, lim, d):
+        def _pos(v, rng, d):
             try:
-                return max(-lim, min(lim, int(round(float(v)))))
+                return max(rng[0], min(rng[1], int(round(float(v)))))
             except (TypeError, ValueError):
                 return d
-        self.art_x = _pos(art_x, ART_POS_LIMIT[0], ART_POS_DEFAULT[0])
-        self.art_y = _pos(art_y, ART_POS_LIMIT[1], ART_POS_DEFAULT[1])
+        self.art_x = _pos(art_x, ART_POS_RANGE[0], ART_POS_DEFAULT[0])
+        self.art_y = _pos(art_y, ART_POS_RANGE[1], ART_POS_DEFAULT[1])
         #: 歌詞に合わせて切り替えるジャケット(利用者の承認 2026-11-13)。
         #: [(始まり, 終わり, 道)] で、時刻は**音源の秒**(None は頭から /
         #: 最後まで)。lyric_jacket.jacket_segments で作る。空なら今までどおり
@@ -915,21 +916,75 @@ def bg_with_defaults(bg, saved):
 #: ジャケットの位置の数字を何 p の画素で数えるか。どの大きさで書き出しても
 #: 同じ数字なら同じ所に来るよう、ここを基準にして出来上がりの高さで縮める。
 ART_POS_REF_H = 1080
-#: 位置の数字の幅(1080p の半分ずつ)。真ん中から端まで動かせる。
-ART_POS_LIMIT = (960, 540)
+
+#: ゲーム画面の下背景の縦の範囲(画面の論理座標、1280x720 の上で)。
+#: 上はレーンの帯の下端 = 左パネル(PANEL_Y..+PANEL_H = 188..363)の下端の
+#: 364 で、ここより上はレーン・打音表記・枠。下は画面の下端 720。
+#: game_screen の数字から出す(あちらを動かせば一緒に動く)。この 364 と
+#: 720 の真ん中(y=542、横は画面の真ん中 640)がジャケットの (0, 0)。
+def lower_area_logical():
+    """下背景の (上, 下, 画面の横幅)。game_screen は重いので要るときに読む。"""
+    from neotja.game_screen import PANEL_H, PANEL_Y, SCREEN_H_FULL, SCREEN_W
+    return float(PANEL_Y + PANEL_H), float(SCREEN_H_FULL), float(SCREEN_W)
 
 
-def art_xy(bg, out_w, out_h, side):
+def art_lower_area(out_w, out_h, src_w=None, src_h=None):
+    """出来上がりの絵の上での、ゲーム画面の下背景 (x0, y0, x1, y1)(小数)。
+
+    src_w / src_h は録った画面の画素(ウィジェットの大きさ×倍率)。録画は
+    それを**縦横比のまま出来上がりへ収めて真ん中に置く**(背景ありの
+    scale+pad も、背景なしの _video_filter も同じ)ので、ここも同じ
+    置き方で写す。渡さなければ画面が出来上がりいっぱいに入っている
+    (1280x720 → 720p / 1080p)ものとする。
+
+    画面の横幅はいつも論理 1280 なので、論理 → 録った画素の倍率は
+    src_w / 1280。画面が 720 より低い(上半分だけの compact)ときは
+    下背景が無いので、画面の下から出来上がりの下端までを使う。"""
+    W, H = float(out_w), float(out_h)
+    sw = float(src_w) if src_w else W
+    sh = float(src_h) if src_h else H
+    f = min(W / sw, H / sh)
+    fw, fh = sw * f, sh * f
+    ox, oy = (W - fw) / 2.0, (H - fh) / 2.0
+    top, bot, lw = lower_area_logical()
+    k = sw / lw * f             # 論理 1px が出来上がりの何画素か
+    if sh * f >= bot * k - 0.5:
+        y0, y1 = oy + top * k, oy + bot * k
+    else:
+        y0 = oy + min(top * k, fh)
+        y1 = H
+    return ox, y0, ox + fw, y1
+
+
+def art_origin(out_w, out_h, src_w=None, src_h=None):
+    """ジャケットの (0, 0) — 下背景の真ん中(出来上がりの画素、小数)。"""
+    x0, y0, x1, y1 = art_lower_area(out_w, out_h, src_w, src_h)
+    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+
+def art_pos_range():
+    """位置の数字の幅を下背景の数字から出す。1080p の 16:9 の画面で、
+    (0, 0) から出来上がりの端まで(ジャケットの真ん中が端に来るまで)。"""
+    cx, cy = art_origin(1920, ART_POS_REF_H)
+    return ((-int(round(cx)), int(round(1920 - cx))),
+            (-int(round(cy)), int(round(ART_POS_REF_H - cy))))
+
+
+def art_xy(bg, out_w, out_h, side, src_w=None, src_h=None):
     """ジャケット(枠まで入れて side 四方)を置く左上の座標(整数)。
 
-    (0, 0) で画面の真ん中、art_x / art_y は 1080p の画素で右・下が +。
+    (0, 0) で**ゲーム画面の下背景(レーンより下)の真ん中**にジャケットの
+    真ん中が来る(art_origin)。art_x / art_y は 1080p の画素で右・下が +。
+    src_w / src_h は録った画面の画素(背景あり・なしのどちらでも、画面を
+    出来上がりへ収めた実際の場所から下背景を出す)。
     **確認の1コマ(Qt)と書き出し(ffmpeg)はどちらもこれを使う** — 式を
     2か所に書くと、見本と出来上がりで1画素ずつずれても気づけない。
     偶数へ寄せるのは、ffmpeg の overlay が yuv420 で重ねるときに奇数の
     座標を切り捨てるため(寄せておけば見本と同じ所に来る)。"""
     s = float(out_h) / ART_POS_REF_H
-    x = (float(out_w) - side) / 2.0 + float(bg.art_x) * s
-    y = (float(out_h) - side) / 2.0 + float(bg.art_y) * s
+    cx, cy = art_origin(out_w, out_h, src_w, src_h)
+    x = cx - side / 2.0 + float(bg.art_x) * s
+    y = cy - side / 2.0 + float(bg.art_y) * s
     return (2 * int(math.floor(x / 2.0 + 0.5)),
             2 * int(math.floor(y / 2.0 + 0.5)))
 
@@ -1088,14 +1143,15 @@ def _bg_filter_complex(canvas, src_w, src_h, fps, bg, pre_black, dur_sec,
     if arts is None:
         arts = ([(art_idx, art_baked, None)]
                 if art_idx is not None and _art_input_args(bg) else [])
-    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0, fps, w=w)
+    chain, cur = _art_overlay_chain(bg, h, cur, arts, t0, fps, w=w,
+                                    src=(src_w, src_h))
     graph += chain
     graph += ("[%s][fg]overlay=format=rgb:alpha=premultiplied:shortest=1"
               % cur + tail + ",format=yuv420p[v]")
     return graph
 
 
-def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None):
+def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None, src=None):
     """cur の上へジャケットを重ねる一節と、次の名札を返す。
 
     背景ありの経路(背景の上・画面の下)と、背景なしの経路(画面の上)で
@@ -1113,8 +1169,8 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None):
             if kb > max(0, ka):
                 out.append((a, b, kind, max(0, ka), kb))
         return out
-    # 置き場所は art_x / art_y(真ん中が 0、1080p の画素 — art_xy)。高さは
-    # 画面に対する割合で、絵は正方形に切ってある。既定は左下。歌詞ごとの
+    # 置き場所は art_x / art_y(下背景の真ん中が 0、1080p の画素 — art_xy)。
+    # 高さは画面に対する割合で、絵は正方形に切ってある。歌詞ごとの
     # ジャケットも同じ大きさ・同じ場所・同じ枠 — 切り替わっても位置が
     # ぶれない。
     ah = max(8, int(round(h * bg.art_pct / 100.0)))
@@ -1123,7 +1179,8 @@ def _art_overlay_chain(bg, h, cur, arts, t0, fps=60, w=None):
     # ffmpeg の式((W-w)/2 …)にすると、丸め方が確認の1コマと食い違う。
     if w is None:
         w = h * 16 // 9
-    ex, ey = ("%d" % v for v in art_xy(bg, w, h, ah + e * 2))
+    sw, sh = src if src else (None, None)
+    ex, ey = ("%d" % v for v in art_xy(bg, w, h, ah + e * 2, sw, sh))
     for k, (idx, baked, windows) in enumerate(arts):
         # 切り替わりでフェードする絵は (区間, 薄くする所) の組で来る。
         ramps = ()
@@ -1225,11 +1282,12 @@ def _art_only_filter_complex(canvas, src_w, src_h, bg, arts, t0=0.0,
     敷いても1画素も見えない)。下背景を透明にすると今度は「いつもの見た目」
     でなくなる。なので画面を出来上がりの大きさへ合わせたあと(余白の色も
     今までと同じ)、**同じ座標・同じ大きさ・同じ枠**で上から重ねる。既定の
-    左下はいつもの画面では下背景と踊り子の所で、レーンも点数も無い。"""
+    (0, 0) は下背景の真ん中で、レーンも点数も無い。"""
     w, h = _bg_out_size(canvas, src_w, src_h)
     vf = _video_filter(canvas, src_w, src_h)
     graph = "[0:v]%s[base];" % (vf or "null")
-    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0, fps, w=w)
+    chain, cur = _art_overlay_chain(bg, h, "base", arts, t0, fps, w=w,
+                                    src=(src_w, src_h))
     graph += chain
     graph += "[%s]format=yuv420p[v]" % cur
     return graph
