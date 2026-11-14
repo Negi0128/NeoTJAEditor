@@ -51,6 +51,9 @@ class _ScrollSpinBox(_CommandDoubleSpinBox):
         enter = event.key() in (Qt.Key_Return, Qt.Key_Enter)
         super().keyPressEvent(event)
         if enter:
+            # Enter はここで使い切る。親(ゲーム画面など)へ流れると、そちらの
+            # キー操作まで動いてしまう。
+            event.accept()
             self.entered.emit()
 
     def stepBy(self, steps):
@@ -201,7 +204,8 @@ class CommandPanel(QFrame):
         # 2026-11-05「SCROLLパネル微妙にレイアウト崩れてる」)。
         # 枠の幅(BOX_W=214)は動かせない — 3つ並べて 672 におさめる決まり。
         self.sp_hs.setFixedWidth(70)
-        self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。Enterでカーソル位置へ配置します。")
+        self.sp_hs.setToolTip("流れる速さの倍率(#SCROLL)。Enterでカーソル位置へ配置します\n"
+                              "(そこに置いてあれば、その値を書き換えます)。")
         self.sp_hs_bpm = _ScrollSpinBox()
         self.sp_hs_bpm.setDecimals(1)
         self.sp_hs_bpm.setRange(0.0, 99999.0)
@@ -210,7 +214,8 @@ class CommandPanel(QFrame):
         self.sp_hs_bpm.setFixedWidth(68)
         self.sp_hs_bpm.setToolTip(
             "見た目の速さを BPM で。いまの BPM × 倍率。\n"
-            "Enterで倍率をカーソル位置へ配置します。")
+            "Enterで倍率をカーソル位置へ配置します\n"
+            "(そこに置いてあれば、その値を書き換えます)。")
         # スクロールの「!」(ハイスピ変換)は外した。「追加」を足したぶん
         # 欄が狭く、同じことはツールバーの「ハイスピ変換」と右クリックの
         # メニューからできる(利用者の指定 2026-11-05)。
@@ -223,7 +228,10 @@ class CommandPanel(QFrame):
         self.sp_bpm.valueChanged.connect(self._sync_hs_bpm)
         self.sp_hs_bpm.valueChanged.connect(self._on_hs_bpm_changed)
         for spin in (self.sp_hs, self.sp_hs_bpm):
-            spin.entered.connect(lambda: self.placeCommand.emit("SCROLL", self._scroll_value()))
+            # Enter も▲▼と同じ道を通す。カーソルの所にスクロールが置いてあれば
+            # その行の値を書き換え、無ければ新しく置く(利用者の報告 2026-11-14
+            # 「Enterで変えると行が増える」)。
+            spin.entered.connect(self._apply_scroll_step)
             spin.stepped.connect(self._apply_scroll_step)
 
         # --- 小節線 / GOGO: 値が無いのでボタン2つ ---

@@ -3496,10 +3496,35 @@ class PreviewDock(QDockWidget):
             return None
 
     def _on_panel_command(self, name, value):
-        """パネルの「追加」: カーソルの位置へ命令を置く。"""
+        """パネルの「追加」: カーソルの位置へ命令を置く。
+
+        パネルの「追加/変更」の切り替えは 30ms 待ってから合わせているので、
+        カーソルを動かしてすぐ Enter を押すと、まだ「追加」のまま届くことが
+        ある。ここでカーソルの所を見直し、同じ命令が置いてあれば書き換えへ
+        回す(行が増えないように)。_panel_targets は合わせた時点の控えなので、
+        そのあとカーソルだけ動いていると古い。ここでは作譜ペインに直接聞く。"""
+        self._flush_command_panel_sync()
         ce = getattr(self, "chart_edit", None)
-        if ce is not None:
-            ce.place_command(str(name), value)
+        if ce is None:
+            return
+        pos = self._panel_command_here(ce, name)
+        if pos is not None:
+            ce.set_command_value(str(name), pos, value)
+            self._sync_command_panel()
+            return
+        ce.place_command(str(name), value)
+
+    def _panel_command_here(self, ce, name):
+        """カーソルの所(または1つだけ選んだ命令)に置いてある、その名前の
+        命令の位置。無ければ None。作譜ペインにその場で聞く。"""
+        kind = self._PANEL_KIND_BY_NAME.get(str(name).upper())
+        if kind is None:
+            return None
+        try:
+            here = (ce.commands_at_cursor() or {}).get(kind)
+        except Exception:  # noqa: BLE001
+            return None
+        return here[0] if here else None
 
     #: 命令の名前 → 行の種類(パネルの「変更」から引くため)。
     _PANEL_KIND_BY_NAME = {"BPMCHANGE": "bpm", "SCROLL": "hs", "MEASURE": "measure"}
@@ -3508,9 +3533,17 @@ class PreviewDock(QDockWidget):
         """パネルの「変更」: その位置に置いてある命令の値を書き換える。"""
         self._flush_command_panel_sync()      # 相手を最新にしてから
         ce = getattr(self, "chart_edit", None)
+        if ce is None:
+            return
         kind = self._PANEL_KIND_BY_NAME.get(str(name).upper())
         pos = (getattr(self, "_panel_targets", None) or {}).get(kind)
-        if ce is None or pos is None:
+        if pos is None:
+            pos = self._panel_command_here(ce, name)
+        if pos is None:
+            # パネルが「変更」のまま、カーソルだけ命令の無い所へ動いていた
+            # (合わせる前に押された)。黙って捨てずに、その位置へ置く。
+            ce.place_command(str(name), value)
+            self._sync_command_panel()
             return
         ce.set_command_value(str(name), pos, value)
         self._sync_command_panel()
