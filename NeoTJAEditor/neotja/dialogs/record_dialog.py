@@ -85,6 +85,9 @@ _PROGRESS_SEC = 0.1
 # するので、この窓からは変わった瞬間が分からない。
 _COST_KEY_POLL_MS = 1000
 
+# 同時再生の録画で背景の欄に出す説明(利用者の決定 2026-11-14)。
+_MULTI_NO_BG_TIP = "同時再生の録画では背景とジャケットは使いません"
+
 
 class _Task(QThread):
     """裏で1つだけ仕事をして、結果かエラーを返すだけのスレッド。
@@ -423,13 +426,21 @@ class RecordDialog(QDialog):
         bg_row.addWidget(self.ed_bg, 1)
         bg_row.addWidget(self.btn_bg)
         form.addRow("背景", bg_row)
+        # 同時再生の録画では背景もジャケットも使わない(利用者の決定
+        # 2026-11-14)。同時再生の画面は全面を黒で塗るので、下に敷いても
+        # 見えないうえ ffmpeg の仕事だけ増える。覚えている設定は消さない
+        # (ふつうの録画ではそのまま使う)。実際に渡すのは _bg_used。
+        if self._layout == "multi":
+            for w in (self.ed_bg, self.btn_bg):
+                w.setEnabled(False)
+                w.setToolTip(_MULTI_NO_BG_TIP)
         # 「背景...」は**いつでも押せる**。以前は細かい欄(開始位置・暗さ)を
         # 背景が空のあいだ灰色にしていて、欄を窓へまとめたときにその仕掛けを
         # ボタンへ残してしまった。空のときこそ開きたいので、押せなくなると
         # 一生選べない(利用者の報告 2026-10-25)。録画中かどうかは
         # _open_bg_dialog の中で見る。
         self.ed_bg.textChanged.connect(self._check_cost_key)
-        self._cost_key = recorder.cost_key(self._bg_now())
+        self._cost_key = recorder.cost_key(self._bg_used())
         # 歌詞のジャケットは作譜ペインで付け外しされ、その知らせはここへ
         # 来ないので、開いているあいだは鍵を時々見に行く(_check_cost_key)。
         self._key_timer = QTimer(self)
@@ -500,7 +511,7 @@ class RecordDialog(QDialog):
         (recorder.cost_key)が同じなら何もしない。"""
         if self.is_busy() or self._bg_dialog_open:
             return
-        key = recorder.cost_key(self._bg_now())
+        key = recorder.cost_key(self._bg_used())
         if key == self._cost_key:
             return
         self._cost_key = key
@@ -521,6 +532,16 @@ class RecordDialog(QDialog):
         窓を開いたまま作譜ペインで付け外しされても、書き出すときの表を使う。"""
         self._bg.art_track = self._art_track(self._bg.art)
         return self._bg
+
+    def _bg_used(self):
+        """見積もりと書き出しに実際に渡す背景。
+
+        同時再生では背景もジャケットも使わない(利用者の決定 2026-11-14)
+        ので、何も付いていない RecordBackground(背景なしの経路)を返す。
+        覚えている設定(self._bg)はそのまま残る。"""
+        if self._layout == "multi":
+            return recorder.RecordBackground()
+        return self._bg_now()
 
     def _art_track(self, base):
         """録るコースの歌詞から、ジャケットの区切り(音源の秒)を作る。
@@ -551,7 +572,7 @@ class RecordDialog(QDialog):
         描画用ウィジェットをそのまま貸す。offline モードの入り切りが
         ぶつかるため、見積もりは先に止める。"""
         from neotja.dialogs.record_bg_dialog import RecordBackgroundDialog
-        if self.is_busy():
+        if self.is_busy() or self._layout == "multi":
             return
         self._cancel_measure()
         if self._widget is None:
@@ -805,7 +826,7 @@ class RecordDialog(QDialog):
                 self._widget, supersample=ss, song_seconds=span,
                 start_sec=start,
                 warmup=_PROBE_WARMUP, samples=_PROBE_SAMPLES,
-                background=self._bg_now(), canvas=canvas, fps=fps)
+                background=self._bg_used(), canvas=canvas, fps=fps)
             self._probe_key = key
             self._probe_timer.start()
             return
@@ -851,7 +872,7 @@ class RecordDialog(QDialog):
         # のに曲全体の目安を出すと何倍も長く見えてしまう。
         # ジャケットで ffmpeg 側に増える分は捨て描きでは測れないので、本番で
         # 測った倍率を掛ける(recorder.art_cost_factor)。
-        ms *= recorder.art_cost_factor(self._bg_now())
+        ms *= recorder.art_cost_factor(self._bg_used())
         return recorder.estimate_seconds(ms, self._record_window()[1],
                                          q["fps"], drain_sec=drain)
 
@@ -996,7 +1017,9 @@ class RecordDialog(QDialog):
             sfx_volume=float(cfg.get("sfx_volume", 0.9)),
             hit_sounds=self.chk_hit.isChecked(),
             want_mips=(self._layout == "wave"))
-        self._pending = (out, q, bg)
+        # 書き戻すのは覚えている設定(bg)、本番に渡すのは _bg_used
+        # (同時再生なら背景なし)。
+        self._pending = (out, q, self._bg_used())
         self._t0 = time.perf_counter()
         # 下ごしらえは途中で止められるようにしておく。止めないと、書き出しを
         # 始めた直後に閉じた人がデコードの終わりまで待たされる(_Task.cancel /
