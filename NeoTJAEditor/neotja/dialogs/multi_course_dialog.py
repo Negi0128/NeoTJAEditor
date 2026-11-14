@@ -1,7 +1,8 @@
 """同時再生で並べる難易度を選ぶ。
 
-並べられるのは **2〜4本**(利用者の指定 2026-10-03)。1本なら今までの再生で
-足りるし、5本は 1280x720 に入らない(帯1本 176px x 4 = 704px)。
+並べられるのは **2〜5本**(はじめは 2〜4本。5本は利用者の承認 2026-11-14)。
+1本なら今までの再生で足りる。5本は等倍だと 1280x720 に入らないので、画面の
+側で帯をまとめて縮める(multi_screen.band_scale)。
 """
 
 from PySide6.QtCore import Qt
@@ -33,9 +34,10 @@ class MultiCourseDialog(QDialog):
             box.toggled.connect(self._refresh)
             v.addWidget(box)
             self._boxes.append((c["key"], box))
-        # 何も指定が無ければ、難しいほうから既定で2つ入れておく。
+        # 何も指定が無ければ、譜面にあるコースを全部入れておく(上限まで)。
+        # 同時再生の既定(preview_dock._default_multi_keys)と同じ決まり。
         if not pre:
-            for _k, b in self._boxes[:MIN_BANDS]:
+            for _k, b in self._boxes[:MAX_BANDS]:
                 b.setChecked(True)
         self._note = QLabel("")
         self._note.setWordWrap(True)

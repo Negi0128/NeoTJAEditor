@@ -174,7 +174,7 @@ def make_offline_widget(preview_data, offset, se_text_enabled=True):
 def make_offline_multi_widget(previews, offset, se_text_enabled=True):
     """同時再生(難易度を縦に並べた画面)を録画用に、画面外へ組み立てる。
 
-    previews は難易度ごとの preview_data を並べ順で並べたもの(2〜4個)。
+    previews は難易度ごとの preview_data を並べ順で並べたもの(2〜5個)。
     返すのは 1280x720 の MultiBandScreen で、時刻の出し入れ
     (begin_offline_render / set_render_time / end_offline_render)は
     GameScreenWidget と同じ約束なので、録画側の手順は1本のときと変わらない。

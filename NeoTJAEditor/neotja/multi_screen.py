@@ -12,11 +12,13 @@
     └──────────────────────────┘
 
 決め事(利用者の指定):
-  ・2〜4本。4本なら 704px で 1280x720 にちょうど収まる
+  ・2〜5本(5本は利用者の承認 2026-11-14)。4本までは等倍で 1280x720 に
+    収まる。5本は入りきらないので、帯の束をまるごと 0.8 倍に縮めて真ん中に
+    置く(左右に 128px ずつ黒が出る)。band_scale と band_rect を参照
   ・帯の中身はそのまま(スコア・太鼓・ネームプレート・打音表記)
   ・背景も踊り子も出さない。地は黒
   ・叩いた音符が飛ぶ演出・スコアの加算文字は出さない
-    (4本ぶん同時に動くと、どの譜面を読んでいるか分からなくなる)
+    (何本も同時に動くと、どの譜面を読んでいるか分からなくなる)
   ・「良」は**出す**(利用者の指定 2026-10-15。はじめは出さない決まりだった)。
     文字は帯の上辺より 61px 上に出るので、帯の切り抜きの中では頭が切れる。
     帯を全部描いたあとに切らずに重ねて描く(_paint_judge_pops)。上下の帯に
@@ -50,7 +52,7 @@ BAND_TOP = PANEL_Y          # 188
 BAND_H = PANEL_H            # 176
 #: 並べられる本数。
 MIN_BANDS = 2
-MAX_BANDS = 4
+MAX_BANDS = 5
 #: 地の色。背景を出さないので、ここが画面の地になる。
 BG_COLOR = "#000000"
 
@@ -58,7 +60,7 @@ BG_COLOR = "#000000"
 #: 上に空ける高さ。モード切替・コース・録画・表示・fps のボタンを置く場所
 #: (利用者の指定 2026-10-03: 最上部のボタンが見えるようにする)。
 TOP_PAD = 40
-#: 帯の下辺(枠の縁 9px)を次の帯で隠して詰める。4本ぶんの場所を作るのに
+#: 帯の下辺(枠の縁 9px)を次の帯で隠して詰める。4本を等倍で収めるのに
 #: 要るのはこれだけで、レーンにも左パネルにも掛からない。
 BAND_TRIM = 9
 
@@ -78,6 +80,24 @@ def total_height(n: int) -> int:
     """n 本ぶんの高さ。いちばん下の帯だけ下辺まで出す。"""
     n = max(1, int(n))
     return band_pitch() * (n - 1) + BAND_H
+
+
+#: 縮めずに並べられる本数。これを超えたら帯をまるごと縮める(案A)。
+FULL_SIZE_BANDS = 4
+
+
+def band_scale(n: int) -> float:
+    """n 本のときの帯の倍率。4本までは 1.0(いまと同じ)。
+
+    5本は 1280x720 に入りきらない(40 + 844 = 884)。上のボタンの 40px は
+    そのまま残し、帯の束(n 本ぶんの高さ)だけを縮めて 680px に収める。
+    倍率は 0.8 に丸める(5本で 40 + 675 = 715、下に 5px 残る)。端数の
+    0.8057 だと 1px 単位の端数が帯ごとにずれて、境目に細い線が出やすい。"""
+    n = max(1, int(n))
+    if n <= FULL_SIZE_BANDS:
+        return 1.0
+    fit = (SCREEN_H_FULL - TOP_PAD) / float(total_height(n))
+    return min(1.0, int(fit * 20) / 20.0)
 
 
 class _MultiBandBase:
@@ -213,6 +233,10 @@ class _MultiBandBase:
     def muted(self):
         return set(self._muted)
 
+    def scale(self) -> float:
+        """いまの本数での帯の倍率(band_scale)。"""
+        return band_scale(len(self._screens))
+
     def band_at(self, pos):
         """その点がどの帯か。帯の外なら None。"""
         for i in range(len(self._screens)):
@@ -227,9 +251,12 @@ class _MultiBandBase:
         if i is None:
             return None
         x, y, _w, _h = self.band_rect(i)
-        # 帯の中は「画面の座標 - 帯のずらし量」で見る(paint_screen と同じ)。
+        s = self.scale()
+        # 帯の中は「画面の座標 - 帯のずらし量」を倍率で割って見る
+        # (paint_screen と同じ変換の逆)。
         r = self._screens[i].course_sym_rect()
-        if r.contains(int(pos.x() - x), int(pos.y() - y + BAND_TOP)):
+        if r.contains(int((pos.x() - x) / s),
+                      int((pos.y() - y) / s + BAND_TOP)):
             return i
         return None
 
@@ -250,8 +277,23 @@ class _MultiBandBase:
         収まりが悪い。"""
         n = max(1, len(self._screens))
         last = (i == n - 1)
-        return (0, TOP_PAD + i * band_pitch(), self.WIDTH,
-                BAND_H if last else band_pitch())
+        s = band_scale(n)
+        if s == 1.0:
+            return (0, TOP_PAD + i * band_pitch(), self.WIDTH,
+                    BAND_H if last else band_pitch())
+        # 縮めたときは、帯の幅も縮むぶん左右に黒が出る。真ん中に置く。
+        w = self.WIDTH * s
+        return ((self.WIDTH - w) / 2.0, TOP_PAD + i * band_pitch() * s, w,
+                (BAND_H if last else band_pitch()) * s)
+
+    def _band_transform(self, p: QPainter, i: int):
+        """帯 i を描くための座標へ p を変える(中の画面は y=BAND_TOP に帯)。"""
+        x, y, _w, _h = self.band_rect(i)
+        s = self.scale()
+        p.translate(x, y)
+        if s != 1.0:
+            p.scale(s, s)
+        p.translate(0, -BAND_TOP)
 
     # ------------------------------------------------------------------
     # 描画
@@ -259,14 +301,15 @@ class _MultiBandBase:
     def paint_screen(self, p: QPainter):
         """画面一式を p へ描く(GameScreenWidget.paint_screen と同じ約束)。"""
         p.fillRect(0, 0, self.WIDTH, self.HEIGHT, self._bg)
+        last = len(self._screens) - 1
         for i, gs in enumerate(self._screens):
-            x, y, w, h = self.band_rect(i)
             p.save()
             # 中の画面は自分の座標(帯は y=BAND_TOP)で描くので、その差だけ
             # ずらしてから、帯の外へ出ないように切る。切らないと上の背景や
-            # 魂ゲージまで出てしまう。
-            p.translate(x, y - BAND_TOP)
-            p.setClipRect(0, BAND_TOP, w, h)
+            # 魂ゲージまで出てしまう。切り抜きは縮める前の寸法で取る。
+            self._band_transform(p, i)
+            p.setClipRect(0, BAND_TOP, self.WIDTH,
+                          BAND_H if i == last else band_pitch())
             gs.paint_screen(p)
             if i in self._muted:
                 self._paint_mute_mark(p, gs)
@@ -286,18 +329,19 @@ class _MultiBandBase:
         いちばん上の帯だけは、そのまま描くと**画面の外へ 21px 出て頭が
         欠ける**(上に空けてあるのはボタンぶんの 40px しかない)。はみ出す
         ぶんだけ下げる。下げるのはその帯だけで、他は素のままの位置。"""
+        s = self.scale()
         for i, gs in enumerate(self._screens):
-            x, y, _w, _h = self.band_rect(i)
+            _x, y, _w, _h = self.band_rect(i)
             p.save()
-            p.translate(x, y - BAND_TOP)
+            self._band_transform(p, i)
             try:
-                gs.draw_judge_pop(p, 0, self._judge_oy(gs, y))
+                gs.draw_judge_pop(p, 0, self._judge_oy(gs, y, s))
             except Exception:  # noqa: BLE001
                 pass
             p.restore()
 
     @staticmethod
-    def _judge_oy(gs, band_y):
+    def _judge_oy(gs, band_y, scale=1.0):
         """「良」を上へずらす量。画面から出るぶんだけ負(=下げる)にする。"""
         try:
             cp = gs.chart_preview
@@ -306,8 +350,10 @@ class _MultiBandBase:
         except Exception:  # noqa: BLE001
             h = 26
         # 出た瞬間は JUDGE_POP_DROP ぶん上にいる。そこが頭。
-        top = (JUDGE_BOTTOM - h - JUDGE_POP_DROP) + (band_y - BAND_TOP)
-        return min(0.0, top)
+        # 画面の上での頭の位置。縮めているときは帯の中の寸法も縮む。
+        top = band_y + (JUDGE_BOTTOM - h - JUDGE_POP_DROP - BAND_TOP) * scale
+        # 戻すのは帯の中の座標(縮める前)での量。
+        return min(0.0, top / scale)
 
     def _paint_mute_mark(self, p: QPainter, gs):
         """打音を切った帯のしるし。コース記号に斜線を引く。

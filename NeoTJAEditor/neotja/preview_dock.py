@@ -2482,6 +2482,8 @@ class PreviewDock(QDockWidget):
     _MULTI_ORDER = ("Edit", "Oni", "Hard", "Normal", "Easy")
 
     def _default_multi_keys(self):
+        """既定は譜面にあるコース全部(上限 MAX_BANDS = 5 まで)。
+        5コースある譜面なら5本、3コースなら3本で開く(利用者の指定 2026-11-14)。"""
         from neotja.multi_screen import MAX_BANDS
         keys = [c.get("key") for c in self.available_courses() if c.get("key")]
         rank = {k: i for i, k in enumerate(self._MULTI_ORDER)}
