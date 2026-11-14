@@ -4049,7 +4049,10 @@ class ChartEditWaveform(WaveformWidget):
                 self._show_legend, pal.get("bg"), pal.get("bg2"),
                 pal.get("border"), pal.get("fg"),
                 # 波形そのものが差し替わったとき(曲を開き直した等)も焼き直す。
-                id(self.mips), round(float(self.duration or 0.0), 3))
+                id(self.mips), round(float(self.duration or 0.0), 3),
+                # グリッドの目盛りは本文の BPM 区切りで位置が変わる。小節の
+                # 途中の命令を動かしただけでも引き直す。
+                id(getattr(self, 'note_timing', None)))
 
     def _static_strip(self):
         """いまの表示に使える帯 (帯, 左端の時刻)。作れないときは None。"""
@@ -4879,8 +4882,19 @@ class ChartEditWaveform(WaveformWidget):
             beats, subs = [], []
             grid = mg
             period = self._beat_period(m, mg)
+            # 小節の途中に #BPMCHANGE 等があると、小節を等分した位置と音符が
+            # 置かれる位置(カーソルと同じ NoteTiming の区分ごとの時刻)がずれる。
+            # 利用者の報告 2026-11-14「BPM変化途中で入れた時のグリッドが
+            # 治ってない」。途中で区切れる小節だけは住所から時刻を引く。
+            # 区切れない小節は等分のまま(結果は同じで、Fraction を使わず速い)。
+            split = self._measure_has_tempo_break(m)
             for k in range(1, grid):
-                t = m_start + span * (k / grid)
+                if split:
+                    t = self._address_time(m, k, grid)
+                    if t is None:
+                        continue
+                else:
+                    t = m_start + span * (k / grid)
                 if t < t0 or t > t1:
                     continue
                 ((beats if (period and k % period == 0) else subs)
@@ -4893,6 +4907,30 @@ class ChartEditWaveform(WaveformWidget):
                 y0 = bottom - int(strip * frac)
                 for x in xs:
                     p.drawLine(x, y0, x, bottom)
+
+    def _measure_has_tempo_break(self, m):
+        """小節 m の途中で、時刻の進み方が変わるか(BPM・拍子・DELAY)。
+
+        NoteTiming は命令の位置で区間を切っている。#SCROLL のように時刻に
+        関係しない命令でも区間は切れるので、「切れているか」ではなく「区間の
+        長さ(1小節あたりの秒)が変わるか・時刻が飛ぶか」で見る。密な譜面
+        (幸福な死を)は小節ごとに #SCROLL があり、切れ目だけで判定すると
+        ほぼ全部の小節が遅い道を通る。"""
+        timing = getattr(self, 'note_timing', None)
+        if timing is None or not (0 <= m < timing.count):
+            return False
+        starts, segs = timing.starts, timing.segments
+        i = bisect.bisect_right(starts, m) - 1
+        if i < 0:
+            return False
+        start, end, at, dur = segs[i]
+        i += 1
+        while i < len(segs) and segs[i][0] < m + 1:
+            s2, e2, at2, dur2 = segs[i]
+            if dur2 != dur or at2 != at + (s2 - start) * dur:
+                return True
+            i += 1
+        return False
 
     def _draw_pending(self, p, top, strip):
         """再解析が届くまでのあいだ、置いたばかりの音符を描く。"""
