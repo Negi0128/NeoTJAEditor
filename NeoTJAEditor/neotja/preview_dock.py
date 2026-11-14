@@ -4686,8 +4686,8 @@ class PreviewDock(QDockWidget):
 
     def _flush_before_play(self):
         """待たせてある編集をレーンへ反映する。環境設定で切れる
-        (play_flush_edits)。重い譜面ではここで少し待つことになるため。"""
-        if not self.config_data.get("play_flush_edits", True):
+        (play_flush_before_play。既定は切。2026-11-14 利用者「操作性が悪い」)。重い譜面ではここで少し待つことになるため。"""
+        if not self.config_data.get("play_flush_before_play", False):
             return
         cb = self.before_play_cb
         if cb is None:

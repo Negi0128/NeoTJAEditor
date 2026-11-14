@@ -16,6 +16,7 @@ class PlayFlushEditsTests(unittest.TestCase):
             open_test_chart(win, root, '1000,\n0000,\n0000,')
             pd = win.preview_dock
             lane = pd.chart_preview
+            win.config_data["play_flush_before_play"] = True
             self.assertEqual(len(lane._note_times), 1)
             for entry in (lambda: lane.toggle_play(),
                           lambda: pd._toggle_play_pause(),
@@ -42,7 +43,7 @@ class PlayFlushEditsTests(unittest.TestCase):
             open_test_chart(win, root, '1000,\n0000,\n0000,')
             pd = win.preview_dock
             lane = pd.chart_preview
-            win.config_data["play_flush_edits"] = False
+            win.config_data["play_flush_before_play"] = False
             self._edit(win)
             with patch.object(pd.audio, 'play') as play, \
                     patch.object(pd.audio, 'is_playing', return_value=False):
@@ -55,16 +56,16 @@ class PlayFlushEditsTests(unittest.TestCase):
     def test_settings_dialog_checkbox(self):
         from neotja import settings
         from neotja.dialogs.settings_dialog import SettingsDialog
-        self.assertIn("play_flush_edits", settings._SETTINGS_KEYS)
-        self.assertTrue(settings.default_settings()["play_flush_edits"])
+        self.assertIn("play_flush_before_play", settings._SETTINGS_KEYS)
+        self.assertFalse(settings.default_settings()["play_flush_before_play"])
         with editor_session() as (win, root):
             dlg = SettingsDialog(win)
             try:
-                self.assertTrue(dlg.play_flush_check.isChecked())
-                dlg.play_flush_check.setChecked(False)
+                self.assertFalse(dlg.play_flush_check.isChecked())
+                dlg.play_flush_check.setChecked(True)
                 dlg._save()
-                self.assertFalse(win.config_data["play_flush_edits"])
-                self.assertFalse(win.preview_dock.config_data["play_flush_edits"])
+                self.assertTrue(win.config_data["play_flush_before_play"])
+                self.assertTrue(win.preview_dock.config_data["play_flush_before_play"])
             finally:
                 dlg.close()
                 dlg.deleteLater()
