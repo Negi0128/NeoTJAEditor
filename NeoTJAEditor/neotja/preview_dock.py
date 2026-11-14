@@ -77,6 +77,7 @@ from neotja.worker_util import detach_worker
 from neotja.bpm_tap import BpmTapper
 from neotja.chart_preview_widget import (
     ChartPreviewWidget, SPEED_STEPS as _SPEED_STEPS, snap_speed,
+    SIM_FPS_CHOICES, SIM_FPS_DEFAULT, normalize_sim_fps,
     snap_speed_index,
 )
 from neotja.tja_analyzer import balloon_pop_spans
@@ -1877,18 +1878,18 @@ class PreviewDock(QDockWidget):
         # 作った絵がプレイヤーの画面でどう出るかは、その環境と同じ刻みで
         # 見ないと分からない(実測: LAMIA の53刻み/秒の区間は 60fps で逆走、
         # 120fps でガタつく)。ここで切り替えて見比べられるようにする。
-        #   60fps / 120fps … その刻みで標本を取る(本家と同じ見え方)
-        #   MAX            … 丸めない。回しているfpsのまま(今までの見え方)
-        # settings.json の preview_sim_fps を 0 にすると「小節の頭で止める
-        # (作ったとおりの絵)」も選べる。ここには出していない — 本家の環境を
-        # 真似るための道具で、そちらは作者だけが見る絵のため。
+        #   60fps / 120fps … その刻みで標本を取り、時刻はミリ秒の整数で読む
+        #                    (TNDE と同じ見え方。chart_preview_widget._view_time)
+        # 以前あった MAX(丸めない)と、設定だけで選べた「小節の頭で止める(0)」は
+        # 無くした(利用者の指定 2026-11-15: Neo のシミュは TNDE と同じ見え方に
+        # する)。設定に 0 などが残っていたら 120 として読む。
         self.sim_fps_combo = QComboBox(self.game_preview_window.scaled_host)
-        self.sim_fps_combo.addItem("60fps", 60)
-        self.sim_fps_combo.addItem("120fps", 120)
-        self.sim_fps_combo.addItem("MAX", 0)
+        for _fps in SIM_FPS_CHOICES:
+            self.sim_fps_combo.addItem("%dfps" % _fps, _fps)
         self.sim_fps_combo.setToolTip(
-            "ストロボなどのギミックを、何fpsのシミュレータで見た絵にするか"
-            "（MAX = 丸めずにそのまま）")
+            "TNDE を何fpsで回したときの見え方にするか。\n"
+            "TNDE と同じく、時刻をミリ秒単位で読んで描きます"
+            "（ストロボの見え方が TNDE と同じになります）。録画も同じ見え方です。")
         # 幅は詰める。右隣(x=598〜)は作譜モードの命令パネルの場所なので、
         # ここを広げるとその下に潜る。字が切れないよう、矢印と余白も細くする。
         self.sim_fps_combo.setFixedSize(62, LANE_BUTTON_H)
@@ -3133,46 +3134,41 @@ class PreviewDock(QDockWidget):
         return b
 
     # ------------------------------------------------------------------
-    # ギミックを見る刻み(60fps / 120fps / MAX)
+    # ギミックを見る刻み(60fps / 120fps)
     # ------------------------------------------------------------------
-    # 中身の切り替えはレーン側の2つの値だけ(chart_preview_widget._strobe_time)。
-    #   _strobe_snap … 丸めるかどうか(MAX なら False)
-    #   _sim_fps     … 丸める刻み(60 / 120 …)。0 は小節の頭へ丸める
+    # 中身の切り替えはレーン側の _sim_fps だけ(chart_preview_widget の
+    # _strobe_time / _view_time)。どちらを選んでも、描く時刻は TNDE と同じく
+    # ミリ秒の整数で読む。
     # 設定にも書き戻すので、次に開いたときも同じ見かたで始まる。
+    # 同時再生・録画のレーンは作るときに設定を読むので、それも同じになる。
 
     def _load_sim_fps_choice(self):
-        snap = bool(self.config_data.get("preview_strobe_snap", True))
-        try:
-            fps = int(self.config_data.get("preview_sim_fps", 120))
-        except (TypeError, ValueError):
-            fps = 120
-        want = 0 if not snap else fps
+        # 昔の MAX(0)や一覧に無い値は 120 として読む(利用者の指定 2026-11-15)。
+        want = normalize_sim_fps(self.config_data.get("preview_sim_fps", SIM_FPS_DEFAULT))
         i = self.sim_fps_combo.findData(want)
-        if i < 0:
-            # 設定に「小節の頭で止める(0)」など一覧に無い値が入っているとき。
-            # 見かたはそのまま活かして、選び直されるまで触らない。
-            self.sim_fps_combo.blockSignals(True)
-            self.sim_fps_combo.setCurrentIndex(1 if snap else 2)
-            self.sim_fps_combo.blockSignals(False)
-            return
         self.sim_fps_combo.blockSignals(True)
-        self.sim_fps_combo.setCurrentIndex(i)
+        self.sim_fps_combo.setCurrentIndex(max(0, i))
         self.sim_fps_combo.blockSignals(False)
         self._apply_sim_fps(want, save=False)
 
     def _apply_sim_fps(self, fps: int, save: bool = True):
+        fps = normalize_sim_fps(fps)
         cp = self.chart_preview
-        if fps == 0:                     # MAX = 丸めない
-            cp._strobe_snap = False
-        else:
-            cp._strobe_snap = True
-            cp._sim_fps = int(fps)
+        cp._strobe_snap = True
+        cp._sim_fps = fps
         cp.update()
+        # 同時再生の帯は、それぞれ自分のレーンを持っている。開いたまま
+        # 切り替えたときも同じ刻みにそろえる。
+        ms = self._multi_screen
+        for s in (getattr(ms, "_screens", None) or []):
+            lane = getattr(s, "chart_preview", None)
+            if lane is not None:
+                lane._strobe_snap = True
+                lane._sim_fps = fps
         if not save:
             return
-        self.config_data["preview_strobe_snap"] = bool(fps != 0)
-        if fps:
-            self.config_data["preview_sim_fps"] = int(fps)
+        self.config_data["preview_strobe_snap"] = True
+        self.config_data["preview_sim_fps"] = fps
         if self.save_settings_cb is not None:
             self.save_settings_cb()
 

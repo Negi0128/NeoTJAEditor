@@ -46,6 +46,36 @@ ROLL_RED_KEEP_G = 0.15
 ROLL_HEAD_CLIP_INSET = 2
 
 
+#: 再現FPS で選べる刻み。TNDE を回す環境に合わせて 60 か 120。
+#: 以前あった MAX(丸めない)は無くした(利用者の指定 2026-11-15:
+#: Neo のシミュは TNDE と同じ見え方にする)。
+SIM_FPS_CHOICES = (60, 120)
+SIM_FPS_DEFAULT = 120
+
+
+def normalize_sim_fps(value) -> int:
+    """設定の preview_sim_fps を 60 / 120 のどちらかにそろえる。
+
+    昔の MAX(0)や、手で書いた 144 などは 120 として読む。"""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return SIM_FPS_DEFAULT
+    return v if v in SIM_FPS_CHOICES else SIM_FPS_DEFAULT
+
+
+def tnde_ms_floor(seconds: float) -> float:
+    """秒をミリ秒の整数へ切り捨てて、秒で返す(TNDE の時刻の読み方)。
+
+    TNDE は毎フレーム、曲の再生位置を**整数ミリ秒**で読んで描く。
+    120fps のフレームは 8.333ms ごとに来るので、読める時刻は 8ms か 9ms
+    ずつ進む。この 1ms 未満の切り捨てが、ストロボの線のぶれの正体
+    (利用者の実機での切り分け 2026-11-15)。
+    浮動小数の誤差で 9.000 が 8.999… になって1つ下へ落ちないよう、
+    ごく小さく足してから切る。"""
+    return math.floor(seconds * 1000.0 + 1e-6) / 1000.0
+
+
 def snap_speed(rate: float) -> float:
     """任意の倍率を SPEED_STEPS のいずれかへ丸める。
 
@@ -579,16 +609,18 @@ class ChartPreviewWidget(QWidget):
         # #SCROLL/HS ギミックを無視して一定速でスクロールする「表示だけ」の
         # モード(譜面データ自体は変えない)。BPM による間隔は通常どおり。
         self._constant_speed = False
-        # ストロボ区間で「描く時刻をその小節の頭へ丸める」か(_strobe_time)。
-        # 既定は入り。切ると今までどおり、回している fps そのままで見える。
+        # ストロボ区間で描く時刻をシミュレータの刻みへ丸めるか(_strobe_time)。
+        # 再現FPS から MAX(丸めない)を無くしたので、いつも入り
+        # (利用者の指定 2026-11-15)。設定の preview_strobe_snap は見ない。
         _cfg = settings_mod.load_settings()
-        self._strobe_snap = bool(_cfg.get("preview_strobe_snap", True))
-        #: ギミック区間を「何fps のシミュレータで見た絵」にするか。
-        #: 0 なら小節の頭へ丸める(作ったとおりの絵)。_strobe_time を参照。
-        try:
-            self._sim_fps = int(_cfg.get("preview_sim_fps", 120))
-        except (TypeError, ValueError):
-            self._sim_fps = 120
+        self._strobe_snap = True
+        #: ギミック区間を「何fps のシミュレータで見た絵」にするか(60 / 120)。
+        #: _strobe_time / _view_time を参照。
+        self._sim_fps = normalize_sim_fps(_cfg.get("preview_sim_fps", SIM_FPS_DEFAULT))
+        #: 描く時刻を TNDE と同じく整数ミリ秒へ切り捨てるか(_view_time)。
+        #: 画面のレーン・ゲーム画面・同時再生・録画はみな入り。作譜ペインは
+        #: このウィジェットではない(WaveformWidget 系)ので掛からない。
+        self._tnde_ms = True
         # 下部パネルのモード循環(Tab / トグルボタン)と速度変更([ ] キー)を
         # ゲーム窓側へ通知するコールバック(フェーズ3)。
         self._cycle_bottom_mode_cb = cycle_bottom_mode_cb
@@ -945,14 +977,19 @@ class ChartPreviewWidget(QWidget):
         直近ヒットは (判定線を通過してからの秒数, 音符の文字, コンボ番号)。
         レーン側が既に持っている情報をそのまま渡すだけなので、HUD 用に
         別途カウントを持たずに済み、シークしてもズレない。"""
-        now = self._current_chart_time()
+        # 返す時刻はレーンと同じ「TNDE の読んだ時刻」(_view_time)。HUD・
+        # ゲージ・背景もレーンと同じ瞬間の絵になる(TNDE は1フレームに1つの
+        # 時刻しか読まない)。判定の見送りだけは本当の時刻で進める(絵の
+        # 読み方で判定がずれないように)。
+        real = self._current_chart_time()
+        now = self._view_time(real)
         st = self._play_state
         if st is not None:
             # 演奏モードでは「時刻から数える」をやめ、叩いた記録を見る。
             # 同時押しの猶予を待っている打があるなら、その時刻より先へは
             # 見送りを進めない(待っている間に窓から出て不可になるのを防ぐ)。
             pend = self._pending_presses
-            st.advance(min(now, pend[0][0]) if pend else now)
+            st.advance(min(real, pend[0][0]) if pend else real)
             return now, st.combo, self._play_recent_hit(st, now)
         combo = bisect.bisect_right(self._note_times, now)
         return now, combo, self._recent_hit(now)
@@ -3826,11 +3863,31 @@ class ChartPreviewWidget(QWidget):
     #       乱れて見える(利用者の実機での見え方 2026-09-28)。作った絵が
     #       プレイヤーの画面でどう出るかを確かめるには、この道が要る。
     #
-    #   preview_sim_fps = 0 … 小節の頭へ丸める。1小節につき1枚だけ見せる
-    #       ので、エイリアシングの無い「作ったとおりの絵」になる。
+    #   (以前あった preview_sim_fps = 0「小節の頭へ丸める」と MAX は
+    #    2026-11-15 に無くした。下の「TNDE の時刻の読み方」を参照。)
     #
-    # どちらも、小節が STROBE_MEASURE_MAX_SEC より短い所でだけ効かせる。
-    # ふつうの譜面(1小節 1〜2秒)は素通りで、今までどおり滑らかに流れる。
+    # 格子へ落とすのは、小節が STROBE_MEASURE_MAX_SEC より短い所でだけ。
+    # ふつうの譜面(1小節 1〜2秒)は格子へは落とさない。
+    #
+    # ------------------------------------------------------------------
+    # TNDE の時刻の読み方(利用者の指定 2026-11-15)
+    # ------------------------------------------------------------------
+    # 格子へ落とすだけでは、TNDE と見え方が合わなかった。1小節 = 8.333ms
+    # (BPM170 #MEASURE 17/2880)のストロボは、Neo では止まるのに TNDE では
+    # 線が「ちょっとズレて戻る」。利用者の実機での切り分け(120fps):
+    #   8.333ms … ぶれる   8ms … ぶれ小   8.35〜8.94ms … ぶれる
+    #   9ms     … ぶれないが一方向に速く流れる
+    #   約1.28ms(1/1100) / 約1.00ms(1/1412) … ぴたりと止まる
+    # これは「TNDE は時刻を整数ミリ秒で読む」で全部説明がつく。120fps の
+    # フレームは 8.333ms ごとだが、読める時刻は 8ms か 9ms ずつしか進まない。
+    #
+    # そこで、描く時刻を最後に**ミリ秒の整数へ切り捨てる**(_view_time)。
+    # 切り捨てる時計は「曲の再生位置」(音声の時刻 = 譜面時刻 - OFFSET)。
+    # TNDE が読むのは曲を鳴らしているタイマーの値で、OFFSET は音符の時刻の
+    # 側に入る。譜面時刻のまま切ると、OFFSET の端数ぶん読み方がずれる。
+    # これは格子と違って**譜面全体**に掛ける(TNDE は全部この時刻で描く)。
+    # ふつうの譜面では 1ms 未満のずれで、目には見えない。
+    # 音(打音)と再生位置そのものには触らない。描く時刻だけ。
     #: ここより短い小節が続く所を「ギミック区間」とみなす。LAMIA の刻みは
     #: 0.0012〜0.0375 秒なので、その全部が入るように 0.05 秒にしてある
     #: (ふつうの譜面は 1小節 1秒前後なので掛からない)。
@@ -3900,6 +3957,15 @@ class ChartPreviewWidget(QWidget):
         if fps and fps > 0:
             return math.floor(now * fps) / fps
         return bars[i]
+
+    def _view_time(self, now: float) -> float:
+        """描く時刻。シミュレータの刻みへ落としてから、TNDE と同じく
+        曲の再生位置を整数ミリ秒へ切り捨てる(上の「TNDE の時刻の読み方」)。"""
+        t = self._strobe_time(now)
+        if not self._tnde_ms:
+            return t
+        off = self._offset
+        return tnde_ms_floor(t - off) + off
 
     def _speed(self, bpm: float, scroll: float = 1.0) -> float:
         b = bpm if bpm and bpm > 0 else DEFAULT_BPM
@@ -4308,7 +4374,7 @@ class ChartPreviewWidget(QWidget):
         if not self._rec_passthrough:
             painter.fillRect(self.rect(), self._color("bg"))
 
-        now = self._strobe_time(self._current_chart_time())
+        now = self._view_time(self._current_chart_time())
         # f/j リード再生: 再生開始位置(reveal_t)より前の音符/連打/風船だけを
         # 隠す。開始位置以降の音符は通常どおり右から流れてくる(いきなり全部が
         # 出現しない)。到達後(reveal_cb で None化)は全表示に戻る。
