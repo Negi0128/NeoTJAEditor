@@ -1594,7 +1594,7 @@ class PreviewDock(QDockWidget):
         self.title_label = QLabel("(WAVEファイルなし)")
         layout.addWidget(self.title_label)
 
-        self.waveform = WaveformWidget(toggle_play_cb=self.audio.toggle_play_pause)
+        self.waveform = WaveformWidget(toggle_play_cb=self._toggle_play_pause)
         self._wire_waveform(self.waveform)
         layout.addWidget(self.waveform, 1)
 
@@ -1605,7 +1605,7 @@ class PreviewDock(QDockWidget):
             # Explicit play/pause (not just toggle) so the widget's own player
             # model can drive precise start-from-anchor / pause-in-place
             # transitions (机能1).
-            play_cb=self.audio.play,
+            play_cb=self._play,
             pause_cb=self.audio.pause,
             # ミキサー経路では打音はサンプル単位で前もってスケジュールされるので、
             # 16ms tick からの check_and_play は不要。widget には None を渡して
@@ -1969,7 +1969,7 @@ class PreviewDock(QDockWidget):
             # 統合画面では ▶ / ■ をシークバーの左に置く(_build_speed_row)。
             self.btn_play = QPushButton("再生")
             self.btn_play.setObjectName("accentButton")
-            self.btn_play.clicked.connect(self.audio.toggle_play_pause)
+            self.btn_play.clicked.connect(self._toggle_play_pause)
             self.btn_stop = QPushButton("停止")
             self.btn_stop.clicked.connect(self._on_stop)
         self.btn_seek_cursor = QPushButton("カーソル位置から再生")
@@ -2409,7 +2409,7 @@ class PreviewDock(QDockWidget):
         # ゲーム窓の作譜ページ用の波形。ドックの self.waveform と同様に audio の
         # 再生位置へ同期し、クリック/ドラッグで seek する(seekRequested→seek)。
         self.game_waveform = WaveformWidget(
-            toggle_play_cb=self.audio.toggle_play_pause, force_dark=True)
+            toggle_play_cb=self._toggle_play_pause, force_dark=True)
         # 作譜モードの波形はドックと独立: 合成(モノ)を既定にし、固定幅の窓を
         # 再生位置に追従スクロールさせる(スクロールする楽譜のような見え方)。
         self._wire_waveform(self.game_waveform, sync_stereo=False)
@@ -2716,7 +2716,7 @@ class PreviewDock(QDockWidget):
         # 作譜モードの波形には「ここを DEMOSTART に」と「合成」は置かない
         # (利用者の指定 2026-10-31)。残すのは〔OFFSET調整〕だけ。
         self.chart_edit = ChartEditWaveform(
-            toggle_play_cb=self.audio.toggle_play_pause,
+            toggle_play_cb=self._toggle_play_pause,
             show_demo=False, show_stereo=False)
         self._wire_waveform(self.chart_edit, sync_stereo=False)
         self.chart_edit.set_stereo_view(False)
@@ -2896,7 +2896,7 @@ class PreviewDock(QDockWidget):
             self.btn_play.setFocusPolicy(Qt.NoFocus)
             self.btn_play.setFixedWidth(36)
             self.btn_play.setToolTip("再生 / 一時停止(Space)")
-            self.btn_play.clicked.connect(self.audio.toggle_play_pause)
+            self.btn_play.clicked.connect(self._toggle_play_pause)
             self.btn_stop = QPushButton("■")
             self.btn_stop.setFocusPolicy(Qt.NoFocus)
             self.btn_stop.setFixedWidth(36)
@@ -4570,7 +4570,7 @@ class PreviewDock(QDockWidget):
         スマホが止めても PC が流れ続けた)。"""
         self._seek_ms(self._audio_ms(seconds))
         if play:
-            self.audio.play()
+            self._play()
 
     def _on_seek_cursor(self):
         if self.seek_cursor_cb is None:
@@ -4680,6 +4680,36 @@ class PreviewDock(QDockWidget):
         except Exception:
             pass
 
+    #: 再生を始める直前に呼ぶもの(MainWindow.flush_pending_preview)。
+    #: 直前の編集は 600ms 待ってから解析し、それからレーンへ貼るので、
+    #: 編集してすぐ再生すると古い譜面が流れていた(利用者の報告 2026-11-14)。
+    before_play_cb = None
+
+    def _flush_before_play(self):
+        """待たせてある編集をレーンへ反映する。環境設定で切れる
+        (play_flush_edits)。重い譜面ではここで少し待つことになるため。"""
+        if not self.config_data.get("play_flush_edits", True):
+            return
+        cb = self.before_play_cb
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
+    def _play(self):
+        """再生する。すべての「再生」の入り口はここを通す。"""
+        self._flush_before_play()
+        self.audio.play()
+
+    def _toggle_play_pause(self):
+        """再生/一時停止の切り替え。止めるときは反映しない(待たせない)。"""
+        if not self.audio.is_playing():
+            self._flush_before_play()
+        self.audio.toggle_play_pause()
+
     def _play_fadein(self, measure_time: float, lead: float = 1.0):
         """f/j 再生: 小節頭の少し前(measure_time - lead 秒)へシークして通常音量
         で再生する。リード中(開始位置に達するまで)は打音(SE)を止め、譜面も
@@ -4692,7 +4722,7 @@ class PreviewDock(QDockWidget):
         # 境目を渡しておけば、助走ぶんだけ黙って1打目から鳴る。
         self._set_hit_mute_before(measure_time)
         self._seek_ms(self._audio_ms(start))
-        self.audio.play()
+        self._play()
 
     def _end_fadein(self):
         """リード表示の終わり(再生位置が開始位置に到達 or 操作でキャンセル)。

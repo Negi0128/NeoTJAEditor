@@ -981,6 +981,8 @@ class MainWindow(QMainWindow):
         # 音源を読み直したいとき(合作で後から降ってきた / 音声を再接続)に、
         # 譜面の中身から全部を組み直してもらう道。
         self.preview_dock.reload_all_cb = self._force_update
+        # 再生を始める直前に、待たせてある編集をレーンへ反映してもらう道。
+        self.preview_dock.before_play_cb = self.flush_pending_preview
         # 合作の操作(画面の上の帯)は置かない(利用者の指定 2026-11-12
         # 「合作を一回削除」)。仕組み(neotja/collab.py と下の collab_*)は
         # 残してあり、入口だけ無い。
@@ -2354,6 +2356,27 @@ class MainWindow(QMainWindow):
         self._cancel_analysis()
         self._heavy_tasks_sync()
         self._preview_tick()
+
+    def flush_pending_preview(self):
+        """待たせてある編集を、いまレーンへ反映する(再生の直前に呼ぶ)。
+
+        編集は 600ms 静まるのを待って解析し(_heavy_timer)、重い譜面では
+        さらに 120ms 遅らせて貼る(_pending_preview)。そのあいだに再生すると
+        直前の編集が入っていない譜面が流れる(利用者の報告 2026-11-14)。
+          ・解析がまだ/走っている途中 → ここで同期で解析して貼る
+          ・解析は済んで貼るのだけ待っている → 貼るだけ
+          ・何も待っていない → 何もしない(いつもの再生は遅れない)"""
+        if self._heavy_timer.isActive() or self._analysis_inflight:
+            before = self.editor.toPlainText()
+            self._force_update()
+            # 塗り直し(apply_data)は textChanged を出すので、600ms 後にもう一度
+            # 解析が予約される。中身は変わっていないので、再生の頭でそれが
+            # 走らないよう取り消す(塗り直しでも revision は進むので、本文で
+            # 比べる)。
+            if self.editor.toPlainText() == before:
+                self._heavy_timer.stop()
+        elif self._pending_preview is not None:
+            self._preview_tick()
 
     # -- 非同期パス(デバウンス経由) -------------------------------------
     def _shutdown_analysis_thread(self):

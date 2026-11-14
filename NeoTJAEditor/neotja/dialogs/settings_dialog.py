@@ -344,6 +344,14 @@ class SettingsDialog(QDialog):
         form.addRow(self.se_text_check)
         form.addRow(self._hint("ゲーム風プレビューのレーン下段に、各音符の打音(ド/ドン/コ/カ/カッ)を"
                                "自動判定して表示します。判定は PeepoDrumKit と同じアルゴリズムです。"))
+        self.play_flush_check = QCheckBox(
+            "再生の前に、直前の編集をレーンへ反映する"
+            "(重い譜面では再生開始が少し遅れます)")
+        self.play_flush_check.setChecked(bool(cfg.get("play_flush_edits", True)))
+        form.addRow(self.play_flush_check)
+        form.addRow(self._hint("編集してすぐ再生したとき、まだレーンに入っていない編集を"
+                               "先に反映してから流します。オフにすると、反映を待たずに"
+                               "すぐ再生します(直前の編集は少し遅れてレーンに入ります)。"))
 
         # 「連打の計算」(短い連打の補正)の欄は 2026-11-13 に外した。
         # 短い連打だけ秒速50〜60で数えるため、BPM の速い2マスの連打で打数が
@@ -1026,6 +1034,7 @@ class SettingsDialog(QDialog):
         cfg["check_updates_on_startup"] = self.check_updates_check.isChecked()
         cfg["auto_save_enabled"] = self.auto_save_check.isChecked()
         cfg["se_text_enabled"] = self.se_text_check.isChecked()
+        cfg["play_flush_edits"] = self.play_flush_check.isChecked()
         cfg["note_input_sound"] = self.note_input_sound_check.isChecked()
 
         cfg["record_output_dir"] = self.rec_dir_edit.text()

@@ -16,6 +16,7 @@ _SETTINGS_KEYS = (
     "recent_files", "window_geometry", "splitter_state", "preview_max_fps",
     "gpu_render", "gpu_vsync", "gpu_screen_window", "preview_strobe_snap", "preview_sim_fps",
     "preview_show_fps", "preview_modes_legacy", "command_panel_follow",
+    "play_flush_edits",
     "chart_edit_tail_measure", "chart_edit_wave_gain",
     "collab_name",
     "preview_bottom_mode",
@@ -340,6 +341,10 @@ def default_settings() -> dict:
         # 合わせ続けるか。既定はオン。オフにすると、自分で入れた数字が
         # 動かないまま残る(利用者の指定 2026-10-03)。
         "command_panel_follow": True,
+        # 再生を始める前に、直前の編集をレーンへ反映するか。既定はオン。
+        # 重い譜面では反映を待つぶん再生の始まりが少し遅れるので、
+        # 切れるようにしてある(利用者の承認 2026-11-14)。
+        "play_flush_edits": True,
         # 作譜で譜面を書いたあと、末尾に空の小節を1つ用意しておくか。
         # 既定はオン。打つ場所が見えていないと続きを書き始められない
         # (利用者の指定 2026-10-04)。
