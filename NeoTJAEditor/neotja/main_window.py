@@ -3443,7 +3443,7 @@ class MainWindow(QMainWindow):
 
         押した人だけが払う形なので、Player を使わない人に 84MB を
         負わせることもない。"""
-        from neotja.updater import PlayerFetchWorker, RELEASES_PAGE_URL
+        from neotja.updater import PlayerFetchWorker
 
         if not getattr(sys, "frozen", False):
             QMessageBox.information(
@@ -3489,20 +3489,13 @@ class MainWindow(QMainWindow):
 
         def on_failed(msg):
             progress.close()
-            box2 = QMessageBox(self)
-            box2.setIcon(QMessageBox.Warning)
-            box2.setWindowTitle("NeoTJAPlayer")
-            box2.setText(
+            # リリースページへは案内しない。本体のリポジトリを非公開にすると
+            # 利用者には開けなくなる(利用者の決定 2026-11-14)。
+            QMessageBox.warning(
+                self, "NeoTJAPlayer",
                 "ダウンロードできませんでした:\n%s\n\n"
                 "「実行 → NeoTJAPlayer を入れ直す」でやり直せます。\n"
-                "リリースページから NeoTJAPlayer.exe を手に入れて、"
-                "NeoTJAEditor.exe と同じ場所へ置くこともできます。" % msg)
-            box2.addButton("リリースページを開く", QMessageBox.ActionRole)
-            box2.addButton(QMessageBox.Close)
-            box2.exec()
-            if box2.clickedButton() and box2.clickedButton().text().startswith("リリース"):
-                import webbrowser
-                webbrowser.open(RELEASES_PAGE_URL)
+                "何度やっても失敗するときは、Discord で知らせてください。" % msg)
 
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_ok)
@@ -4323,10 +4316,14 @@ class MainWindow(QMainWindow):
             return
 
         if not getattr(sys, "frozen", False):
-            import webbrowser
-            from neotja.updater import RELEASES_PAGE_URL
-            QMessageBox.information(self, "更新", "ソースから実行中のため自動更新はできません。リリースページを開きます。")
-            webbrowser.open(RELEASES_PAGE_URL)
+            # ソースから動かしているときは exe を差し替えられない。前はリリース
+            # ページを開いていたが、本体のリポジトリを非公開にすると利用者には
+            # 開けなくなるので、案内だけにする(利用者の決定 2026-11-14)。
+            QMessageBox.information(
+                self, "更新",
+                "ソースから実行中のため自動更新はできません。\n"
+                f"ソースを {tag} に揃えるか、exe 版の「ヘルプ → 更新を確認」から更新してください。\n"
+                "わからないときは Discord で聞いてください。")
             return
 
         if not asset_url:

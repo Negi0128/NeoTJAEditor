@@ -14,7 +14,6 @@ from neotja.child_env import child_env
 from neotja.constants import VERSION
 
 RELEASES_API_URL = "https://api.github.com/repos/Negi0128/NeoTJAEditor/releases/latest"
-RELEASES_PAGE_URL = "https://github.com/Negi0128/NeoTJAEditor/releases/latest"
 ASSET_NAME = "NeoTJAEditor.exe"
 #: 再生・録画専用の NeoTJAPlayer。**Editor と一緒に落として隣へ置く。**
 #: 中身は Editor と同じ Qt / ffmpeg / PortAudio を積んだ別の exe で、
