@@ -1912,7 +1912,8 @@ class PreviewDock(QDockWidget):
 
         # 0.5 秒ごとに数え直す。刻みを細かくすると数字が落ち着かず読めないし、
         # 粗くすると引っかかりに気づけない。
-        self._fps_prev = (_time.perf_counter(), self.chart_preview.frames_painted)
+        _src, _n = self._fps_source()
+        self._fps_prev = (_time.perf_counter(), _n, _src)
         self._fps_timer = QTimer(self)
         # 作譜モードの命令パネル。ゲーム画面の右の空きに重ねる(利用者の案
         # 2026-09-25)。作譜以外のモードでは隠す。
@@ -3143,11 +3144,12 @@ class PreviewDock(QDockWidget):
         if not from_play and self.audio.is_playing():
             return
         now = _time.perf_counter()
-        frames = self.chart_preview.frames_painted
-        prev_t, prev_f = self._fps_prev
+        src, frames = self._fps_source()
+        prev_t, prev_f, prev_src = self._fps_prev
         dt = now - prev_t
-        self._fps_prev = (now, frames)
-        if dt <= 0:
+        self._fps_prev = (now, frames, src)
+        # 数える相手が替わった(モードを切り替えた)回は差が意味を持たない。
+        if dt <= 0 or src is not prev_src:
             return
         fps = (frames - prev_f) / dt
         # 止まっているときは 0 ではなく「-」。0fps と書くと不具合に見えるが、
@@ -3157,6 +3159,18 @@ class PreviewDock(QDockWidget):
         # ことがある。塗り直しは窓ぜんたいの合成になる)。
         if text != self.fps_label.text():
             self.fps_label.setText(text)
+
+    def _fps_source(self):
+        """fps を数える相手と、その塗った回数 (相手, 回数)。
+
+        同時再生のあいだはレーンが塗られないので、帯の束のほうを数える
+        (数えないと「-- fps」のままになる)。"""
+        ms = self._multi_screen
+        if (ms is not None and self.bottom_stack.currentIndex() == self.MODE_MULTI
+                and self.game_preview_window.scaled_host.content() is ms):
+            return ms, ms.frames_painted
+        cp = self.chart_preview
+        return cp, cp.frames_painted
 
     def _on_record_clicked(self):
         if self.record_cb:
