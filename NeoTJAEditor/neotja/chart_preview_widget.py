@@ -1908,14 +1908,15 @@ class ChartPreviewWidget(QWidget):
         # Finalize a scroll tween once it runs out - snap the extrapolation
         # base exactly to the target and, if we're not actually playing, let
         # the timer go idle again (it's only kept running for the animation).
+        settled = False
         if self._animating and (_clock() - self._anim_start_wall) >= self.SCROLL_ANIM_SEC:
             self._animating = False
             self._pos_sec = self._anim_target_sec
             self._pos_wall = _clock()
+            settled = True
             if not self._playing:
                 self._timer.stop()
         self._request_repaint()
-        self._push_realtime_info()
         # Hit sounds only while genuinely playing - a stopped/paused scroll
         # tween moves the display but must stay silent.
         if self._hit_sound_engine is not None and self._playing:
@@ -1924,11 +1925,34 @@ class ChartPreviewWidget(QWidget):
         # リード再生: 再生位置が表示開始時刻に達したら譜面/SEを復帰させる。
         if self._reveal_time is not None and self._current_chart_time() >= self._reveal_time:
             self._clear_reveal()
+        # **ここから下は見た目のためだけ。前のティックから1枚も塗れていなければ
+        # 飛ばす。** タイマーは 1ms で回り、塗るより多く(実測 491 回/秒に対して
+        # 塗りは 350 回/秒)呼ばれる。塗られない回に作譜ペインの追従や情報欄を
+        # 動かしても、目に届く前に次の回で上書きされるだけ(利用者の承認
+        # 2026-11-14)。打音・風船の破裂・リードの解除は上で毎回見ている。
+        # レーンが塗られない画面(同時再生など)でも止まらないよう、
+        # FOLLOW_FALLBACK_SEC 塗られなければ1回は通す。トゥイーンが終わった回
+        # (settled)も必ず通す。ここで止まるとタイマーも止まり、作譜ペインが
+        # 行き先の手前に取り残される。
+        painted = self.frames_painted
+        now_w = _clock()
+        if (not settled and painted == self._tick_seen_frames
+                and now_w - self._tick_follow_wall < self.FOLLOW_FALLBACK_SEC):
+            return
+        self._tick_seen_frames = painted
+        self._tick_follow_wall = now_w
+        self._push_realtime_info()
         # Drive any follower (作譜モードの波形) off this same smoothly-extrapolated
         # clock so it scrolls at the lane's 120fps and stays perfectly in sync
         # (no separate clock to drift). Cheap when the follower is hidden.
         if self._frame_cb is not None:
             self._frame_cb(self._current_audio_time())
+
+    #: _on_tick が最後に見た塗った回数と、追従を最後に動かした時刻(_clock)。
+    _tick_seen_frames = -1
+    _tick_follow_wall = 0.0
+    #: 塗られていなくても追従を動かす間合い(秒)。
+    FOLLOW_FALLBACK_SEC = 0.05
 
     # A seek/jump can move `now` by seconds in one tick; anything bigger than
     # normal forward playback (~one tick) is a jump, not a burst of pops, so we
