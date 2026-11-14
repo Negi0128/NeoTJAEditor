@@ -277,7 +277,8 @@ def make_offline_wave_widget(preview_data, offset, mips=None,
     wf.set_follow_window(6.0)          # 画面の既定と同じ表示幅(秒)
     bars = data.get("bar_times") or []
     bpm = float(bars[0][1]) if bars and bars[0][1] else 120.0
-    wf.set_beat_grid(bpm, offset, bar_grid_clicks(bars))
+    wf.set_beat_grid(bpm, offset,
+                     bar_grid_clicks(bars, data.get("bpm_changes") or []))
     wf.set_notes(list(data.get("notes", [])))
     wf.set_spans(list(data.get("rolls", [])),
                  list(data.get("balloons", [])),

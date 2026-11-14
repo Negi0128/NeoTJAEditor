@@ -3868,7 +3868,9 @@ class PreviewDock(QDockWidget):
                                       list(preview_data.get("measure_changes", [])),
                                       list(preview_data.get("gogo_regions", [])),
                                       list(preview_data.get("lyrics", [])))
-            self._game_grid_clicks = self._bar_grid_clicks(preview_data.get("bar_times", []))
+            self._game_grid_clicks = self._bar_grid_clicks(
+                preview_data.get("bar_times", []),
+                preview_data.get("bpm_changes", []))
 
         self.waveform.set_beat_grid(headers["bpm"], self._grid_offset(),
                                     self._editor_metronome_clicks)
@@ -4823,10 +4825,11 @@ class PreviewDock(QDockWidget):
     # OFFSET adjust
     # ------------------------------------------------------------------
     @staticmethod
-    def _bar_grid_clicks(bars):
+    def _bar_grid_clicks(bars, bpm_changes=None):
         """波形のグリッド用クリックを作る。中身は waveform_data へ移した
-        (録画側でも同じグリッドを引くため)。ここは呼び出し口だけ残す。"""
-        return bar_grid_clicks(bars)
+        (録画側でも同じグリッドを引くため)。ここは呼び出し口だけ残す。
+        bpm_changes は小節の途中の BPM 変化でビート線を刻み直すのに使う。"""
+        return bar_grid_clicks(bars, bpm_changes)
 
     def _set_game_grid(self, bpm, offset):
         """作譜波形のグリッドを bar_times 由来のクリックで引き直す。データが

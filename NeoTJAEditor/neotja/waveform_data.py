@@ -20,6 +20,7 @@ OFFSET 合わせに必要なズーム(WaveformWidget.MAX_ZOOM=1000 → 5分曲�
 合計で約 12.6MB/ch = 25MB(float32)。
 """
 
+import bisect
 import numpy as np
 
 # level 0 を作るときの間引き率(何サンプルの絶対値平均を1点にするか)。
@@ -181,7 +182,7 @@ class WaveformMips:
         return out
 
 
-def bar_grid_clicks(bars):
+def bar_grid_clicks(bars, bpm_changes=None):
     """bar_times([(time, bpm, scroll, visible)] = 権威的な小節境界)から、波形の
     グリッド用クリック [(chart_time, is_measure)] を作る。
 
@@ -189,9 +190,17 @@ def bar_grid_clicks(bars):
     小節境界までビート線(False)で刻む。小節境界そのものは bar_times に一致
     するので、音符/レーンと必ず揃う。
 
+    bpm_changes(解析の "bpm_changes" = [(時刻, BPM)])を渡すと、小節の途中の
+    #BPMCHANGE から先は新しい BPM で刻む。小節頭の BPM だけで刻むと、途中で
+    BPM が変わった小節のビート線が音符とずれる(利用者の報告 2026-11-14
+    「BPM変化途中で入れた時のグリッドが治ってない」)。途中で変わらない
+    小節は以前と同じ計算のまま。
+
     もとは preview_dock の中にあったが、録画側(recorder)でも同じグリッドを
     引く必要が出たのでここへ移した。Qt に触らないので置き場所はここが適切。"""
     clicks = []
+    changes = sorted((float(t), float(b)) for t, b in (bpm_changes or ()))
+    change_times = [t for t, _ in changes]
     n = len(bars)
     for i in range(n):
         t = float(bars[i][0])
@@ -200,10 +209,36 @@ def bar_grid_clicks(bars):
         if i + 1 >= n or bpm <= 0:
             continue
         t_next = float(bars[i + 1][0])
-        quarter = 60.0 / bpm
+        # この小節の内側(頭と終わりちょうどは除く)で BPM が変わる所。
+        lo = bisect.bisect_right(change_times, t + 1e-6)
+        hi = bisect.bisect_left(change_times, t_next - 1e-6)
+        inner = [(ct, b) for ct, b in changes[lo:hi] if b > 0]
+        if not inner:
+            quarter = 60.0 / bpm
+            k = 1
+            while k < 64:
+                bt = t + k * quarter
+                if bt >= t_next - 1e-4:
+                    break
+                clicks.append((bt, False))
+                k += 1
+            continue
+        # 区間ごとに「区間の頭の時刻・そこまでの拍数・BPM」を持っておき、
+        # k 拍目がどの区間に入るかで時刻を出す。
+        segs = []
+        seg_t, seg_beat, seg_bpm = t, 0.0, bpm
+        for ct, b in inner:
+            segs.append((seg_t, seg_beat, seg_bpm))
+            seg_beat += (ct - seg_t) * seg_bpm / 60.0
+            seg_t, seg_bpm = ct, b
+        segs.append((seg_t, seg_beat, seg_bpm))
+        j = 0
         k = 1
         while k < 64:
-            bt = t + k * quarter
+            while j + 1 < len(segs) and segs[j + 1][1] <= k + 1e-9:
+                j += 1
+            st, sb, sbpm = segs[j]
+            bt = st + (k - sb) * 60.0 / sbpm
             if bt >= t_next - 1e-4:
                 break
             clicks.append((bt, False))

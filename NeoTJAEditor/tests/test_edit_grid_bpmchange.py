@@ -1,4 +1,4 @@
-"""小節の途中で BPM が変わるときの作譜ペインのグリッド。
+"""小節の途中で BPM が変わるときのグリッド(作譜ペインの目盛り・波形のビート線)。
 
 利用者の報告 2026-11-14「BPM変化途中で入れた時のグリッドが治ってない」。
 音符とカーソルは NoteTiming の区分ごとの時刻で置かれるのに、目盛りは小節を
@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import MagicMock
 
 from gui_support import editor_session, open_test_chart, real_qt_test
+from neotja.tja_analyzer import TJACourseAnalyzer
+from neotja.waveform_data import bar_grid_clicks
 
 # BPM145 の 4/4、16分の 8 個目で 161、12 個目で 148 に変わる。全スロットに音符。
 SPLIT_BODY = ('11111111\n#BPMCHANGE 161\n1111\n#BPMCHANGE 148\n1111,\n'
@@ -73,6 +75,21 @@ class EditGridBpmChangeTests(unittest.TestCase):
                     a, b = ce._bar_time(m), ce._bar_time(m + 1)
                     old = [a + (b - a) * (k / 16) for k in range(1, 16)]
                     self.assertEqual(grid_ticks(ce, m), sorted(old))
+
+    def test_waveform_beat_lines_follow_mid_measure_bpm_change(self):
+        data = TJACourseAnalyzer({}).build_preview_timeline(chart(SPLIT_BODY), 4)
+        notes = sorted(n[0] for n in data['notes'])
+        clicks = bar_grid_clicks(data['bar_times'], data['bpm_changes'])
+        bar0, bar1 = data['bar_times'][0][0], data['bar_times'][1][0]
+        beats = [t for t, is_bar in clicks if not is_bar and bar0 < t < bar1]
+        self.assertEqual(len(beats), 3)
+        for t, slot in zip(beats, (4, 8, 12)):
+            self.assertAlmostEqual(t, notes[slot], delta=1e-6)
+
+    def test_waveform_beat_lines_without_mid_change_are_unchanged(self):
+        data = TJACourseAnalyzer({}).build_preview_timeline(chart(PLAIN_BODY), 4)
+        self.assertEqual(bar_grid_clicks(data['bar_times'], data['bpm_changes']),
+                         bar_grid_clicks(data['bar_times']))
 
 
 if __name__ == '__main__':
