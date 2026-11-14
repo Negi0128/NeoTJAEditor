@@ -424,6 +424,12 @@ class _ToastStatusBar(QStatusBar):
             pass
 
 
+#: MainWindow.eventFilter(アプリ全体)が相手にする出来事の種類。これ以外は
+#: 最初の1回の比べでそのまま帰す。
+_APP_FILTER_TYPES = frozenset((QEvent.KeyPress, QEvent.KeyRelease,
+                               QEvent.MouseButtonPress, QEvent.MouseButtonDblClick))
+
+
 class MainWindow(QMainWindow):
     # プレビューの組み立てがこの秒数を超えたら、解析パスと同時にやらず
     # 少し後ろへ回す(重い譜面で打鍵停止時の固まりを 1 回あたり半分にする)。
@@ -3271,14 +3277,22 @@ class MainWindow(QMainWindow):
         # Alt+何か の組み合わせは、組み合わせ先のキー(F/J/0〜9 等)のイベント
         # 側に AltModifier が乗って別に届くので、これを止めても影響しない。
         # F10 での経路(F10 は Key_Alt ではない)にも影響しない。
-        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease) and event.key() == Qt.Key_Alt:
+        #
+        # **最初に種類だけ見て、関係ない出来事はすぐ帰す。** このフィルタは
+        # アプリ全体に掛かっていて、塗り・タイマー・更新の合図まで1コマに
+        # 9〜14 回ここを通る(調べた結果 2026-11-14)。見るのはキーとマウスの
+        # 押下だけなので、それ以外は基底(何もせず False)も呼ばずに False。
+        t = event.type()
+        if t not in _APP_FILTER_TYPES:
+            return False
+        if (t == QEvent.KeyPress or t == QEvent.KeyRelease) and event.key() == Qt.Key_Alt:
             return True
         # マウスのサイドボタンで作譜の分割を変える(利用者の希望
         # 2026-11-02)。「どこでも反応してほしい」とのことなので、作譜
         # ペインの上だけでなくゲーム画面でもエディタでも効かせる。ここで
         # 握りつぶすので、作譜ペイン自身の mousePressEvent までは届かない
         # (二重に変わらない)。
-        if (event.type() == QEvent.MouseButtonPress
+        if (t == QEvent.MouseButtonPress
                 and event.button() in (Qt.BackButton, Qt.ForwardButton)
                 and self._grid_side_button(event.button())):
             return True
@@ -3288,7 +3302,7 @@ class MainWindow(QMainWindow):
         # 3段 = 1/32 から 1/48 を飛ばして 1/64 へ。利用者の報告
         # 2026-11-13)。DblClick の前には必ず Press が来ていて、そちらで
         # もう1段動かしてあるので、ここでは何もせず握りつぶすだけ。
-        if (event.type() == QEvent.MouseButtonDblClick
+        if (t == QEvent.MouseButtonDblClick
                 and event.button() in (Qt.BackButton, Qt.ForwardButton)
                 and self._grid_side_target() is not None):
             return True
