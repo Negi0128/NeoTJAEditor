@@ -62,6 +62,57 @@ def _line_starts(text):
     return starts
 
 
+def _common_prefix_len(a, b):
+    """a と b の先頭から一致している文字数。
+
+    切り出しの比較(C で1回に比べる)で半分ずつ詰める。1文字ずつ Python で
+    回すと、28万字の譜面で 1操作あたり 30ms 以上かかっていた(実測 2026-11-14)。"""
+    n = min(len(a), len(b))
+    if a[:n] == b[:n]:
+        return n
+    lo, hi = 0, n               # a[:lo] == b[:lo] で、a[:hi] != b[:hi]
+    while hi - lo > 32:
+        mid = (lo + hi) // 2
+        if a[lo:mid] == b[lo:mid]:
+            lo = mid
+        else:
+            hi = mid
+    while lo < hi and a[lo] == b[lo]:
+        lo += 1
+    return lo
+
+
+def _common_suffix_len(a, b, limit):
+    """a と b の末尾から一致している文字数(limit を上限にする)。"""
+    la, lb = len(a), len(b)
+    n = min(limit, la, lb)
+    if n <= 0:
+        return 0
+    if a[la - n:] == b[lb - n:]:
+        return n
+    lo, hi = 0, n               # 末尾 lo 字は一致、末尾 hi 字は不一致
+    while hi - lo > 32:
+        mid = (lo + hi) // 2
+        if a[la - mid:la - lo] == b[lb - mid:lb - lo]:
+            lo = mid
+        else:
+            hi = mid
+    while lo < hi and a[la - 1 - lo] == b[lb - 1 - lo]:
+        lo += 1
+    return lo
+
+
+def text_diff_range(old, new):
+    """old → new で変わった所を (p, old_end, new_end) で返す。
+
+    old[:p] == new[:p] で、old[old_end:] == new[new_end:]。先頭の一致を
+    いちばん長く取り、残りから末尾の一致を取る(重なりは作らない)。
+    同じ本文なら (len, len, len)。"""
+    p = _common_prefix_len(old, new)
+    s = _common_suffix_len(old, new, min(len(old), len(new)) - p)
+    return p, len(old) - s, len(new) - s
+
+
 def course_body_span(text, course_line_range):
     """course_line_range() が返す (#START行, #END行) を文字オフセットへ。
 

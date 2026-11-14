@@ -3915,18 +3915,14 @@ class MainWindow(QMainWindow):
                 res["text"] = new
                 res["reparse"] = True
         # 先頭と末尾の一致を削って、変わった範囲だけを置き換える。
-        p = 0
-        limit = min(len(text), len(new))
-        while p < limit and text[p] == new[p]:
-            p += 1
-        s = 0
-        while (s < limit - p and text[len(text) - 1 - s] == new[len(new) - 1 - s]):
-            s += 1
+        # 1文字ずつ比べていたころは、28万字の譜面で 1操作あたり 66ms を
+        # ここで使っていた(実測 2026-11-14)。
+        p, old_end, new_end = note_edit.text_diff_range(text, new)
         tc = self.editor.textCursor()
         tc.beginEditBlock()
         tc.setPosition(p)
-        tc.setPosition(len(text) - s, QTextCursor.KeepAnchor)
-        tc.insertText(new[p:len(new) - s])
+        tc.setPosition(old_end, QTextCursor.KeepAnchor)
+        tc.insertText(new[p:new_end])
         tc.endEditBlock()
         block = self.editor.document().findBlock(min(p, len(new)))
         self.editor.modified_lines.add(block.blockNumber() + 1)
