@@ -464,7 +464,36 @@ class TJACourseAnalyzer:
         COURSE:/#START/#END scanning idiom as build_preview_timeline()'s
         course_bounds, pulled out standalone since callers that just need to
         locate one course's body (to splice new note data into it) don't
-        need everything else that method computes."""
+        need everything else that method computes.
+
+        作譜の1音ごとに呼ばれるので、直前の本文の答えを覚えておく。変わった
+        のが「# も COURSE も含まない1行の中」だけなら(数字を書き換えた、
+        など)、どのコースの #START/#END の行番号も変わらないのでそのまま
+        返す。28万字の譜面で1回 20ms かかっていた(実測 2026-11-14)。"""
+        memo = getattr(self, "_line_range_memo", None)
+        table = None
+        if memo is not None:
+            m_content, m_table = memo
+            if m_content is content:
+                table = m_table
+            elif len(m_content) == len(content) and m_content == content:
+                table = m_table
+            else:
+                from neotja import note_edit
+                if note_edit._line_local_change(
+                        m_content, content, ("#", "COURSE")) is not None:
+                    table = m_table
+        if table is None:
+            table = {}
+        self._line_range_memo = (content, table)
+        if course_key in table:
+            return table[course_key]
+        got = self._scan_course_line_range(content, course_key)
+        table[course_key] = got
+        return got
+
+    def _scan_course_line_range(self, content: str, course_key: str):
+        """course_line_range の中身(本文を頭から読む)。"""
         lines = content.split('\n')
         start = None
         cur_key = "Oni"

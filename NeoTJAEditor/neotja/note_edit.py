@@ -19,6 +19,7 @@ convert_notes / render_converted をそのまま使う(命令行を割合位置�
 1操作にまとまる。
 """
 
+import bisect
 import math
 
 from neotja.measure_math import (convert_notes, min_len, parse_measure_lines,
@@ -113,6 +114,83 @@ def text_diff_range(old, new):
     return p, len(old) - s, len(new) - s
 
 
+# ---------------------------------------------------------------------------
+# 本文が少しだけ変わったときに、前の計算を使い回す
+# ---------------------------------------------------------------------------
+# 作譜の1音は「ある行の中の数文字」しか変えない。小節の範囲・行の頭・
+# コースの #START/#END の行番号は、その行が命令でもコメントでもなく、
+# 変わった文字にカンマも改行も無ければ、**後ろへずれるだけ**で中身は同じ。
+# 28万字の譜面で毎回全部数え直すと、1音あたり 100ms 以上になっていた
+# (実測 2026-11-14)。
+
+#: 直前に比べた2つの本文とその結果(同じ組を何度も比べるため)。
+_diff_memo = (None, None, None)
+
+
+def _edit_between(old, new):
+    """text_diff_range の結果を、直前の1組だけ覚えておく。"""
+    global _diff_memo
+    mo, mn, mr = _diff_memo
+    if mo is old and mn is new:
+        return mr
+    r = text_diff_range(old, new)
+    _diff_memo = (old, new, r)
+    return r
+
+
+def _line_local_change(old, new, line_forbid=(), piece_forbid="\n"):
+    """old → new の変化が**1行の中だけ**なら (p, old_end, new_end) を返す。
+
+    消えた文字と入った文字のどちらにも piece_forbid の字が無く、その行の
+    変わる前と後のどちらにも line_forbid の文字列が無いときだけ。そうで
+    なければ None(呼び出し側は全部数え直す)。"""
+    p, oe, ne = _edit_between(old, new)
+    rem = old[p:oe]
+    ins = new[p:ne]
+    for ch in piece_forbid:
+        if ch in rem or ch in ins:
+            return None
+    if line_forbid:
+        ls = old.rfind("\n", 0, p) + 1
+        le = old.find("\n", oe)
+        if le < 0:
+            le = len(old)
+        line_old = old[ls:le]
+        line_new = new[ls:le + (ne - oe)]
+        for f in line_forbid:
+            if f in line_old or f in line_new:
+                return None
+    return p, oe, ne
+
+
+#: 直前の _line_starts の結果 (本文, 行頭の並び)。
+_starts_memo = (None, None)
+
+
+def _line_starts_cached(text):
+    """_line_starts と同じ答え。直前の本文から1行の中だけ変わったなら、
+    変わった所より後ろの行頭をずらすだけで済ませる。"""
+    global _starts_memo
+    mt, ms = _starts_memo
+    if mt is text:
+        return ms
+    starts = None
+    if mt is not None:
+        if len(mt) == len(text) and mt == text:
+            starts = ms
+        else:
+            ch = _line_local_change(mt, text)
+            if ch is not None:
+                p, oe, ne = ch
+                d = ne - oe
+                i = bisect.bisect_right(ms, p)
+                starts = ms[:i] + [s + d for s in ms[i:]]
+    if starts is None:
+        starts = _line_starts(text)
+    _starts_memo = (text, starts)
+    return starts
+
+
 def course_body_span(text, course_line_range):
     """course_line_range() が返す (#START行, #END行) を文字オフセットへ。
 
@@ -121,7 +199,7 @@ def course_body_span(text, course_line_range):
     if not course_line_range:
         return None
     start_line, end_line = course_line_range
-    starts = _line_starts(text)
+    starts = _line_starts_cached(text)
     n = len(text)
     # 行番号は1始まり。#START の次の行頭 = starts[start_line]。
     if start_line < 0 or start_line >= len(starts):
@@ -234,10 +312,60 @@ def measure_spans(text, body, level=_INHERIT, path=None):
     # の両方から)。3万行の譜面では1回 40ms かかるので、直前の結果を1つだけ
     # 覚えておく(実測 2026-10-03)。
     global _spans_memo
-    key = (len(text), body, level, tuple(path) if path else None)
+    key = (body, level, tuple(path) if path else None)
     memo_text, memo_key, memo_val = _spans_memo
     if memo_text is text and memo_key == key:
         return memo_val
+    spans = None
+    if memo_text is not None and memo_key[1:] == key[1:]:
+        if memo_key == key and len(memo_text) == len(text) and memo_text == text:
+            # 同じ中身の別の文字列(toPlainText は呼ぶたびに作り直す)。
+            spans = memo_val
+        else:
+            # 1行の中だけ変わったのなら、ずらすだけで済む。
+            spans = _shift_spans(memo_text, text, memo_key[0], body, memo_val)
+    if spans is None:
+        spans = _scan_measure_spans(text, body, level, path)
+    _spans_memo = (text, key, spans)
+    return spans
+
+
+def _shift_spans(old, new, old_body, body, spans):
+    """old の小節範囲 spans から、new の小節範囲を作る。作れなければ None。
+
+    使えるのは、変わったのが**命令でもコメントでもない1行の中**で、消えた
+    文字にも入った文字にもカンマと改行が無いときだけ。そのときカンマの
+    並びも分岐の切り替えも変わらないので、変わった所より後ろの位置が
+    ずれるだけになる。次の場合は安全側に倒して数え直す:
+      ・変わった所が本文の外にかかる/本文の頭が動いた
+      ・変わった所の直前がカンマ(カンマの直後の改行を小節に含めるか、の
+        判定が変わりうる)
+      ・最後の小節(またはそれより後ろ)が変わった(カンマの無い書きかけの
+        末尾を小節に数えるか、の判定が変わりうる)"""
+    if not spans or body[0] != old_body[0]:
+        return None
+    ch = _line_local_change(old, new, ("#", "/"), "\n,")
+    if ch is None:
+        return None
+    p, oe, ne = ch
+    d = ne - oe
+    if p < old_body[0] or oe > old_body[1] or body[1] != old_body[1] + d:
+        return None
+    if p > 0 and old[p - 1] == ",":
+        return None
+    if p >= spans[-1][0]:
+        return None
+    # b <= p の小節はそのまま。それより後ろは d だけずらす。
+    i = bisect.bisect_right(spans, (p, len(old) + 1))
+    while i > 0 and spans[i - 1][1] > p:
+        i -= 1
+    out = spans[:i]
+    out.extend([(a if a <= p else a + d, b + d) for a, b in spans[i:]])
+    return out
+
+
+def _scan_measure_spans(text, body, level, path):
+    """measure_spans の中身(本文を頭から数える)。"""
     auto = (level == BRANCH_AUTO)
     bstart, bend = body
     spans = []
@@ -284,7 +412,6 @@ def measure_spans(text, body, level=_INHERIT, path=None):
         i = line_end + 1
     if active and a < bend and text[a:bend].strip():
         spans.append((a, bend))
-    _spans_memo = (text, key, spans)
     return spans
 
 
@@ -641,12 +768,29 @@ def _as_grids(grid):
     return grid if isinstance(grid, _Grids) else _Grids(grid)
 
 
+#: 小節の文字列 → その音符列。同じ中身の小節はいくつあっても同じ答え
+#: なので、文字列そのものを鍵にして覚える(本文が変わっても、変わって
+#: いない小節はそのまま当たる)。密な譜面では chart_items が全小節を読み
+#: 直していて、1音あたり 70ms かかっていた(実測 2026-11-14)。
+_notes_cache = {}
+_NOTES_CACHE_MAX = 200000
+
+
 def _measure_notes(text, span):
     a, b = span
-    for p in parse_measure_lines(text[a:b]):
+    chunk = text[a:b]
+    got = _notes_cache.get(chunk)
+    if got is not None:
+        return got
+    got = ""
+    for p in parse_measure_lines(chunk):
         if p["type"] == "measure":
-            return p["notes"]
-    return ""
+            got = p["notes"]
+            break
+    if len(_notes_cache) >= _NOTES_CACHE_MAX:
+        _notes_cache.clear()
+    _notes_cache[chunk] = got
+    return got
 
 
 def chart_items(text, body):
@@ -664,6 +808,8 @@ def chart_items(text, body):
     ordinal = 0
     for m, span in enumerate(measure_spans(text, body)):
         notes = _measure_notes(text, span)
+        if not notes.strip("0"):
+            continue                    # 空の小節(0 は項目にしない)
         L = len(notes)
         for i, c in enumerate(notes):
             if c == "0":
