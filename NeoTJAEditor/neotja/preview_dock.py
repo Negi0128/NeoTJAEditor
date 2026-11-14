@@ -2810,9 +2810,7 @@ class PreviewDock(QDockWidget):
                 if op.get("name") == "BPMCHANGE":
                     res["default"] = float(self.chart_preview.bpm_at(t))
                 else:
-                    ch = list(self.chart_preview._scroll_changes or [(0.0, 1.0)])
-                    i = max(0, _bisect.bisect_right([c[0] for c in ch], t) - 1)
-                    res["default"] = float(ch[i][1])
+                    res["default"] = float(self.chart_preview.scroll_at(t))
             except Exception:  # noqa: BLE001
                 res.setdefault("default", None)
         return res
@@ -2992,22 +2990,16 @@ class PreviewDock(QDockWidget):
         """シークバーを押した/引いた。**助走こみの音源の時刻**で来る。"""
         self._seek_padded(seconds)
 
-    #: シークバーを合わせ直す間隔(秒)。曲ぜんたいを1本に詰めているので、
-    #: 1px 動くのに何百 ms もかかる。60Hz で合わせ直す意味は無いうえ、
-    #: GL 画面の隣での塗り直しは高い(利用者の報告 2026-11-07「重い」)。
-    MINIMAP_SYNC_SEC = 0.05
-    _last_mm_sync = 0.0
-
     def _sync_minimap(self, ms=None):
-        """シークバーの赤い線と「いま見えている範囲」を合わせる。"""
+        """シークバーの赤い線と「いま見えている範囲」を合わせる。
+
+        再生中の間引きは呼ぶ側(_on_position_changed の RASTER_UI_PLAY_SEC)で
+        まとめてやる。曲ぜんたいを1本に詰めているので 1px 動くのに 0.1 秒前後
+        かかり、GL 画面の隣での塗り直しは高い(利用者の報告 2026-11-07「重い」)。
+        ここで別に間引くと、再生中のシークで最後の位置を取りこぼす。"""
         mm = getattr(self, "minimap", None)
         if mm is None:
             return
-        if ms is not None and self.audio.is_playing():
-            now = _time.monotonic()
-            if now - self._last_mm_sync < self.MINIMAP_SYNC_SEC:
-                return
-            self._last_mm_sync = now
         if ms is not None:
             mm.set_position(ms / 1000.0)
             lead_ms = int(self._lead_sec * 1000)
@@ -3115,11 +3107,17 @@ class PreviewDock(QDockWidget):
     def _on_sim_fps_changed(self, _index):
         self._apply_sim_fps(int(self.sim_fps_combo.currentData()))
 
-    def _update_fps_label(self):
+    def _update_fps_label(self, from_play=False):
         """出ているコマ数を数え直して表示する。
 
         前回からの「描けた回数の差」を「経過時間」で割るだけ。タイマーが
-        遅れて呼ばれても経過時間の方も伸びるので、値は狂わない。"""
+        遅れて呼ばれても経過時間の方も伸びるので、値は狂わない。
+
+        再生中は自分のタイマーでは書かない。_on_position_changed が時刻や
+        シークバーと**同じ回に**呼ぶ(from_play)。別の間合いで書くと、それだけ
+        で1回ぶん窓ぜんたいの合成が増える(RASTER_UI_PLAY_SEC を参照)。"""
+        if not from_play and self.audio.is_playing():
+            return
         now = _time.perf_counter()
         frames = self.chart_preview.frames_painted
         prev_t, prev_f = self._fps_prev
@@ -3130,7 +3128,11 @@ class PreviewDock(QDockWidget):
         fps = (frames - prev_f) / dt
         # 止まっているときは 0 ではなく「-」。0fps と書くと不具合に見えるが、
         # 実際は描く必要が無いだけなので。
-        self.fps_label.setText("-- fps" if fps < 0.5 else "%.0f fps" % fps)
+        text = "-- fps" if fps < 0.5 else "%.0f fps" % fps
+        # 同じ数字なら触らない(QLabel は同じ文字でも書けば塗り直しの合図を出す
+        # ことがある。塗り直しは窓ぜんたいの合成になる)。
+        if text != self.fps_label.text():
+            self.fps_label.setText(text)
 
     def _on_record_clicked(self):
         if self.record_cb:
@@ -3380,13 +3382,14 @@ class PreviewDock(QDockWidget):
         except Exception:  # noqa: BLE001
             pass
         try:
+            # 時刻の列は譜面が変わったときに1回だけ作ってある(レーンの
+            # _scroll_times・_measure_times_of)。以前は毎回、変化点ぜんぶ
+            # (密な譜面で1万4千個)を list に写して時刻を取り出していた。
             import bisect as _bisect
-            ch = list(self.chart_preview._scroll_changes or [(0.0, 1.0)])
-            i = max(0, _bisect.bisect_right([c[0] for c in ch], t) - 1)
-            scroll = float(ch[i][1])
-            mc = list((self._preview_commands or [None, None, [], None])[2] or [])
+            scroll = float(self.chart_preview.scroll_at(t))
+            mc, mt = self._measure_times_of()
             if mc:
-                j = max(0, _bisect.bisect_right([c[0] for c in mc], t) - 1)
+                j = max(0, _bisect.bisect_right(mt, t) - 1)
                 measure = "%d/%d" % (int(mc[j][1]), int(mc[j][2]))
         except Exception:  # noqa: BLE001
             pass
@@ -3410,6 +3413,18 @@ class PreviewDock(QDockWidget):
         if self.config_data.get("command_panel_follow", True):
             panel.set_values(bpm=bpm, scroll=scroll, measure=measure)
         panel.set_editing(self._panel_targets.keys())
+
+    #: _measure_times_of の作り置き (元の列, その時刻の列)。
+    _measure_times_cache = (None, [])
+
+    def _measure_times_of(self):
+        """拍子の変化点の列と、その時刻だけの列。列が差し替わったときだけ作る。"""
+        mc = (self._preview_commands or [None, None, [], None])[2] or []
+        cached, times = self._measure_times_cache
+        if cached is not mc:
+            times = [c[0] for c in mc]
+            self._measure_times_cache = (mc, times)
+        return mc, times
 
     #: 命令の行の種類 → (_preview_commands の何番目か, 値の作り方)。
     _PANEL_VALUE_SRC = {
@@ -4135,6 +4150,15 @@ class PreviewDock(QDockWidget):
     #: シークした行き先(ms)と、こだまを捨てる期限。_seek_padded を参照。
     _seek_target_ms = -10 ** 9
     _seek_echo_until = 0.0
+    #: 再生中に窓のふつうの部品(シークバー・時刻・fps 表示)を合わせる間合い(秒)。
+    #: 4 回/秒。シークバーの赤い線は1画素動くのに曲の長さ次第で 0.1 秒前後
+    #: かかるので、これより細かくしても見た目はほとんど変わらない。
+    RASTER_UI_PLAY_SEC = 0.25
+    _last_raster_ui = 0.0
+    #: 再生中に命令パネルの数値を合わせる間合い(秒)。密な譜面ではハイスピが
+    #: 数拍ごとに変わり、そのたびに欄を塗り直して窓ぜんたいの合成になる。
+    PANEL_PLAY_SYNC_SEC = 0.5
+    _last_panel_sync = 0.0
 
     def _on_position_changed(self, ms, manual=False):
         # Throttle to ~30Hz while playing so the 60Hz position feed doesn't
@@ -4173,11 +4197,28 @@ class PreviewDock(QDockWidget):
         # 命令パネルの数値を、いまカーソルが居る場所の値に合わせ続ける
         # (利用者の指定 2026-10-03: 移動したとき・再生したときに、その位置の
         #  数値が出ていてほしい)。触っている欄は書き換えない(set_values)。
-        if playing:
+        #
+        # **ここから下(パネル・時刻・シークバー・fps 表示)は窓のふつうの部品。**
+        # 窓に QOpenGLWidget が居ると、ふつうの部品をほんの少し塗り直すだけで
+        # 窓ぜんたいの合成になり、そのコマが 8ms ほど延びる(作譜で引っかかる
+        # 正体。調べた結果 2026-11-14)。再生中は RASTER_UI_PLAY_SEC ごとに
+        # **まとめて1回**だけ合わせる。同じ呼び出しの中で書き換えれば Qt は
+        # 1回の合成に束ねるので、ばらばらの間合いで払うより引っかかりが減る。
+        # 止まっているとき・シークしたとき(manual)は今までどおりその場で
+        # ぴったり合わせる(利用者の承認 2026-11-14)。
+        if playing and not manual:
             now2 = _time.monotonic()
-            if now2 - getattr(self, "_last_panel_sync", 0.0) >= 0.12:
+            if now2 - self._last_raster_ui < self.RASTER_UI_PLAY_SEC:
+                return
+            self._last_raster_ui = now2
+            if now2 - self._last_panel_sync >= self.PANEL_PLAY_SYNC_SEC:
                 self._last_panel_sync = now2
                 self._sync_command_panel()
+            if _time.perf_counter() - self._fps_prev[0] >= 0.5:
+                self._update_fps_label(from_play=True)
+        elif playing:
+            self._last_panel_sync = _time.monotonic()
+            self._sync_command_panel()
         # 表示する時刻は**音源の頭を 0:00**にする。頭へ足した助走ぶんは
         # 引いて見せるので、曲の長さも今までと同じ数字になる。
         lead_ms = int(self._lead_sec * 1000)

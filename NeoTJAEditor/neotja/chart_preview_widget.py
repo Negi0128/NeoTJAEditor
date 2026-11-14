@@ -1400,6 +1400,12 @@ class ChartPreviewWidget(QWidget):
             return 0.0
         return float(self._bpm_changes[self._idx_at(self._bpm_times, t)][1])
 
+    def scroll_at(self, t: float) -> float:
+        """時刻 t で効いている #SCROLL。時刻の列は譜面を読んだときに作ってある。"""
+        if not self._scroll_changes:
+            return 1.0
+        return float(self._scroll_changes[self._idx_at(self._scroll_times, t)][1])
+
     def is_gogo(self, t: float) -> bool:
         """時刻 t がゴーゴー区間の中か。"""
         if not self._gogo_starts:
