@@ -2512,8 +2512,8 @@ class PreviewDock(QDockWidget):
 
         画面(ScaledHost の中身)を帯の束と差し替え、打音を難易度ぶん合流
         させる。出るときは元のゲーム画面へ戻し、打音も元へ戻す。"""
-        from neotja.multi_screen import (MIN_BANDS, MultiBandScreen,
-                                         make_band_screen)
+        from neotja.multi_screen import (MIN_BANDS, make_band_screen,
+                                         make_multi_screen)
         host = self.game_preview_window.scaled_host
         if not on:
             if self._multi_screen is not None:
@@ -2542,7 +2542,7 @@ class PreviewDock(QDockWidget):
         screens = [make_band_screen(d, offset, self._se_text_enabled)
                    for d in previews]
         if self._multi_screen is None:
-            self._multi_screen = MultiBandScreen()
+            self._multi_screen = make_multi_screen(gpu=self._multi_gpu())
             self._multi_screen.muteToggled.connect(self._on_multi_mute)
         self._multi_built_for = self._tja_content
         self._multi_built = previews
@@ -2550,6 +2550,8 @@ class PreviewDock(QDockWidget):
         # 切ってあった難易度のしるしを付け直す(set_screens が番号を捨てる)。
         self._multi_screen.set_muted(self._muted_band_indices())
         self._multi_screen.begin_offline_render()
+        # 時刻を取りに行く刻みはレーンと同じにする(fps の上限の設定も同じに効く)。
+        self._multi_screen.set_frame_ms(self.chart_preview._timer.interval())
         # 時刻は帯の画面が自分のタイマーで取りに来る。レーンは見えていなくても
         # 時計を持っているので、そこから直に引く(multi_screen の説明を参照)。
         self._multi_screen.set_time_source(
@@ -2568,6 +2570,18 @@ class PreviewDock(QDockWidget):
         self.course_button.setStyleSheet("")
         self._fit_course_button()
         self._rebuild_multi_notes()
+
+    def _multi_gpu(self) -> bool:
+        """同時再生の帯を GPU(QOpenGLWidget)で塗るか。
+
+        GPU 描画が入っていて、ゲーム画面が QOpenGLWidget 版のときだけ。
+        ゲーム画面が別の窓(gpu_screen_window)のときは CPU 版のままにする —
+        QOpenGLWidget を一度でも窓へ入れると、その窓ぜんたいの組み立てが
+        GPU 経由に変わったまま戻らず、別の窓にして切った「作譜ペインとの
+        綱引き」(GameScreenGLWindow の説明)を呼び戻してしまう。"""
+        if not bool(self.config_data.get("gpu_render", True)):
+            return False
+        return not bool(getattr(self.game_screen, "native_screen_window", False))
 
     def _muted_band_indices(self):
         """打音を切ってある難易度が、いま何本目にいるか。"""

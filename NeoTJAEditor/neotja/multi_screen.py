@@ -29,6 +29,12 @@
 
 録画の約束(begin_offline_render / set_render_time / end_offline_render)は
 GameScreenWidget と同じにしてあるので、書き出しは1本のときと同じ手順で通る。
+
+**塗る面は2つある**(ゲーム画面の GameScreenWidget / GameScreenGLWidget と
+同じ分け方)。描く中身は _MultiBandBase.paint_screen の1本で、違うのは面だけ。
+  ・MultiBandScreen   … CPU で塗る。録画と、GPU 描画を切ってあるとき。
+  ・MultiBandGLScreen … GPU(QOpenGLWidget)で塗る。画面に出すときだけ。
+選ぶのは make_multi_screen。
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -36,7 +42,8 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from neotja.game_screen import (JUDGE_BOTTOM, JUDGE_POP_DROP, JUDGE_SCALE,
-                                PANEL_H, PANEL_Y, SCREEN_H_FULL, SCREEN_W)
+                                PANEL_H, PANEL_Y, SCREEN_H_FULL, SCREEN_W,
+                                QOpenGLWidget)
 
 #: 帯の上端と高さ(素材の箱。game_screen の左パネルと同じ値)。
 BAND_TOP = PANEL_Y          # 188
@@ -73,8 +80,8 @@ def total_height(n: int) -> int:
     return band_pitch() * (n - 1) + BAND_H
 
 
-class MultiBandScreen(QWidget):
-    """帯を縦に積んで描く入れ物。
+class _MultiBandBase:
+    """帯を縦に積んで描く入れ物(面に依らない部分。塗る面は下の2つ)。
 
     中の GameScreenWidget は**画面に出さない**。親子にすると帯の外(上の
     背景や下の余白)まで塗られてしまうので、ここが自分の painter へ
@@ -87,11 +94,12 @@ class MultiBandScreen(QWidget):
     WIDTH = SCREEN_W
     HEIGHT = SCREEN_H_FULL
 
-    #: 自分で時刻を取りに行く刻み(120fps 相当)。
+    #: 自分で時刻を取りに行く刻み(120fps 相当)。画面に出すときは置く側が
+    #: レーンと同じ刻みに合わせる(set_frame_ms)。
     FRAME_MS = 8
 
-    #: コース記号を押して、その帯の打音を入り切りした(帯の番号を渡す)。
-    muteToggled = Signal(int)
+    #: 画面へ塗った回数。fps の表示が数える(録画で描いたぶんは入らない)。
+    frames_painted = 0
 
     def __init__(self, screens=None, parent=None):
         super().__init__(parent)
@@ -109,7 +117,10 @@ class MultiBandScreen(QWidget):
         #: 時刻を取りに行く先と、前回描いた時刻(同じなら塗り直さない)。
         self._time_cb = None
         self._last_t = None
+        self._frame_ms = self.FRAME_MS
         self._timer = QTimer(self)
+        # 既定の粗いタイマーは Windows で 15ms 刻みに丸められる(レーンと同じ)。
+        self._timer.setTimerType(Qt.PreciseTimer)
         self._timer.timeout.connect(self._tick)
         if screens:
             self.set_screens(screens)
@@ -131,7 +142,17 @@ class MultiBandScreen(QWidget):
         if cb is None:
             self._timer.stop()
         elif self.isVisible():
-            self._timer.start(self.FRAME_MS)
+            self._timer.start(self._frame_ms)
+
+    def set_frame_ms(self, ms):
+        """時刻を取りに行く刻み(ms)。レーンのタイマーと同じ値を渡す。
+
+        8ms のままだと GPU で塗っても 125fps で頭打ちになる(利用者の承認
+        2026-11-14)。上限の設定(preview_max_fps)はレーンが読んで自分の
+        刻みにしているので、ここはそれに倣うだけ。"""
+        self._frame_ms = max(1, int(ms))
+        if self._timer.isActive():
+            self._timer.start(self._frame_ms)
 
     def _tick(self):
         cb = self._time_cb
@@ -151,7 +172,7 @@ class MultiBandScreen(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if self._time_cb is not None:
-            self._timer.start(self.FRAME_MS)
+            self._timer.start(self._frame_ms)
 
     def hideEvent(self, event):
         super().hideEvent(event)
@@ -304,10 +325,13 @@ class MultiBandScreen(QWidget):
         p.setPen(QPen(QColor(MUTE_SLASH_COLOR), 4))
         p.drawLine(x0, y0, x1, y1)
 
-    def paintEvent(self, event):
+    def paint_self(self):
+        """自分の面へ1コマ描く(paintEvent / paintGL の中身)。"""
+        self.frames_painted += 1
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         self.paint_screen(p)
+        p.end()
 
     # ------------------------------------------------------------------
     # キー操作
@@ -395,6 +419,48 @@ class MultiBandScreen(QWidget):
     def end_offline_render(self):
         for gs in self._screens:
             gs.end_offline_render()
+
+
+class MultiBandScreen(_MultiBandBase, QWidget):
+    """CPU で塗る帯の束。録画と、GPU 描画を切ってあるときはこちら。
+
+    録画は QWidget.render() で QImage へ描く(recorder.make_offline_multi_widget)。
+    render() で他の描き先へ描けるのはこちらだけ。"""
+
+    #: コース記号を押して、その帯の打音を入り切りした(帯の番号を渡す)。
+    muteToggled = Signal(int)
+
+    def paintEvent(self, event):
+        self.paint_self()
+
+
+class MultiBandGLScreen(_MultiBandBase, QOpenGLWidget or QWidget):
+    """GPU で塗る帯の束。画面に出すときだけ使う(利用者の承認 2026-11-14)。
+
+    CPU 版は1コマの塗りに 5ms 前後かかり、そのうえ窓ぜんたいの組み立てで
+    もう 5ms ほど取られて、92fps あたりで頭打ちだった。こちらは塗りが
+    GPU に乗り、組み立ても絵を貼るだけで済む。
+
+    中身は CPU 版と同じ paint_screen。GameScreenGLWidget と同じく:
+      ・paintEvent を持たせない(QOpenGLWidget の段取りが飛ぶ)。
+      ・render() で他の描き先へは描けない。録画は CPU 版を作って使う
+        (recorder.make_offline_multi_widget)。縮小表示は入れ物が paint_screen を
+        直に呼ぶので、こちらのままで通る。
+    """
+
+    muteToggled = Signal(int)
+
+    def paintGL(self):
+        self.paint_self()
+
+
+def make_multi_screen(gpu=False, parent=None):
+    """画面に出す帯の束を作る。gpu=True で GPU 版(使えなければ CPU 版)。
+
+    録画からは呼ばないこと(MultiBandScreen を直に作る)。"""
+    if gpu and QOpenGLWidget is not None:
+        return MultiBandGLScreen(parent=parent)
+    return MultiBandScreen(parent=parent)
 
 
 def make_band_screen(preview_data, offset, se_text_enabled=True):
