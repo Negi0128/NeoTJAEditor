@@ -439,10 +439,40 @@ def hit_schedule_from_preview(preview_data: dict, offset: float):
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
+def multi_hit_schedule(previews, offset, muted=()):
+    """同時再生の録画の打音スケジュール。(音声時間の一覧, 種別の一覧, 本数) を返す。
+
+    画面の同時再生(preview_dock._rebuild_multi_notes)と同じ組み立てを
+    する。難易度ぶんの打音を merge_multi_hit_notes で合流させ、同じ時刻・
+    同じ音は1つにまとめる。muted は打音を切ってある帯の番号で、その難易度は
+    混ぜない。本数は実際に混ぜた難易度の数で、2本以上なら呼び出し側が
+    MULTI_HIT_GAIN を掛ける。
+
+    風船の割れる音も難易度ぶん集め、同じ時刻のものは1つにする。"""
+    from neotja.preview_dock import (balloon_pop_schedule, hit_notes_from_preview,
+                                     hit_sound_kind, merge_multi_hit_notes,
+                                     MULTI_MERGE_SEC)
+
+    muted = {int(i) for i in (muted or ())}
+    kept = [d or {} for i, d in enumerate(previews or []) if i not in muted]
+    merged = merge_multi_hit_notes([hit_notes_from_preview(d) for d in kept])
+    pairs = [(n[0] - offset, hit_sound_kind(n[1])) for n in merged]
+    pops = sorted(t for d in kept
+                  for t in balloon_pop_schedule(d, d.get("roll_hit_speed", 45)))
+    last = None
+    for t in pops:
+        if last is not None and t - last <= MULTI_MERGE_SEC:
+            continue
+        last = t
+        pairs.append((t - offset, "pop"))
+    pairs.sort()
+    return [p[0] for p in pairs], [p[1] for p in pairs], len(kept)
+
+
 def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
                  don_path="", ka_path="", song_volume=0.8, sfx_volume=0.9,
                  hit_sounds=True, sample_rate=SAMPLE_RATE,
-                 cancel=None) -> np.ndarray:
+                 cancel=None, hit_gain=1.0) -> np.ndarray:
     """[start_sec, end_sec) の音声を (N, 2) float32 で作る。
 
     実機の再生とまったく同じ MixerCore を、デバイスに繋がずに回すだけ。
@@ -462,6 +492,10 @@ def render_audio(song_pcm, hit_times, hit_kinds, *, start_sec, end_sec,
     core.post(("metro_enabled", False))
     core.post(("vol", "song", song_volume))
     core.post(("vol", "sfx", sfx_volume))
+    # 打音だけの倍率(同時再生の MULTI_HIT_GAIN)。1.0 のときは何も積まない
+    # ので、ふつうの録画は今までと同じ手順のまま。
+    if hit_gain != 1.0:
+        core.post(("hit_gain", float(hit_gain)))
     # song コマンドが read_pos を 0 に戻すので、seek はそのあとで積む。
     core.post(("seek", int(round(start_sec * sample_rate))))
     core.post(("play",))
@@ -1847,7 +1881,8 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
                       end_sec=None, fps=60, don_path="", ka_path="",
                       song_volume=0.8, sfx_volume=0.9, hit_sounds=True,
                       cancel=None, want_mips=False,
-                      lead_sec=RECORD_LEAD_SEC):
+                      lead_sec=RECORD_LEAD_SEC, multi_previews=None,
+                      multi_muted=()):
     """曲を読み、音声を作り、RecordingPlan を返す。**Qt には触らない**ので
     ワーカースレッドから呼んでよい(GUI スレッドから呼んでも同じ結果)。
 
@@ -1859,7 +1894,18 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
     song_sec = song.shape[0] / float(SAMPLE_RATE) if song.shape[0] else 0.0
     if end_sec is None:
         end_sec = song_sec
-    hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
+    hit_gain = 1.0
+    if multi_previews:
+        # 同時再生の録画は、並べた難易度ぶんの打音を画面と同じに合流させ、
+        # 2本以上なら打音だけ MULTI_HIT_GAIN 倍にする。以前は1つの難易度の
+        # 打音しか入っていなかった(2026-11-14)。
+        from neotja.preview_dock import MULTI_HIT_GAIN
+        hit_times, hit_kinds, live = multi_hit_schedule(
+            multi_previews, offset, multi_muted)
+        if live >= 2:
+            hit_gain = MULTI_HIT_GAIN
+    else:
+        hit_times, hit_kinds = hit_schedule_from_preview(preview_data, offset)
 
     # 助走は「頭から録るとき」だけ。範囲を指定して途中だけ録るときに勝手に
     # 前へ伸ばすと、指定した範囲と食い違う。
@@ -1903,7 +1949,8 @@ def prepare_recording(*, preview_data, offset, song_path, start_sec=0.0,
                          end_sec=end_sec + pad_sec,
                          don_path=don_path, ka_path=ka_path,
                          song_volume=song_volume, sfx_volume=sfx_volume,
-                         hit_sounds=hit_sounds, cancel=cancel)
+                         hit_sounds=hit_sounds, cancel=cancel,
+                         hit_gain=hit_gain)
     tmp_dir = tempfile.mkdtemp(prefix="neotja_rec_")
     audio_path = os.path.join(tmp_dir, "audio.f32")
     with open(audio_path, "wb") as f:

@@ -243,6 +243,9 @@ class RecordDialog(QDialog):
         self._multi_previews = list(multi_previews or [])
         if self._layout == "multi" and len(self._multi_previews) < 2:
             self._layout = "game"
+        #: 同時再生で打音を切ってある帯の番号(コース記号を押したもの)。
+        #: 録画の打音にも混ぜない。並びは書き出しを開いた時点の写し。
+        self._multi_muted = self._read_multi_muted()
         self._rec = None            # 進行中の VideoRecording
         self._widget = None         # 画面外の描画用ウィジェット
         self._cancel = False
@@ -674,6 +677,23 @@ class RecordDialog(QDialog):
         return recorder.chart_end_seconds(self._preview, offset,
                                           fallback=song_seconds)
 
+    def _read_multi_muted(self):
+        """画面の同時再生で打音を切ってある帯の番号を読む。
+
+        録画の帯は画面と同じ並び(preview_dock.multi_previews)で作られて
+        いるので、番号はそのまま使える。読めないとき・本数が合わないときは
+        何も切らない(並べた難易度を全部鳴らす)。"""
+        if self._layout != "multi":
+            return []
+        pd = getattr(self._mw, "preview_dock", None)
+        try:
+            keys = list(getattr(pd, "_multi_keys", None) or [])
+            if len(keys) != len(self._multi_previews):
+                return []
+            return list(pd._muted_band_indices())
+        except Exception:  # noqa: BLE001
+            return []
+
     def _make_widget(self):
         """画面外の描画用ウィジェットを作る。録画を始めたときのモードで
         中身が変わる。
@@ -1016,7 +1036,11 @@ class RecordDialog(QDialog):
             song_volume=float(cfg.get("preview_volume", 0.8)),
             sfx_volume=float(cfg.get("sfx_volume", 0.9)),
             hit_sounds=self.chk_hit.isChecked(),
-            want_mips=(self._layout == "wave"))
+            want_mips=(self._layout == "wave"),
+            # 同時再生なら、並べた難易度ぶんの打音を画面と同じに合流させる。
+            multi_previews=(self._multi_previews
+                            if self._layout == "multi" else None),
+            multi_muted=tuple(self._multi_muted))
         # 書き戻すのは覚えている設定(bg)、本番に渡すのは _bg_used
         # (同時再生なら背景なし)。
         self._pending = (out, q, self._bg_used())
