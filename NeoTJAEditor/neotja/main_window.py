@@ -427,7 +427,11 @@ class _ToastStatusBar(QStatusBar):
 #: MainWindow.eventFilter(アプリ全体)が相手にする出来事の種類。これ以外は
 #: 最初の1回の比べでそのまま帰す。
 _APP_FILTER_TYPES = frozenset((QEvent.KeyPress, QEvent.KeyRelease,
+                               QEvent.ShortcutOverride,
                                QEvent.MouseButtonPress, QEvent.MouseButtonDblClick))
+#: Alt 単独を握りつぶす出来事。**ShortcutOverride が要**(下の eventFilter 参照)。
+_ALT_EVENT_TYPES = frozenset((QEvent.KeyPress, QEvent.KeyRelease,
+                              QEvent.ShortcutOverride))
 
 
 class MainWindow(QMainWindow):
@@ -3273,7 +3277,15 @@ class MainWindow(QMainWindow):
         # 命令挿入(Alt+B/D/G/L/R)など、このアプリでは修飾キーとして多用している。
         # Qt の既定では Alt を単独で押して離すとメニューバーがハイライトされ、
         # 矢印キーでの操作待ちになってしまう(=キー入力の邪魔)。ここでは
-        # Key_Alt そのものの生イベント(押下/離し)だけを握りつぶす。
+        # Key_Alt そのものの出来事だけを握りつぶす。
+        #
+        # **押下/離しだけでは足りなかった**(利用者の報告 2026-11-14「ALT押すと
+        # ファイルが押される」)。メニューバーが Alt を待ち受け始めるきっかけは
+        # その前に届く ShortcutOverride で、これが MainWindow まで上がると
+        # メニューバー自身が一時的にアプリ全体のフィルタを張り、後から張った
+        # フィルタが先に呼ばれるため、離した Alt を先に取られていた。v14 までは
+        # 再生画面・作譜ペインが別窓で、そこで止まっていたので出なかった。
+        # ShortcutOverride もここ(アプリのフィルタは窓のフィルタより先)で止める。
         # Alt+何か の組み合わせは、組み合わせ先のキー(F/J/0〜9 等)のイベント
         # 側に AltModifier が乗って別に届くので、これを止めても影響しない。
         # F10 での経路(F10 は Key_Alt ではない)にも影響しない。
@@ -3285,8 +3297,10 @@ class MainWindow(QMainWindow):
         t = event.type()
         if t not in _APP_FILTER_TYPES:
             return False
-        if (t == QEvent.KeyPress or t == QEvent.KeyRelease) and event.key() == Qt.Key_Alt:
+        if t in _ALT_EVENT_TYPES and event.key() == Qt.Key_Alt:
             return True
+        if t == QEvent.ShortcutOverride:
+            return False            # Alt 以外のショートカット確認は素通し
         # マウスのサイドボタンで作譜の分割を変える(利用者の希望
         # 2026-11-02)。「どこでも反応してほしい」とのことなので、作譜
         # ペインの上だけでなくゲーム画面でもエディタでも効かせる。ここで
