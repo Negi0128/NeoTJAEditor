@@ -1794,7 +1794,8 @@ class _GameScreenBase:
         self.chart_preview.end_offline_render()
 
     def wheelEvent(self, event):
-        """ホイールで小節移動。**ゲーム画面のどこでも効く。**
+        """ホイールで移動(1目盛 = いまの BPM の4/4の1小節ぶんの秒数。
+        ChartPreviewWidget.wheel_seek)。**ゲーム画面のどこでも効く。**
 
         レーン(ChartPreviewWidget)は自分の矩形の中でしか受け取らないので、
         左のパネル・背景・魂ゲージの上ではホイールが素通りしていた。同じ
@@ -1804,9 +1805,7 @@ class _GameScreenBase:
         例外を外へ出さないのはレーン側と同じ理由(ホイールは短時間に何十回も
         飛んでくるので、1回の失敗でプロセスごと落とさない)。"""
         try:
-            d = event.angleDelta().y()
-            if d:
-                self.chart_preview.seek_relative_measure(1 if d > 0 else -1)
+            self.chart_preview.wheel_seek(event)
         except Exception:  # noqa: BLE001
             import traceback
             traceback.print_exc()

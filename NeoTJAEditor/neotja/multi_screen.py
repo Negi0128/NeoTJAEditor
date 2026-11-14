@@ -434,7 +434,7 @@ class _MultiBandBase:
         self.muteToggled.emit(i)
 
     def wheelEvent(self, event):
-        """ホイールで小節移動(ゲーム画面と同じ)。"""
+        """ホイールで移動(ゲーム画面と同じ。時間で送る)。"""
         t = self._key_target
         if t is not None:
             try:

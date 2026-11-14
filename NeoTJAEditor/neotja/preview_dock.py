@@ -1188,7 +1188,8 @@ class GamePreviewWindow(QWidget):
         self._refit()
 
     def wheelEvent(self, event):
-        """ホイールで小節移動。**この窓のどこにカーソルがあっても効く。**
+        """ホイールで移動(レーンと同じ。ChartPreviewWidget.wheel_seek)。
+        **この窓のどこにカーソルがあっても効く。**
 
         レーン(ChartPreviewWidget)も同じことを自前でやるが、あちらはレーンの
         矩形の中にカーソルがあるときだけ。ゲーム画面の余白・左のパネル・
@@ -1202,9 +1203,7 @@ class GamePreviewWindow(QWidget):
         例外を外へ出さないのはレーン側と同じ理由 — ホイールは短時間に
         何十回も飛んでくるので、1回の失敗でプロセスごと落とさない。"""
         try:
-            d = event.angleDelta().y()
-            if d:
-                self._lane.seek_relative_measure(1 if d > 0 else -1)
+            self._lane.wheel_seek(event)
         except Exception:  # noqa: BLE001
             import traceback
             traceback.print_exc()

@@ -2870,15 +2870,117 @@ class ChartPreviewWidget(QWidget):
         # 抜けると Qt(C++)側へ伝播できず、環境によってはプロセスごと落ちる。
         # ホイールは短時間に何十回も飛んでくるので、1回の失敗で終了させない。
         try:
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self.seek_relative_measure(1)
-            elif delta < 0:
-                self.seek_relative_measure(-1)
+            self.wheel_seek(event)
         except Exception:  # noqa: BLE001
             import traceback
             traceback.print_exc()
         event.accept()
+
+    # ------------------------------------------------------------------
+    # ホイール = 時間で移動(利用者の決定 2026-11-14)
+    #
+    # 以前は1目盛 = 1小節だった。#MEASURE で小節を細かく刻んだ所では
+    # 1目盛でほとんど進まず、ホイールが効かないように見えていた。
+    # 1目盛 = **いまの位置の BPM での 4/4 の1小節ぶんの秒数**(240/BPM)。
+    # 拍子(#MEASURE)は見ない。キーの小節送り(← → PgUp/PgDn)は今までどおり。
+    # ------------------------------------------------------------------
+    #: Shift + ホイールの倍率(作譜ペインと同じ 4)。
+    WHEEL_JUMP = 4
+    #: 再生中のシークの最短間隔(秒)。回し続けるとシークが立て続けに入って
+    #: 音が途切れ途切れになるので、その間に来たぶんはまとめて1回にする。
+    WHEEL_SEEK_INTERVAL = 0.05
+    #: BPM が取れないとき(解析前など)に使う値。
+    WHEEL_FALLBACK_BPM = 120.0
+
+    _wheel_pending = None       # 再生中に待たせている行き先(音源の秒)
+    _wheel_last_seek = 0.0      # 再生中に最後にシークした時刻(_clock)
+    _wheel_timer = None
+
+    @staticmethod
+    def wheel_notches(event) -> float:
+        """そのホイール操作が何目盛ぶんか(1目盛 = 120)。
+
+        高分解能のホイールやタッチパッドは細かい値で送ってくるので、端数の
+        まま使う(作譜ペインの _wheel_notches と同じ考え方)。Windows では
+        Alt を押すと横のホイールとして届くので、縦が 0 なら横を見る。"""
+        d = event.angleDelta()
+        v = float(d.y() or d.x())
+        if v == 0.0:
+            return 0.0
+        n = v / 120.0
+        # 取りこぼし防止: どんなに小さくても 1/8 目盛ぶんは動かす。
+        if abs(n) < 0.125:
+            n = 0.125 if n > 0 else -0.125
+        return n
+
+    def wheel_step_seconds(self, audio_t=None) -> float:
+        """ホイール1目盛ぶんの秒数。その位置の BPM での 4/4 の1小節。"""
+        if audio_t is None:
+            audio_t = self.scroll_target_time()
+        try:
+            bpm = float(self.bpm_at(float(audio_t) + self._offset))
+        except Exception:  # noqa: BLE001
+            bpm = 0.0
+        if not (bpm > 0.0) or math.isinf(bpm):
+            bpm = self.WHEEL_FALLBACK_BPM
+        return 240.0 / bpm
+
+    def wheel_seek(self, event):
+        """ホイールの1回ぶんを、時間での移動にして渡す。上に回すと先へ。"""
+        n = self.wheel_notches(event)
+        if n == 0.0:
+            return
+        if event.modifiers() & Qt.ShiftModifier:
+            n *= self.WHEEL_JUMP
+        base = self._wheel_base_time()
+        self.seek_relative_seconds(n * self.wheel_step_seconds(base))
+
+    def _wheel_base_time(self) -> float:
+        """続けて回したときの基準。待たせている行き先があればそこから。"""
+        if self._wheel_pending is not None:
+            return float(self._wheel_pending)
+        return self.scroll_target_time()
+
+    def seek_relative_seconds(self, delta: float):
+        """いまの行き先から delta 秒ずらす。
+
+        止まっているあいだは小節移動と同じく滑らせる(scroll_to_seconds)。
+        再生中はシークして鳴らし続けるが、シークは最短
+        WHEEL_SEEK_INTERVAL 秒おきにまとめる(音が途切れないように)。"""
+        if not self._seek_seconds_cb:
+            return
+        base = self._wheel_base_time()
+        target = max(0.0, base + float(delta))
+        # 先は最後の小節まで(小節移動と同じ行き止まり)。すでにその先に
+        # 居るときは、そこより先へ押し出さない。
+        if self._nav_points:
+            target = min(target, max(float(self._nav_points[-1]), base))
+        if self._state != "playing":
+            self._wheel_pending = None
+            self.scroll_to_seconds(target)
+            return
+        self._wheel_pending = target
+        wait = self.WHEEL_SEEK_INTERVAL - (_clock() - self._wheel_last_seek)
+        if wait <= 0.0:
+            self._flush_wheel_seek()
+            return
+        t = self._wheel_timer
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._flush_wheel_seek)
+            self._wheel_timer = t
+        if not t.isActive():
+            t.start(max(1, int(wait * 1000)))
+
+    def _flush_wheel_seek(self):
+        """待たせていたホイールの行き先へ、1回だけシークする。"""
+        target = self._wheel_pending
+        self._wheel_pending = None
+        if target is None:
+            return
+        self._wheel_last_seek = _clock()
+        self.scroll_to_seconds(target)
 
     # ------------------------------------------------------------------
     # Navigation-point helpers (机能1)
