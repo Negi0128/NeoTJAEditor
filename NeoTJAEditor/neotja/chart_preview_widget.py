@@ -3,6 +3,14 @@ import math
 import os
 import time as _time
 
+# 外挿・アニメの時計。Windows の time.monotonic() は 15.6ms 刻みでしか進まないので、
+# 1ms タイマーで何百コマ塗っても「新しい時刻のコマ」は毎秒 64 枚にしかならず、
+# 同じ絵を何度も塗っていた。perf_counter は µs 未満まで細かい。
+# このファイルの壁時計(_pos_wall・トゥイーン・fps 表示)は全部これに揃える。
+# 起点の違う時計を混ぜると外挿が狂うので、monotonic を足さないこと
+# (利用者の承認 2026-11-14)。
+_clock = _time.perf_counter
+
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QRadialGradient,
@@ -588,10 +596,10 @@ class ChartPreviewWidget(QWidget):
         self._set_speed_cb = set_speed_cb
         self._offset = 0.0
         self._pos_sec = 0.0
-        self._pos_wall = _time.monotonic()
+        self._pos_wall = _clock()
         self._playing = False
         # 録画(オフライン描画)中に外から与えられる表示時刻。None なら通常どおり
-        # monotonic 時計で外挿する。begin_offline_render() を参照。
+        # 壁時計(_clock)で外挿する。begin_offline_render() を参照。
         self._render_time = None
         # 再生速度倍率(作譜モード。0.25〜1.0)。1.0=等速。再生中の外挿
         # (_current_audio_time / set_playback の予測)にこの倍率を掛けて、
@@ -625,7 +633,7 @@ class ChartPreviewWidget(QWidget):
         self._animating = False
         self._anim_start_sec = 0.0
         self._anim_target_sec = 0.0
-        self._anim_start_wall = _time.monotonic()
+        self._anim_start_wall = _clock()
         # Transient badge drawn in the lane's top-left (show_toast). Used for
         # the F1 hit-sound ON/OFF feedback, which otherwise has no visible
         # effect at all on a silent passage.
@@ -807,7 +815,7 @@ class ChartPreviewWidget(QWidget):
         # Match the redraw cadence to the display's refresh rate: 60 fps on a
         # 60 Hz panel, up to 120/144 fps on a high-refresh one (capped so we
         # never render faster than the monitor can show, which would be pure
-        # wasted CPU). The monotonic-clock extrapolation in paintEvent keeps
+        # wasted CPU). The wall-clock (_clock) extrapolation in paintEvent keeps
         # scrolling time-accurate regardless of the exact interval.
         hz = 60.0
         try:
@@ -1894,10 +1902,10 @@ class ChartPreviewWidget(QWidget):
         # Finalize a scroll tween once it runs out - snap the extrapolation
         # base exactly to the target and, if we're not actually playing, let
         # the timer go idle again (it's only kept running for the animation).
-        if self._animating and (_time.monotonic() - self._anim_start_wall) >= self.SCROLL_ANIM_SEC:
+        if self._animating and (_clock() - self._anim_start_wall) >= self.SCROLL_ANIM_SEC:
             self._animating = False
             self._pos_sec = self._anim_target_sec
-            self._pos_wall = _time.monotonic()
+            self._pos_wall = _clock()
             if not self._playing:
                 self._timer.stop()
         self._request_repaint()
@@ -2898,7 +2906,7 @@ class ChartPreviewWidget(QWidget):
         # stopped/paused.
         self._anim_start_sec = self._current_audio_time()
         self._anim_target_sec = target_sec
-        self._anim_start_wall = _time.monotonic()
+        self._anim_start_wall = _clock()
         self._animating = True
         self._apply_timer_interval()
         self._timer.start()
@@ -2915,7 +2923,7 @@ class ChartPreviewWidget(QWidget):
         self._playing = False
         self._animating = False
         self._pos_sec = 0.0
-        self._pos_wall = _time.monotonic()
+        self._pos_wall = _clock()
         self._timer.stop()
         if self._pause_cb:
             self._pause_cb()
@@ -2938,7 +2946,7 @@ class ChartPreviewWidget(QWidget):
         target = self.scroll_target_time()
         self._animating = False
         self._pos_sec = target
-        self._pos_wall = _time.monotonic()
+        self._pos_wall = _clock()
         if self._seek_seconds_cb:
             self._seek_seconds_cb(target)
         if self._play_cb:
@@ -2970,7 +2978,7 @@ class ChartPreviewWidget(QWidget):
         else:
             self._clear_reveal()
             self._pos_sec = target
-            self._pos_wall = _time.monotonic()
+            self._pos_wall = _clock()
             if self._seek_seconds_cb:
                 self._seek_seconds_cb(target)
             if self._play_cb:
@@ -3031,7 +3039,7 @@ class ChartPreviewWidget(QWidget):
         self._animating = False
         if self._state == "playing":
             self._pos_sec = target
-            self._pos_wall = _time.monotonic()
+            self._pos_wall = _clock()
             if self._seek_seconds_cb:
                 self._seek_seconds_cb(target)
         else:
@@ -3050,7 +3058,7 @@ class ChartPreviewWidget(QWidget):
         target = self._nav_points[self._anchor_idx]
         self._animating = False
         self._pos_sec = target
-        self._pos_wall = _time.monotonic()
+        self._pos_wall = _clock()
         self._state = "paused"
         if self._pause_cb:
             self._pause_cb()
@@ -3096,7 +3104,7 @@ class ChartPreviewWidget(QWidget):
         if self._state == "playing":
             # 再生中はトゥイーンせず、その位置へシークして再生継続。
             self._pos_sec = target
-            self._pos_wall = _time.monotonic()
+            self._pos_wall = _clock()
             self._animating = False
         else:
             self._start_scroll_anim(target)
@@ -3133,7 +3141,7 @@ class ChartPreviewWidget(QWidget):
         if self._state == "playing":
             # 再生中はトゥイーンせず、その位置へシークして再生継続。
             self._pos_sec = target
-            self._pos_wall = _time.monotonic()
+            self._pos_wall = _clock()
             self._animating = False
             self._seek_seconds_cb(target)
         else:
@@ -3585,7 +3593,7 @@ class ChartPreviewWidget(QWidget):
     def begin_offline_render(self):
         """表示時刻を「外から与える」モードに入る。
 
-        通常このウィジェットは monotonic 時計から現在位置を外挿して描くため、
+        通常このウィジェットは壁時計(_clock)から現在位置を外挿して描くため、
         描画にかかった時間ぶんだけ絵が進んでしまい、1コマずつ書き出す用途には
         使えない。このモードでは set_render_time() で指定した時刻だけを見て
         描くので、何ms かかっても出来上がりは必ず同じになる(=コマ落ちしない)。
@@ -3606,7 +3614,7 @@ class ChartPreviewWidget(QWidget):
         self._render_time = None
 
     def set_playback(self, position_seconds: float, playing: bool):
-        now_wall = _time.monotonic()
+        now_wall = _clock()
         # During a stopped/paused scroll tween the audio.seek() we issued fires
         # positionChanged; snapping to it would cut the animation short, so
         # ignore those until the tween finalizes. (Only relevant while not
@@ -3644,7 +3652,7 @@ class ChartPreviewWidget(QWidget):
         if self._render_time is not None:
             return self._render_time
         if self._animating:
-            elapsed = _time.monotonic() - self._anim_start_wall
+            elapsed = _clock() - self._anim_start_wall
             if elapsed >= self.SCROLL_ANIM_SEC:
                 return self._anim_target_sec
             # Ease-out cubic: fast at first, settling gently onto the target.
@@ -3654,7 +3662,7 @@ class ChartPreviewWidget(QWidget):
         # 再生中はレート補正付きで外挿(トゥイーン中の上ブランチはUIアニメ用
         # なので速度倍率とは無関係、変更しない)。
         if self._playing:
-            return self._pos_sec + (_time.monotonic() - self._pos_wall) * self._playback_rate
+            return self._pos_sec + (_clock() - self._pos_wall) * self._playback_rate
         return self._pos_sec
 
     def _current_chart_time(self) -> float:
@@ -4180,7 +4188,7 @@ class ChartPreviewWidget(QWidget):
         # fps 文字も下の打数も**画面外**にしか描けない。文字列組み立てと
         # drawText、さらに _live_top_count の全span走査ごと丸ごと省く。
         if self._show_fps and band_top > 0:
-            wall = _time.monotonic()
+            wall = _clock()
             if self._fps_last_wall is not None:
                 dt = wall - self._fps_last_wall
                 if dt > 0.0:
