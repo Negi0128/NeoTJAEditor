@@ -1222,34 +1222,72 @@ class WaveformWidget(QWidget):
                     "balloon": QColor("#ff9f43"), "kusudama": QColor("#ff9f43")}
     #: 音符の絵の使い回し。鍵は (ドンの色, カッの色, 半径, 大きい半径)。
     _note_spr_cache = None
+    #: _span_index_for の作り置き (元の列, 引き出し)。
+    _span_index = (None, None)
+
+    def _span_index_for(self, sa):
+        """スパンの列 sa から、二分探索用の列と筆・ペンを作る(列が変わったときだけ)。
+
+        返すのは (始点の列, 終点の累積最大の列, {種類: QBrush}, 頭のペン)。
+        _span_audio は譜面や OFFSET が変わるたびに新しい列になるので、
+        「同じ列か」は is で見れば足りる。"""
+        cached, idx = self._span_index
+        if cached is sa:
+            return idx
+        starts, end_max = [], []
+        m = float("-inf")
+        brushes = {}
+        span_col = self._SPAN_COLORS
+        for s, e, kind in sa:
+            starts.append(s)
+            m = e if e > m else m
+            end_max.append(m)
+            if kind not in brushes:
+                brushes[kind] = QBrush(span_col.get(kind, QColor("#fcdb38")))
+        idx = (starts, end_max, brushes, QPen(self._NOTE_RING, 2))
+        self._span_index = (sa, idx)
+        return idx
 
     def _draw_notes(self, painter, w: int, t0: float, t1: float, cy: int):
         """作譜モード: 波形の下の帯に譜面を描く。連打/風船/くす玉のスパン(バー)
         を先に、その上に音符(ドン=赤 / カ=青、大音符は大きめ)を円で描く。
         cy は帯の中心 y。"""
-        ring = self._NOTE_RING
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         # --- 連打/風船/くす玉のスパン(バー + 頭) ---
+        # **見えている区間だけを二分探索で切り出す。** 以前は毎コマすべての
+        # 区間をなめ、区間ごとに QBrush / QPen を作り直していた(利用者の承認
+        # 2026-11-14)。描く順番・描き方そのものは変えない(見た目は1画素も
+        # 変えない約束。作譜ペインの grab() を前後で比べて同一)。
+        #
+        # 頭の丸と棒を作り置きの絵で貼る案も試したが、この画面の描き手
+        # (OpenGL2)ではアンチエイリアスの丸を描くのと絵を貼るのがほぼ同じ
+        # 速さで、棒を3つに割って貼ると逆に遅くなった(実測 2026-11-14)。
+        # なので形は今までどおり直に描く。
         sa = self._span_audio
         if sa:
-            span_col = self._SPAN_COLORS
-            for s, e, kind in sa:
+            idx = self._span_index_for(sa)
+            starts, end_max, brushes, head_pen = idx
+            # end_max[i] は 0..i 番目の終点の最大。これより前の区間はすべて
+            # t0 より前で終わっている。始点は昇順(_apply_offset_local で sorted)。
+            lo = bisect.bisect_left(end_max, t0)
+            hi = bisect.bisect_right(starts, t1)
+            for i in range(lo, hi):
+                s, e, kind = sa[i]
                 if e < t0 or s > t1:
                     continue
                 xs = self._sec_to_x(s)
                 xe = self._sec_to_x(e)
-                col = span_col.get(kind, QColor("#fcdb38"))
+                brush = brushes[kind]
                 th = self.SPAN_TH_BIG if kind == "roll_big" else self.SPAN_TH
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(col))
+                painter.setBrush(brush)
                 painter.drawRoundedRect(min(xs, xe), cy - th // 2, max(2, abs(xe - xs)), th, th // 2, th // 2)
                 # 頭(始点)を丸で強調。風船/くす玉はそれと分かる色に。
                 hr = (self.SPAN_TH // 2 + 3 if kind in ("balloon", "kusudama")
                       else (self.SPAN_TH_BIG // 2 + 1 if kind == "roll_big"
                             else self.SPAN_TH // 2 + 2))
-                painter.setPen(QPen(ring, 2))
-                painter.setBrush(QBrush(col))
+                painter.setPen(head_pen)
                 painter.drawEllipse(QPoint(xs, cy), hr, hr)
 
         # --- 音符(1〜4) ---
