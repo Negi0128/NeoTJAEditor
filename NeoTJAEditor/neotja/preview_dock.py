@@ -2673,9 +2673,19 @@ class PreviewDock(QDockWidget):
         self.game_waveform.set_position_smooth(t)
         # 作譜ページは音声波形ページより後に組まれるので、構築の途中で
         # 1フレーム入ってきても落ちないようにしておく。
+        # **作譜ペインを追わせるのは作譜モードのときだけ。** 隠れていても
+        # 位置・表示範囲・カーソルの計算は毎コマ走っていた(塗らないだけ)。
+        # 作譜へ戻ったときは set_bottom_mode でその場の時刻に合わせ直す
+        # (利用者の承認 2026-11-14)。
         ce = getattr(self, "chart_edit", None)
-        if ce is not None:
+        if ce is not None and self._edit_mode_shown():
             ce.set_position_smooth(t)
+
+    def _edit_mode_shown(self):
+        """いま下のページが作譜モードか。"""
+        mode = getattr(self, "MODE_EDIT", None)
+        stack = getattr(self, "bottom_stack", None)
+        return mode is not None and stack is not None and stack.currentIndex() == mode
 
     def _build_edit_page(self) -> QWidget:
         """作譜モードのページ: 音声波形と同じ見た目に、グリッドと編集カーソルを
@@ -3633,6 +3643,12 @@ class PreviewDock(QDockWidget):
         # 作譜モードのときだけ、キー入力を受けるのは編集ペイン。ほかのモードでは
         # レーンへ返す(Space/小節移動が今までどおり効くように)。
         if idx == self.MODE_EDIT and self.MODE_EDIT is not None:
+            # ほかのモードのあいだは作譜ペインを追わせていない(_on_preview_frame)。
+            # 再生中なら、いまの時刻へ1回合わせ直してから見せる。止まって
+            # いるときは _on_position_changed が毎回 set_position で渡している。
+            if self.audio.is_playing():
+                self.chart_edit.set_position_smooth(
+                    self.chart_preview._current_audio_time())
             self.chart_edit.setFocus(Qt.OtherFocusReason)
             self._place_command_panel(True)
         else:

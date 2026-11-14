@@ -1145,14 +1145,55 @@ class ChartEditWaveform(WaveformWidget):
         if getattr(self, "_grid", 0) <= 0 or getattr(self, "_bar_times_raw", None) is None:
             return
         self._free_time = None
+        # **再生中はほとんどのコマで答えが変わらない。** 1つのグリッドの中に
+        # 居るあいだはカーソルは動かないのに、毎コマ cursor_time と
+        # _address_from_time(どちらも Fraction で重い)を引き直していた
+        # (1回 100µs 強 × 毎秒 300 回。調べた結果 2026-11-14)。いまのグリッドの
+        # 時刻の幅 [lo, hi) を覚えておき、その中なら何もしない。譜面・分割・
+        # OFFSET・カーソルのどれかが変わったら鍵が変わって引き直す。
+        # 止まっているとき(nearest)は呼ばれる回数が少ないので今までどおり。
+        key = None
+        if not nearest:
+            key = self._follow_key()
+            c = self._follow_cache
+            if c is not None and c[0] == key and c[1] <= t < c[2]:
+                return
         if abs(t - self.cursor_time()) < self.SYNC_TOLERANCE_SEC:
+            self._remember_follow(key)
             return
         addr = self._address_from_time(max(0.0, t), nearest=nearest)
         if addr is None or addr == (self._cur_measure, self._cur_slot):
+            self._remember_follow(key)
             return
         self._cur_measure, self._cur_slot = addr
         self._clamp_cursor()
+        self._remember_follow(None if key is None else self._follow_key())
         self.update()
+
+    #: _follow_playhead の覚え (鍵, いまのグリッドの頭, 次のグリッドの頭)。
+    _follow_cache = None
+
+    def _follow_key(self):
+        """_follow_playhead の覚えが使えるかを決める鍵。"""
+        return (self._cur_measure, self._cur_slot, self._grid, self.offset,
+                id(getattr(self, "note_timing", None)), id(self._bar_times_raw),
+                id(getattr(self, "_bar_times", None)), self._measure_count())
+
+    def _remember_follow(self, key):
+        """いまのカーソルのグリッドが受け持つ時刻の幅を覚える(key が None なら捨てる)。"""
+        self._follow_cache = None
+        if key is None:
+            return
+        m, slot = self._cur_measure, self._cur_slot
+        g = self._measure_grid(m)
+        lo = self._address_time(m, slot, g)
+        if slot + 1 < g:
+            hi = self._address_time(m, slot + 1, g)
+        else:
+            hi = self._address_time(m + 1, 0, self._measure_grid(m + 1))
+        if lo is None or hi is None or not hi > lo:
+            return
+        self._follow_cache = (key, lo, hi)
 
     def set_playing(self, playing):
         """再生中かどうか。再生中は黄色いカーソルを出さない(赤い線だけ)。
