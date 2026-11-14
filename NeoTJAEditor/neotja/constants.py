@@ -2,7 +2,7 @@ import datetime
 from decimal import getcontext
 
 APP_NAME = "NeoTJAEditor"
-VERSION = "15.0.0"
+VERSION = "15.1.0"
 
 getcontext().prec = 50
 
