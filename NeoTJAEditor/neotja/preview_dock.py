@@ -3684,9 +3684,11 @@ class PreviewDock(QDockWidget):
         # それなら魂ゲージや魂の飛翔・スコア加算まで落として軽量と同じレーンに
         # 揃えたほうが、モードを行き来しても見え方が変わらず、そのぶん軽い。
         self.game_screen.set_lite(idx != self.MODE_TITLE)
-        # 火花(大きい放射)は通常再生のときだけ。ほかのモードは判定円の金色だけ
-        # にする(利用者の指定 2026-09-26)。
-        self.chart_preview.set_effects_lite(idx != self.MODE_TITLE)
+        # 火花(大きい放射)は通常再生と作譜のとき。ほかのモードは判定円の金色
+        # だけにする(利用者の指定 2026-09-26。作譜は 2026-11-14「作譜モードの
+        # 時も判定の火花欲しい」で足した)。
+        self.chart_preview.set_effects_lite(
+            idx not in (self.MODE_TITLE, self.MODE_EDIT))
         # レーンの小節線に小節番号を出すのは作譜モードだけ(PeepoDrumKit の
         # ゲーム画面と同じ見せ方)。書いている最中は「画面に出ているのが何小節
         # 目か」が要るが、ふだんの再生では邪魔になる。

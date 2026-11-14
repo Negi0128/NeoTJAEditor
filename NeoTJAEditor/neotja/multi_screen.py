@@ -520,10 +520,11 @@ def make_band_screen(preview_data, offset, se_text_enabled=True):
     data = preview_data or {}
     cp = ChartPreviewWidget()
     cp.set_se_text_enabled(bool(se_text_enabled))
-    # 叩くたびの火花は出さない(判定円の光りだけにする)。4本ぶん出ると
-    # 判定円のまわりの音符が隠れる(利用者の指定 2026-10-03)。
-    # **ゴーゴーの炎は別物で、こちらは残る**(paint_gogo_fire)。
-    cp.set_effects_lite(True)
+    # 叩くたびの火花も出す(利用者の指定 2026-11-14「同時再生の時、判定枠の
+    # 火花表示してほしい」)。はじめは判定円の光りだけにしていた(2026-10-03)。
+    # 火花はレーンより大きい絵だが、帯の切り抜き(paint_screen)の中で描くので
+    # 上下の帯へははみ出さない。
+    cp.set_effects_lite(False)
     cp.set_preview_data(data)
     cp.set_offset(offset)
     gs = GameScreenWidget(cp, compact=True)
