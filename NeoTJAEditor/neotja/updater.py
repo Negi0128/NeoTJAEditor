@@ -32,6 +32,151 @@ DOWNLOAD_TRIES = 3
 #: 落とし直す前に置く秒数(回を追うごとに伸ばす)。
 RETRY_WAIT = 3.0
 
+#: API の版。付けておくと GitHub 側の既定が変わっても応答の形が揺れない。
+_API_VERSION = "2022-11-28"
+_API_ROOT = "https://api.github.com/"
+#: リリースの添付ファイルを API で落とすときの URL の頭。
+#: 非公開リポジトリでは browser_download_url(github.com/.../download/...)が
+#: 404 になるので、こちら(releases/assets/<id>)を Accept: octet-stream で叩く。
+_ASSET_API_PREFIX = "https://api.github.com/repos/Negi0128/NeoTJAEditor/releases/assets/"
+#: 鍵つきで断られたとき、鍵なしでやり直す状態コード。リポジトリがまだ
+#: 公開のうちに鍵が失効・取り消しされても、更新が止まらないようにするため。
+_AUTH_FALLBACK_CODES = (401, 403, 404)
+
+
+# ---------------------------------------------------------------------------
+# 非公開リポジトリから更新を取るための鍵(アクセストークン)。
+#
+# 鍵はリポジトリに入れない。組み立てのときに update_token.txt(gitignore 済み)
+# から build_version.write_update_token が neotja/_update_token.py(これも
+# gitignore 済み)を作り、spec がそれを exe に積む。無ければ鍵なしで動く。
+#
+# **難読化は「ぱっと見で読めない」程度のもの。** exe を持っている人なら誰でも
+# 取り出せる。なので鍵は必ず「このリポジトリ1つだけ・Contents の読み取りだけ」
+# の fine-grained token にすること。漏れても読めるのはこのリポジトリだけになる。
+# ---------------------------------------------------------------------------
+
+def _decode_token(data: str, key: str) -> str:
+    """_update_token.py の中身を元に戻す(XOR + base64)。"""
+    import base64
+    raw = base64.b64decode(data.encode("ascii"))
+    k = key.encode("ascii")
+    return bytes(b ^ k[i % len(k)] for i, b in enumerate(raw)).decode("utf-8").strip()
+
+
+def _load_token() -> str:
+    """積まれている鍵を返す。無ければ空文字。"""
+    try:
+        from neotja import _update_token  # 組み立て時に作られる。普段は無い
+    except ImportError:
+        return ""
+    try:
+        return _decode_token(_update_token.DATA, _update_token.KEY)
+    except Exception:  # noqa: BLE001 — 壊れていても鍵なしで動けばよい
+        return ""
+
+
+_TOKEN = None
+
+
+def get_token() -> str:
+    """鍵(1回だけ読む)。**画面にもログにも出さないこと。**"""
+    global _TOKEN
+    if _TOKEN is None:
+        _TOKEN = _load_token()
+    return _TOKEN
+
+
+def scrub(message) -> str:
+    """エラー文から鍵を消す。利用者に見せる文・記録に残す文は必ずここを通す。"""
+    text = str(message)
+    token = get_token()
+    if token:
+        text = text.replace(token, "***")
+    return re.sub(r"(?i)\b(bearer|token)(\s+)[A-Za-z0-9_\-.]{8,}", r"\1\2***", text)
+
+
+class _DropAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """転送先へ Authorization を持っていかない。
+
+    API の添付ファイルは S3 などの別ホストへ 302 で飛ばされる。その先に鍵を
+    渡す理由は無いし、署名つき URL に Authorization が付くと S3 は 400 を返す。
+    鍵は add_unredirected_header で付けているので本来ここで落ちるが、念のため
+    両方から消しておく。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            for table in (new.headers, new.unredirected_hdrs):
+                for name in list(table):
+                    if name.lower() == "authorization":
+                        del table[name]
+        return new
+
+
+def _open(url, timeout, token="", accept=None):
+    """1回ぶんの GET。token があれば Authorization を付ける(転送先には渡さない)。"""
+    headers = {"User-Agent": _USER_AGENT}
+    if url.startswith(_API_ROOT):
+        headers["X-GitHub-Api-Version"] = _API_VERSION
+        headers["Accept"] = accept or "application/vnd.github+json"
+    elif accept:
+        headers["Accept"] = accept
+    req = urllib.request.Request(url, headers=headers)
+    if token:
+        req.add_unredirected_header("Authorization", "Bearer " + token)
+    opener = urllib.request.build_opener(_DropAuthRedirect)
+    return opener.open(req, timeout=timeout)
+
+
+def open_github(url, timeout, accept=None):
+    """GitHub への GET。鍵があれば使い、401/403/404 なら鍵なしでやり直す。
+
+    鍵が無ければ最初から鍵なし(今までどおり)。返すのは応答(with で使う)。
+    失敗したときの例外文は鍵を消したものにして投げ直す。"""
+    token = get_token() if url.startswith(_API_ROOT) else ""
+    try:
+        if token:
+            try:
+                return _open(url, timeout, token, accept)
+            except urllib.error.HTTPError as e:
+                if e.code not in _AUTH_FALLBACK_CODES:
+                    raise
+                # 公開のうちは鍵なしで通る。非公開になったあとでここへ来るなら
+                # 鍵が切れているか、権限が足りない。
+        return _open(url, timeout, "", accept)
+    except urllib.error.HTTPError as e:
+        raise IOError(scrub("HTTP Error %d: %s" % (e.code, e.reason))) from None
+    except Exception as e:  # noqa: BLE001
+        cleaned = scrub(e)
+        if cleaned != str(e):
+            raise IOError(cleaned) from None
+        raise
+
+
+def fetch_json(url, timeout=10):
+    """API の JSON を取る(鍵があれば使う)。"""
+    with open_github(url, timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def asset_url(asset) -> str:
+    """リリースの添付ファイルを落とす URL。
+
+    鍵があるときは API の URL(非公開でも落とせる)、無ければ今までどおり
+    browser_download_url。"""
+    api = asset.get("url", "") or ""
+    if get_token() and api.startswith(_ASSET_API_PREFIX):
+        return api
+    return asset.get("browser_download_url", "") or ""
+
+
+def open_asset(url, timeout):
+    """添付ファイルの GET。API の URL なら Accept: octet-stream を付ける。"""
+    if url.startswith(_ASSET_API_PREFIX):
+        return open_github(url, timeout, accept="application/octet-stream")
+    return open_github(url, timeout)
+
 
 def _version_tuple(v: str):
     v = v.strip()
@@ -62,9 +207,7 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
-            req = urllib.request.Request(RELEASES_API_URL, headers={"User-Agent": _USER_AGENT})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = fetch_json(RELEASES_API_URL)
 
             tag = data.get("tag_name", "")
             if not tag or not is_newer(tag):
@@ -75,15 +218,13 @@ class UpdateCheckWorker(QThread):
             for asset in data.get("assets", []):
                 name = asset.get("name")
                 if name in (ASSET_NAME, PLAYER_ASSET_NAME):
-                    urls[name] = asset.get("browser_download_url", "")
+                    urls[name] = asset_url(asset)
 
             self.update_available.emit(tag, data.get("body", ""),
                                        urls.get(ASSET_NAME, ""),
                                        urls.get(PLAYER_ASSET_NAME, ""))
-        except (urllib.error.URLError, TimeoutError, ValueError) as e:
-            self.failed.emit(str(e))
-        except Exception as e:
-            self.failed.emit(str(e))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(scrub(e))
 
 
 class UpdateDownloadWorker(QThread):
@@ -153,8 +294,7 @@ class UpdateDownloadWorker(QThread):
         raise last
 
     def _fetch_once(self, url, dest, base, span):
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp, open(dest, "wb") as f:
+        with open_asset(url, DOWNLOAD_TIMEOUT) as resp, open(dest, "wb") as f:
             # Prefer the Content-Length header (resp.length decreases as we
             # read, so capture the expected total up front for validation).
             try:
@@ -225,7 +365,7 @@ class UpdateDownloadWorker(QThread):
                 self._discard(dest)
                 self.cancelled.emit()
                 return
-            self.failed.emit(str(e))
+            self.failed.emit(scrub(e))
             return
 
         player_path = ""
@@ -250,9 +390,9 @@ class UpdateDownloadWorker(QThread):
                 self._discard(pdest)
                 if self.require_player:
                     self._discard(dest)
-                    self.failed.emit('NeoTJAPlayerの取得に失敗しました。\n' + str(e))
+                    self.failed.emit('NeoTJAPlayerの取得に失敗しました。\n' + scrub(e))
                     return
-                self.player_error = str(e)
+                self.player_error = scrub(e)
 
         self.finished_ok.emit(dest, player_path)
 
@@ -300,20 +440,17 @@ class PlayerFetchWorker(QThread):
 
     def run(self):
         try:
-            req = urllib.request.Request(RELEASES_API_URL,
-                                         headers={"User-Agent": _USER_AGENT})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            data = fetch_json(RELEASES_API_URL)
             url = ""
             for asset in data.get("assets", []):
                 if asset.get("name") == PLAYER_ASSET_NAME:
-                    url = asset.get("browser_download_url", "")
+                    url = asset_url(asset)
                     break
             if not url:
                 self.failed.emit("リリースに %s がありませんでした。" % PLAYER_ASSET_NAME)
                 return
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+            self.failed.emit(scrub(e))
             return
 
         final = os.path.join(self.dest_dir, PLAYER_ASSET_NAME)
@@ -349,12 +486,11 @@ class PlayerFetchWorker(QThread):
                     self.cancelled.emit()
                     return
                 last = e
-        self.failed.emit(str(last))
+        self.failed.emit(scrub(last))
 
     def _fetch_once(self, url, part):
         """1回ぶんの取得。中止されたら None、済んだらバイト数。"""
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as resp, open(part, "wb") as f:
+        with open_asset(url, DOWNLOAD_TIMEOUT) as resp, open(part, "wb") as f:
             try:
                 total = int(resp.headers.get("Content-Length") or 0)
             except (TypeError, ValueError):

@@ -116,6 +116,9 @@ a = Analysis(
     # QML/Quick/Pdf のバインディングと pydoc_data で、どれも未使用。
     excludes=[
         'yt_dlp',
+        # 更新用の鍵。Player は自分で更新しない(更新は Editor が2本まとめて
+        # 入れ替える)ので積まない。積む exe が少ないほど漏れる口も少ない。
+        'neotja._update_token',
         'PySide6.QtQml',
         'PySide6.QtQuick',
         'PySide6.QtQuickWidgets',

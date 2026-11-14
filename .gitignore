@@ -8,3 +8,7 @@ NeoTJAEditor/.venv/
 # committed. The app loads skin/Notes.png next to the exe if present.
 skin/
 NeoTJAEditor/skin/
+
+# 更新用の鍵(アクセストークン)。組み立てる人の手元にだけ置く。絶対にコミットしない。
+NeoTJAEditor/update_token.txt
+NeoTJAEditor/neotja/_update_token.py

@@ -1,13 +1,10 @@
 """必要なときだけ開く公開バージョン一覧。"""
-import json
-import urllib.request
-
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtWidgets import (QDialog, QLabel, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QTextBrowser, QHBoxLayout, QVBoxLayout)
 
 from neotja.constants import VERSION
-from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME, _USER_AGENT
+from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME, asset_url, fetch_json, scrub
 from neotja.worker_util import detach_worker
 
 API = 'https://api.github.com/repos/Negi0128/NeoTJAEditor/releases'
@@ -24,17 +21,14 @@ class ReleaseListWorker(QThread):
 
     def run(self):
         try:
-            request = urllib.request.Request(
-                API + '?per_page=%d&page=%d' % (PAGE_SIZE, self.page),
-                headers={'User-Agent': _USER_AGENT})
-            with urllib.request.urlopen(request, timeout=10) as response:
-                releases = json.loads(response.read().decode('utf-8'))
+            # 鍵が積まれていれば使う(非公開リポジトリでも一覧が取れる)。
+            releases = fetch_json(API + '?per_page=%d&page=%d' % (PAGE_SIZE, self.page))
             if not isinstance(releases, list):
                 raise ValueError('一覧を取得できませんでした')
             self.loaded.emit([r for r in releases if not r.get('draft')],
                              len(releases) == PAGE_SIZE)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(scrub(exc))
 
 
 class VersionChangeDialog(QDialog):
@@ -166,7 +160,7 @@ class VersionChangeDialog(QDialog):
         tag = release['tag_name']
         self.selected.setText(tag)
         self.notes.setMarkdown(release.get('body', '').replace('\n', '  \n'))
-        names = {a.get('name') for a in release.get('assets', []) if a.get('browser_download_url')}
+        names = {a.get('name') for a in release.get('assets', []) if asset_url(a)}
         complete = {ASSET_NAME, PLAYER_ASSET_NAME}.issubset(names)
         self.change.setEnabled(complete and tag.lstrip('vV') != VERSION)
         self.change.setText(tag + ' に変更')

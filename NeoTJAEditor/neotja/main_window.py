@@ -4280,7 +4280,7 @@ class MainWindow(QMainWindow):
 
     def open_version_change(self):
         from neotja.dialogs.version_change_dialog import VersionChangeDialog
-        from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME
+        from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME, asset_url
         dialog = VersionChangeDialog(self)
         if not dialog.exec() or not dialog.selected_release:
             return
@@ -4292,7 +4292,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'バージョン変更', '録画を終了してから変更してください。')
             return
         release = dialog.selected_release
-        urls = {a.get('name'): a.get('browser_download_url', '')
+        # 鍵があれば API の URL(非公開でも落とせる)、無ければ公開の URL。
+        urls = {a.get('name'): asset_url(a)
                 for a in release.get('assets', [])}
         if not urls.get(ASSET_NAME) or not urls.get(PLAYER_ASSET_NAME):
             return

@@ -62,3 +62,61 @@ def write_version_file(name: str, description: str, version: str,
     with open(path, "w", encoding="utf-8") as f:
         f.write(str(info))
     return path
+
+
+# ---------------------------------------------------------------------------
+# 更新用の鍵(非公開リポジトリから更新を取るためのアクセストークン)
+#
+# 鍵はリポジトリに入れない。組み立てる人の手元にだけ置く:
+#   - NeoTJAEditor/update_token.txt に1行で書く(gitignore 済み)か、
+#   - 環境変数 NEOTJA_UPDATE_TOKEN に入れる。
+# どちらも無ければ鍵なしの exe になる(公開リポジトリのうちはそれで動く)。
+#
+# ここで neotja/_update_token.py(gitignore 済み)を作り、spec がそれを積む。
+# 難読化(XOR + base64)は「ぱっと見で読めない」程度のもので、exe を持って
+# いる人なら誰でも取り出せる。なので鍵は必ず
+#   fine-grained / このリポジトリだけ / Contents: Read-only
+# のものにすること。
+# ---------------------------------------------------------------------------
+
+TOKEN_FILE = "update_token.txt"
+TOKEN_MODULE = os.path.join("neotja", "_update_token.py")
+TOKEN_ENV = "NEOTJA_UPDATE_TOKEN"
+
+
+def _read_token(spec_dir: str) -> str:
+    path = os.path.join(spec_dir, TOKEN_FILE)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    return os.environ.get(TOKEN_ENV, "").strip()
+
+
+def write_update_token(spec_dir: str) -> bool:
+    """鍵があれば neotja/_update_token.py を作って True。無ければ古いものを消して False。
+
+    **古いものを消すのが大事。** 前の組み立てで作られたまま残っていると、
+    鍵を外したつもりでも積まれてしまう。鍵そのものは表示しない。"""
+    import base64
+    import secrets
+
+    module = os.path.join(spec_dir, TOKEN_MODULE)
+    token = _read_token(spec_dir)
+    if not token:
+        if os.path.exists(module):
+            os.remove(module)
+        print("[spec] 更新用の鍵が無いので、鍵なしで組み立てます(公開リポジトリ向け)")
+        return False
+    key = secrets.token_hex(16)
+    raw = token.encode("utf-8")
+    k = key.encode("ascii")
+    data = base64.b64encode(bytes(b ^ k[i % len(k)] for i, b in enumerate(raw))).decode("ascii")
+    with open(module, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# 組み立て時に build_version.write_update_token が作るファイル。\n"
+                "# コミットしないこと(.gitignore 済み)。難読化はぱっと見よけだけ。\n"
+                "KEY = %r\nDATA = %r\n" % (key, data))
+    print("[spec] 更新用の鍵を積みます(%d 文字)" % len(token))
+    return True

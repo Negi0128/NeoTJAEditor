@@ -4,7 +4,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath(SPECPATH))
-from build_version import write_version_file  # noqa: E402
+from build_version import write_update_token, write_version_file  # noqa: E402
 from neotja.constants import VERSION          # noqa: E402
 
 import imageio_ffmpeg
@@ -102,6 +102,11 @@ _tunnel_datas = [(_tunnel_exe, 'tools')] if os.path.exists(_tunnel_exe) else []
 if not _tunnel_datas:
     print('[spec] tools/cloudflared.exe が無いので、合作はLANのみになります')
 
+# 非公開リポジトリから更新を取るための鍵。update_token.txt(または環境変数
+# NEOTJA_UPDATE_TOKEN)があれば neotja/_update_token.py を作って積む。無くても
+# 組み立ては通り、鍵なしの exe になる(build_version.py の説明を参照)。
+_token_imports = ['neotja._update_token'] if write_update_token(SPECPATH) else []
+
 a = Analysis(
     ['neotja/__main__.py'],
     pathex=[],
@@ -123,7 +128,7 @@ a = Analysis(
         'PySide6.QtWidgets',
         'PySide6.QtMultimedia',
         'imageio_ffmpeg',
-    ] + collect_submodules('yt_dlp'),
+    ] + _token_imports + collect_submodules('yt_dlp'),
     hookspath=[],
     hooksconfig={},
     # **PySide6 より先に**記録の仕掛けを掛ける。ここに書いたものは
