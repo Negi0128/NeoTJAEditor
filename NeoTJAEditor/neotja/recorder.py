@@ -128,23 +128,44 @@ def chart_end_seconds(preview_data, offset, fallback=0.0):
     return max(0.0, last_t + bar_len - float(offset))
 
 
-#: 曲全体を録るときに、終わりのあとへ足す秒数。Player の再生(PlayerCore の
-#: postroll_sec)と同じ 5 秒。
-RECORD_TAIL_SEC = 5.0
+def base_bpm(preview_data):
+    """譜面の基本BPM。ヘッダの BPM: を使い、無ければ譜面の頭の BPM、
+    それも無ければ 120。"""
+    data = preview_data or {}
+    try:
+        v = float(data.get("header_bpm") or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v > 0:
+        return v
+    bars = data.get("bar_times") or []
+    try:
+        v = float(bars[0][1]) if bars and len(bars[0]) > 1 else 0.0
+    except (TypeError, ValueError, IndexError):
+        v = 0.0
+    return v if v > 0 else 120.0
+
+
+def record_tail_seconds(preview_data):
+    """曲全体を録るとき、最後の小節のあとへ足す余白(秒)。基本BPMの
+    4/4 拍子 1 小節ぶん(240 / BPM)。途中の #BPMCHANGE や #MEASURE は見ない。"""
+    return 240.0 / base_bpm(preview_data)
 
 
 def full_record_end(preview_data, offset, song_seconds):
-    """曲全体を録るときの終わり(音源時刻)。Player と同じ決め方にする
-    (利用者の指定 2026-11-13): 音源と譜面の**遅いほう**が終わってから
-    RECORD_TAIL_SEC 秒。
+    """曲全体を録るときの終わり(音源時刻)。
 
-    以前は譜面の終わりで切っていて、後奏の途中でぶつ切りになっていた。逆に
-    譜面のほうが長い(音源が途中で切れている等)ときは譜面の終わりまで録る。
-    曲が終わったあとは無音で、画面はそのまま流れ続ける(prepare_recording
-    が音源の後ろへ無音を継ぎ足す)。"""
+    利用者の指定 2026-11-15: 最後の小節が終わってから、基本BPM(ヘッダの
+    BPM:)で 1 小節ぶん(240 / BPM 秒)を余白として足したところで終わる。
+
+    音源の長さでは延ばさない。曲のほうが長ければ(後奏など)そこで切れる。
+    譜面のほうが長い(音源が途中で切れている等)ときは、曲が終わったあとは
+    無音で画面はそのまま流れる(prepare_recording が音源の後ろへ無音を
+    継ぎ足す)。譜面の終わりが求められない(小節が無い)ときだけ、音源の
+    長さを譜面の終わりの代わりに使う。"""
     song = max(0.0, float(song_seconds or 0.0))
     chart = chart_end_seconds(preview_data, offset, fallback=song)
-    return max(song, chart) + RECORD_TAIL_SEC
+    return max(0.0, chart) + record_tail_seconds(preview_data)
 
 
 def make_offline_widget(preview_data, offset, se_text_enabled=True):

@@ -1182,10 +1182,13 @@ class TJACourseAnalyzer:
             target if target is not None else course_bounds[0])
 
         bpm = Decimal("120")
+        # ヘッダの BPM:(書いてなければ None)。録画の最後の余白(1小節)に使う。
+        header_bpm = None
         for l in lines:
             if l.startswith("BPM:"):
                 try:
                     bpm = Decimal(l[4:].strip())
+                    header_bpm = float(bpm)
                 except Exception:
                     pass
                 break
@@ -1646,6 +1649,8 @@ class TJACourseAnalyzer:
             "roll_hit_speed": float(self.config_data.get("roll_speed", 45)),
             # 曲名(録画画面の右上に出す)。ヘッダは曲に1つなので素直に拾う。
             "title": _header_value(content, "TITLE"),
+            # ヘッダの BPM:(基本BPM)。無ければ None。
+            "header_bpm": header_bpm if header_bpm and header_bpm > 0 else None,
             "bar_times": [(float(t), float(bpm_), float(sc), bool(vis)) for t, bpm_, sc, vis in bar_times],
             # bar_times と同じ並びの「その小節が始まる行番号(1始まり)」。
             # 譜面プレビューのチェックポイントをエディタの行と結び付けるのに使う。

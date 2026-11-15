@@ -308,9 +308,10 @@ class RecordDialog(QDialog):
         #
         # 区間で最終小節を選んだときの終わりに使う。
         self._chart_end_sec = self._compute_chart_end(offset, song_seconds)
-        # 曲全体を録るときの終わり。Player と同じく、音源と譜面の遅いほうが
-        # 終わってから 5 秒(recorder.full_record_end、利用者の指定
-        # 2026-11-13)。曲が終わったあとは無音で、画面はそのまま流れる。
+        # 曲全体を録るときの終わり。最後の小節が終わってから、基本BPMの
+        # 1 小節ぶん(240/BPM 秒)を足したところ(recorder.full_record_end、
+        # 利用者の指定 2026-11-15)。音源の長さでは延ばさない。曲が先に
+        # 終わったら残りは無音で、画面はそのまま流れる。
         self._full_end_sec = recorder.full_record_end(
             self._preview, offset, song_seconds)
 
@@ -319,7 +320,8 @@ class RecordDialog(QDialog):
         head = QLabel(
             f"対象コース: {course}    曲の長さ: {song_seconds:.1f} 秒"
             f"    譜面の長さ: {self._chart_end_sec:.1f} 秒"
-            f"    録画: {self._full_end_sec:.1f} 秒まで")
+            f"    録画: {self._full_end_sec:.1f} 秒まで"
+            f"(譜面の終わり + 1 小節 {recorder.record_tail_seconds(self._preview):.1f} 秒)")
         head.setStyleSheet("font-weight: bold;")
         layout.addWidget(head)
 
@@ -724,11 +726,10 @@ class RecordDialog(QDialog):
     def _range_secs(self):
         """書き出す区間を音源時刻の (start_sec, end_sec) で返す。
 
-        全体のときは (0.0, 音源と譜面の遅いほう + 5 秒)。Player の再生と
-        同じ終わり方(recorder.full_record_end)。以前は譜面の終わりで切って
-        いたので、後奏の途中でぶつ切りになっていた。
+        全体のときは (0.0, 最後の小節の終わり + 基本BPMの 1 小節ぶん)
+        (recorder.full_record_end)。音源がそれより長くてもそこで切る。
 
-        区間を選んだときは、その区間のまま(+5 秒は足さない)。"""
+        区間を選んだときは、その区間のまま(余白は足さない)。"""
         if self._is_full_range():
             return 0.0, self._full_end_sec
         s = self.sp_start.value()
