@@ -3451,6 +3451,10 @@ class MainWindow(QMainWindow):
                     self.collab_stop()
                 except Exception:  # noqa: BLE001
                     pass
+            # Discord の表示を消す(切るだけでも消えるが、待たずに確実に)。
+            if getattr(self, "_discord", None) is not None:
+                self._discord.stop()
+                self._discord = None
             event.accept()
         else:
             event.ignore()
@@ -5714,6 +5718,19 @@ class MainWindow(QMainWindow):
                               restore_measure=current_measure,
                               restore_scroll=current_scroll).exec()
 
+    def start_discord_presence(self):
+        """Discord の「プレイ中」表示を始める。起動の入口(__main__)からだけ
+        呼ぶ — テストが MainWindow を作るたびに利用者の Discord へ送らないため。"""
+        from neotja.discord_presence import DiscordPresence
+        self._discord = DiscordPresence()
+        self._sync_discord_presence()
+
+    def _sync_discord_presence(self):
+        d = getattr(self, "_discord", None)
+        if d is not None:
+            d.update(self.config_data.get("discord_presence", True),
+                     self.config_data.get("discord_show_editing", True))
+
     def open_settings(self):
         from neotja.dialogs.settings_dialog import SettingsDialog
         prev_device = self.config_data.get("audio_output_device", "")
@@ -5731,6 +5748,7 @@ class MainWindow(QMainWindow):
             self.preview_dock.refresh_theme()
             self.start_screen.refresh_theme()
             self.preview_dock.refresh_nameplate()
+            self._sync_discord_presence()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))
             self._apply_wireless_offset()
             # 出力デバイスを変えたときだけ開き直す(結果はプレビュー側が表示する)。

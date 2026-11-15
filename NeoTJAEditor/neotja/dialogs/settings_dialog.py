@@ -438,6 +438,20 @@ class SettingsDialog(QDialog):
             "絵や音がおかしいとき、素材を差し替えても反映されないときに"
             "お試しください。"))
 
+        # --- Discord ---
+        form = self._group(outer, "Discord")
+        self.discord_check = QCheckBox("Discord に「NeoTJAEditor をプレイ中」と表示する")
+        self.discord_check.setChecked(cfg.get("discord_presence", True))
+        form.addRow(self.discord_check)
+        self.discord_editing_check = QCheckBox("その下に「作譜中」と表示する")
+        self.discord_editing_check.setChecked(cfg.get("discord_show_editing", True))
+        self.discord_editing_check.setEnabled(self.discord_check.isChecked())
+        self.discord_check.toggled.connect(self.discord_editing_check.setEnabled)
+        form.addRow(self.discord_editing_check)
+        form.addRow(self._hint(
+            "PC で Discord が起動しているときだけ表示されます。"
+            "曲名や難易度は送りません。"))
+
         # --- その他 ---
         form = self._group(outer, "その他")
         self.check_updates_check = QCheckBox("起動時に自動で更新を確認する")
@@ -1232,6 +1246,8 @@ class SettingsDialog(QDialog):
         cfg["record_output_dir"] = self.rec_dir_edit.text()
         cfg["system_dir"] = self.system_dir_edit.text()
         cfg["warn_missing_system"] = self.warn_missing_system_check.isChecked()
+        cfg["discord_presence"] = self.discord_check.isChecked()
+        cfg["discord_show_editing"] = self.discord_editing_check.isChecked()
         cfg["hit_sound_don_path"] = self.hit_don_edit.text()
         cfg["hit_sound_ka_path"] = self.hit_ka_edit.text()
         cfg["hit_sound_use_custom"] = self.hit_custom_check.isChecked()

@@ -78,6 +78,8 @@ _SETTINGS_KEYS = (
     # 新規作成の窓の「BPM自動入力」「OFFSET自動入力」。default_settings() と
     # 両方に要る(片方だけだと次の起動で覚えた選択が戻ってしまう)。
     "new_project_auto_bpm", "new_project_auto_offset",
+    # Discord の「プレイ中」表示。default_settings() と両方に要る。
+    "discord_presence", "discord_show_editing",
 )
 
 
@@ -202,6 +204,11 @@ def default_settings() -> dict:
         # (利用者の指定 2026-11-13)。既定はどちらも入れる。
         "new_project_auto_bpm": True,
         "new_project_auto_offset": True,
+        # Discord に「NeoTJAEditor をプレイ中」と出すか、その下に「作譜中」と
+        # 出すか(利用者の指定 2026-11-15。どちらも既定オン)。曲名は設定に
+        # 関わらず送らない(neotja/discord_presence.py)。
+        "discord_presence": True,
+        "discord_show_editing": True,
         "check_updates_on_startup": True,
         "auto_save_enabled": False,
         "hit_sound_don_path": "",

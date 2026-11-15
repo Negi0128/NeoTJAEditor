@@ -245,6 +245,7 @@ def main():
     _prepare_skin(cfg)
     win = MainWindow(app)
     win.show()
+    win.start_discord_presence()
     if os.environ.get("NEOTJA_CRASH_SELFTEST") == "1":
         # 窓が出てから落とす。import の途中ではなく、ふだん落ちているのと
         # 同じ「Qt が回っている最中」で確かめたいため。
