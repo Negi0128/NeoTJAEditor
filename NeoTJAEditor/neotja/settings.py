@@ -72,6 +72,9 @@ _SETTINGS_KEYS = (
     "nameplate_dan_dx", "nameplate_dan_dy", "nameplate_dan_size",
     "nameplate_title_image_dx", "nameplate_title_image_dy",
     "nameplate_title_image_dw", "nameplate_title_image_dh",
+    # 保存したネームプレートの一覧と、選んでいる番号(neotja/nameplate_profiles.py)。
+    # これも default_settings() と両方に要る — 片方だけだと再起動で一覧が消える。
+    "nameplate_profiles", "nameplate_profile_index",
     # 新規作成の窓の「BPM自動入力」「OFFSET自動入力」。default_settings() と
     # 両方に要る(片方だけだと次の起動で覚えた選択が戻ってしまう)。
     "new_project_auto_bpm", "new_project_auto_offset",
@@ -134,9 +137,8 @@ def default_settings() -> dict:
         # 毎回同じダイアログを見せても読まれないだけなので、逃げ道を用意した。
         # 環境設定「エディタ・ツール」タブの素材の枠から戻せる。
         "warn_missing_system": True,
-        # --- ネームプレート(ゲーム画面の左下の名前板) ---
-        # 中身はここが正。TNDE 形式の NamePlate.json は環境設定の
-        # 「読み込む」から取り込む(load_nameplate)。
+        # --- ネームプレート(ゲーム画面の左下のネームプレート) ---
+        # 中身はここが正。
         "nameplate_name": "どんちゃん",
         "nameplate_title": "NeoTJAPlayer",
         # 称号バーの色。NAMEPLATE_TITLE_TYPES の値。
@@ -168,6 +170,13 @@ def default_settings() -> dict:
         "nameplate_dan_dx": 0,
         "nameplate_dan_dy": 0,
         "nameplate_dan_size": 15,
+        # 保存したネームプレートの一覧。1枚は {"label": 名前, 上の nameplate_* の値}。
+        # 上の平らなキーが「いま使っている1枚」で、ゲーム画面はそちらだけを
+        # 読む。こちらは切り替え用の控え。空なら読み込みのときに、いまの
+        # ネームプレートから1枚作る(nameplate_profiles.ensure_profiles)。
+        "nameplate_profiles": [],
+        # 環境設定の「保存したネームプレート」で選んでいる番号。
+        "nameplate_profile_index": 0,
         # 位置合わせ用のキー(Ctrl+Shift+…)を効かせるか。ふだんは切っておく。
         # 作る側が絵の位置を詰めるための道具で、遊ぶ人には要らないため。
         "show_tuner": False,
@@ -573,6 +582,13 @@ def load_settings() -> dict:
     # しまい、印だけが付いて位置が古いまま残る。
     if isinstance(loaded, dict):
         _migrate_art_pos(data, loaded)
+    # ネームプレートの一覧も控えを取ったあとで整える(理由は上と同じ)。この機能より
+    # 前の設定には一覧が無いので、いまのネームプレートを1枚目として取っておく。
+    try:
+        from neotja import nameplate_profiles
+        nameplate_profiles.ensure_profiles(data)
+    except Exception:  # noqa: BLE001
+        pass   # 一覧が作れなくても、いま使っているネームプレートは平らなキーで残る
     return data
 
 

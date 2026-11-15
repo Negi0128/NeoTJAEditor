@@ -1,11 +1,16 @@
+import copy
+import json
+from pathlib import Path
+
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from neotja import nameplate_profiles as np_mod
 from neotja import settings as settings_mod
 from neotja import theme as theme_mod
 
@@ -609,7 +614,7 @@ class SettingsDialog(QDialog):
         return dx, dy, size
 
     def _build_nameplate_tab(self):
-        """ゲーム画面の左下に出る名前板の中身。
+        """ゲーム画面の左下に出るネームプレートの中身。
 
         並びは実際の絵と同じで、上から 称号 → 名前 → 段位。"""
         w, outer = self._tab_body()
@@ -618,6 +623,37 @@ class SettingsDialog(QDialog):
 
         def val(key):
             return cfg.get(key, d[key])
+
+        # 保存したネームプレート。いじるのはこの画面の中の控え(_np_profiles)で、
+        # 設定へ書くのは「保存して適用」のとき。キャンセルで閉じたら、
+        # 保存・削除・読み込みも含めてすべて無かったことになる。
+        np_mod.ensure_profiles(cfg)
+        self._np_profiles = copy.deepcopy(cfg["nameplate_profiles"])
+        self._np_loading = False
+        form = self._group(outer, "保存したネームプレート")
+        self.np_profile_combo = QComboBox()
+        form.addRow("ネームプレート", self.np_profile_combo)
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        for text, slot in (("保存", self._np_save_profile),
+                           ("別名で保存", self._np_save_profile_as),
+                           ("削除", self._np_delete_profile),
+                           ("書き出す", self._np_export_profile),
+                           ("読み込む", self._np_import_profiles)):
+            btn = QPushButton(text)
+            # clicked の bool を捨てる(_path_row と同じ理由)。
+            btn.clicked.connect(lambda _=False, f=slot: f())
+            row_layout.addWidget(btn)
+        row_layout.addStretch()
+        form.addRow(row)
+        form.addRow(self._hint(
+            "選ぶと、そのネームプレートの中身が下の欄に入ります。下の欄を変えて"
+            "「保存」か「保存して適用」を押すと、選んでいるネームプレートに上書きされ、"
+            "ゲーム画面にもそれが出ます。書き出すのも、いま下の欄に入っている中身です。"))
+        self._np_refresh_profile_combo(int(cfg.get("nameplate_profile_index", 0)))
+        self.np_profile_combo.currentIndexChanged.connect(
+            self._np_on_profile_selected)
 
         # 出来上がりの見本。入力のたびに描き直す。数値をいじって窓を開き直す
         # までどう出るか分からない、という往復を無くすため。
@@ -640,7 +676,7 @@ class SettingsDialog(QDialog):
         btn_dir.clicked.connect(self._open_nameplate_dir)
         form.addRow(btn_dir)
         form.addRow(self._hint(
-            "名前板・称号バー・段位バッジの絵は NamePlate.png から切り出して"
+            "ネームプレート・称号バー・段位バッジの絵は NamePlate.png から切り出して"
             "います。太鼓さん次郎のスキンによっては入っていないので、"
             "このフォルダに自分で置くこともできます"
             "(形式は 220x1189 の縦長の部品シート)。"))
@@ -734,6 +770,160 @@ class SettingsDialog(QDialog):
         path = settings_mod.nameplate_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
+    # ---- 保存したネームプレート ------------------------------------------------
+
+    def _np_refresh_profile_combo(self, index: int):
+        """選ぶ欄を控えの一覧から作り直す。入力欄へは読み込まない
+        (作り直しのたびに、いじりかけの欄が上書きされないように)。"""
+        combo = self.np_profile_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for prof in self._np_profiles:
+            combo.addItem(prof["label"])
+        combo.setCurrentIndex(max(0, min(len(self._np_profiles) - 1, index)))
+        combo.blockSignals(False)
+
+    def _np_on_profile_selected(self, index: int):
+        if 0 <= index < len(self._np_profiles):
+            self._np_apply_values(np_mod.values_of(self._np_profiles[index]))
+
+    def _np_apply_values(self, values: dict):
+        """ネームプレートの値を下の入力欄へ入れる。見本の描き直しは最後に1回だけ
+        (欄ごとに描き直すと20回描くことになるため)。"""
+        def set_combo(combo, data):
+            i = combo.findData(data)
+            combo.setCurrentIndex(max(0, i))
+
+        self._np_loading = True
+        try:
+            self.np_title_edit.setText(values["nameplate_title"])
+            set_combo(self.np_title_type_combo, values["nameplate_title_type"])
+            self.np_title_image_edit.setText(values["nameplate_title_image"])
+            self.np_name_edit.setText(values["nameplate_name"])
+            set_combo(self.np_dan_combo, values["nameplate_dan"])
+            set_combo(self.np_dan_type_combo, values["nameplate_dan_type"])
+            set_combo(self.np_dan_text_combo, values["nameplate_dan_text_color"])
+            for spin, key in (
+                    (self.np_title_img_dx, "nameplate_title_image_dx"),
+                    (self.np_title_img_dy, "nameplate_title_image_dy"),
+                    (self.np_title_img_dw, "nameplate_title_image_dw"),
+                    (self.np_title_img_dh, "nameplate_title_image_dh"),
+                    (self.np_title_dx, "nameplate_title_dx"),
+                    (self.np_title_dy, "nameplate_title_dy"),
+                    (self.np_title_size, "nameplate_title_size"),
+                    (self.np_name_dx, "nameplate_name_dx"),
+                    (self.np_name_dy, "nameplate_name_dy"),
+                    (self.np_name_size, "nameplate_name_size"),
+                    (self.np_dan_dx, "nameplate_dan_dx"),
+                    (self.np_dan_dy, "nameplate_dan_dy"),
+                    (self.np_dan_size, "nameplate_dan_size")):
+                spin.setValue(int(values[key]))
+        finally:
+            self._np_loading = False
+        self._update_nameplate_preview()
+
+    def _np_save_profile(self):
+        """選んでいるネームプレートを、いまの入力欄の中身で上書きする。"""
+        i = self.np_profile_combo.currentIndex()
+        if not 0 <= i < len(self._np_profiles):
+            return
+        label = self._np_profiles[i]["label"]
+        self._np_profiles[i] = np_mod.profile_from_values(
+            label, self._nameplate_values())
+
+    def _np_save_profile_as(self):
+        """いまの入力欄の中身を、名前を付けて新しい1枚として足す。"""
+        label, ok = QInputDialog.getText(
+            self, "別名で保存", "ネームプレートの名前:", QLineEdit.Normal,
+            self.np_name_edit.text())
+        if not ok:
+            return
+        label = np_mod.clean_label(label, "")
+        if not label:
+            return
+        label = np_mod.unique_label(
+            label, [p["label"] for p in self._np_profiles])
+        self._np_profiles.append(
+            np_mod.profile_from_values(label, self._nameplate_values()))
+        # 入力欄はすでに同じ中身なので、読み込み直さずに選ぶだけにする。
+        self._np_refresh_profile_combo(len(self._np_profiles) - 1)
+
+    def _np_delete_profile(self):
+        i = self.np_profile_combo.currentIndex()
+        if not 0 <= i < len(self._np_profiles):
+            return
+        if len(self._np_profiles) <= 1:
+            # 一覧が空になると「選んでいるもの」が無くなり、保存や書き出しの
+            # 行き先が決まらないので、最後の1枚は残す。
+            QMessageBox.information(
+                self, "削除できません",
+                "最後の1枚は削除できません。"
+                "別のネームプレートを作ってから削除してください。")
+            return
+        label = self._np_profiles[i]["label"]
+        ans = QMessageBox.question(
+            self, "確認",
+            "ネームプレート「%s」を一覧から削除しますか？%s%s"
+            "(「保存して適用」を押すまでは、キャンセルで元に戻せます)"
+            % (label, LF, LF))
+        if ans != QMessageBox.Yes:
+            return
+        del self._np_profiles[i]
+        new_i = max(0, i - 1)
+        self._np_refresh_profile_combo(new_i)
+        self._np_on_profile_selected(new_i)
+
+    def _np_export_profile(self):
+        """選んでいるネームプレートを .json に書き出す(別の PC へ持っていく用)。"""
+        i = self.np_profile_combo.currentIndex()
+        if not 0 <= i < len(self._np_profiles):
+            return
+        # 下の欄の手直しも含めて渡す(「保存」を押し忘れて古い中身を
+        # 渡してしまわないように)。
+        self._np_save_profile()
+        prof = self._np_profiles[i]
+        start = str(Path.home() / (np_mod.safe_file_stem(prof["label"]) + ".json"))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "ネームプレートを書き出す", start, "ネームプレート (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(np_mod.export_json(prof))
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "書き出せませんでした",
+                "ファイルを書けませんでした。%s%s" % (LF, exc))
+
+    def _np_import_profiles(self):
+        """書き出した .json を読み、新しいネームプレートとして一覧へ足す。
+        手元のネームプレートは上書きしない。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "ネームプレートを読み込む", "", "ネームプレート (*.json);;すべてのファイル (*)")
+        if not path:
+            return
+        try:
+            size = Path(path).stat().st_size
+            if size > np_mod.FILE_MAX_BYTES:
+                raise np_mod.NameplateImportError("ファイルが大きすぎます。")
+            with open(path, "rb") as f:
+                data = f.read()
+            added = np_mod.import_plates(
+                data, [p["label"] for p in self._np_profiles],
+                settings_mod.nameplate_dir())
+        except np_mod.NameplateImportError as exc:
+            QMessageBox.warning(self, "読み込めませんでした", str(exc))
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self, "読み込めませんでした",
+                "ファイルを読めませんでした。%s%s" % (LF, exc))
+            return
+        first = len(self._np_profiles)
+        self._np_profiles.extend(added)
+        self._np_refresh_profile_combo(first)
+        self._np_on_profile_selected(first)
+
     def _nameplate_values(self):
         """この画面の入力欄から、設定と同じ形の辞書を作る。"""
         return {
@@ -765,6 +955,8 @@ class SettingsDialog(QDialog):
         部品シート(NamePlate.png)が見つからないときは、下の設定が効かない
         ことを伝えて入力欄を灰色にする。効かない値をいじれてしまうと
         「設定が悪いのか、そもそも無効なのか」が分からなくなるため。"""
+        if getattr(self, "_np_loading", False):
+            return   # ネームプレートをまとめて入れている途中。最後に1回だけ描く
         have_sheet = True
         try:
             from neotja import game_screen as gs_mod
@@ -1060,6 +1252,11 @@ class SettingsDialog(QDialog):
         # 見本を描くのに使っている辞書をそのまま入れる。二か所で並べると
         # 片方に足し忘れて「見本では変わるのに保存されない」ことになる。
         cfg.update(self._nameplate_values())
+        # 「保存して適用」= 選んでいるネームプレートにも上書きする(利用者に
+        # 任された 2026-11-15。押したのに一覧の中身が古いまま、を無くす)。
+        self._np_save_profile()
+        cfg["nameplate_profiles"] = copy.deepcopy(self._np_profiles)
+        cfg["nameplate_profile_index"] = max(0, self.np_profile_combo.currentIndex())
         cfg["show_tuner"] = self.np_tuner_check.isChecked()
         cfg["arrange_ref"] = self.arrange_ref_check.isChecked()
         # 画面へ映すのは呼び出し元(PreviewDock.refresh_nameplate)がやる。
