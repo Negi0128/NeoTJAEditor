@@ -29,6 +29,9 @@ _SETTINGS_KEYS = (
     # 読み戻せないと意味が無い** — Editor 側は最新なので「更新の確認」は
     # 「最新です」と答えるだけで、Player を取りに行く道が無くなる。
     "player_update_pending",
+    # 同居 Player(v15.5〜)の選曲: 最近開いた楽曲・保存済み楽曲(元ファイルへの
+    # 参照)・登録フォルダ。default_settings() と両方に要る。
+    "player_recent", "player_saved", "player_folders",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
@@ -339,6 +342,12 @@ def default_settings() -> dict:
         # 最近開いた/保存したファイルのパス(新しい順、最大10件)。
         "recent_files": [],
         "player_update_pending": False,
+        # 同居 Player の選曲。player_recent は [{"path", "title", "opened"}]
+        # 新しい順、player_saved は [{"path", "title"}](参照だけ。外しても
+        # 元の TJA は消さない)、player_folders はフォルダのパス。
+        "player_recent": [],
+        "player_saved": [],
+        "player_folders": [],
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
         # base64 文字列(QMainWindow.saveGeometry / QSplitter.saveState)。空文字
         # なら既定サイズで開く。

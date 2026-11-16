@@ -10,7 +10,7 @@ import traceback
 from PySide6.QtCore import Qt, QEvent, QTimer, QByteArray, QThread, Signal, QPointF
 from PySide6.QtGui import (
     QFont, QFontInfo, QKeySequence, QShortcut, QTextCursor,
-    QPainter, QPixmap, QColor, QBrush, QRadialGradient,
+    QPainter, QPixmap, QColor, QBrush, QRadialGradient, QIcon,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -870,6 +870,10 @@ class MainWindow(QMainWindow):
         self.start_screen.help_requested.connect(self.open_help)
         self.start_screen.settings_requested.connect(self.open_settings)
         self.start_screen.file_dropped.connect(self._open_dropped)
+        self.start_screen.player_requested.connect(self._show_player)
+        # 同居 Player(neotja/player/host.py)。初めて「Player を起動」を
+        # 押したときに作って central_stack へ足す。
+        self.player_page = None
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.start_screen)   # 0
         self.central_stack.addWidget(splitter)            # 1
@@ -892,6 +896,10 @@ class MainWindow(QMainWindow):
         """起動画面を片付けて分割画面へ。開く/新規作成が決まったときに呼ぶ。
         何度呼んでも害は無い(すでに分割画面なら何もしない)。"""
         stack = getattr(self, "central_stack", None)
+        if self.is_player_visible():
+            # Player の最中によそ(2つ目の起動で渡された TJA など)から
+            # 開くことになった。Player で隠したものを先に戻す。
+            self._restore_from_player()
         if stack is not None and stack.currentIndex() != 1:
             stack.setCurrentIndex(1)
         tb = getattr(self, "toolbar_top", None)
@@ -901,6 +909,64 @@ class MainWindow(QMainWindow):
     def is_start_screen_visible(self):
         stack = getattr(self, "central_stack", None)
         return stack is not None and stack.currentIndex() == 0
+
+    # ------------------------------------------------------------------
+    # 同居 Player(v15.5〜)
+    # ------------------------------------------------------------------
+    def is_player_visible(self):
+        host = getattr(self, "player_page", None)
+        stack = getattr(self, "central_stack", None)
+        return (host is not None and stack is not None
+                and stack.currentWidget() is host)
+
+    def _show_player(self):
+        """ランチャーから Player へ。同じ窓の中央を差し替える。
+
+        メニューと上のツールバーは Editor のものなので隠す。窓全体に張った
+        キー(Ctrl+S・Ctrl+Z・F1〜F3 など)は各ハンドラの頭で
+        is_player_visible() を見て何もしない。"""
+        host = self.player_page
+        if host is None:
+            from neotja.player.host import PlayerHost
+            host = PlayerHost(self.config_data,
+                              lambda: settings_mod.save_settings(self.config_data))
+            host.back_requested.connect(self._leave_player)
+            self.player_page = host
+            self.central_stack.addWidget(host)
+        # Editor の再生が鳴っていたら止める(Player の音と重ねない)。
+        try:
+            audio = self.preview_dock.audio
+            if audio.is_playing():
+                audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        self.menuBar().hide()
+        self.toolbar_top.hide()
+        if getattr(self, "_editor_window_icon", None) is None:
+            self._editor_window_icon = self.windowIcon()
+        try:
+            ip = settings_mod.icon_path(True)
+            if ip and os.path.exists(str(ip)):
+                self.setWindowIcon(QIcon(str(ip)))
+        except Exception:  # noqa: BLE001
+            pass
+        self.central_stack.setCurrentWidget(host)
+        host.on_shown()
+        self.setWindowTitle("NeoTJAPlayer")
+
+    def _restore_from_player(self):
+        """Player で隠したもの(メニュー・アイコン)を戻す。"""
+        self.menuBar().show()
+        icon = getattr(self, "_editor_window_icon", None)
+        if icon is not None:
+            self.setWindowIcon(icon)
+            self._editor_window_icon = None
+
+    def _leave_player(self):
+        """Player の「戻る」。ランチャーへ。"""
+        self._restore_from_player()
+        self._show_start_screen()
+        self._refresh_title()
 
     def _fit_player_to_pane(self):
         """右ペインの幅と高さに合わせて再生画面の倍率を決める(原寸が上限)。
@@ -1975,6 +2041,8 @@ class MainWindow(QMainWindow):
         以前は「プレビューが閉じていれば開く、開いていれば打音切替」だった。
         v15 では再生画面が右ペインに埋め込みで常にあるので、開く側の分岐は
         通らない。打音切替だけにする。"""
+        if self.is_player_visible():
+            return
         self.preview_dock.toggle_hit_sounds()
 
     def _build_menu(self):
@@ -2082,7 +2150,7 @@ class MainWindow(QMainWindow):
         # 2026-11-05)。F1 と同じ ApplicationShortcut なら別窓にも届く。
         sc_save = QShortcut(QKeySequence("Ctrl+S"), self.editor)
         sc_save.setContext(Qt.ApplicationShortcut)
-        sc_save.activated.connect(self.save_file)
+        sc_save.activated.connect(self._on_save_shortcut)
 
         # 取り消し / やり直しも同じ理由で届いていなかった。別窓のプレビューに
         # だけ手当てがあった(2026-09-28 の報告)ので、ここで**アプリ全体**に
@@ -2148,6 +2216,14 @@ class MainWindow(QMainWindow):
         sc_f1.setContext(Qt.ApplicationShortcut)
         sc_f1.activated.connect(self._on_f1)
 
+    def _on_save_shortcut(self):
+        """Ctrl+S。Player の最中は Editor の譜面を保存しない(見えていない
+        ものを書き換えない)。save_file 自体は終了時の確認からも呼ぶので
+        そちらは止めない。"""
+        if self.is_player_visible():
+            return
+        self.save_file()
+
     def _insert_custom(self, key):
         text = self.config_data["custom_shortcuts"].get(key, "")
         if text:
@@ -2200,6 +2276,9 @@ class MainWindow(QMainWindow):
     def _refresh_title(self):
         """タイトルを現在のファイル名から組み立て直す。末尾の [*] は Qt の
         未保存インジケータで、setWindowModified(True) のとき * になる。"""
+        if self.is_player_visible():
+            self.setWindowTitle("NeoTJAPlayer")
+            return
         base = f"{APP_NAME}  v{VERSION}"
         if self.current_file:
             base += f"  —  {os.path.basename(self.current_file)}"
@@ -3357,6 +3436,7 @@ class MainWindow(QMainWindow):
         # (二重に変わらない)。
         if (t == QEvent.MouseButtonPress
                 and event.button() in (Qt.BackButton, Qt.ForwardButton)
+                and not self.is_player_visible()
                 and self._grid_side_button(event.button())):
             return True
         # 素早く2回押すと、2回目は Press ではなく DblClick として届く。
@@ -3367,6 +3447,7 @@ class MainWindow(QMainWindow):
         # もう1段動かしてあるので、ここでは何もせず握りつぶすだけ。
         if (t == QEvent.MouseButtonDblClick
                 and event.button() in (Qt.BackButton, Qt.ForwardButton)
+                and not self.is_player_visible()
                 and self._grid_side_target() is not None):
             return True
         return super().eventFilter(obj, event)
@@ -3429,6 +3510,8 @@ class MainWindow(QMainWindow):
             for attr in ("_bpm_detect_worker", "_update_check_worker",
                          "_update_download_worker", "_new_project_chart_gen_worker"):
                 detach_worker(getattr(self, attr, None))
+            if getattr(self, "player_page", None) is not None:
+                self.player_page.shutdown()   # 選曲の見出し読みのワーカー
             # 解析スレッドは常駐なので必ずここで畳む。走行中のジョブは最長でも
             # 1 パスぶん(数百 ms)で終わるので、その完了を待ってから抜ける。
             # 待たずに破棄すると "QThread: Destroyed while thread is still
@@ -3479,6 +3562,8 @@ class MainWindow(QMainWindow):
         return d if d and os.path.isdir(d) else None
 
     def run_simulator(self, key):
+        if self.is_player_visible():
+            return
         path = self.config_data["run_config"][key]["path"]
         if path and os.path.exists(path):
             subprocess.Popen([path], env=child_env(),
@@ -3547,6 +3632,8 @@ class MainWindow(QMainWindow):
         if isinstance(fw, QLineEdit) and fw.isEnabled() and not fw.isReadOnly():
             (fw.redo if redo else fw.undo)()
             return
+        if self.is_player_visible():
+            return      # Player の最中は Editor の本文を巻き戻さない
         (self.editor.redo if redo else self.editor.undo)()
 
     def _measure_op(self, op, arg=None, pos=None):
@@ -4142,6 +4229,8 @@ class MainWindow(QMainWindow):
         self.preview_dock.refresh_theme()
         self._restyle_bottom_controls()
         self.start_screen.refresh_theme()
+        if self.player_page is not None:
+            self.player_page.refresh_theme()
 
     def _show_about(self):
         QMessageBox.information(self, "バージョン情報", f"{APP_NAME}\nVersion: {VERSION}\n\nRedesigned & Optimized Edition (PySide6)")
