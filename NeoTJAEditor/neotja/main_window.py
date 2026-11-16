@@ -606,8 +606,6 @@ class MainWindow(QMainWindow):
         # A failed update can only be reported now: the batch that applies it
         # runs after the previous process is gone.
         QTimer.singleShot(300, self._report_failed_update)
-        # 前回 Player だけ入れ替えられなかったときの拾い直し。
-        QTimer.singleShot(900, self.check_player_pending)
 
         if self.config_data.get("check_updates_on_startup", True):
             QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
@@ -2040,10 +2038,9 @@ class MainWindow(QMainWindow):
         for k in ("F2", "F3"):
             action = rm.addAction(f"{k}: {self.config_data['run_config'][k]['name']}", lambda key=k: self.run_simulator(key))
             self._run_actions[k] = action
-        rm.addSeparator()
-        rm.addAction("NeoTJAPlayer を別ウィンドウで開く", self.launch_player)
-        rm.addAction("NeoTJAPlayer を入れ直す",
-                     lambda: self._offer_player_download(repair=True))
+        # 「NeoTJAPlayer を別ウィンドウで開く」「NeoTJAPlayer を入れ直す」は
+        # v15 で外した。旧 Player(別 exe)は配らなくなり、再生画面は右ペインに
+        # 埋め込みで常にあるため(v15-design/PLAYER_REDESIGN.md 6章)。
 
         sm = mb.addMenu("設定")
         sm.addAction("環境設定...", self.open_settings)
@@ -3462,138 +3459,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Simulator launch
     # ------------------------------------------------------------------
-    def launch_player(self):
-        """NeoTJAPlayer(別プロセス)を、いま開いている譜面で起動する。
-
-        **保存済みのファイルが要る。** Player は別プロセスなので、渡せるのは
-        パスだけ。編集中(未保存)の内容は渡らない。黙って古い内容を再生すると
-        「直したはずが直っていない」と見えるので、先に保存してもらう。
-
-        コースと再生位置も渡す。鑑賞会や録画のために開くとき、また頭から
-        探し直すのは無駄なので、いま見ているところがそのまま出る。
-        """
-        if not self.current_file or not os.path.exists(self.current_file):
-            QMessageBox.information(
-                self, "NeoTJAPlayer",
-                "先に譜面を保存してください。\n\n"
-                "NeoTJAPlayer は別のプログラムなので、渡せるのは保存された"
-                "ファイルだけです。編集中の内容はそのままでは開けません。")
-            return
-        exe = self._find_player()
-        if not exe:
-            if not self._offer_player_download():
-                return
-            exe = self._find_player()
-            if not exe:
-                return
-        args = list(exe) + [self.current_file]
-        course = self._preview_course_override
-        if course:
-            args += ["--course", str(course)]
-        try:
-            at = self.preview_dock.audio.position() / 1000.0
-        except Exception:  # noqa: BLE001
-            at = 0.0
-        if at > 0.5:
-            args += ["--at", "%.3f" % at]
-        try:
-            subprocess.Popen(args, env=child_env(),
-                             cwd=self._exe_dir(exe[0]) if exe else None)
-        except OSError as exc:
-            QMessageBox.warning(self, "NeoTJAPlayer",
-                                "起動できませんでした:\n%s" % exc)
-
-    def _offer_player_download(self, repair=False):
-        """NeoTJAPlayer.exe を落とすか尋ねる。落とせたら True。
-
-        repair=True は「もう有るが古い/壊れている」ときの入れ直し。
-
-
-        **なぜここで落とすのか**: 更新で2本まとめて落とす仕組みを入れても、
-        その処理を走らせるのは利用者の環境に既に入っている**古い版**の
-        updater で、そちらは NeoTJAEditor.exe しか見ていない。つまり
-        「Player を配り始める版」への更新そのものでは Player が届かず、
-        届くのはその次の更新から。ここで拾えるようにしておかないと、
-        いま使っている人の手元にはいつまでも Player が来ない。
-
-        押した人だけが払う形なので、Player を使わない人に 84MB を
-        負わせることもない。"""
-        from neotja.updater import PlayerFetchWorker
-
-        if not getattr(sys, "frozen", False):
-            QMessageBox.information(
-                self, "NeoTJAPlayer",
-                "ソースから実行中なので、python -m neotja.player で開けます。")
-            return False
-        dest_dir = os.path.dirname(sys.executable)
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("NeoTJAPlayer")
-        box.setText(
-            ("NeoTJAPlayer が NeoTJAEditor より古いままです。" + "\n"
-             "入れ直しますか？(約 84MB)"
-             if repair else
-             "NeoTJAPlayer がまだ入っていません。" + "\n"
-             "いまダウンロードしますか？(約 84MB)")
-            + "\n\n置き場所:\n　%s" % dest_dir)
-        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        box.setDefaultButton(QMessageBox.Yes)
-        if box.exec() != QMessageBox.Yes:
-            return False
-
-        progress = QProgressDialog("NeoTJAPlayer をダウンロード中...",
-                                   "キャンセル", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        result = {"ok": False}
-        worker = PlayerFetchWorker(dest_dir, self)
-
-        def on_progress(pct):
-            if pct >= 0:
-                progress.setRange(0, 100)
-                progress.setValue(pct)
-            else:
-                progress.setRange(0, 0)
-
-        def on_ok(_path):
-            result["ok"] = True
-            # 入れ直せたので「古いまま」の印を消す。
-            if self.config_data.pop("player_update_pending", None) is not None:
-                settings_mod.save_settings(self.config_data)
-            progress.close()
-
-        def on_failed(msg):
-            progress.close()
-            # リリースページへは案内しない。本体のリポジトリを非公開にすると
-            # 利用者には開けなくなる(利用者の決定 2026-11-14)。
-            QMessageBox.warning(
-                self, "NeoTJAPlayer",
-                "ダウンロードできませんでした:\n%s\n\n"
-                "「実行 → NeoTJAPlayer を入れ直す」でやり直せます。\n"
-                "何度やっても失敗するときは、Discord で知らせてください。" % msg)
-
-        worker.progress.connect(on_progress)
-        worker.finished_ok.connect(on_ok)
-        worker.failed.connect(on_failed)
-        worker.cancelled.connect(progress.close)
-        progress.canceled.connect(worker.cancel)
-        self._player_fetch_worker = worker
-        worker.start()
-        progress.exec()
-        worker.wait(5000)
-        return result["ok"]
-
-    @staticmethod
-    def _find_player():
-        """Player の起動コマンドを組み立てる。見つからなければ空。
-
-        配布物では exe の隣に NeoTJAPlayer.exe が居る。開発中(ソースから
-        動かしているとき)は同じ Python で -m neotja.player を叩く。"""
-        if getattr(sys, "frozen", False):
-            here = os.path.dirname(sys.executable)
-            exe = os.path.join(here, "NeoTJAPlayer.exe")
-            return [exe] if os.path.exists(exe) else []
-        return [sys.executable, "-m", "neotja.player"]
+    # 旧 NeoTJAPlayer(別 exe)を起動・入れ直す入口(launch_player /
+    # _offer_player_download / _find_player)は v15 で外した。再生画面は
+    # 右ペインに埋め込んであり、別の exe を開く必要がなくなったため
+    # (v15-design/PLAYER_REDESIGN.md 6章)。手元に残った旧 Player は
+    # old_player_cleanup がごみ箱へ移す。
 
     @staticmethod
     def _exe_dir(path):
@@ -4298,31 +4168,11 @@ class MainWindow(QMainWindow):
             if line.startswith("update_exe=") or line.startswith("update_player="):
                 update_exe = line.split("=", 1)[1].strip()
 
-        # Player だけ置けなかった場合。Editor は入れ替わっているので、
-        # 「更新に失敗しました」と言ってしまうと嘘になる。
+        # Player だけ置けなかった場合(印を書くのは Player 付きの版の bat)。
+        # Editor は入れ替わっているので「更新に失敗しました」は嘘になる。
+        # v15 からは旧 Player を使わない(入れ直す入口も無い)ので、黙って
+        # 終える。残った旧 Player は old_player_cleanup がごみ箱へ移す。
         if info.startswith("player_copy_failed"):
-            # コピーできなかった = Player は前のまま。次の起動で尋ねる。
-            self.config_data["player_update_pending"] = True
-            settings_mod.save_settings(self.config_data)
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Warning)
-            box.setWindowTitle("NeoTJAPlayer を置けませんでした")
-            box.setText(
-                f"NeoTJAEditor は v{VERSION} に更新できましたが、"
-                "NeoTJAPlayer.exe を置き換えられませんでした。\n\n"
-                "更新のときに NeoTJAPlayer を開いたままにしていると、"
-                "ファイルを掴まれていて上書きできません。\n\n"
-                "ダウンロード済みのファイルは残してあるので、"
-                "NeoTJAPlayer を閉じてから手動で上書きするか、"
-                "「ヘルプ → 更新の確認」からやり直してください。")
-            box.setDetailedText(info)
-            if update_exe and os.path.exists(update_exe):
-                box.addButton("ファイルの場所を開く", QMessageBox.ActionRole)
-            box.addButton(QMessageBox.Close)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked and clicked.text().startswith("ファイル"):
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(update_exe)])
             return
 
         box = QMessageBox(self)
@@ -4345,19 +4195,6 @@ class MainWindow(QMainWindow):
         clicked = box.clickedButton()
         if clicked and clicked.text().startswith("更新ファイル"):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(update_exe)])
-
-    def check_player_pending(self):
-        """前回 Player だけ入れ替えられなかったなら、いま入れ直すか尋ねる。
-
-        **これが無いと復旧できない。** NeoTJAEditor のほうは新しくなって
-        いるので「ヘルプ → 更新の確認」は「最新です」と答えるだけで、
-        Player を取りに行かない。印を見てここから拾う。"""
-        if not self.config_data.get("player_update_pending"):
-            return
-        if not getattr(sys, "frozen", False):
-            self.config_data.pop("player_update_pending", None)
-            return
-        self._offer_player_download(repair=True)
 
     def open_version_change(self):
         from neotja.dialogs.version_change_dialog import VersionChangeDialog
@@ -4417,7 +4254,10 @@ class MainWindow(QMainWindow):
         if not asset_url:
             QMessageBox.warning(self, "更新エラー", "ダウンロード用のファイルが見つかりませんでした。")
             return
-        self._run_update_download(asset_url, player_url)
+        # 通常の更新では Player を落とさない。v15 から旧 Player は使わない
+        # ので、最新版に(何かの手違いで)載っていても隣に置く理由が無い。
+        # Player を落とすのは、旧版へ戻すとき(open_version_change)だけ。
+        self._run_update_download(asset_url)
 
     def _run_update_download(self, asset_url, player_url="", version_change=False):
         from neotja.updater import UpdateDownloadWorker, apply_update
@@ -4441,24 +4281,9 @@ class MainWindow(QMainWindow):
             # Player だけ落とせなかった場合。Editor の更新はこのまま進める
             # (落とせている以上、そちらを止める理由が無い)。片方だけ新しく
             # なることになるので、そうなったことは必ず伝える。
-            if worker.player_error:
-                # **印を残す。** これを残さないと、次に起動したとき
-                # NeoTJAEditor は最新なので「ヘルプ → 更新の確認」は
-                # 「最新です」と答えるだけで、Player を取りに行く道が
-                # どこにも無くなる(最初の版はここを取り違えていた)。
-                self.config_data["player_update_pending"] = True
-                settings_mod.save_settings(self.config_data)
-                QMessageBox.warning(
-                    self, "更新",
-                    "NeoTJAPlayer をダウンロードできませんでした。\n"
-                    "NeoTJAEditor だけを更新します。\n\n"
-                    "%s\n\n"
-                    "NeoTJAPlayer は前のままになるので、"
-                    "「実行 → NeoTJAPlayer を別ウィンドウで開く」の動きが"
-                    "エディタ側とずれることがあります。\n\n"
-                    "次の起動で入れ直すかお尋ねします。"
-                    "「実行 → NeoTJAPlayer を入れ直す」からいつでもやり直せます。"
-                    % worker.player_error)
+            # 「Player だけ落とせなかった」(worker.player_error)の案内は外した。
+            # 通常の更新では Player を落とさず、旧版へ戻すときは Player の
+            # 失敗で丸ごと止める(require_player)ので、ここへは来ない。
             # Settle the unsaved-changes question BEFORE arming the batch:
             # apply_update() starts a script that busy-waits for this PID to
             # exit. If closeEvent then vetoed the exit (Cancel is the default
