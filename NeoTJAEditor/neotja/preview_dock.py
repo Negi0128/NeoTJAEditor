@@ -631,12 +631,16 @@ class GamePreviewWindow(QWidget):
         # 統合画面(埋め込み)では全画面そのものを無くした(利用者の指定
         # 2026-11-12)。再生画面は右ペインに収まるのが前提で、F11 で窓へ
         # 出す道は要らない。キーも張らず、enter/toggle も何もしない。
+        #: この窓が自分で張ったキー(F11/Esc・位置合わせ)。操作を締めるとき
+        #: (set_controls_locked)にまとめて切る。
+        self._own_shortcuts = []
         if not self._embedded:
             for seq, fn in ((QKeySequence(Qt.Key_F11), self.toggle_fullscreen),
                             (QKeySequence(Qt.Key_Escape), self.exit_fullscreen)):
                 sc = QShortcut(seq, self)
                 sc.setContext(Qt.WindowShortcut)
                 sc.activated.connect(fn)
+                self._own_shortcuts.append(sc)
         self._build_tuner()
 
     # --- 画面を見ながらの位置合わせ (Ctrl+Shift+…) ---------------------
@@ -705,6 +709,7 @@ class GamePreviewWindow(QWidget):
         sc = QShortcut(QKeySequence(seq), self)
         sc.setContext(Qt.WindowShortcut)
         sc.activated.connect(fn)
+        self._own_shortcuts.append(sc)
 
     def _tune_item(self):
         from . import game_screen as _gs
@@ -854,6 +859,30 @@ class GamePreviewWindow(QWidget):
             self._bottom_widget.show()
             self.set_overlay_visible(True)
         self._refit()
+
+    def set_controls_locked(self, locked: bool, key_cb=None):
+        """再生の操作(再生・停止・シーク・速度・ホイール・レーンのクリック・
+        この窓のキー)をすべて受け付けなくする。Player の通常プレイ用で、
+        **既定は締めない**(Editor は呼ばない)。
+
+        締めているあいだのキーは key_cb(event) へ渡す(Esc でメニューを
+        出すなど)。止める・流すは置いた側が audio / レーンを直に呼んで行う。
+        締めるのはレーン(キー・ホイール・Tab・P の離し・作譜からの速度キー)
+        と、この窓が自分で張ったショートカット(F11/Esc・位置合わせ)。"""
+        locked = bool(locked)
+        self._controls_locked = locked
+        self._lane.set_controls_locked(locked, key_cb)
+        cp = self._chart_preview
+        if cp is not self._lane and hasattr(cp, "chart_preview"):
+            # 本家レイアウト(GameScreen)の中のレーンが別物のとき(同じはず)。
+            inner = getattr(cp, "chart_preview", None)
+            if inner is not None and inner is not self._lane:
+                inner.set_controls_locked(locked, key_cb)
+        for sc in getattr(self, "_own_shortcuts", ()):
+            sc.setEnabled(not locked)
+
+    def controls_locked(self) -> bool:
+        return bool(getattr(self, "_controls_locked", False))
 
     def fit_view_only(self, avail_w: int, avail_h: int):
         """絵だけの表示(set_view_only)で、avail に収まる最大の倍率にする。

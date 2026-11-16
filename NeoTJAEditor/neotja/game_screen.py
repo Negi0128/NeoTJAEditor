@@ -1887,6 +1887,9 @@ class _GameScreenBase:
         # Tab は keyPressEvent へ届く前にフォーカス移動へ消費されるので、
         # レーン側と同じく event() で横取りする。
         if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab:
+            # 操作を締めているあいだ(Player の通常プレイ)は置いた側へ回す。
+            if self.chart_preview.locked_key(e):
+                return True
             self.chart_preview.toggle_constant_speed()
             e.accept()
             return True
@@ -1907,7 +1910,9 @@ class _GameScreenBase:
         # accept() を必ず返すこと — ScaledHost が「誰も受け取らなかった」と
         # 判断すると親へ送り返し、行き場のないイベントが往復して落ちる
         # (preview_dock.ScaledHost._forward の説明を参照)。
-        self.setFocus(Qt.MouseFocusReason)
+        # 操作を締めているあいだ(Player の通常プレイ)はフォーカスも取らない。
+        if not self.chart_preview.controls_locked():
+            self.setFocus(Qt.MouseFocusReason)
         event.accept()
 
     def draw_judge_effects_back(self, p, now):
@@ -4754,7 +4759,8 @@ class GLScreenHost(QWidget):
     def mousePressEvent(self, event):
         # ScaledHost が「誰も受け取らなかった」と判断すると親へ送り返し、
         # 行き場のないイベントが往復して落ちる(ScaledHost._forward 参照)。
-        self.setFocus(Qt.MouseFocusReason)
+        if not self._screen.chart_preview.controls_locked():
+            self.setFocus(Qt.MouseFocusReason)
         event.accept()
 
 

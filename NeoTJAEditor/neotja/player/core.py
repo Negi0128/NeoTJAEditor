@@ -98,6 +98,9 @@ class PlayerCore:
     再生ウィンドウ(game_preview_window)だけ。
     """
 
+    _chart_started = False
+    _held = None
+
     def __init__(self, config_data):
         self.cfg = config_data
         self.analyzer = TJACourseAnalyzer(self.cfg)
@@ -112,6 +115,10 @@ class PlayerCore:
         self._pending = None
         # 最後に読み終わった音源。
         self._ready = None
+        #: 本編(play_chart)を流し始めたか。終わりの見張り(chart_finished)用。
+        self._chart_started = False
+        #: 途中メニューで止めたときに、まだ鳴らしていなかった予約。
+        self._held = None
         # 終わりまで来たかを見る番人。音源の読み込みが裏で進むので、
         # 「頭出し」もこのタイマーが引き受ける(長さが分かるまで待つ)。
         from PySide6.QtCore import QTimer
@@ -220,14 +227,82 @@ class PlayerCore:
         if not wave:
             return
         self._pending = (wave, float(at_seconds or 0.0), False)
+        self._chart_started = True
+        self._held = None
         # **読み込みの最中なら待つ。** 同じ音源を試聴で先に読んでいると
         # 「もう読めている」ように見えるが、本編ぶんの読み込みがそのあと
         # 音を差し替えるので、先に鳴らしても止まってしまう。
         if not self.dock.is_decoding() and self._ready == wave:
             self._fire_pending()
 
+    # ------------------------------------------------------------------
+    # 本編の一時停止(Player の途中メニュー)
+    # ------------------------------------------------------------------
+    def pause_chart(self):
+        """本編を今の位置で止める。音源・打音・譜面の時計は同じ音源の
+        位置で動いているので、音源を止めればまとめて止まる(打音は音源の
+        位置に合わせて予定されている。レーンは playingChanged で止まる)。
+
+        背景の映像: 再生画面(PreviewDock)は背景に動画を流していない(静止画
+        だけ。動画は録画のときだけ使う)ので、止めるものは無い。
+
+        まだ鳴らす前(読み込み待ちの予約)なら、その予約を預かっておく
+        (読めた瞬間に勝手に鳴りださないように)。"""
+        if self._pending is not None:
+            self._held, self._pending = self._pending, None
+        try:
+            self.dock.audio.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 状態の反映は playingChanged 経由で1拍遅れるので、時計もここで
+            # 止めておく(メニューを開いた瞬間の位置で絵を止める)。
+            cp = self.dock.chart_preview
+            cp.set_playback(self.dock.audio.position() / 1000.0, False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def resume_chart(self):
+        """pause_chart で止めた所から続ける。"""
+        held, self._held = self._held, None
+        if held is not None:
+            self._pending = held
+            if not self.dock.is_decoding() and self._ready == held[0]:
+                self._fire_pending()
+            return
+        try:
+            self.dock._play()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def chart_position(self):
+        """本編の音源の位置(秒・助走込み)。"""
+        try:
+            return self.dock.audio.position() / 1000.0
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def chart_playing(self):
+        try:
+            return bool(self.dock.audio.is_playing())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def chart_finished(self):
+        """本編が終わりまで流れきったか(後ろの余韻 5 秒まで鳴り終えて、
+        音源が自分で止まった)。止めているだけ・まだ始まっていないときは
+        False。"""
+        if not self._chart_started or self._pending is not None or self._held is not None:
+            return False
+        if self.chart_playing():
+            return False
+        dur = self.dock.duration_seconds()
+        return dur > 0 and self.chart_position() >= dur - 0.25
+
     def stop_audio(self):
         self._pending = None
+        self._held = None
+        self._chart_started = False
         self._loop = None
         try:
             self.dock.audio.pause()

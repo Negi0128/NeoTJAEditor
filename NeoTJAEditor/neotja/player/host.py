@@ -15,7 +15,7 @@ NeoTJAEditor.exe に同居させる)。
 
 import os
 
-from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtCore import Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QRadialGradient
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -36,6 +36,11 @@ class PlayerHost(QWidget):
     song_chosen = Signal(str)
     play_requested = Signal(str, str)     # (tja, コースキー)
     record_requested = Signal(str, str)
+    #: 通常プレイで譜面が終わりまで流れた(tja, コースキー)。結果画面の入口。
+    play_finished = Signal(str, str)
+
+    #: 譜面の終わりを見張る間合い(ms)。
+    FINISH_POLL_MS = 100
 
     def __init__(self, config_data, save_cb, parent=None, audio_provider=None):
         super().__init__(parent)
@@ -98,8 +103,18 @@ class PlayerHost(QWidget):
         self.body.addWidget(self.intro)
         self.play_page = PlayPage()
         self.body.addWidget(self.play_page)
+        self.play_page.esc_pressed.connect(self.open_pause_menu)
+        self.play_page.menu.chosen.connect(self._on_menu)
+        self.play_page.menu.sound_requested.connect(self.sounds.play)
         #: いま進んでいる曲名表示の段取り(IntroSequence)。無ければ None。
         self._seq = None
+        #: 再生画面で流している曲 (tja, コースキー)。流していなければ None。
+        self._play_ctx = None
+        #: 再生画面のモード。"normal"(通常プレイ)。"detail" は次の段。
+        self.play_mode = "normal"
+        self._finish_timer = QTimer(self)
+        self._finish_timer.setInterval(self.FINISH_POLL_MS)
+        self._finish_timer.timeout.connect(self._check_finished)
 
         self.refresh_theme()
 
@@ -128,13 +143,34 @@ class PlayerHost(QWidget):
             self.body.cancel()
             self.body.setCurrentWidget(page)
 
-    def show_difficulty(self, path):
+    def show_difficulty(self, path, course=None, fade=None):
+        """難易度選択へ。course を渡すとそのコースを選んだ状態にする
+        (演奏から戻ったとき)。fade を渡すとフェードしてから試聴を始める。"""
         self._abort_sequence()
         self.difficulty.close_settings()
         self.difficulty.set_song(path)
-        self._set_page(self.difficulty)
-        self.start_preview(path)
-        self.difficulty.setFocus()
+        if course:
+            self._select_course(course)
+
+        def after():
+            self.start_preview(path)
+            self.difficulty.setFocus()
+        if fade:
+            self._set_page(self.difficulty, fade=fade, done=after)
+        else:
+            self._set_page(self.difficulty)
+            after()
+
+    def _select_course(self, course):
+        """難易度選択で course を選んだ状態にする(裏ならおにの枠を裏へ)。"""
+        d = self.difficulty
+        if course in ("Oni", "Edit") and d.has_ura_toggle():
+            d.oni_side = course
+            d.select_slot("Oni")
+        elif course != "Edit":
+            d.select_slot(course)
+        d._sync()
+        d.update()
 
     def show_library(self):
         """難易度選択の「戻る」。選曲は作り直さないので、開いていた
@@ -147,6 +183,7 @@ class PlayerHost(QWidget):
         """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
         self.library.shutdown()
         self._abort_sequence()
+        self._end_play()
         core, self._core = self._core, None
         if core is not None:
             try:
@@ -190,6 +227,7 @@ class PlayerHost(QWidget):
     def stop_preview(self):
         """鳴っているものを全部止める(試聴・曲名表示の段取り・本編)。"""
         self._abort_sequence()
+        self._end_play()
         if self._core is not None:
             self._core.stop_audio()
 
@@ -259,15 +297,133 @@ class PlayerHost(QWidget):
         except Exception:  # noqa: BLE001
             pass
         native = bool(getattr(getattr(dock, "game_screen", None), "native_screen_window", False))
+        # 通常プレイ: 止める・巻き戻す・飛ばすを締める(キーは再生画面へ回る)。
+        self.play_mode = "normal"
+        self.play_page.menu.set_detail_mode(False)
+        self.play_page.hide_menu()
         self.play_page.attach(dock.game_preview_window, native)
+        self._play_ctx = (path, course)
 
         def go():
-            try:
-                dock.game_screen.setFocus(Qt.OtherFocusReason)
-            except Exception:  # noqa: BLE001
-                pass
+            # キーは再生画面(PlayPage)が受ける。ゲーム画面にフォーカスを
+            # 渡さない(締めてあるので渡っても再生画面へ回るが、GL の窓だと
+            # 窓ごと前に出てしまうため)。
+            self.play_page.setFocus(Qt.OtherFocusReason)
             core.play_chart(0.0)
+            self._finish_timer.start()
         self._set_page(self.play_page, fade="black", done=go)
+
+    # ------------------------------------------------------------------
+    # 通常プレイの途中メニュー(Esc)と終わり
+    def in_play(self):
+        return self._play_ctx is not None
+
+    def open_pause_menu(self):
+        """Esc。音源・譜面の時計をまとめて止めてメニューを出す。"""
+        if (self._play_ctx is None or self.play_page.menu_open()
+                or self.body.currentWidget() is not self.play_page
+                or self.body.is_fading()):
+            return
+        self._finish_timer.stop()
+        core = self._core
+        if core is not None:
+            core.pause_chart()
+        self.sounds.pi()
+        self.play_page.show_menu(self._game_snapshot())
+
+    def _game_snapshot(self):
+        """GL の窓のときだけ、止めた画面を1枚もらう(メニューの後ろに敷く)。"""
+        if not self.play_page.native_gl or self._core is None:
+            return None
+        try:
+            img = self._core.dock.game_screen.grabFramebuffer()
+            return None if img.isNull() else img
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _on_menu(self, key):
+        ctx = self._play_ctx
+        if ctx is None:
+            self.play_page.hide_menu()
+            return
+        path, course = ctx
+        if key == "resume":
+            self.play_page.hide_menu()
+            self.play_page.setFocus(Qt.OtherFocusReason)
+            if self._core is not None:
+                self._core.resume_chart()
+            self._finish_timer.start()
+        elif key == "restart":
+            # 暫定方針: 同じコース・表示設定で 5 秒の曲名表示からやり直す。
+            # 本編は曲名表示の 5 秒目に読み直す(core.load)ので、譜面の状態・
+            # 集計は全部そこで初めからになる。
+            self._end_play()
+            if self._core is not None:
+                self._core.stop_audio()
+            self.start_intro(path, course)
+        elif key == "detail":
+            self.switch_to_detail()
+        elif key == "library":
+            self._end_play()
+            if self._core is not None:
+                self._core.stop_audio()
+            self.difficulty.close_settings()
+
+            def focus_library():
+                try:
+                    self.library.pages.currentWidget().setFocus()
+                except Exception:  # noqa: BLE001
+                    pass
+            # 選曲は作り直さないので、開いていたフォルダ・検索・選んだ行は
+            # そのまま残っている。
+            self._set_page(self.library, fade="black", done=focus_library)
+
+    def switch_to_detail(self):
+        """詳細モードへ。
+
+        TODO(次の段): 既存の作譜ペインを読取専用で出し、停止・シークを
+        許す(set_controls_locked(False) + 編集経路の無効化)。切り替え直後は
+        一時停止、メニューの3番目を「通常演奏に移行する」に(set_detail_mode)。
+        終端では一時停止して結果へ進まない。
+        いまはメニューの3番目を押せなくしてあるので、ここへは来ない。"""
+        return
+
+    def _check_finished(self):
+        core = self._core
+        if core is None or self._play_ctx is None:
+            self._finish_timer.stop()
+            return
+        if self.play_page.menu_open() or self.body.is_fading():
+            return
+        try:
+            done = bool(core.chart_finished())
+        except Exception:  # noqa: BLE001
+            done = False
+        if done:
+            self.on_play_finished()
+
+    def on_play_finished(self):
+        """通常プレイで譜面が終わった。
+
+        TODO(結果画面の段): ここで結果画面へ進む(既存プレビューと同じ計算の
+        終端値を渡す)。いまは難易度選択へフェードで戻る(同じコースを選んだ
+        状態で、試聴も戻る)。"""
+        ctx = self._play_ctx
+        if ctx is None:
+            return
+        path, course = ctx
+        self._end_play()
+        if self._core is not None:
+            self._core.stop_audio()
+        self.play_finished.emit(path, course)
+        self.show_difficulty(path, course=course, fade="black")
+
+    def _end_play(self):
+        """再生画面の後片付け(音は止めない — 呼んだ側が止める)。"""
+        self._finish_timer.stop()
+        self._play_ctx = None
+        self.play_page.hide_menu()
+        self.play_page.unlock()
 
     def _intro_failed(self, path):
         """本編を読めなかった。難易度選択へ戻す。"""

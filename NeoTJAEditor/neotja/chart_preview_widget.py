@@ -2616,8 +2616,55 @@ class ChartPreviewWidget(QWidget):
         self._push_realtime_info()
 
     def mousePressEvent(self, event):
+        if self._controls_locked:
+            # 操作を締めているあいだはフォーカスも取らない(キーは置いた側が
+            # 受ける — set_controls_locked)。
+            event.accept()
+            return
         self.setFocus(Qt.MouseFocusReason)
         super().mousePressEvent(event)
+
+    # ------------------------------------------------------------------
+    # 操作の締め切り(Player の通常プレイ)
+    # ------------------------------------------------------------------
+    #: 締めているか。**既定は締めない** — Editor は何も変わらない。
+    _controls_locked = False
+    #: 締めているあいだに届いたキーを渡す先(置いた側の Esc メニューなど)。
+    _locked_key_cb = None
+
+    def set_controls_locked(self, locked: bool, key_cb=None):
+        """再生・停止・シーク・速度・チェックポイント・等速などの操作を
+        すべて受け付けなくする(Player の通常プレイ: 止める・巻き戻す・
+        飛ばすをさせない)。
+
+        締めているあいだのキーは何もせず key_cb(event) へ渡す(None なら
+        event.ignore() で親へ流す)。ホイールは捨てる。外からの呼び出し
+        (play/pause/seek の各メソッド)は止めない — 置いた側が自分の判断で
+        止める・流すのに使うため。"""
+        self._controls_locked = bool(locked)
+        self._locked_key_cb = key_cb if locked else None
+        if locked:
+            self._p_held = False
+            self._p_moved = False
+
+    def controls_locked(self) -> bool:
+        return bool(self._controls_locked)
+
+    def locked_key(self, event):
+        """締めているときに届いたキーを置いた側へ回す。回したら True。"""
+        if not self._controls_locked:
+            return False
+        cb = self._locked_key_cb
+        if cb is not None and event.type() == QEvent.KeyPress:
+            try:
+                cb(event)
+            except Exception:  # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+            event.accept()
+        else:
+            event.ignore()
+        return True
 
     def cycle_course(self):
         # Each call steps down one rank (Ura -> Oni -> Hard -> Normal ->
@@ -2658,6 +2705,8 @@ class ChartPreviewWidget(QWidget):
         # 「等速モード(HS1固定表示)」のトグルに割り当てた(下部パネルのモード
         # 切替は画面上のモードボタンで行う)。
         if e.type() == QEvent.KeyPress and e.key() == Qt.Key_Tab:
+            if self.locked_key(e):
+                return True
             self.toggle_constant_speed()
             e.accept()
             return True
@@ -2685,6 +2734,8 @@ class ChartPreviewWidget(QWidget):
     PRESS_CHORD_SEC = 1.0 / 60.0
 
     def keyPressEvent(self, event):
+        if self.locked_key(event):
+            return
         key = event.key()
         # --- 演奏モード ---------------------------------------------
         # ここを先に見る。**演奏中は打面がすべてを持っていく。** 再生・
@@ -2830,6 +2881,9 @@ class ChartPreviewWidget(QWidget):
         self._request_repaint()
 
     def keyReleaseEvent(self, event):
+        if self._controls_locked:
+            event.ignore()
+            return
         if event.key() == Qt.Key_P and not event.isAutoRepeat():
             if self._p_held and not self._p_moved:
                 self.toggle_checkpoint()
@@ -2884,7 +2938,7 @@ class ChartPreviewWidget(QWidget):
 
         条件もレーンの keyPressEvent と同じ: 演奏モードのあいだは速度を
         変えない(打面がすべてを持っていく)。いま何倍かはレーンに出す。"""
-        if self._play_state is not None:
+        if self._play_state is not None or self._controls_locked:
             return
         self._step_speed(direction, toast=True)
 
@@ -2972,7 +3026,13 @@ class ChartPreviewWidget(QWidget):
         return 240.0 / bpm
 
     def wheel_seek(self, event):
-        """ホイールの1回ぶんを、時間での移動にして渡す。上に回すと先へ。"""
+        """ホイールの1回ぶんを、時間での移動にして渡す。上に回すと先へ。
+
+        操作を締めているあいだ(set_controls_locked)は何もしない。ホイールは
+        レーン・ゲーム画面・再生ウィンドウのどこで回してもここへ来るので、
+        ここ1か所で止まる。"""
+        if self._controls_locked:
+            return
         n = self.wheel_notches(event)
         if n == 0.0:
             return
