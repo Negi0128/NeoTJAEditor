@@ -1,3 +1,49 @@
+> **旧Playerの記録です。** 新Playerの実装は [PLAYER_IMPLEMENTATION_PLAN.md](../v15-design/PLAYER_IMPLEMENTATION_PLAN.md) を優先してください。本文に残る別exe、旧起動メニュー、プレイリスト先行等は過去の前提です。現行コードと最新計画を確認してください。
+
+## 新 Player (v15.5 開発中)
+
+ランチャーの「Player を起動」で、Editor と**同じ窓・同じプロセス**の中央へ差し込む1ページ(PlayerHost)。別 exe ではない。計画の基準は `v15-design/PLAYER_IMPLEMENTATION_PLAN.md`。
+
+### 流れ(できているもの)
+選曲 → 難易度選択(DEMOSTART から試聴ループ・設定パネル・録画) → 曲名表示(5 秒・飛ばせない・試聴は 2 秒後から 3 秒でフェード) → 通常プレイ(常時オート。停止・巻き戻し・シーク不可) → Esc の途中メニュー(続ける / 初めからやり直す / 詳細モード⇔通常演奏 / 選曲画面にもどる) → 譜面の終わりで結果画面(もう一度プレイする / 選曲画面に戻る・Esc)。
+詳細モードは作譜ペインを読むだけで出し、停止・シーク・速度は可。終わりまで行くとそこで止まり、結果へは進まない。
+難易度選択の「録画」は Editor と同じ RecordDialog を開く(曲ごとのジャケット・背景を最初の値に。.jacket.json は書かない。Editor と窓の置き場 `MainWindow._record_dialog` を共有して2つ開かない。閉じたら試聴を再開)。
+
+### ファイル(`neotja/player/`)
+- `host.py` … PlayerHost。ページの流れ・試聴・曲名表示・再生・途中メニュー・結果・録画の段取り
+- `library_view.py` / `song_lists.py` … 選曲(最近 / 保存済み / 登録フォルダ、box.def ジャンル、並び替え、検索、曲ごとの画像)
+- `difficulty.py` … 難易度選択。平らなガラスの描き方(paint_glass)・書体(勘亭流 / UI)もここ
+- `intro.py` … 曲名表示と IntroSequence
+- `play_page.py` / `pause_menu.py` … 再生画面(GamePreviewWindow を埋め込む)と Esc メニュー
+- `results.py` … 結果画面(王冠は skin の Result_Crown.png の左列、無ければ色の丸)
+- `record.py` … 録画の窓に渡す入れ物
+- `transitions.py` … FadeStack(cross / black)
+- `ui_sound.py` … 「ピ」(合成)と「ドン」。Editor の音声エンジンの `ui_now` で鳴らす(F1 に関係なく鳴る)
+- `core.py` … PlayerCore(PreviewDock を1つ抱える。読むだけ・Player 専用)
+
+### 共通部品に足した口(どれも既定は今までどおり = Editor は変わらない)
+- `GamePreviewWindow.set_controls_locked(on, key_cb)` / レーンの `controls_locked` … 通常プレイで操作を締める(キー・ホイール・Tab・クリック・窓の F11/Esc)。Esc は key_cb へ
+- `PreviewDock.set_read_only` / `ChartEditWaveform.set_read_only` / `WaveformWidget.set_read_only` … 作譜ペインの編集経路を全部ふさぐ
+- `GamePreviewWindow.set_view_only(on, with_bottom)` / `fit_view_only` … 絵だけ(+ 下の段)で置く
+- `PreviewDock.predecode_wave` … 試聴を止めずに本編の音源を先読み
+- ミキサーの `ui_now` … 操作音
+- `game_screen.result_values()` / `gauge_strip()`、`ScoreTimeline.roll_hits_at`、`ChartPreviewWidget.combo_at` … 結果は HUD と同じ計算を譜面の終わりで引く
+- `PreviewDock.set_speed_row_visible` / `set_pane_follow_scale`、`RecordDialog(bg_path=)`
+
+### 設定のキー(config_data を Editor と共有)
+`player_folders` `player_recent` `player_saved` `player_sort` `player_last_file` `player_chart_art`(曲ごとのジャケット・背景) `player_show_jacket` `player_show_bg` `player_show_lyric` `player_select_bgm` `player_select_bgm_volume`。skin キャッシュに `Select_Marks.png` `Result_Crown.png` を追加(TNDE の素材から。同梱しない)。
+
+### 試験(アプリのフォルダで `PYTHONPATH=. .venv/Scripts/python.exe tests/<file>.py`)
+`test_player_host` `test_player_difficulty` `test_player_preview` `test_player_intro` `test_player_pause` `test_player_detail` `test_player_results` `test_player_record`。
+
+### 残っていること
+- GPU(native GL)のときの途中メニューの見た目は未確認(止めた画面を敷く作り)
+- 録画の「背景...」の窓の見た目を Player に揃える(見た目だけ)は未着手
+- 計画書の B(曲別と既定の関係)/ C(TJA 直接起動)/ D(代替フォント)は未決定
+- プレイリストは今回の範囲外。F11 の全画面は未実装
+- 終了時のクラッシュ(shiboken の PepException_GetArgs 系)は未解決
+
+
 # NeoTJAPlayer 開発の引き継ぎメモ
 
 作業が中断しても、このファイルだけ読めば続きから再開できるようにしてある。
@@ -127,3 +173,4 @@ cd <このリポジトリの NeoTJAEditor フォルダ>
 
 - BPM 240、必要 8 打、秒速 45 で、`7080000000000000,` は 5 打、`7008000000000000,` は 7 打＋破裂音。再生と録画は同じ打音生成処理を使う。
 - `tests/test_short_balloon_ticks.py` で打音の間隔、累計表示、通常連打の短連打補正を確認できる。
+
