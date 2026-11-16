@@ -510,7 +510,13 @@ class RecordBackgroundDialog(QDialog):
                     self.sp_art_x, self.sp_art_y,
                     self.sp_art_edge, self.btn_art_color):
             wdg.setEnabled(True)
-        self.sl_at.setEnabled(on or bool(self.ed_art.text().strip()))
+        # 背景もジャケットも「なし」でも、画面があれば**いつもの見た目の
+        # サムネ**は出せる(利用者の報告 2026-11-16「背景なしだとPNGで
+        # 保存が押せない」)。_frame は空の背景を _compose_plain_frame へ
+        # 回すので、ジャケットが無くても描ける。画面が無いのはまとめ録画
+        # から開いたときだけで、そのときは今までどおり背景かジャケットが要る。
+        self.sl_at.setEnabled(on or bool(self.ed_art.text().strip())
+                              or self._screen() is not None)
         # 見本が出せるときだけ押せる(出ないときに押しても書くものが無い)。
         self.btn_png.setEnabled(self.sl_at.isEnabled())
         self.sp_in.setEnabled(on and self.chk_in.isChecked())
@@ -658,6 +664,12 @@ class RecordBackgroundDialog(QDialog):
         self.lb_at.setText("%6.2f 秒" % at)
         self._timer.start(PREVIEW_MS)
 
+    def _screen(self):
+        """重ねる画面(無ければ作る)。まとめ録画から開いたときは None。"""
+        if self._widget is None:
+            self._widget = self._make_widget()
+        return self._widget
+
     def _frame(self, wait=True):
         """いまの設定と見る位置の1コマ。(絵, 出せないときの文言) を返す。
 
@@ -667,12 +679,14 @@ class RecordBackgroundDialog(QDialog):
         wait=False(見本)は背景の動画のコマを待たない。まだ取れていなければ
         (PENDING, "") を返す。"""
         bg = self.background()
-        plain = not bg and recorder.wants_art_only(bg)
+        # 背景が空なら「いつもの見た目(+あればジャケット)」の経路。
+        # ジャケットが無くても、画面があればサムネは描ける(_sync_enabled)。
+        plain = not bg and (recorder.wants_art_only(bg)
+                            or self._screen() is not None)
         if not plain and (not bg or not os.path.exists(bg.path)):
             return None, ("背景かジャケットを選ぶと、ここに重なった"
                           "1コマが出ます。")
-        if self._widget is None:
-            self._widget = self._make_widget()
+        self._screen()
         if plain and self._widget is None:
             # まとめ録画から開いたとき(重ねる譜面が決まらない)は、背景が
             # 無ければ出す絵が無い。
