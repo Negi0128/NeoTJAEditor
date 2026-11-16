@@ -13,11 +13,13 @@ import datetime
 import os
 import time
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 from neotja.player import song_lists
@@ -35,6 +37,8 @@ SIDEBAR_WIDTH = 264
 #: ワーカーがまとめて送る件数・間隔(library.py と同じ考え方)。
 _BATCH = 24
 _BATCH_SEC = 0.15
+#: 検索欄の打鍵がこれだけ止まったらフォルダの下を探し始める(ms)。
+SEARCH_DEBOUNCE_MS = 200
 
 
 # ----------------------------------------------------------------------
@@ -43,8 +47,9 @@ _BATCH_SEC = 0.15
 class InfoWorker(QThread):
     """パスの一覧、またはフォルダ一段ぶんの見出しを読む。"""
 
-    listed = Signal(object, object)   # (サブフォルダ, TJA) — フォルダのときだけ
-    infos = Signal(object)            # [(path, info)]
+    # 先頭はワーカー自身(古い走査の結果を受け手が捨てられるように)。
+    listed = Signal(object, object, object)   # (worker, ジャンル, サブフォルダ) — フォルダのときだけ
+    infos = Signal(object, object)            # (worker, [(path, info)])
 
     def __init__(self, paths=None, directory=None, parent=None):
         super().__init__(parent)
@@ -58,10 +63,10 @@ class InfoWorker(QThread):
     def run(self):
         paths = self._paths
         if self._dir is not None:
-            dirs, paths = song_lists.list_dir(self._dir)
+            genres, dirs, paths = song_lists.list_dir(self._dir)
             if self._cancelled:
                 return
-            self.listed.emit(dirs, paths)
+            self.listed.emit(self, genres, dirs)
         batch, last = [], time.monotonic()
         for p in paths:
             if self._cancelled:
@@ -69,10 +74,45 @@ class InfoWorker(QThread):
             batch.append((p, song_lists.song_info(p)))
             now = time.monotonic()
             if len(batch) >= _BATCH or now - last >= _BATCH_SEC:
-                self.infos.emit(batch)
+                self.infos.emit(self, batch)
                 batch, last = [], now
         if batch and not self._cancelled:
-            self.infos.emit(batch)
+            self.infos.emit(self, batch)
+
+
+class SearchWorker(QThread):
+    """フォルダの下(サブフォルダ・ジャンルの中も全部)から、題名・副題・
+    ファイル名に query を含む曲を探す。"""
+
+    found = Signal(object, object)   # (worker, [(path, info)])
+    done = Signal(object)            # worker
+
+    def __init__(self, root, query, parent=None):
+        super().__init__(parent)
+        self.root = root
+        self.query = query
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        batch, last = [], time.monotonic()
+        for p in song_lists.walk_tjas(self.root, lambda: self._cancelled):
+            if self._cancelled:
+                return
+            info = song_lists.song_info(p)
+            if song_lists.matches(self.query, info, p):
+                batch.append((p, info))
+            now = time.monotonic()
+            if batch and (len(batch) >= _BATCH or now - last >= _BATCH_SEC):
+                self.found.emit(self, batch)
+                batch, last = [], now
+        if self._cancelled:
+            return
+        if batch:
+            self.found.emit(self, batch)
+        self.done.emit(self)
 
 
 # ----------------------------------------------------------------------
@@ -119,11 +159,12 @@ class SongRow(GlassCard):
     relink_requested = Signal(str)
 
     def __init__(self, path, title, *, saved=None, removable=False,
-                 date_text="", show_path=False, parent=None):
+                 date_text="", show_path=False, path_text=None, parent=None):
         super().__init__(radius=10, hoverable=True, parent=parent)
         self.path = path
         self.missing = not os.path.isfile(path)
-        self.info = {"title": title, "subtitle": "", "courses": []}
+        self.info = {"title": title, "subtitle": "", "courses": [], "bpm": None}
+        self.order = 0
         self._saved = saved
         self.setObjectName("songRow")
         self.setFixedHeight(ROW_HEIGHT)
@@ -142,17 +183,28 @@ class SongRow(GlassCard):
         self.title = ElidedText(title, key, 16, bold=True)
         self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         texts.addWidget(self.title)
-        self.sub = ElidedText(_short_dir(path) if show_path else "", "fg_dim", 12,
-                              elide=show_path)
+        if path_text is not None:
+            show_path = True
+        else:
+            path_text = _short_dir(path) if show_path else ""
+        self.sub = ElidedText(path_text, "fg_dim", 12, elide=show_path)
         self.sub.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._show_path = show_path
         texts.addWidget(self.sub)
+        # 2段目が空なら隠して、曲名を縦の真ん中に置く。
+        self.sub.setVisible(bool(self.sub.text()))
         h.addLayout(texts, 1)
 
         self.chip_box = QHBoxLayout()
         self.chip_box.setSpacing(6)
         h.addLayout(self.chip_box)
         self.chips = []
+        self.bpm = QLabel("")
+        self.bpm.setObjectName("bpm")
+        self.bpm.setMinimumWidth(70)
+        self.bpm.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.bpm.setVisible(False)
+        h.addWidget(self.bpm)
 
         if date_text:
             self.date = QLabel(date_text)
@@ -187,6 +239,7 @@ class SongRow(GlassCard):
         self.title._text = info["title"]
         if not self._show_path:
             self.sub._text = info.get("subtitle", "")
+            self.sub.setVisible(bool(self.sub._text))
         for chip in self.chips:
             chip.deleteLater()
         self.chips = []
@@ -197,6 +250,10 @@ class SongRow(GlassCard):
             chip.setFixedHeight(22)
             self.chip_box.addWidget(chip)
             self.chips.append(chip)
+        bpm = info.get("bpm")
+        self.bpm.setText("BPM %s" % ("%g" % bpm) if bpm else "")
+        # 並び替えには使うが表示はしない(利用者の指定 2026-11-16)。
+        self.bpm.setVisible(False)
         self._restyle()
         self.title.update()
         self.sub.update()
@@ -210,11 +267,7 @@ class SongRow(GlassCard):
         self._restyle()
 
     def matches(self, q):
-        if not q:
-            return True
-        return (q in self.info["title"].lower()
-                or q in self.info.get("subtitle", "").lower()
-                or q in os.path.basename(self.path).lower())
+        return song_lists.matches(q, self.info, self.path)
 
     def set_chosen(self, on):
         self._accent = bool(on)
@@ -297,7 +350,8 @@ class FolderRow(GlassCard):
         h.addWidget(arrow)
 
     def matches(self, q):
-        return not q or q in self.name.lower()
+        q = song_lists.normalize(q).strip()
+        return not q or q in song_lists.normalize(self.name)
 
     def refresh_theme(self):
         self.title.refresh()
@@ -315,6 +369,167 @@ class FolderRow(GlassCard):
             ev.accept()
             return
         super().keyPressEvent(ev)
+
+
+class GenreRow(GlassCard):
+    """ジャンル(box.def のあるフォルダ)の1行。box.def の色を左の帯と
+    うっすらした地の色に使う。"""
+
+    opened = Signal(str)
+
+    def __init__(self, path, box, parent=None):
+        super().__init__(radius=10, hoverable=True, parent=parent)
+        self.path = path
+        self.box = box
+        self.name = box["title"]
+        self.setObjectName("genreRow")
+        self.setFixedHeight(62)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(path)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(24, 6, 18, 6)
+        h.setSpacing(12)
+        texts = QVBoxLayout()
+        texts.setSpacing(1)
+        self.title = ElidedText(self.name, "fg_bright", 17, bold=True)
+        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        texts.addWidget(self.title)
+        genre = box.get("genre", "")
+        if genre and genre != self.name:
+            self.sub = ElidedText(genre, "fg_dim", 12)
+            texts.addWidget(self.sub)
+        h.addLayout(texts, 1)
+        arrow = QLabel("›")
+        arrow.setObjectName("chevron")
+        h.addWidget(arrow)
+        self._restyle()
+
+    def color(self):
+        return QColor(self.box.get("color") or COLORS["accent"])
+
+    def _restyle(self):
+        self.set_bar_color(self.color())
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, 10, 10)
+        p.setClipPath(clip)
+        grad = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        col = self.color()
+        grad.setColorAt(0, _c(col, 0.22))
+        grad.setColorAt(0.55, _c(col, 0.04))
+        grad.setColorAt(1, _c(col, 0))
+        p.fillRect(rect, QBrush(grad))
+        p.end()
+
+    def matches(self, q):
+        q = song_lists.normalize(q).strip()
+        return (not q or q in song_lists.normalize(self.name)
+                or q in song_lists.normalize(self.box.get("genre", "")))
+
+    def refresh_theme(self):
+        self._restyle()
+        self.title.refresh()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.opened.emit(self.path)
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.opened.emit(self.path)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+
+class CategoryDialog(QDialog):
+    """登録フォルダのカテゴリ(シミュレーター名)を打つ小さな窓。
+
+    候補は利用者がこれまでに付けた名前だけ。決まった名前の一覧は持たない
+    (利用者の指定)。"""
+
+    def __init__(self, names, current="", path="", heading="カテゴリ",
+                 ok_text="追加", parent=None):
+        super().__init__(parent)
+        self.setObjectName("categoryDialog")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(True)
+        self.setFixedWidth(460)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(30, 26, 30, 24)
+        v.setSpacing(0)
+        head = QLabel(heading)
+        head.setObjectName("dlgHead")
+        v.addWidget(head)
+        if path:
+            v.addSpacing(6)
+            self.lbl_path = ElidedText(path, "fg_dim", 12, elide=True)
+            self.lbl_path.setToolTip(path)
+            v.addWidget(self.lbl_path)
+        v.addSpacing(18)
+        self.combo = QComboBox()
+        self.combo.setObjectName("category")
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.NoInsert)
+        self.combo.addItems([n for n in names if n])
+        self.combo.setEditText(current)
+        self.combo.lineEdit().setPlaceholderText("カテゴリ名")
+        self.combo.setMinimumHeight(38)
+        v.addWidget(self.combo)
+        v.addSpacing(22)
+        bh = QHBoxLayout()
+        bh.setSpacing(10)
+        bh.addStretch(1)
+        self.btn_cancel = QPushButton("キャンセル")
+        self.btn_cancel.clicked.connect(self.reject)
+        bh.addWidget(self.btn_cancel)
+        self.btn_ok = QPushButton(ok_text)
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        bh.addWidget(self.btn_ok)
+        v.addLayout(bh)
+        self.combo.editTextChanged.connect(self._sync)
+        self._sync()
+        from neotja.start_screen import StartScreen
+        self.setStyleSheet(StartScreen._qss() + library_qss())
+        self.combo.lineEdit().setFocus()
+        self.combo.lineEdit().selectAll()
+
+    def value(self):
+        return self.combo.currentText().strip()
+
+    def _sync(self):
+        self.btn_ok.setEnabled(bool(self.value()))
+
+    def paintEvent(self, ev):
+        g = glass_colors()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(g["accent_border"], 1))
+        p.setBrush(QColor(COLORS["bg"]))
+        p.drawRoundedRect(rect, 14, 14)
+        p.setBrush(g["fill"])
+        p.drawRoundedRect(rect, 14, 14)
+        hl = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        hl.setColorAt(0, _c(g["highlight"], 0))
+        hl.setColorAt(0.5, g["highlight"])
+        hl.setColorAt(1, _c(g["highlight"], 0))
+        p.setPen(QPen(QBrush(hl), 1))
+        p.drawLine(QPointF(rect.left() + 14, rect.top() + 1),
+                   QPointF(rect.right() - 14, rect.top() + 1))
+        p.end()
 
 
 class _FolderIcon(QWidget):
@@ -375,12 +590,30 @@ class RowList(QScrollArea):
         self.empty.setVisible(True)
 
     def add(self, row):
+        if isinstance(row, SongRow):
+            row.order = len(self._rows)
         self._v.insertWidget(self._v.count() - 1, row)
         self._rows.append(row)
         self.empty.setVisible(False)
 
+    def sort_songs(self, mode, reverse):
+        """曲の行だけ並べ替える。ジャンルとフォルダは上に、名前順のまま。"""
+        songs = [r for r in self._rows if isinstance(r, SongRow)]
+        if len(songs) < 2:
+            return
+        others = [r for r in self._rows if not isinstance(r, SongRow)]
+        ordered = song_lists.sort_songs(
+            [(r.path, r.info, r.order, r) for r in songs], mode, reverse)
+        new = others + [t[3] for t in ordered]
+        if new == self._rows:
+            return
+        for r in new:
+            self._v.removeWidget(r)
+        for r in new:
+            self._v.insertWidget(self._v.count() - 1, r)
+        self._rows = new
+
     def apply_filter(self, q):
-        q = q.strip().lower()
         shown = 0
         for r in self._rows:
             ok = r.matches(q)
@@ -407,8 +640,59 @@ class NavButton(QPushButton):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(QColor(COLORS["accent"]), 3, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(4, 12, 4, self.height() - 12)
+            x = 18 if self.property("sub") else 4
+            p.drawLine(x, 12, x, self.height() - 12)
             p.end()
+
+
+class SortBar(QWidget):
+    """並べ方の切り替え(つながったボタン)と、向きの ↑↓。"""
+
+    changed = Signal(str, bool)   # (mode, reverse)
+
+    def __init__(self, modes, parent=None):
+        super().__init__(parent)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        self.mode = modes[0]
+        self.reverse = False
+        self.buttons = {}
+        for i, m in enumerate(modes):
+            b = QPushButton(song_lists.SORT_LABELS[m])
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setProperty("pos", "first" if i == 0 else ("last" if i == len(modes) - 1 else "mid"))
+            b.clicked.connect(lambda _=False, mode=m: self._pick(mode))
+            h.addWidget(b)
+            self.buttons[m] = b
+        h.addSpacing(6)
+        self.btn_dir = QPushButton()
+        self.btn_dir.setObjectName("sortDir")
+        self.btn_dir.setFixedSize(34, 32)
+        self.btn_dir.setCursor(Qt.PointingHandCursor)
+        self.btn_dir.clicked.connect(self._flip)
+        h.addWidget(self.btn_dir)
+        self.set_state(self.mode, False)
+
+    def set_state(self, mode, reverse):
+        if mode not in self.buttons:
+            mode = next(iter(self.buttons))
+        self.mode, self.reverse = mode, bool(reverse)
+        for m, b in self.buttons.items():
+            b.setChecked(m == mode)
+        desc = song_lists.is_descending(mode, reverse)
+        self.btn_dir.setText("↓" if desc else "↑")
+        self.btn_dir.setToolTip("降順" if desc else "昇順")
+
+    def _pick(self, mode):
+        self.set_state(mode, self.reverse)
+        self.changed.emit(self.mode, self.reverse)
+
+    def _flip(self):
+        self.set_state(self.mode, not self.reverse)
+        self.changed.emit(self.mode, self.reverse)
 
 
 class _Sidebar(QWidget):
@@ -457,6 +741,11 @@ class _Page(QWidget):
         self.tools.addStretch(1)
         return self.search
 
+    def add_sort(self, modes):
+        self.sort = SortBar(modes)
+        self.tools.addWidget(self.sort)
+        return self.sort
+
     def add_list(self):
         self.v.addSpacing(16)
         self.list = RowList()
@@ -481,6 +770,11 @@ class LibraryView(QWidget):
         self._folder_root = ""
         self._folder_dir = ""
         self._pending_rows = {}
+        self._search_worker = None
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(self._run_folder_search)
 
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
@@ -489,25 +783,38 @@ class LibraryView(QWidget):
         # --- 左 ----------------------------------------------------------
         side = _Sidebar()
         side.setFixedWidth(SIDEBAR_WIDTH)
-        sv = QVBoxLayout(side)
+        side_v = QVBoxLayout(side)
+        side_v.setContentsMargins(0, 0, 0, 0)
+        # 登録フォルダが増えても切れないように、列ごとスクロールさせる。
+        side_scroll = QScrollArea()
+        side_scroll.setFrameShape(QFrame.NoFrame)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_scroll.viewport().setAutoFillBackground(False)
+        side_v.addWidget(side_scroll)
+        side_inner = QWidget()
+        side_inner.setObjectName("sideInner")
+        side_scroll.setWidget(side_inner)
+        sv = QVBoxLayout(side_inner)
         sv.setContentsMargins(16, 22, 16, 22)
         sv.setSpacing(4)
-        sv.addWidget(self._section("NeoTJAPlayer"))
+        sv.addWidget(self._category_head("NeoTJAPlayer"))
         sv.addSpacing(6)
         self.nav_open = NavButton("TJAを開く", "open")
         self.nav_recent = NavButton("最近開いた楽曲", "recent")
         self.nav_saved = NavButton("保存済み楽曲", "saved")
         for b in (self.nav_open, self.nav_recent, self.nav_saved):
+            b.setProperty("sub", True)
             b.clicked.connect(lambda _=False, k=b.kind: self.show_section(k))
             sv.addWidget(b)
-        sv.addSpacing(22)
-        sv.addWidget(self._section("フォルダ"))
-        sv.addSpacing(6)
+        sv.addSpacing(24)
+        # シミュレーター(カテゴリ)ごとに見出しを立て、その下に登録フォルダ。
         self.folder_box = QVBoxLayout()
         self.folder_box.setSpacing(4)
         sv.addLayout(self.folder_box)
         self.folder_navs = []
-        sv.addSpacing(6)
+        self.category_labels = []
+        sv.addSpacing(10)
         self.btn_add_folder = QPushButton("＋  フォルダを追加")
         self.btn_add_folder.setObjectName("addFolder")
         self.btn_add_folder.setCursor(Qt.PointingHandCursor)
@@ -544,11 +851,18 @@ class LibraryView(QWidget):
 
         self.page_recent = _Page("最近開いた楽曲")
         self.page_recent.add_search()
+        self.page_recent.add_sort(song_lists.SORT_MODES)
+        self.page_recent.sort.changed.connect(
+            lambda m, r: self._on_sort_changed(True, m, r))
         self.recent_list = self.page_recent.add_list()
         self.pages.addWidget(self.page_recent)
 
         self.page_saved = _Page("保存済み楽曲")
         self.page_saved.add_search()
+        self.page_saved.add_sort(song_lists.SORT_MODES[1:])
+        self.page_saved.sort.changed.connect(
+            lambda m, r: self._on_sort_changed(False, m, r))
+        self.page_saved.tools.addSpacing(6)
         self.btn_add_saved = QPushButton("楽曲を追加")
         self.btn_add_saved.clicked.connect(self.add_saved_files)
         self.page_saved.tools.addWidget(self.btn_add_saved)
@@ -557,9 +871,25 @@ class LibraryView(QWidget):
 
         self.page_folder = _Page("")
         self.page_folder.add_search()
-        self.folder_list = self.page_folder.add_list()
+        self.page_folder.add_sort(song_lists.SORT_MODES[1:])
+        self.page_folder.sort.changed.connect(
+            lambda m, r: self._on_sort_changed(False, m, r))
+        # ふつうは一段ぶんの一覧。検索欄に何か入っているあいだは、下の
+        # フォルダ全部から探した曲だけの一覧に差し替える。
+        self.page_folder.v.addSpacing(16)
+        self.folder_stack = QStackedWidget()
+        self.folder_list = RowList()
+        self.search_list = RowList()
+        self.folder_stack.addWidget(self.folder_list)
+        self.folder_stack.addWidget(self.search_list)
+        self.page_folder.list = self.folder_list
+        self.page_folder.v.addWidget(self.folder_stack, 1)
+        self.page_folder.search.textChanged.connect(lambda _t: self._search_timer.start())
         self.pages.addWidget(self.page_folder)
+        self._sync_sort_bars()
 
+        if song_lists.migrate_folders(self.cfg):
+            self._save()
         self._rebuild_folder_navs()
         self.refresh_theme()
 
@@ -569,6 +899,34 @@ class LibraryView(QWidget):
         lbl = QLabel(text)
         lbl.setObjectName("section")
         return lbl
+
+    @staticmethod
+    def _category_head(text):
+        lbl = QLabel(text)
+        lbl.setObjectName("category")
+        return lbl
+
+    # ------------------------------------------------------------------
+    # 並べ方
+    def _sync_sort_bars(self):
+        m, r = song_lists.sort_state(self.cfg, recent_view=True)
+        self.page_recent.sort.set_state(m, r)
+        m, r = song_lists.sort_state(self.cfg)
+        self.page_saved.sort.set_state(m, r)
+        self.page_folder.sort.set_state(m, r)
+
+    def _on_sort_changed(self, recent_view, mode, reverse):
+        song_lists.set_sort_state(self.cfg, mode, reverse, recent_view=recent_view)
+        self._save()
+        self._sync_sort_bars()
+        self._resort()
+
+    def _resort(self):
+        m, r = song_lists.sort_state(self.cfg, recent_view=True)
+        self.recent_list.sort_songs(m, r)
+        m, r = song_lists.sort_state(self.cfg)
+        for lst in (self.saved_list, self.folder_list, self.search_list):
+            lst.sort_songs(m, r)
 
     def _save(self):
         try:
@@ -621,7 +979,7 @@ class LibraryView(QWidget):
         self._chosen = path
         song_lists.add_recent(self.cfg, path)
         self._save()
-        for lst in (self.recent_list, self.saved_list, self.folder_list):
+        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
             for r in lst.rows():
                 if isinstance(r, SongRow):
                     r.set_chosen(song_lists.path_key(r.path) == song_lists.path_key(path))
@@ -650,9 +1008,12 @@ class LibraryView(QWidget):
         detach_worker(self._worker)
         self._worker = None
         w = InfoWorker(paths=paths, directory=directory, parent=self)
-        w.infos.connect(lambda batch, w=w: self._on_infos(w, batch))
+        # 受け手は必ず self の結び付いたメソッドにする。ラムダへ繋ぐと受け手の
+        # スレッドが分からず、ワーカーのスレッドでそのまま呼ばれて部品を作って
+        # しまう(実際に行が欠けた)。メソッドなら GUI スレッドへ回される。
+        w.infos.connect(self._on_infos)
         if directory is not None:
-            w.listed.connect(lambda d, t, w=w: self._on_listed(w, d, t))
+            w.listed.connect(self._on_listed)
         self._worker = w
         w.start()
         return w
@@ -671,9 +1032,11 @@ class LibraryView(QWidget):
                 continue
             for row in rows:
                 row.set_info(info)
+        self._resort()
+        page = self.pages.currentWidget()
         q = self._current_search()
-        lst = getattr(self.pages.currentWidget(), "list", None)
-        if q and lst is not None:
+        lst = getattr(page, "list", None)
+        if q and lst is not None and page is not self.page_folder:
             lst.apply_filter(q)
 
     def _current_search(self):
@@ -696,6 +1059,7 @@ class LibraryView(QWidget):
                 self._pending_rows.setdefault(song_lists.path_key(e["path"]), []).append(row)
                 paths.append(e["path"])
         self.recent_list.apply_filter(self.page_recent.search.text())
+        self._resort()
         if paths:
             self._start_worker(paths=paths)
 
@@ -713,6 +1077,7 @@ class LibraryView(QWidget):
                 self._pending_rows.setdefault(song_lists.path_key(e["path"]), []).append(row)
                 paths.append(e["path"])
         self.saved_list.apply_filter(self.page_saved.search.text())
+        self._resort()
         if paths:
             self._start_worker(paths=paths)
 
@@ -755,45 +1120,96 @@ class LibraryView(QWidget):
     # 登録フォルダ
     def _rebuild_folder_navs(self):
         cur = self.current_section()
-        for b in self.folder_navs:
-            b.setParent(None)
-            b.deleteLater()
+        while self.folder_box.count():
+            item = self.folder_box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
         self.folder_navs = []
-        for path in song_lists.folders(self.cfg):
-            name = os.path.basename(os.path.normpath(path)) or path
-            b = NavButton(name, "folder")
-            b.path = path
-            b.setToolTip(path)
-            if not os.path.isdir(path):
-                b.setProperty("missing", True)
-            b.clicked.connect(lambda _=False, p=path: self.show_section("folder", p))
-            b.setContextMenuPolicy(Qt.CustomContextMenu)
-            b.customContextMenuRequested.connect(
-                lambda pos, btn=b: self._folder_menu(btn, pos))
-            self.folder_box.addWidget(b)
-            self.folder_navs.append(b)
+        self.category_labels = []
+        for i, sim in enumerate(song_lists.simulators(self.cfg)):
+            if i:
+                self.folder_box.addSpacing(20)
+            head = self._category_head(sim)
+            head.setContextMenuPolicy(Qt.CustomContextMenu)
+            head.customContextMenuRequested.connect(
+                lambda pos, lbl=head, name=sim: self._category_menu(lbl, name, pos))
+            self.folder_box.addWidget(head)
+            self.folder_box.addSpacing(6)
+            self.category_labels.append(head)
+            for path in song_lists.folders_of(self.cfg, sim):
+                name = os.path.basename(os.path.normpath(path)) or path
+                b = NavButton(name, "folder")
+                b.setProperty("sub", True)
+                b.path = path
+                b.simulator = sim
+                b.setToolTip(path)
+                if not os.path.isdir(path):
+                    b.setProperty("missing", True)
+                b.clicked.connect(lambda _=False, p=path: self.show_section("folder", p))
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(
+                    lambda pos, btn=b: self._folder_menu(btn, pos))
+                self.folder_box.addWidget(b)
+                self.folder_navs.append(b)
         if isinstance(cur, tuple):
             for b in self.folder_navs:
                 b.setChecked(song_lists.path_key(b.path) == song_lists.path_key(cur[1]))
 
     def _folder_menu(self, btn, pos):
         menu = QMenu(btn)
-        act = menu.addAction("外す")
-        if menu.exec(btn.mapToGlobal(pos)) is act:
+        act_remove = menu.addAction("外す")
+        act_cat = menu.addAction("カテゴリを変更")
+        act = menu.exec(btn.mapToGlobal(pos))
+        if act is act_remove:
             self.remove_folder(btn.path)
+        elif act is act_cat:
+            self.change_folder_category(btn.path)
+
+    def _category_menu(self, label, name, pos):
+        menu = QMenu(label)
+        act = menu.addAction("名前を変更")
+        if menu.exec(label.mapToGlobal(pos)) is act:
+            self.rename_category(name)
+
+    def ask_category(self, current="", path="", heading="カテゴリ", ok_text="追加"):
+        """カテゴリ名を打ってもらう。やめたら None。"""
+        dlg = CategoryDialog(song_lists.simulators(self.cfg), current=current,
+                             path=path, heading=heading, ok_text=ok_text,
+                             parent=self.window())
+        if dlg.exec() == QDialog.Accepted and dlg.value():
+            return dlg.value()
+        return None
 
     def add_folder(self):
         path = QFileDialog.getExistingDirectory(self, "フォルダを追加", "")
-        if path:
-            self.add_folder_path(path)
+        if not path:
+            return
+        name = self.ask_category(current="", path=os.path.normpath(path))
+        if name:
+            self.add_folder_path(path, name)
 
-    def add_folder_path(self, path):
+    def add_folder_path(self, path, simulator=song_lists.OTHER_SIMULATOR):
         if not os.path.isdir(path):
             return
-        if song_lists.add_folder(self.cfg, path):
+        if song_lists.add_folder(self.cfg, path, simulator):
             self._save()
             self._rebuild_folder_navs()
         self.show_section("folder", os.path.normpath(os.path.abspath(path)))
+
+    def change_folder_category(self, path):
+        cur = song_lists.folder_simulator(self.cfg, path) or ""
+        name = self.ask_category(current=cur, path=path, ok_text="変更")
+        if name and song_lists.set_folder_simulator(self.cfg, path, name):
+            self._save()
+            self._rebuild_folder_navs()
+
+    def rename_category(self, old):
+        name = self.ask_category(current=old, heading="名前を変更", ok_text="変更")
+        if name and song_lists.rename_simulator(self.cfg, old, name):
+            self._save()
+            self._rebuild_folder_navs()
 
     def remove_folder(self, path):
         """登録を外すだけ(フォルダの中身には触らない)。"""
@@ -808,11 +1224,12 @@ class LibraryView(QWidget):
         """登録フォルダの中の一段を開く。"""
         self._folder_dir = directory
         page = self.page_folder
-        page.lbl_title.setText(os.path.basename(os.path.normpath(directory)) or directory)
+        page.lbl_title.setText(song_lists.display_name(directory))
         self._build_crumbs(directory)
         page.search.blockSignals(True)
         page.search.clear()
         page.search.blockSignals(False)
+        self._stop_search()
         self.folder_list.clear()
         self._pending_rows = {}
         if os.path.isdir(directory):
@@ -839,23 +1256,77 @@ class LibraryView(QWidget):
                 sep = QLabel("›")
                 sep.setObjectName("crumbSep")
                 lay.insertWidget(lay.count() - 1, sep)
-            b = QPushButton(os.path.basename(os.path.normpath(p)) or p)
+            b = QPushButton(song_lists.display_name(p))
             b.setObjectName("crumbCur" if i == len(parts) - 1 else "crumb")
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _=False, d=p: self.open_dir(d))
             lay.insertWidget(lay.count() - 1, b)
 
-    def _on_listed(self, worker, dirs, tjas):
+    def _on_listed(self, worker, genres, dirs):
         if worker is not self._worker:
             return
+        for d, box in genres:
+            row = GenreRow(d, box)
+            row.opened.connect(self.open_dir)
+            self.folder_list.add(row)
         for d in dirs:
             row = FolderRow(d)
             row.opened.connect(self.open_dir)
             self.folder_list.add(row)
 
     # ------------------------------------------------------------------
+    # 登録フォルダの中の検索(下のフォルダも全部)
+    def _stop_search(self):
+        self._search_timer.stop()
+        detach_worker(self._search_worker)
+        self._search_worker = None
+        self.search_list.clear()
+        self.folder_stack.setCurrentWidget(self.folder_list)
+
+    def _run_folder_search(self):
+        q = self.page_folder.search.text().strip()
+        if not q or not self._folder_dir:
+            self._stop_search()
+            return
+        detach_worker(self._search_worker)
+        self.search_list.clear()
+        self.folder_stack.setCurrentWidget(self.search_list)
+        self._search_names = {}
+        w = SearchWorker(self._folder_dir, q, parent=self)
+        w.found.connect(self._on_search_found)
+        self._search_worker = w
+        w.start()
+
+    def _on_search_found(self, worker, batch):
+        if worker is not self._search_worker:
+            return       # 打ち直す前の検索の結果
+        root = worker.root
+        names = self._search_names
+
+        def name(d):
+            # ジャンルは box.def の題で見せる。同じフォルダは何度も読まない。
+            if d not in names:
+                names[d] = song_lists.display_name(d)
+            return names[d]
+
+        for path, info in batch:
+            rel = os.path.relpath(os.path.dirname(path), root)
+            dirs = [root]
+            if rel != ".":
+                for seg in rel.split(os.sep):
+                    dirs.append(os.path.join(dirs[-1], seg))
+            text = "  ›  ".join(name(d) for d in dirs)
+            row = self._song_row(path, info["title"],
+                                 saved=song_lists.is_saved(self.cfg, path),
+                                 path_text=text)
+            row.set_info(info)
+            self.search_list.add(row)
+        m, r = song_lists.sort_state(self.cfg)
+        self.search_list.sort_songs(m, r)
+
+    # ------------------------------------------------------------------
     def refresh_theme(self):
-        for lst in (self.recent_list, self.saved_list, self.folder_list):
+        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
             for r in lst.rows():
                 r.refresh_theme()
         self.update()
@@ -863,6 +1334,9 @@ class LibraryView(QWidget):
     def shutdown(self):
         detach_worker(self._worker)
         self._worker = None
+        self._search_timer.stop()
+        detach_worker(self._search_worker)
+        self._search_worker = None
 
 
 def library_qss():
@@ -901,5 +1375,28 @@ def library_qss():
                         font-size: 18px; color: {p['fg_dim']}; }}
     QPushButton#star:hover {{ background-color: {_rgba(g['btn_fill'])}; color: {p['fg']}; }}
     QPushButton#star[on="true"] {{ color: {p['kusudama']}; }}
-    QWidget#rowListInner {{ background: transparent; }}
+    QWidget#rowListInner, QWidget#sideInner {{ background: transparent; }}
+    QLabel#dlgHead {{ color: {p['fg_bright']}; {fam_css} font-size: 20px; font-weight: 300; letter-spacing: 1px; }}
+    QComboBox#category {{ background-color: {_rgba(g['field_fill'])}; border: 1px solid {_rgba(g['field_border'])};
+                          border-radius: 9px; padding: 4px 12px; font-size: 14px; color: {p['fg']}; }}
+    QComboBox#category:focus {{ border: 1px solid {p['accent']}; }}
+    QComboBox#category QLineEdit {{ background: transparent; border: none; color: {p['fg']}; font-size: 14px; }}
+    QComboBox#category::drop-down {{ border: none; width: 26px; }}
+    QComboBox#category QAbstractItemView {{ background-color: {p['bg']}; color: {p['fg']};
+                          border: 1px solid {_rgba(g['btn_border'])}; selection-background-color: {_rgba(g['btn_fill_hover'])}; }}
+    QPushButton:disabled {{ color: {p['fg_dim']}; }}
+    QLabel#category {{ color: {p['fg_bright']}; {fam_css} font-size: 15px; font-weight: bold;
+                       letter-spacing: 1px; padding: 1px 0 1px 10px; margin-left: 2px;
+                       border-left: 3px solid {p['accent']}; }}
+    QPushButton#nav[sub="true"] {{ padding-left: 30px; font-size: 13px; }}
+    QLabel#bpm {{ color: {p['fg_dim']}; font-size: 12px; }}
+    QPushButton#seg {{ background-color: {_rgba(g['btn_fill'])}; border: 1px solid {_rgba(g['btn_border'])};
+                       border-radius: 0; padding: 6px 14px; font-size: 12px; color: {p['fg_dim']}; }}
+    QPushButton#seg[pos="first"] {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
+    QPushButton#seg[pos="last"] {{ border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
+    QPushButton#seg[pos="mid"], QPushButton#seg[pos="last"] {{ border-left: none; }}
+    QPushButton#seg:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill_hover'])}; }}
+    QPushButton#seg:checked {{ color: {g['primary_fg'].name()}; background-color: {_rgba(_c(p['accent'], 0.55))};
+                               font-weight: bold; }}
+    QPushButton#sortDir {{ padding: 0; border-radius: 8px; font-size: 15px; font-weight: bold; color: {p['fg']}; }}
     """

@@ -31,7 +31,7 @@ _SETTINGS_KEYS = (
     "player_update_pending",
     # 同居 Player(v15.5〜)の選曲: 最近開いた楽曲・保存済み楽曲(元ファイルへの
     # 参照)・登録フォルダ。default_settings() と両方に要る。
-    "player_recent", "player_saved", "player_folders",
+    "player_recent", "player_saved", "player_folders", "player_sort",
     # 動画書き出しの保存先。ここに書き忘れていたため default_settings() には
     # あるのに load_settings() が読み戻さず、環境設定で指定した保存先が再起動の
     # たびに空へ戻っていた。
@@ -344,10 +344,14 @@ def default_settings() -> dict:
         "player_update_pending": False,
         # 同居 Player の選曲。player_recent は [{"path", "title", "opened"}]
         # 新しい順、player_saved は [{"path", "title"}](参照だけ。外しても
-        # 元の TJA は消さない)、player_folders はフォルダのパス。
+        # 元の TJA は消さない)、player_folders は
+        # [{"simulator", "path"}](古い文字列だけの項目は「その他」として読む)。
         "player_recent": [],
         "player_saved": [],
         "player_folders": [],
+        # 選曲の並べ方。mode は登録フォルダ・保存済み、recent_mode は最近開いた
+        # 楽曲。reverse はその並べ方の素直な向きの逆か。
+        "player_sort": {"mode": "name", "recent_mode": "recent", "reverse": False},
         # ウィンドウのサイズ・位置とサイドバー分割比を次回起動へ引き継ぐための
         # base64 文字列(QMainWindow.saveGeometry / QSplitter.saveState)。空文字
         # なら既定サイズで開く。
