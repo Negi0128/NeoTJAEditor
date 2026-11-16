@@ -487,7 +487,7 @@ class MainWindow(QMainWindow):
         self._preview_branch_level = note_edit.BRANCH_AUTO
         # 直近の解析が返した「区間ごとの系統」。編集の書き込み先に使う。
         self._preview_branch_path = []
-        # プレビュー(NeoTJAPlayer/情報/打音/メトロノーム)が映す譜面テキスト。
+        # プレビュー(再生画面/情報/打音/メトロノーム)が映す譜面テキスト。
         # 入力中のバッファではなく、最後に保存/読込した内容を保持する。保存/開く/
         # 新規のときだけ更新し、打鍵では変えない(=プレビューは保存済みの譜面を
         # 映す)。_preview_courses はその内容のコース解析結果のキャッシュ。
@@ -2477,7 +2477,7 @@ class MainWindow(QMainWindow):
         """計算済みの結果を画面へ貼る。ここは GUI スレッドなので、この所要時間が
         そのまま「操作が効かない時間」になる。だから貼る作業も
           (1) 構文ハイライト/サイドバー/索引
-          (2) プレビュー(NeoTJAPlayer/情報/打音)
+          (2) プレビュー(再生画面/情報/打音)
         の二つに分け、重い譜面では (2) を少し後ろへ回して一度の停止を半分にする。
         軽い譜面(下の PREVIEW_DEFER_SEC 未満)はこれまでどおり一度に貼る。"""
         content = self.editor.toPlainText()
@@ -2664,7 +2664,7 @@ class MainWindow(QMainWindow):
             self._preview_courses = self.analyzer.parse_courses(content)
 
     def _refresh_preview(self):
-        """プレビュー(NeoTJAPlayer/情報/打音/メトロノーム)を編集中(未保存)の
+        """プレビュー(再生画面/情報/打音/メトロノーム)を編集中(未保存)の
         エディタ内容から組み直す。保存を待たずにすぐ反映される。音源(WAVE)は
         refresh_from_content 側でパスが変わったときだけ読み直すので、編集中に
         鳴り直すことはない。OFFSET・波形の合わせ込みは別経路(OFFSETスピン
@@ -4344,7 +4344,7 @@ class MainWindow(QMainWindow):
             return False
 
     def open_video_recorder(self):
-        """NeoTJAPlayer の画面を動画(mp4)として書き出す。
+        """プレビューの再生画面を動画(mp4)として書き出す。
 
         書き出すのは「いまプレビューで見ているコース/分岐」。画面キャプチャでは
         なく1コマずつ描き直すので、書き出し中にアプリを触っても影響しない。

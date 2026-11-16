@@ -1136,7 +1136,9 @@ class SettingsDialog(QDialog):
             "合わせ続けます。自分で打ち込んでいる欄（カーソルが入っている欄）は"
             "書き換えません。オフにすると、入れた数字がそのまま残ります。"))
 
-        form2 = self._group(outer, "NeoTJAPlayer")
+        # 枠の名前は以前「NeoTJAPlayer」だった。内蔵の再生画面のことなのに
+        # 旧 Player(別 exe、v15 で廃止)と紛らわしいので「プレビュー」にした。
+        form2 = self._group(outer, "プレビュー")
         self.arrange_ref_check = QCheckBox("アレンジ譜面")
         self.arrange_ref_check.setChecked(cfg.get("arrange_ref", False))
         form2.addRow(self.arrange_ref_check)

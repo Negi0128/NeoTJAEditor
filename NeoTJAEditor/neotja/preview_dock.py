@@ -84,7 +84,7 @@ from neotja.chart_preview_widget import (
 from neotja.tja_analyzer import balloon_pop_spans
 from neotja import theme
 
-# NeoTJAPlayer(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
+# 再生画面(ゲーム窓)は情報バー・波形も含めてアプリのテーマに
 # 関わらず常にダーク基調で見せる。ここで固定のダークパレットを参照する。
 _DARK = theme.THEMES["dark"]
 from neotja.chart_edit_widget import ChartEditWaveform
