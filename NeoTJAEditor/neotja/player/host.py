@@ -5,8 +5,9 @@
 NeoTJAEditor.exe に同居させる)。
 
 上の段に「戻る」とワードマーク、その下に画面を重ねる(QStackedWidget)。
-いまは選曲(LibraryView)だけ。曲が選ばれたら song_chosen を出す
-(難易度選択はあとの段で足す)。
+選曲(LibraryView)で曲が選ばれたら song_chosen を出し、難易度選択
+(DifficultyPage)へ進む。難易度選択は窓いっぱいに背景を見せるので、
+そのあいだは上の段を隠す(戻る・設定は難易度選択が自分で持つ)。
 
 設定は MainWindow の config_data と保存の口(save_cb)をそのまま借りる。
 自分で別の辞書を持つと、Editor が丸ごと書くたびに Player の値が消えるため。
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from neotja.player.difficulty import DifficultyPage
 from neotja.player.library_view import LibraryView, library_qss
 from neotja.start_screen import StartScreen, dropped_tja_path, wordmark_family
 from neotja.theme import COLORS, glass_colors
@@ -29,6 +31,8 @@ from neotja.theme import with_alpha as _c, rgba as _rgba
 class PlayerHost(QWidget):
     back_requested = Signal()
     song_chosen = Signal(str)
+    play_requested = Signal(str, str)     # (tja, コースキー)
+    record_requested = Signal(str, str)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -42,6 +46,7 @@ class PlayerHost(QWidget):
         v.setSpacing(0)
 
         top = QWidget()
+        self.top_bar = top
         top.setObjectName("playerTop")
         th = QHBoxLayout(top)
         th.setContentsMargins(16, 12, 28, 10)
@@ -58,6 +63,7 @@ class PlayerHost(QWidget):
         th.addStretch(1)
         v.addWidget(top)
         rule = QFrame()
+        self.top_rule = rule
         rule.setObjectName("rule")
         rule.setFixedHeight(1)
         v.addWidget(rule)
@@ -67,13 +73,18 @@ class PlayerHost(QWidget):
         self.library = LibraryView(config_data, save_cb)
         self.library.song_chosen.connect(self._on_song_chosen)
         self.body.addWidget(self.library)
+        self.difficulty = DifficultyPage(config_data, save_cb)
+        self.difficulty.back_requested.connect(self.show_library)
+        self.difficulty.play_requested.connect(self.play_requested)
+        self.difficulty.record_requested.connect(self.record_requested)
+        self.body.addWidget(self.difficulty)
 
         self.refresh_theme()
 
     # ------------------------------------------------------------------
     def on_shown(self):
         """ランチャーから入ったとき。選曲の最初の画面へ。"""
-        self.body.setCurrentWidget(self.library)
+        self._set_page(self.library)
         self.library.show_default()
         # 押した「Player を起動」が消えて、フォーカスが「戻る」へ流れ着く
         # のを避ける(Enter 一つでランチャーへ戻ってしまう)。
@@ -82,6 +93,25 @@ class PlayerHost(QWidget):
     def _on_song_chosen(self, path):
         self.current_song = path
         self.song_chosen.emit(path)
+        self.show_difficulty(path)
+
+    def _set_page(self, page):
+        full = page is self.difficulty
+        self.top_bar.setVisible(not full)
+        self.top_rule.setVisible(not full)
+        self.body.setCurrentWidget(page)
+
+    def show_difficulty(self, path):
+        self.difficulty.close_settings()
+        self.difficulty.set_song(path)
+        self._set_page(self.difficulty)
+        self.difficulty.setFocus()
+
+    def show_library(self):
+        """難易度選択の「戻る」。選曲は作り直さないので、開いていた
+        フォルダ・検索・並び・選んだ行はそのまま。"""
+        self.difficulty.close_settings()
+        self._set_page(self.library)
 
     def shutdown(self):
         self.library.shutdown()
