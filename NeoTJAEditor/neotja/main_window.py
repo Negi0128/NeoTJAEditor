@@ -1970,13 +1970,12 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_f1(self):
-        """F1: launch the built-in game-style preview (NeoTJAPlayer)
-        if it's not open yet; while it's open, F1 instead toggles hit
-        sounds so the key never relaunches/duplicates the preview."""
-        if not self.preview_dock.is_game_preview_visible():
-            self.preview_dock.set_game_preview_visible(True)
-        else:
-            self.preview_dock.toggle_hit_sounds()
+        """F1: 打音の ON/OFF。
+
+        以前は「プレビューが閉じていれば開く、開いていれば打音切替」だった。
+        v15 では再生画面が右ペインに埋め込みで常にあるので、開く側の分岐は
+        通らない。打音切替だけにする。"""
+        self.preview_dock.toggle_hit_sounds()
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -2029,12 +2028,10 @@ class MainWindow(QMainWindow):
 
         rm = mb.addMenu("起動")
         self._run_actions = {}
-        # F1 is reserved for the built-in preview (see _bind_shortcuts /
-        # _on_f1), not an external simulator, so its label is fixed rather
-        # than sourced from run_config and it isn't refreshed in
-        # open_settings() below.
-        f1_action = rm.addAction("F1: NeoTJAPlayer(内蔵プレビュー)", self._on_f1)
-        self._run_actions["F1"] = f1_action
+        # 「F1: NeoTJAPlayer(内蔵プレビュー)」は外した。再生画面は常に右ペインに
+        # あり、F1 キーは打音の切替(_on_f1)なので、「起動」に並べると旧 Player
+        # (別 exe)と紛らわしい。設定の run_config["F1"] は読み込みの互換の
+        # ために残してある(表示には使わない)。
         for k in ("F2", "F3"):
             action = rm.addAction(f"{k}: {self.config_data['run_config'][k]['name']}", lambda key=k: self.run_simulator(key))
             self._run_actions[k] = action
@@ -2145,10 +2142,8 @@ class MainWindow(QMainWindow):
             sc = QShortcut(QKeySequence(k), self)
             sc.activated.connect(lambda key=k: self.run_simulator(key))
 
-        # F1 is reserved for the built-in game-style preview: first press
-        # launches it, subsequent presses (while it's open) toggle hit
-        # sounds instead of relaunching. ApplicationShortcut so it fires
-        # whether focus is in the editor or the (separate) preview window.
+        # F1 は打音の ON/OFF(_on_f1)。ApplicationShortcut にしてあるので、
+        # フォーカスがエディタ側でも再生画面側でも効く。
         sc_f1 = QShortcut(QKeySequence("F1"), self)
         sc_f1.setContext(Qt.ApplicationShortcut)
         sc_f1.activated.connect(self._on_f1)
@@ -5586,8 +5581,6 @@ class MainWindow(QMainWindow):
             self.btn_auto_save.blockSignals(False)
             self._sync_auto_save_button(self.btn_auto_save.isChecked())
             for k, action in self._run_actions.items():
-                if k == "F1":
-                    continue  # fixed label - not sourced from run_config
                 action.setText(f"{k}: {self.config_data['run_config'][k]['name']}")
             self.editor.gutter.update()
             self.ruler.update()

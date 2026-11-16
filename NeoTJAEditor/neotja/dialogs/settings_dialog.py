@@ -225,19 +225,15 @@ class SettingsDialog(QDialog):
         w, outer = self._tab_body()
         outer.addWidget(self._hint(
             "F2・F3キーで起動する外部シミュレータの名前とexeパスを設定します。"
-            "F1は内蔵プレビュー(NeoTJAPlayer)に固定されています。"))
+            "F1キーは打音の ON/OFF に使っています。"))
 
         cfg = self.main_window.config_data["run_config"]
 
-        # F1 は main_window 側で内蔵プレビュー固定になっており、ここで exe を
-        # 指定しても起動しない(メニューのラベル更新でも F1 だけ飛ばしている)。
-        # 以前は F2・F3 と同じ入力欄を並べていたので、指定して保存しても何も
-        # 起きず、原因も分からなかった。欄自体を出さず、そう決まっていることを
-        # 書いておく。
-        form = self._group(outer, "F1 キーで起動")
-        form.addRow(self._hint(
-            "内蔵プレビュー(NeoTJAPlayer)で固定です。変更できません。\n"
-            "外部シミュレータを使いたい場合は F2・F3 に設定してください。"))
+        # F1 は main_window 側で打音の ON/OFF に固定してあり、ここで exe を
+        # 指定しても起動しない。以前は F2・F3 と同じ入力欄を並べていたので、
+        # 指定して保存しても何も起きず、原因も分からなかった。欄は出さず、
+        # 上の説明文で F1 の役目だけ伝える。v15 で「F1 キーで起動」の枠
+        # (内蔵プレビュー固定の説明)は外した — F1 はもう何も起動しない。
 
         self.run_entries = {}
         for key in ("F2", "F3"):
