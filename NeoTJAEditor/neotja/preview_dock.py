@@ -809,6 +809,14 @@ class GamePreviewWindow(QWidget):
         cb = getattr(self, "_pane_cb", None)
         if cb is not None:
             cb()
+        if getattr(self, "_view_only", False):
+            # Player の再生画面: 絵だけ(set_view_only)。窓の大きさは絵の大きさ。
+            self.scaled_host.refit()
+            self.setFixedSize(self.scaled_host.size())
+            cb = getattr(self, "_embed_cb", None)
+            if cb is not None:
+                cb()
+            return
         if self._fullscreen:
             # 全画面のあいだは窓の大きさを固定しない(固定すると画面いっぱいの
             # 表示が壊れる)。モード切替で中身の高さが変わったときは、倍率を
@@ -833,6 +841,39 @@ class GamePreviewWindow(QWidget):
         cb = getattr(self, "_embed_cb", None)
         if cb is not None:
             cb()
+
+    def set_view_only(self, on: bool):
+        """絵(ゲーム画面)だけを見せる。下部パネル(速度・波形・情報)と
+        レーンの上のボタン類を隠す。NeoTJAPlayer が自分の画面の中へ再生画面を
+        置くときに使う。Editor は使わない(呼ばなければ今までどおり)。"""
+        self._view_only = bool(on)
+        if on:
+            self._bottom_widget.hide()
+            self.set_overlay_visible(False)
+        else:
+            self._bottom_widget.show()
+            self.set_overlay_visible(True)
+        self._refit()
+
+    def fit_view_only(self, avail_w: int, avail_h: int):
+        """絵だけの表示(set_view_only)で、avail に収まる最大の倍率にする。
+        当ててから測り直して詰める(_fit_fullscreen と同じ考え方)。"""
+        if not getattr(self, "_view_only", False):
+            return
+        avail_w, avail_h = max(1, int(avail_w)), max(1, int(avail_h))
+        for _ in range(6):
+            cur = self.scaled_host.scale()
+            cw = max(1, self.scaled_host.width())
+            ch = max(1, self.scaled_host.height())
+            r = min(avail_w / float(cw), avail_h / float(ch))
+            if cw <= avail_w and ch <= avail_h and r <= 1.02:
+                break
+            want = max(0.25, min(4.0, cur * (r * 0.998 if r < 1.0 else r)))
+            if abs(want - cur) < 1e-4:
+                break
+            self._apply_scale_all(want)
+            self.scaled_host.refit()
+        self._refit()
 
     def set_embed_resized_cb(self, cb):
         """埋め込みのとき、大きさを取り直したあとに呼ぶ先。"""
@@ -4191,7 +4232,81 @@ class PreviewDock(QDockWidget):
         over = max(0.0, float(self._chart_end_audio or 0.0) - float(song_sec))
         return self._postroll_sec + over
 
+    # ------------------------------------------------------------------
+    # 先読み(NeoTJAPlayer の曲名表示のあいだに本編の音源を読んでおく)
+    # ------------------------------------------------------------------
+    #: [道筋, 読み終わった中身 or None]。None なら先読みしていない。
+    _pre = None
+    _pre_worker = None
+    #: 本編の読み込みが先読みの終わりを待っているか。
+    _pre_waiting = False
+
+    def predecode_wave(self, wave_path):
+        """音源を**鳴っている音に触らずに**読んでおく。
+
+        あとで refresh_from_content が同じ音源を読もうとしたら、読み直さずに
+        この結果を使う(_start_waveform_decode)。Player の曲名表示は試聴を
+        流したまま本編の準備をしたいが、ふつうの読み込み(audio.load)は
+        その場で今の音を止めてしまうため。Editor は使わない。"""
+        if not wave_path or not os.path.exists(wave_path):
+            return False
+        if self._pre is not None and self._pre[0] == wave_path:
+            return True
+        self.cancel_predecode()
+        self._pre = [wave_path, None]
+        worker = SongDecodeWorker(wave_path)
+        worker.path = wave_path
+        worker.decoded.connect(
+            lambda pcm, sr, peaks, dur, mips, p=wave_path:
+            self._on_predecoded(p, (pcm, sr, peaks, dur, mips)))
+        worker.failed.connect(lambda msg, p=wave_path: self._on_predecode_failed(p))
+        self._pre_worker = worker
+        worker.start()
+        return True
+
+    def cancel_predecode(self):
+        detach_worker(self._pre_worker)
+        self._pre_worker = None
+        self._pre = None
+        self._pre_waiting = False
+
+    def _on_predecoded(self, path, data):
+        if self._pre is None or self._pre[0] != path:
+            return          # 取り消したあとに届いたもの
+        self._pre[1] = data
+        if self._pre_waiting:
+            self._pre_waiting = False
+            self._use_predecoded()
+
+    def _on_predecode_failed(self, path):
+        if self._pre is None or self._pre[0] != path:
+            return
+        waiting = self._pre_waiting
+        self._pre = None
+        self._pre_waiting = False
+        if waiting:
+            self._start_waveform_decode(path)    # ふつうに読み直す
+
+    def _use_predecoded(self):
+        pre, self._pre = self._pre, None
+        self._pre_worker = None
+        if pre is None or pre[1] is None:
+            return
+        pcm, sr, peaks, dur, mips = pre[1]
+        self._on_decoded(pre[0], pcm, sr, peaks, dur, mips)
+
     def _start_waveform_decode(self, wave_path):
+        pre = self._pre
+        if pre is not None and pre[0] == wave_path:
+            # 先読みしてあるもの。読み直さずにそれを渡す(届いていなければ待つ)。
+            detach_worker(self._decode_worker)
+            self._decode_worker = None
+            self._decoding_path = wave_path
+            if pre[1] is not None:
+                QTimer.singleShot(0, self._use_predecoded)
+            else:
+                self._pre_waiting = True
+            return
         self._decoding_path = wave_path
         # 曲は1回だけデコードし、ステレオ PCM(ミキサー用)と波形ピーク/長さ
         # (波形表示用)を同時に得る。レガシー経路では PCM を無視してピークだけ使う。
@@ -4281,6 +4396,7 @@ class PreviewDock(QDockWidget):
                 pass
         detach_worker(self._decode_worker)
         self._decode_worker = None
+        self.cancel_predecode()
 
     def _on_decode_failed(self, path, msg):
         if path != self._current_wave_path:

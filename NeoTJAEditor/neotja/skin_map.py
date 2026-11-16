@@ -877,6 +877,11 @@ SKIN_MAP = {
         {"kind": KIND_COPY, "source": "TNDE-R/Sounds/BGM/SongSelect.ogg", "rect": None, "exact": True, "note": None},
     "Select_Cards.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Bar.png", "rect": None, "exact": True, "note": None},
+    # 難易度のマークだけの絵(背景なし・透過)。上の段に かんたん/ふつう/
+    # むずかしい/おに/裏 の5つ、下の段は光らせる用の白い型。Player の
+    # 難易度選択と曲名表示で使う(neotja/player/difficulty.py の course_mark)。
+    "Select_Marks.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Mark.png", "rect": None, "exact": True, "note": None},
     # 後ろの大きな角丸パネル。12色あるのはジャンル別だが、Player は
     # ジャンルを持たないので実機の見た目に合う teal(10番)を1枚だけ使う。
     "Select_Panel.png":

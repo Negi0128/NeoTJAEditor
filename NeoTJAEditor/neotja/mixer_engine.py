@@ -415,6 +415,11 @@ class MixerCore:
                 # "hit_enabled" コマンドとの整合も保たれる。
                 if self.hit_enabled:
                     self._spawn(self.bank.get(cmd[1]), 0, False)
+            elif op == "ui_now":
+                # Player の操作音(ピ・ドン)。sfx_now と同じく今すぐ1つ鳴らすが、
+                # 打音の ON/OFF(F1 の hit_enabled)は見ない — 操作の手応えで
+                # あって譜面の打音ではないため。Editor はこの命令を使わない。
+                self._spawn(self.bank.get(cmd[1]), 0, False)
             elif op == "song":
                 self.song = cmd[1]
                 self.song_sr = int(cmd[2])

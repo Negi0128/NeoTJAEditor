@@ -86,6 +86,9 @@ class FakeDock:
     def set_master_volume(self, v):
         pass
 
+    def cancel_predecode(self):
+        pass
+
 
 class FakeTimer:
     def __init__(self):
@@ -199,6 +202,19 @@ class FakeCore:
     def shutdown(self):
         self.log.append(('shutdown',))
 
+    def predecode(self, path):
+        self.log.append(('predecode', os.path.basename(path)))
+
+    def chart_ready(self):
+        return False
+
+    def load(self, path, course_key=None, play_mode=None):
+        self.log.append(('load', course_key))
+        return True
+
+    def play_chart(self, at=0.0):
+        self.log.append(('play_chart', at))
+
 
 class HostPreviewTests(unittest.TestCase):
     def setUp(self):
@@ -229,8 +245,14 @@ class HostPreviewTests(unittest.TestCase):
             core.log.clear()
             host.library.choose(b)
             self.assertEqual(core.log, [('stop',), ('play', 'b.tja', 0.0)])
-            for click, name in ((host.difficulty.btn_play, 'play'),
-                                (host.difficulty.btn_record, 'record'),
+            # Play は曲名表示へ進み、試聴はその場では止めない(test_player_intro.py)。
+            host.show_difficulty(a)
+            core.log.clear()
+            host.difficulty.btn_play.click()
+            self.assertNotIn(('stop',), core.log)
+            self.assertIs(host.body.currentWidget(), host.intro)
+            host.stop_preview()
+            for click, name in ((host.difficulty.btn_record, 'record'),
                                 (host.difficulty.btn_back, 'back')):
                 host.show_difficulty(a)
                 core.log.clear()
@@ -262,6 +284,85 @@ class HostPreviewTests(unittest.TestCase):
                 win.player_page.btn_back.click()    # ランチャーへ
                 self.assertEqual(core.log, [('stop',)])
                 self.assertFalse(win.is_player_visible())
+
+
+# ----------------------------------------------------------------------
+# 操作音
+# ----------------------------------------------------------------------
+class FakeMixerCore:
+    device_sr = 48000
+
+    def __init__(self):
+        self.posts = []
+
+    def post(self, cmd):
+        self.posts.append(cmd)
+
+
+class FakeEngine:
+    def __init__(self):
+        self.core = FakeMixerCore()
+        self.played = []
+        self.hit_sounds = type('H', (), {'play_once': lambda _s, k: self.played.append(k)})()
+
+
+class UiSoundTests(unittest.TestCase):
+    def test_pi_is_synthesized_once_and_played_through_mixer(self):
+        from neotja.player.ui_sound import UiSounds, synth_pi, PI_SLOT
+        pcm = synth_pi(48000)
+        self.assertEqual(pcm.shape, (int(48000 * 0.07), 2))
+        self.assertLess(float(abs(pcm).max()), 0.4)
+        self.assertLess(float(abs(pcm[-5:]).max()), 0.01)      # 末尾はプチッとしない
+        eng = FakeEngine()
+        snd = UiSounds(lambda: eng)
+        snd.pi()
+        snd.pi()
+        kinds = [c[0] for c in eng.core.posts]
+        self.assertEqual(kinds, ['sfx', 'ui_now', 'ui_now'])     # 合成は1回だけ
+        self.assertEqual(eng.core.posts[0][1], PI_SLOT)
+        snd.don()
+        # F1(打音の ON/OFF)を見ない ui_now で鳴らす。
+        self.assertEqual(eng.core.posts[-1], ('ui_now', 'don'))
+        UiSounds(lambda: None).pi()                               # 道が無くても落ちない
+
+    @real_qt_test
+    def test_clicks_make_sounds_without_touching_preview(self):
+        from neotja.player.host import PlayerHost
+        orig = PlayerHost.core_factory
+        PlayerHost.core_factory = FakeCore
+        FakeCore.instances.clear()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                a = _chart(Path(d) / 'a', 'a', 2)
+                eng = FakeEngine()
+                host = PlayerHost({'master_volume': 0.0}, lambda: None,
+                                  audio_provider=lambda: eng)
+                host.resize(1600, 900)
+                host.show()
+                host.on_shown()
+                host.library.nav_saved.click()
+                self.assertEqual([c[0] for c in eng.core.posts], ['sfx', 'ui_now'])
+                host.library.choose(a)
+                core = FakeCore.instances[0]
+                core.log.clear()
+                page = host.difficulty
+                eng.core.posts.clear()
+                page.cards['Oni'].clicked.emit('Oni')           # 譜面にあるカード → ピ
+                self.assertEqual(eng.core.posts, [('ui_now', 'ui_pi')])
+                from PySide6.QtCore import QPoint, Qt
+                from PySide6.QtTest import QTest
+                QTest.mouseClick(page.cards['Easy'], Qt.LeftButton, pos=QPoint(60, 60))
+                self.assertEqual(len(eng.core.posts), 1)         # 無いカードは鳴らない
+                page.btn_swap.click()                            # 裏が無いので押されない扱いでも可
+                page.btn_settings.click()
+                page.settings.switches['player_show_lyric'].click()
+                n = len([c for c in eng.core.posts if c[0] == 'ui_now'])
+                self.assertGreaterEqual(n, 2)
+                self.assertEqual(core.log, [])                   # 試聴は止めない
+                host.shutdown()
+                host.deleteLater()
+        finally:
+            PlayerHost.core_factory = orig
 
 
 if __name__ == '__main__':

@@ -760,6 +760,8 @@ class LibraryView(QWidget):
     """選曲。左の列と右の中身。"""
 
     song_chosen = Signal(str)
+    #: 操作音の合図("pi")。鳴らすのは PlayerHost(ui_sound)。
+    sound_requested = Signal(str)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -806,6 +808,7 @@ class LibraryView(QWidget):
         for b in (self.nav_open, self.nav_recent, self.nav_saved):
             b.setProperty("sub", True)
             b.clicked.connect(lambda _=False, k=b.kind: self.show_section(k))
+            b.clicked.connect(self._pi)
             sv.addWidget(b)
         sv.addSpacing(24)
         # シミュレーター(カテゴリ)ごとに見出しを立て、その下に登録フォルダ。
@@ -818,6 +821,7 @@ class LibraryView(QWidget):
         self.btn_add_folder = QPushButton("＋  フォルダを追加")
         self.btn_add_folder.setObjectName("addFolder")
         self.btn_add_folder.setCursor(Qt.PointingHandCursor)
+        self.btn_add_folder.clicked.connect(self._pi)
         self.btn_add_folder.clicked.connect(self.add_folder)
         sv.addWidget(self.btn_add_folder)
         sv.addStretch(1)
@@ -840,6 +844,7 @@ class LibraryView(QWidget):
         self.btn_open_file = QPushButton("ファイルを選択…")
         self.btn_open_file.setObjectName("primary")
         self.btn_open_file.setCursor(Qt.PointingHandCursor)
+        self.btn_open_file.clicked.connect(self._pi)
         self.btn_open_file.clicked.connect(self.open_file)
         bh = QHBoxLayout()
         bh.addWidget(self.btn_open_file)
@@ -864,6 +869,7 @@ class LibraryView(QWidget):
             lambda m, r: self._on_sort_changed(False, m, r))
         self.page_saved.tools.addSpacing(6)
         self.btn_add_saved = QPushButton("楽曲を追加")
+        self.btn_add_saved.clicked.connect(self._pi)
         self.btn_add_saved.clicked.connect(self.add_saved_files)
         self.page_saved.tools.addWidget(self.btn_add_saved)
         self.saved_list = self.page_saved.add_list()
@@ -915,7 +921,11 @@ class LibraryView(QWidget):
         self.page_saved.sort.set_state(m, r)
         self.page_folder.sort.set_state(m, r)
 
+    def _pi(self, *_args):
+        self.sound_requested.emit("pi")
+
     def _on_sort_changed(self, recent_view, mode, reverse):
+        self._pi()
         song_lists.set_sort_state(self.cfg, mode, reverse, recent_view=recent_view)
         self._save()
         self._sync_sort_bars()
@@ -996,7 +1006,9 @@ class LibraryView(QWidget):
     # 一覧を作る
     def _song_row(self, path, title, **kw):
         row = SongRow(path, title, **kw)
+        row.chosen.connect(self._pi)
         row.chosen.connect(self.choose)
+        row.save_toggled.connect(self._pi)
         row.save_toggled.connect(self._on_save_toggled)
         row.remove_requested.connect(self.remove_saved)
         row.relink_requested.connect(self.relink_saved)
@@ -1148,6 +1160,7 @@ class LibraryView(QWidget):
                 if not os.path.isdir(path):
                     b.setProperty("missing", True)
                 b.clicked.connect(lambda _=False, p=path: self.show_section("folder", p))
+                b.clicked.connect(self._pi)
                 b.setContextMenuPolicy(Qt.CustomContextMenu)
                 b.customContextMenuRequested.connect(
                     lambda pos, btn=b: self._folder_menu(btn, pos))
@@ -1260,6 +1273,7 @@ class LibraryView(QWidget):
             b.setObjectName("crumbCur" if i == len(parts) - 1 else "crumb")
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _=False, d=p: self.open_dir(d))
+            b.clicked.connect(self._pi)
             lay.insertWidget(lay.count() - 1, b)
 
     def _on_listed(self, worker, genres, dirs):
@@ -1267,10 +1281,12 @@ class LibraryView(QWidget):
             return
         for d, box in genres:
             row = GenreRow(d, box)
+            row.opened.connect(self._pi)
             row.opened.connect(self.open_dir)
             self.folder_list.add(row)
         for d in dirs:
             row = FolderRow(d)
+            row.opened.connect(self._pi)
             row.opened.connect(self.open_dir)
             self.folder_list.add(row)
 
@@ -1348,8 +1364,10 @@ def library_qss():
     return f"""
     QLabel#section {{ color: {p['fg_dim']}; {fam_css} font-size: 12px; font-weight: bold;
                       letter-spacing: 2px; padding: 0 12px; }}
+    QPushButton {{ font-weight: 600; }}
     QPushButton#nav {{ text-align: left; background-color: transparent; border: 1px solid transparent;
-                       border-radius: 9px; padding: 10px 14px 10px 18px; font-size: 14px; color: {p['fg']}; }}
+                       border-radius: 9px; padding: 10px 14px 10px 18px; font-size: 14px; color: {p['fg']};
+                       font-weight: 600; }}
     QPushButton#nav:hover {{ background-color: {_rgba(g['btn_fill'])}; }}
     QPushButton#nav:checked {{ background-color: {_rgba(g['btn_fill_hover'])};
                                border: 1px solid {_rgba(g['accent_border'])}; color: {p['fg_bright']}; font-weight: bold; }}
@@ -1358,9 +1376,9 @@ def library_qss():
     QPushButton#addFolder {{ text-align: left; background-color: transparent; border: 1px dashed {_rgba(g['btn_border'])};
                              border-radius: 9px; padding: 9px 14px; color: {p['fg_dim']}; font-size: 13px; }}
     QPushButton#addFolder:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
-    QLabel#pageTitle {{ color: {p['fg_bright']}; {fam_css} font-size: 34px; font-weight: 300; letter-spacing: 1px; }}
+    QLabel#pageTitle {{ color: {p['fg_bright']}; {fam_css} font-size: 34px; font-weight: 600; letter-spacing: 1px; }}
     QLabel#openGlyph {{ color: {p['accent']}; {fam_css} font-size: 44px; font-weight: 200; letter-spacing: 6px; }}
-    QLabel#empty {{ color: {p['fg_dim']}; font-size: 14px; padding-top: 40px; }}
+    QLabel#empty {{ color: {p['fg_dim']}; font-size: 14px; font-weight: 600; padding-top: 40px; }}
     QLabel#chevron {{ color: {p['fg_dim']}; font-size: 26px; padding-bottom: 3px; }}
     QLabel#crumbSep {{ color: {p['fg_dim']}; font-size: 13px; }}
     QPushButton#crumb, QPushButton#crumbCur {{ background-color: transparent; border: 1px solid transparent;
@@ -1376,7 +1394,7 @@ def library_qss():
     QPushButton#star:hover {{ background-color: {_rgba(g['btn_fill'])}; color: {p['fg']}; }}
     QPushButton#star[on="true"] {{ color: {p['kusudama']}; }}
     QWidget#rowListInner, QWidget#sideInner {{ background: transparent; }}
-    QLabel#dlgHead {{ color: {p['fg_bright']}; {fam_css} font-size: 20px; font-weight: 300; letter-spacing: 1px; }}
+    QLabel#dlgHead {{ color: {p['fg_bright']}; {fam_css} font-size: 20px; font-weight: 600; letter-spacing: 1px; }}
     QComboBox#category {{ background-color: {_rgba(g['field_fill'])}; border: 1px solid {_rgba(g['field_border'])};
                           border-radius: 9px; padding: 4px 12px; font-size: 14px; color: {p['fg']}; }}
     QComboBox#category:focus {{ border: 1px solid {p['accent']}; }}

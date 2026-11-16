@@ -288,6 +288,43 @@ class PlayerCore:
             self.dock.audio.seek(int(self._loop[0] * 1000))
             self.dock.audio.play()
 
+    def chart_wave_path(self, path):
+        """本編を読むとき PreviewDock が使う音源の道筋(refresh_from_content と
+        同じ作り方)。無ければ ""。"""
+        try:
+            content = read_text(path)
+        except OSError:
+            return ""
+        from neotja.preview_dock import parse_preview_headers
+        wave = parse_preview_headers(content).get("wave") or ""
+        return os.path.join(os.path.dirname(path), wave) if wave else ""
+
+    def predecode(self, path):
+        """本編の音源を、鳴っている試聴に触らずに読んでおく。"""
+        wave = self.chart_wave_path(path)
+        if wave:
+            self.dock.predecode_wave(wave)
+
+    def use_normal_play_mode(self):
+        """再生画面を「通常再生」にする。PreviewDock は開くと作譜で始まる
+        (Editor の決まり)が、Player の本編は通常再生で見せる。設定の
+        preview_bottom_mode(Editor と共有)には書かない。"""
+        d = self.dock
+        idx = getattr(d, "MODE_TITLE", None)
+        if idx is None:
+            return
+        prev = getattr(d, "_restoring_mode", False)
+        d._restoring_mode = True
+        try:
+            d.set_bottom_mode(idx)
+        finally:
+            d._restoring_mode = prev
+
+    def chart_ready(self):
+        """load() した本編の音源が読み終わっているか。"""
+        wave = self.dock._current_wave_path
+        return bool(wave) and self._ready == wave and not self.dock.is_decoding()
+
     def peek(self, path):
         """譜面を**再生せずに**覗く。難易度選択画面へ出す材料を返す。
 

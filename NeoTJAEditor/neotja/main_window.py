@@ -929,7 +929,10 @@ class MainWindow(QMainWindow):
         if host is None:
             from neotja.player.host import PlayerHost
             host = PlayerHost(self.config_data,
-                              lambda: settings_mod.save_settings(self.config_data))
+                              lambda: settings_mod.save_settings(self.config_data),
+                              # 操作音は Editor の音声エンジンで鳴らす(Player の
+                              # あいだ Editor の曲は止めてあるので空いている)。
+                              audio_provider=lambda: self.preview_dock.audio)
             host.back_requested.connect(self._leave_player)
             self.player_page = host
             self.central_stack.addWidget(host)

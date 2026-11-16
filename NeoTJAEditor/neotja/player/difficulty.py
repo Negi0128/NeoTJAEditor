@@ -107,7 +107,7 @@ def title_font(px):
     return f
 
 
-def thin_font(px, weight=QFont.Light):
+def thin_font(px, weight=QFont.DemiBold):
     f = QFont(ui_family())
     f.setPixelSize(max(6, int(px)))
     f.setWeight(weight)
@@ -132,11 +132,40 @@ def draw_outlined(p, text, font, x, baseline, outline_px, fill="#ffffff",
 _marks = {}
 
 
+#: Select_Marks.png(TNDE の Difficulty_Mark.png)の並び。上の段に5つ。
+_MARK_SHEET_COLS = 5
+#: 1コマの中で使う正方形(1コマ 458px のとき)。5つのマークの不透明な範囲を
+#: すべて含む大きさで、どのコースでも同じ所を切るので、おに と 裏 の
+#: 位置と大きさがずれない。
+_MARK_SQUARE = (48, 50, 362)
+
+
 def course_mark(key):
-    """コースのマーク(素材から切り出し)。無ければ None。"""
+    """コースのマーク(背景なしの絵)。正方形。無ければ None。
+
+    System の 3_SongSelect/Difficulty_Select/Difficulty_Mark.png
+    (キャッシュの Select_Marks.png)から切り出す。それが無い古いキャッシュでは
+    カードの絵(Select_Cards.png)の上側を切ったもの(背景つき)に落ちる。"""
     if key in _marks:
         return _marks[key]
     pm = None
+    try:
+        sheet = os.path.join(str(settings_mod.skin_dir()), "Select_Marks.png")
+        if os.path.exists(sheet):
+            full = QPixmap(sheet)
+            if not full.isNull():
+                cw = full.width() / float(_MARK_SHEET_COLS)
+                k = cw / 458.0
+                x0, y0, side = _MARK_SQUARE
+                pm = full.copy(int(round(_CARD_INDEX[key] * cw + x0 * k)),
+                               int(round(y0 * k)), int(round(side * k)),
+                               int(round(side * k)))
+                pm = None if pm.isNull() else pm
+    except Exception:  # noqa: BLE001
+        pm = None
+    if pm is not None:
+        _marks[key] = pm
+        return pm
     try:
         src = os.path.join(str(settings_mod.skin_dir()), "Select_Cards.png")
         if os.path.exists(src):
@@ -211,19 +240,20 @@ class CourseCard(QWidget):
                     selected=self.selected, base_alpha=190)
 
         # マーク(位置と大きさは表/裏で同じ)
-        mw, mh = 100 * s, 109 * s
-        mr = QRectF(r.center().x() - mw / 2, r.top() + 14 * s, mw, mh)
+        mw, mh = 112 * s, 112 * s
+        mr = QRectF(r.center().x() - mw / 2, r.top() + 10 * s, mw, mh)
         pm = course_mark(self.key)
-        clip = QPainterPath()
-        clip.addRoundedRect(mr, 12 * s, 12 * s)
-        if pm is not None:
+        if pm is not None and pm.width() == pm.height():
+            # 背景なしのマーク(正方形)。そのまま置く。
+            p.drawPixmap(mr, pm, QRectF(pm.rect()))
+        elif pm is not None:
+            # 古いキャッシュ: カードの絵を切ったもの(背景つき)を角丸で。
+            clip = QPainterPath()
+            clip.addRoundedRect(mr, 12 * s, 12 * s)
             p.save()
             p.setClipPath(clip)
             p.drawPixmap(mr, pm, QRectF(pm.rect()))
             p.restore()
-            p.setPen(QPen(QColor(0, 0, 0, 120), 1.2 * s))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(clip)
         else:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(FALLBACK_MARK.get(self.key, "#888")))
@@ -239,7 +269,7 @@ class CourseCard(QWidget):
         draw_outlined(p, name, f, x, base, 5 * s)
 
         # ★レベル(細い書体・名前より小さく)
-        lf = thin_font(20 * s, QFont.Normal)
+        lf = thin_font(20 * s, QFont.DemiBold)
         p.setFont(lf)
         p.setPen(QColor(235, 242, 250))
         p.drawText(QRectF(r.left(), base + 5 * s, r.width(), 28 * s),
@@ -349,7 +379,7 @@ class GlassPill(_GlassButton):
         self.icon_kind = icon
 
     def _font(self):
-        f = thin_font(22 * self.scale, QFont.Normal)
+        f = thin_font(22 * self.scale, QFont.DemiBold)
         f.setLetterSpacing(QFont.AbsoluteSpacing, 3 * self.scale)
         return f
 
@@ -476,7 +506,7 @@ class ActionButton(_GlassButton):
                         primary=self.primary, base_alpha=175,
                         edge=QColor(220, 228, 238, 150))
         px = (28 if self.primary else 25) * s
-        f = thin_font(px, QFont.Light)
+        f = thin_font(px, QFont.Bold if self.primary else QFont.DemiBold)
         f.setLetterSpacing(QFont.AbsoluteSpacing, (6 if self.primary else 4) * s)
         fm = QFontMetricsF(f)
         icon_w = (20 if self.primary else 12) * s
@@ -535,7 +565,7 @@ class ToggleSwitch(_GlassButton):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255) if on else QColor(200, 210, 222))
         p.drawEllipse(knob)
-        f = thin_font(15 * s, QFont.Normal)
+        f = thin_font(15 * s, QFont.Bold)
         f.setLetterSpacing(QFont.AbsoluteSpacing, 1.5 * s)
         p.setFont(f)
         p.setPen(QColor(255, 255, 255, 235 if on else 170))
@@ -575,7 +605,7 @@ class SettingsPanel(QFrame):
         v.addLayout(self.grid)
         v.addStretch(1)
         self.labels = []
-        lbl = QLabel("オート")
+        lbl = QLabel("オート再生")
         lbl.setObjectName("setLabel")
         val = QLabel("ON（固定）")
         val.setObjectName("setValue")
@@ -606,10 +636,10 @@ class SettingsPanel(QFrame):
         self._v.setSpacing(int(18 * s))
         self.grid.setVerticalSpacing(int(10 * s))
         self.grid.setColumnStretch(0, 1)
-        f = thin_font(30 * s, QFont.Normal)
+        f = thin_font(30 * s, QFont.DemiBold)
         self.lbl_head.setFont(f)
         for lbl in self.labels:
-            lbl.setFont(thin_font(25 * s, QFont.Normal))
+            lbl.setFont(thin_font(25 * s, QFont.DemiBold))
         self.btn_close.scale = s
         self.btn_close.setFixedSize(int(48 * s + 2 * GLOW * s), int(48 * s + 2 * GLOW * s))
         for sw in self.switches.values():
@@ -640,6 +670,8 @@ class DifficultyPage(QWidget):
     back_requested = Signal()
     play_requested = Signal(str, str)     # (tja, コースキー)
     record_requested = Signal(str, str)
+    #: 操作音の合図。"don"(Play)/ "pi"(それ以外: カード・戻る・設定・録画…)。
+    sound_requested = Signal(str)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -659,30 +691,39 @@ class DifficultyPage(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.btn_back = GlassPill("戻る", "back", self)
+        self.btn_back.clicked.connect(lambda: self.sound_requested.emit("pi"))
         self.btn_back.clicked.connect(self.back_requested)
         self.btn_settings = GlassPill("設定", "gear", self)
+        self.btn_settings.clicked.connect(lambda: self.sound_requested.emit("pi"))
         self.btn_settings.clicked.connect(self.toggle_settings)
 
         self.cards = {}
         for slot in SLOTS:
             c = CourseCard(slot, self)
+            # 押せるのは譜面にあるコースだけ(無いカードは clicked を出さない)。
+            c.clicked.connect(lambda _slot: self.sound_requested.emit("pi"))
             c.clicked.connect(self.select_slot)
             self.cards[slot] = c
         self.btn_swap = SwapButton(self)
+        self.btn_swap.clicked.connect(lambda: self.sound_requested.emit("pi"))
         self.btn_swap.clicked.connect(self.toggle_ura)
-        self.btn_play = ActionButton("プレイ", "play", self)
+        self.btn_play = ActionButton("Play", "play", self)
+        self.btn_play.clicked.connect(lambda: self.sound_requested.emit("don"))
         self.btn_play.clicked.connect(
             lambda: self.current_course() and self.play_requested.emit(self.path, self.current_course()))
         self.btn_record = ActionButton("録画", "record", self)
+        self.btn_record.clicked.connect(lambda: self.sound_requested.emit("pi"))
         self.btn_record.clicked.connect(
             lambda: self.current_course() and self.record_requested.emit(self.path, self.current_course()))
-        self.lbl_auto = QLabel("オート", self)
+        self.lbl_auto = QLabel("オート再生", self)
         self.lbl_auto.setObjectName("autoBadge")
         self.lbl_auto.setAlignment(Qt.AlignCenter)
 
         self.settings = SettingsPanel(self)
         self.settings.hide()
+        self.settings.closed.connect(lambda: self.sound_requested.emit("pi"))
         self.settings.closed.connect(self.close_settings)
+        self.settings.changed.connect(lambda *_: self.sound_requested.emit("pi"))
         self.settings.changed.connect(self._on_setting)
         self._anim = QPropertyAnimation(self.settings, b"pos", self)
         self._anim.setDuration(180)
@@ -890,7 +931,7 @@ class DifficultyPage(QWidget):
             b.scale = s
             b.setGeometry(int(bx - g), int(yy - g), int(bw + 2 * g), int(hh + 2 * g))
         self.lbl_auto.setGeometry(int(32 * s), int(top - 46 * s), int(108 * s), int(34 * s))
-        self.lbl_auto.setFont(thin_font(17 * s, QFont.Normal))
+        self.lbl_auto.setFont(thin_font(17 * s, QFont.DemiBold))
         gl = GLOW * s
         for b, align in ((self.btn_back, "left"), (self.btn_settings, "right")):
             b.scale = s
@@ -962,7 +1003,7 @@ class DifficultyPage(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 150), 1.6 * s))
             p.setBrush(QColor(10, 18, 32, 150))
             p.drawRect(jr)
-            p.setFont(thin_font(30 * s, QFont.Normal))
+            p.setFont(thin_font(30 * s, QFont.DemiBold))
             p.setPen(QColor(235, 240, 248))
             p.drawText(jr, Qt.AlignCenter, "No\nImage")
 
@@ -990,9 +1031,9 @@ class DifficultyPage(QWidget):
         return f"""
         QLabel#autoBadge {{ background-color: rgba(108,116,128,225); color: #ffffff;
                            border: 1px solid rgba(255,255,255,95); border-radius: {px(4)}px; {fam}
-                           font-size: {px(16)}px; letter-spacing: 1px; }}
+                           font-size: {px(16)}px; font-weight: 600; letter-spacing: 1px; }}
         QFrame#diffSettings QLabel {{ color: #ffffff; background: transparent; {fam}
-                                     font-size: {px(24)}px; font-weight: 300; }}
+                                     font-size: {px(24)}px; font-weight: 600; }}
         QLabel#setHead {{ font-size: {px(30)}px; letter-spacing: 2px; }}
         QLabel#setValue {{ color: rgba(255,255,255,190); }}
         """
