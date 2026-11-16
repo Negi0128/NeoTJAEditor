@@ -37,6 +37,13 @@ class VersionChangeTests(unittest.TestCase):
                 self.assertEqual(dialog.selected_release['tag_name'], 'v14.7.0')
                 self.assertFalse(dialog.change.isEnabled())
                 self.assertTrue(dialog.versions.item(0).isHidden())
+                # 旧 Player を配っていない版(15.4 以降)は Editor だけで選べる。
+                dialog._loaded([release('v15.4.0', player=False),
+                                release('v16.0.0', player=False)], False)
+                for tag in ('15.4', '16.0'):
+                    dialog.search.setText(tag)
+                    self.assertEqual(dialog.selected_release['tag_name'], 'v' + tag + '.0')
+                    self.assertTrue(dialog.change.isEnabled(), tag)
                 dialog.search.setText('not-found')
                 self.assertIsNone(dialog.selected_release)
                 self.assertFalse(dialog.change.isEnabled())
@@ -76,6 +83,71 @@ class VersionChangeTests(unittest.TestCase):
                 self.assertTrue(download.call_args.kwargs['version_change'])
                 self.assertTrue(download.call_args.args[0].endswith('NeoTJAEditor.exe'))
                 self.assertTrue(download.call_args.args[1].endswith('NeoTJAPlayer.exe'))
+
+    @real_qt_test
+    def test_playerless_release_passes_empty_player(self):
+        from neotja.dialogs.version_change_dialog import VersionChangeDialog
+        with editor_session() as (win, root):
+            def choose(dialog):
+                dialog.selected_release = release('v15.4.0', player=False)
+                return 1
+            with patch.object(VersionChangeDialog, 'load_more', lambda self: None), \
+                 patch.object(VersionChangeDialog, 'exec', choose), \
+                 patch('sys.frozen', True, create=True), \
+                 patch.object(win, '_run_update_download') as download:
+                win.open_version_change()
+                download.assert_called_once()
+                self.assertTrue(download.call_args.args[0].endswith('NeoTJAEditor.exe'))
+                self.assertEqual(download.call_args.args[1], '')
+                self.assertTrue(download.call_args.kwargs['version_change'])
+
+    @real_qt_test
+    def test_old_release_without_player_is_refused(self):
+        from neotja.dialogs.version_change_dialog import VersionChangeDialog
+        with editor_session() as (win, root):
+            def choose(dialog):
+                dialog.selected_release = release('v15.3.0', player=False)
+                return 1
+            with patch.object(VersionChangeDialog, 'load_more', lambda self: None), \
+                 patch.object(VersionChangeDialog, 'exec', choose), \
+                 patch('sys.frozen', True, create=True), \
+                 patch.object(win, '_run_update_download') as download:
+                win.open_version_change()
+                download.assert_not_called()
+
+    @real_qt_test
+    def test_require_player_follows_player_url(self):
+        from unittest.mock import MagicMock
+        with editor_session() as (win, root):
+            for player_url, version_change, expected in (
+                    ('', True, False), ('https://example.invalid/NeoTJAPlayer.exe', True, True),
+                    ('', False, False)):
+                with patch('neotja.updater.UpdateDownloadWorker') as worker_cls, \
+                     patch('neotja.main_window.QProgressDialog', MagicMock()):
+                    win._run_update_download('https://example.invalid/NeoTJAEditor.exe',
+                                             player_url, version_change=version_change)
+                    self.assertEqual(worker_cls.call_args.kwargs['require_player'], expected,
+                                     (player_url, version_change))
+
+    def test_playerless_version_change_downloads_editor_only(self):
+        from neotja.updater import UpdateDownloadWorker
+        worker = UpdateDownloadWorker('editor', '', require_player=False)
+        success, failures = [], []
+        worker.finished_ok.connect(lambda *paths: success.append(paths))
+        worker.failed.connect(failures.append)
+        with patch.object(worker, '_fetch', return_value=1) as fetch:
+            worker.run()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertFalse(failures)
+        self.assertEqual(len(success), 1)
+        self.assertEqual(success[0][1], '')
+
+    def test_release_needs_player(self):
+        from neotja.updater import release_needs_player
+        for tag in ('v15.3.0', 'v15.3.9', 'v15.0.0', 'v14.8.0', '12.0.1'):
+            self.assertTrue(release_needs_player(tag), tag)
+        for tag in ('v15.4.0', 'v15.10.0', 'v16.0.0'):
+            self.assertFalse(release_needs_player(tag), tag)
 
     def test_player_failure_aborts_version_change(self):
         from neotja.updater import UpdateDownloadWorker

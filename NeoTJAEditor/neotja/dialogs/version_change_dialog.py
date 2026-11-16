@@ -4,7 +4,8 @@ from PySide6.QtWidgets import (QDialog, QLabel, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QTextBrowser, QHBoxLayout, QVBoxLayout)
 
 from neotja.constants import VERSION
-from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME, asset_url, fetch_json, scrub
+from neotja.updater import (ASSET_NAME, PLAYER_ASSET_NAME, asset_url, fetch_json,
+                             release_needs_player, scrub)
 from neotja.worker_util import detach_worker
 
 API = 'https://api.github.com/repos/Negi0128/NeoTJAEditor/releases'
@@ -161,7 +162,12 @@ class VersionChangeDialog(QDialog):
         self.selected.setText(tag)
         self.notes.setMarkdown(release.get('body', '').replace('\n', '  \n'))
         names = {a.get('name') for a in release.get('assets', []) if asset_url(a)}
-        complete = {ASSET_NAME, PLAYER_ASSET_NAME}.issubset(names)
+        # 旧 Player を配っていた版(〜15.3)は Editor・Player の両方が要る。
+        # それより新しい版は Player を配っていないので Editor だけでよい。
+        needed = {ASSET_NAME}
+        if release_needs_player(tag):
+            needed.add(PLAYER_ASSET_NAME)
+        complete = needed.issubset(names)
         self.change.setEnabled(complete and tag.lstrip('vV') != VERSION)
         self.change.setText(tag + ' に変更')
         self.change.setToolTip('' if complete else 'Editor・Playerが揃っていない版です')

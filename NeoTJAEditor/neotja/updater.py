@@ -15,13 +15,16 @@ from neotja.constants import VERSION
 
 RELEASES_API_URL = "https://api.github.com/repos/Negi0128/NeoTJAEditor/releases/latest"
 ASSET_NAME = "NeoTJAEditor.exe"
-#: 再生・録画専用の NeoTJAPlayer。**Editor と一緒に落として隣へ置く。**
-#: 中身は Editor と同じ Qt / ffmpeg / PortAudio を積んだ別の exe で、
-#: Player 固有のコードは 110KB しかない(つまり 84MB は重複)。それでも別々に
-#: しているのは利用者の選択。片方だけ新しくなると、設定ファイルも再生画面も
-#: 共有しているぶん原因の分かりにくい食い違いになるので、**更新のたびに
-#: 必ず両方を入れ替える**。
+#: 再生・録画専用の旧 NeoTJAPlayer。v15.3.x までは Editor と一緒に配り、
+#: 更新のたびに両方を入れ替えていた。v15 の次の版からは配らない
+#: (v15-design/PLAYER_REDESIGN.md 6章)。名前を残しているのは、旧版へ戻す
+#: (バージョン変更)ときに、その版の Editor が隣にあるはずと思っている
+#: Player も一緒に置くため。
 PLAYER_ASSET_NAME = "NeoTJAPlayer.exe"
+#: 旧 Player を一緒に配っていた最後の版(major, minor)。これ以下の版へ
+#: 戻すときは Player も揃っていないと戻さない(その版の Editor は Player が
+#: 隣にある前提で動く)。これより新しい版は Player が無くてよい。
+LAST_PLAYER_RELEASE = (15, 3)
 _USER_AGENT = "NeoTJAEditor-Updater"
 #: 1回の読み書きで待つ上限(秒)。**総時間ではなくソケット1操作ぶん。**
 #: 30 秒では 84MB の途中で read が切れる回線があった(実測: 3回中2回失敗)。
@@ -195,6 +198,14 @@ def is_newer(remote_tag: str, local_version: str = VERSION) -> bool:
     return _version_tuple(remote_tag) > _version_tuple(local_version)
 
 
+def release_needs_player(tag: str) -> bool:
+    """その版へ戻すとき、旧 NeoTJAPlayer.exe も揃っている必要があるか。
+
+    旧 Player を配っていた版(LAST_PLAYER_RELEASE 以下)なら True。それより
+    新しい版は Player を配っていないので False(無くても戻せる)。"""
+    return _version_tuple(tag)[:2] <= LAST_PLAYER_RELEASE
+
+
 class UpdateCheckWorker(QThread):
     """Checks GitHub Releases for a newer tagged version than the running
     build. Network I/O only (urllib, no extra dependency); safe to run at
@@ -340,6 +351,9 @@ class UpdateDownloadWorker(QThread):
             pass
 
     def run(self):
+        # require_player は「この版には Player がある(はず)」のときだけ立てる
+        # (呼び出し側が bool(player_url) で渡す)。Player の無い版へ戻すとき
+        # は立てないので、ここで止まらない。念のための安全網として残す。
         if self.require_player and not self.player_url:
             self.failed.emit('この版にはNeoTJAPlayerがありません。')
             return

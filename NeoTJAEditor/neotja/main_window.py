@@ -4193,7 +4193,8 @@ class MainWindow(QMainWindow):
 
     def open_version_change(self):
         from neotja.dialogs.version_change_dialog import VersionChangeDialog
-        from neotja.updater import ASSET_NAME, PLAYER_ASSET_NAME, asset_url
+        from neotja.updater import (ASSET_NAME, PLAYER_ASSET_NAME, asset_url,
+                                    release_needs_player)
         dialog = VersionChangeDialog(self)
         if not dialog.exec() or not dialog.selected_release:
             return
@@ -4208,9 +4209,16 @@ class MainWindow(QMainWindow):
         # 鍵があれば API の URL(非公開でも落とせる)、無ければ公開の URL。
         urls = {a.get('name'): asset_url(a)
                 for a in release.get('assets', [])}
-        if not urls.get(ASSET_NAME) or not urls.get(PLAYER_ASSET_NAME):
+        # Player は「旧 Player を配っていた版」へ戻すときだけ要る。v15.4 以降の
+        # 版には Player が無いので、Editor だけで戻す(以前は Player が無いと
+        # 失敗していた)。Player がある版なら今までどおり隣へ置く — その版の
+        # Editor は Player が隣にある前提で動くため。
+        player_url = urls.get(PLAYER_ASSET_NAME, '')
+        if not urls.get(ASSET_NAME):
             return
-        self._run_update_download(urls[ASSET_NAME], urls[PLAYER_ASSET_NAME],
+        if not player_url and release_needs_player(release.get('tag_name', '')):
+            return
+        self._run_update_download(urls[ASSET_NAME], player_url,
                                   version_change=True)
 
     def check_for_updates(self, manual=False):
@@ -4261,8 +4269,11 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
 
+        # 旧版へ戻すときは、Player がある版に限り Player の失敗で丸ごと止める
+        # (片方だけ旧版になると、その版の Editor の前提が崩れる)。Player の
+        # 無い版では Editor だけ落とせばよいので、require_player は立てない。
         worker = UpdateDownloadWorker(asset_url, player_url, self,
-                                      require_player=version_change)
+                                      require_player=version_change and bool(player_url))
 
         def on_progress(pct):
             if pct >= 0:
@@ -4273,9 +4284,6 @@ class MainWindow(QMainWindow):
 
         def on_ok(path, player_path):
             progress.close()
-            # Player だけ落とせなかった場合。Editor の更新はこのまま進める
-            # (落とせている以上、そちらを止める理由が無い)。片方だけ新しく
-            # なることになるので、そうなったことは必ず伝える。
             # 「Player だけ落とせなかった」(worker.player_error)の案内は外した。
             # 通常の更新では Player を落とさず、旧版へ戻すときは Player の
             # 失敗で丸ごと止める(require_player)ので、ここへは来ない。
