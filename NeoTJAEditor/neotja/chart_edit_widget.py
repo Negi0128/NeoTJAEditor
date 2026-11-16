@@ -313,10 +313,13 @@ class ChartEditWaveform(WaveformWidget):
         self._redraw_fps = v
 
     def __init__(self, parent=None, toggle_play_cb=None, show_demo=True,
-                 show_stereo=True):
+                 show_stereo=True, step_speed_cb=None):
         super().__init__(parent, toggle_play_cb=toggle_play_cb,
                          force_dark=True, show_demo=show_demo,
                          show_stereo=show_stereo)
+        #: z / c(再生速度を1段階 遅く/速く)を渡す先。レーンと同じ動きに
+        #: するため、窓(preview_dock)がレーンの step_speed_key をつなぐ。
+        self._step_speed_cb = step_speed_cb
         self._grid = 16
         self._cur_measure = 0
         self._cur_slot = 0
@@ -3362,6 +3365,16 @@ class ChartEditWaveform(WaveformWidget):
             char = _PLAIN_KEYS.get(key)
         if char is not None:
             self._place(char)
+            return
+
+        # 再生速度(z で 1 段階遅く、c で 1 段階速く)。レーンと同じ。
+        # 作譜ペインにフォーカスがあると z / c が効かなかった(利用者の報告
+        # 2026-11-16)。Ctrl+Z / Ctrl+C は上の取り消し・コピーのまま。
+        # ↑↓ はこのペインでは目盛りの細かさなので、速度には使わない。
+        if (key in (Qt.Key_Z, Qt.Key_C) and self._step_speed_cb is not None
+                and not (mods & (Qt.ControlModifier | Qt.AltModifier
+                                 | Qt.MetaModifier))):
+            self._step_speed_cb(-1 if key == Qt.Key_Z else 1)
             return
 
         # ここで拾わなかったキー(Space の再生など)は親へ。

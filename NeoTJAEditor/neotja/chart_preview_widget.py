@@ -2879,6 +2879,15 @@ class ChartPreviewWidget(QWidget):
         if toast:
             self.show_toast(f"再生速度 : ×{rate:.2f}")
 
+    def step_speed_key(self, direction: int):
+        """よそ(作譜ペイン)で押された z / c を、レーンで押したのと同じに扱う。
+
+        条件もレーンの keyPressEvent と同じ: 演奏モードのあいだは速度を
+        変えない(打面がすべてを持っていく)。いま何倍かはレーンに出す。"""
+        if self._play_state is not None:
+            return
+        self._step_speed(direction, toast=True)
+
     def set_playback_rate(self, rate: float):
         """再生速度倍率(SPEED_STEPS のいずれか)を設定。再生中の時間外挿に使う。
         段階外の値が来ても丸めて受け入れる。"""
