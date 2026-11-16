@@ -31,7 +31,7 @@ import datetime
 from PySide6.QtCore import Qt, Signal, QSize, QRectF, QPointF
 from PySide6.QtGui import (
     QFont, QFontMetrics, QFontDatabase, QPainter, QColor, QPen,
-    QBrush, QLinearGradient, QRadialGradient, QPainterPath,
+    QBrush, QLinearGradient, QRadialGradient, QPainterPath, QIcon,
 )
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
@@ -41,17 +41,20 @@ from PySide6.QtWidgets import (
 from neotja.constants import APP_NAME, VERSION
 from neotja.theme import COLORS, glass_colors, is_dark_theme
 from neotja.theme import with_alpha as _c, rgba as _rgba
+from neotja.settings import icon_path
 
 #: 画面の中央の列の幅。見本(1180)に合わせる。窓が狭ければ縮む。
 COLUMN_WIDTH = 1180
 #: 最近使った項目に出す上限。設定には 10 件まで残るが、画面には 8 件。
 RECENT_ROWS = 8
-#: 最近使った項目の列数(見本は 2 列のコンパクトカード)。
-RECENT_COLUMNS = 2
+#: 最近使った項目の列数。ランチャーでは左の列に入るので 1 列。
+RECENT_COLUMNS = 1
+#: Player の大きなアイコンの一辺。
+PLAYER_ICON_SIZE = 168
 #: 最近使った項目のカードの高さ(見本 92)。
 RECENT_CARD_HEIGHT = 92
-#: 新規作成 / TJA を開く のカードの高さ(見本 196)。
-ACTION_CARD_HEIGHT = 196
+#: 新規作成 / TJA を開く のカードの高さ。
+ACTION_CARD_HEIGHT = 132
 #: ヘッダを読むのに頭から何バイトまで見るか。TITLE: は先頭にあり、COURSE:
 #: は本文の途中にも出るので、譜面全体を読む。ただし異常に大きいファイルで
 #: 起動が遅くならないよう上限を置く。
@@ -170,6 +173,17 @@ def wordmark_family():
         if fam in have:
             return fam
     return ""
+
+
+def _icon_pixmap(path, size):
+    """.ico から一辺 size の絵を作る。無ければ None(アイコン無しで並べる)。"""
+    try:
+        if not path or not os.path.exists(str(path)):
+            return None
+        pix = QIcon(str(path)).pixmap(QSize(size, size))
+        return None if pix.isNull() else pix
+    except Exception:
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -313,6 +327,56 @@ class GlassCard(QFrame):
         p.end()
 
 
+class SquareHolder(QWidget):
+    """中の板を正方形に保つ入れ物(利用者の指定 2026-11-16)。
+    一辺は入れ物の幅と高さの小さいほう。上・横中央に寄せる。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._child = None
+        self.setMinimumSize(280, 280)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_child(self, w):
+        self._child = w
+        self._place()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._place()
+
+    def _place(self):
+        if self._child is None:
+            return
+        side = min(self.width(), self.height())
+        self._child.setGeometry((self.width() - side) // 2, 0, side, side)
+
+
+class PlayerPanel(GlassCard):
+    """右の Player の大きなガラス板。アイコンの後ろに青い光を敷く。"""
+
+    def __init__(self, parent=None):
+        super().__init__(radius=20, accent=True, parent=parent)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        g = glass_colors()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        cx, cy = self.width() * 0.5, self.height() * 0.40
+        rad = max(120.0, min(self.width(), self.height()) * 0.45)
+        grad = QRadialGradient(cx, cy, rad)
+        col = COLORS["accent"]
+        a = min(1.0, g["glow1_alpha"] * 2.2)
+        grad.setColorAt(0, _c(col, a))
+        grad.setColorAt(0.5, _c(col, a * 0.3))
+        grad.setColorAt(1, _c(col, 0))
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(QPointF(cx, cy), rad, rad)
+        p.end()
+
+
 class RecentRow(GlassCard):
     """最近使った項目の1枚(2 列に並ぶコンパクトカード)。クリックか Enter で開く。
 
@@ -418,6 +482,8 @@ class StartScreen(QWidget):
     #: 最近使った項目の行(パス)
     recent_activated = Signal(str)
     help_requested = Signal()
+    #: 「Player を起動」
+    player_requested = Signal()
     settings_requested = Signal()
     #: TJA が落とされた(パス)。開く処理は MainWindow が窓へのドロップと
     #: 同じ道(未保存の確認 → _open_path)で行う。
@@ -452,10 +518,9 @@ class StartScreen(QWidget):
         page = QWidget()
         page.setObjectName("startPage")
         pl = QHBoxLayout(page)
-        pl.setContentsMargins(24, 0, 24, 0)
-        # 列が伸び率 1、両脇の余白は 0。余白にも伸び率を付けると列は
-        # 推奨幅(600 ほど)で止まり、1180 まで広がらない。列が上限に
-        # 当たった残りは両脇へ等分されるので中央に収まる。
+        pl.setContentsMargins(32, 0, 32, 0)
+        # 列が伸び率 1、両脇の余白は 0。列が上限に当たった残りは両脇へ
+        # 等分されるので中央に収まる。
         pl.addStretch(0)
         col = QWidget()
         col.setObjectName("startColumn")
@@ -466,42 +531,59 @@ class StartScreen(QWidget):
         self.scroll.setWidget(page)
 
         v = QVBoxLayout(col)
-        v.setContentsMargins(0, 40, 0, 24)
+        v.setContentsMargins(0, 34, 0, 28)
         v.setSpacing(0)
-        v.addStretch(2)
 
-        # ワードマーク + 版のピル。見本では版はワードマークの右、上から 14。
+        # ランチャー(v15.5〜)。左上にワードマーク、右上に 環境設定・版・ヘルプ。
+        # 下は左右 2 枚: 左が Editor、右が Player
+        # (配置の元は v15-design/player-approved/launcher.png。見た目は自由)。
         head = QHBoxLayout()
-        head.setSpacing(16)
-        self.lbl_name = self._label(APP_NAME, "appName")
+        head.setSpacing(2)
+        self.lbl_name = QLabel()
+        self.lbl_name.setObjectName("appName")
+        self.lbl_name.setTextFormat(Qt.RichText)
         head.addWidget(self.lbl_name, 0, Qt.AlignBottom)
+        head.addStretch(1)
+        self.btn_settings = QPushButton("環境設定")
+        self.btn_settings.setObjectName("ghost")
+        self.btn_settings.clicked.connect(self.settings_requested)
+        head.addWidget(self.btn_settings, 0, Qt.AlignVCenter)
         self.lbl_ver = self._label("v" + VERSION, "appVer")
         self.lbl_ver.setFixedHeight(22)
+        head.addSpacing(6)
         head.addWidget(self.lbl_ver, 0, Qt.AlignVCenter)
-        head.addStretch(1)
+        head.addSpacing(6)
+        self.btn_help = QPushButton("ヘルプ")
+        self.btn_help.setObjectName("ghost")
+        self.btn_help.clicked.connect(self.help_requested)
+        head.addWidget(self.btn_help, 0, Qt.AlignVCenter)
         v.addLayout(head)
-        v.addSpacing(4)
-        v.addWidget(self._label("はじめる", "tagline"))
-        v.addSpacing(26)
+        v.addSpacing(34)
 
-        cards = QHBoxLayout()
-        cards.setSpacing(24)
-        self.btn_new_url = QPushButton("YouTube / SoundCloud から")
+        body = QHBoxLayout()
+        body.setSpacing(28)
+        v.addLayout(body, 1)
+
+        # --- 左: Editor ---------------------------------------------------
+        left = QVBoxLayout()
+        left.setSpacing(0)
+        left.addLayout(self._side_head("EDITOR", icon_path(False)))
+        left.addSpacing(18)
+        self.btn_new_url = QPushButton("YouTube / SoundCloud")
         self.btn_new_url.setObjectName("primary")
         self.btn_new_url.clicked.connect(self.new_from_url)
-        self.btn_new_file = QPushButton("音源ファイルから")
+        self.btn_new_file = QPushButton("音源ファイル")
+        self.btn_new_file.setToolTip("手元の音源(ogg / mp3 / wav など)から譜面を作ります")
         self.btn_new_file.clicked.connect(self.new_from_file)
-        cards.addWidget(self._card(
-            "新規作成",
-            "YouTube / SoundCloud の URL か、手元の音源ファイルから譜面を作ります。",
-            [self.btn_new_url, self.btn_new_file], accent=True), 1)
-        self.btn_open = QPushButton("ファイルを選ぶ…")
+        acts = QHBoxLayout()
+        acts.setSpacing(16)
+        acts.addWidget(self._card("新規作成", [self.btn_new_url, self.btn_new_file],
+                                  accent=True), 3)
+        self.btn_open = QPushButton("ファイルを選択…")
         self.btn_open.clicked.connect(self.open_requested)
-        cards.addWidget(self._card(
-            "TJA を開く", ".tja ファイルを選んで編集します。",
-            [self.btn_open]), 1)
-        v.addLayout(cards)
-        v.addSpacing(40)
+        acts.addWidget(self._card("TJA を開く", [self.btn_open]), 2)
+        left.addLayout(acts)
+        left.addSpacing(26)
 
         # 見出しの行。隠している間は「N 件あります」と「表示する」だけ、
         # 1 件も無ければ「まだありません」だけを出す。
@@ -517,40 +599,55 @@ class StartScreen(QWidget):
         self.btn_reveal.setToolTip("最近使った項目を並べます(次に起動するまで)")
         self.btn_reveal.clicked.connect(self.reveal)
         rh.addWidget(self.btn_reveal)
-        v.addLayout(rh)
+        left.addLayout(rh)
+        left.addSpacing(8)
+        rule = QFrame()
+        rule.setObjectName("rule")
+        rule.setFixedHeight(1)
+        left.addWidget(rule)
 
-        # 2 列のカードを並べる格子。枠は持たない(カードが各自ガラスを描く)。
-        # 件数が奇数でも最後のカードが半分の幅のままになるよう、両列の
-        # 伸び率をそろえる。見出しとの間の 12 は格子の側に持たせ、隠して
-        # いる間は間ごと消えるようにする。
         self.list_frame = QWidget()
         self.list_frame.setObjectName("recentGrid")
         self.list_layout = QGridLayout(self.list_frame)
         self.list_layout.setContentsMargins(0, 12, 0, 0)
-        self.list_layout.setHorizontalSpacing(16)
-        self.list_layout.setVerticalSpacing(12)
+        self.list_layout.setHorizontalSpacing(14)
+        self.list_layout.setVerticalSpacing(10)
         for c in range(RECENT_COLUMNS):
             self.list_layout.setColumnStretch(c, 1)
-        v.addWidget(self.list_frame)
+        left.addWidget(self.list_frame)
+        left.addStretch(1)
+        body.addLayout(left, 3)
 
-        # 低い窓で伸び代が 0 になっても、最後のカードと脚注がくっつかない
-        # よう最低 24 は空ける。
-        v.addSpacing(24)
-        v.addStretch(3)
-        foot = QHBoxLayout()
-        foot.setSpacing(4)
-        self.btn_help = QPushButton("ヘルプ")
-        self.btn_help.setObjectName("ghost")
-        self.btn_help.clicked.connect(self.help_requested)
-        foot.addWidget(self.btn_help)
-        self.btn_settings = QPushButton("環境設定")
-        self.btn_settings.setObjectName("ghost")
-        self.btn_settings.clicked.connect(self.settings_requested)
-        foot.addWidget(self.btn_settings)
-        foot.addStretch(1)
-        foot.addWidget(self._label(
-            "ファイルを開くか新規作成すると、この画面は閉じてエディタに切り替わります", "dim"))
-        v.addLayout(foot)
+        # --- 右: Player ---------------------------------------------------
+        right = QVBoxLayout()
+        right.setSpacing(0)
+        right.addLayout(self._side_head("PLAYER", icon_path(True)))
+        right.addSpacing(18)
+        holder = SquareHolder()
+        panel = PlayerPanel(holder)
+        holder.set_child(panel)
+        panel.setObjectName("playerPanel")
+        pv = QVBoxLayout(panel)
+        pv.setContentsMargins(36, 36, 36, 36)
+        pv.setSpacing(0)
+        pv.addStretch(2)
+        self.player_icon = QLabel()
+        self.player_icon.setObjectName("playerIcon")
+        self.player_icon.setAlignment(Qt.AlignCenter)
+        pix = _icon_pixmap(icon_path(True), PLAYER_ICON_SIZE)
+        if pix is not None:
+            self.player_icon.setPixmap(pix)
+        pv.addWidget(self.player_icon, 0, Qt.AlignHCenter)
+        pv.addStretch(3)
+        self.btn_player = QPushButton("Player を起動")
+        self.btn_player.setObjectName("playerLaunch")
+        self.btn_player.setMinimumHeight(64)
+        self.btn_player.setCursor(Qt.PointingHandCursor)
+        self.btn_player.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_player.clicked.connect(self.player_requested)
+        pv.addWidget(self.btn_player)
+        right.addWidget(holder, 1)
+        body.addLayout(right, 2)
 
         self.set_recent([])
         self.refresh_theme()
@@ -562,17 +659,14 @@ class StartScreen(QWidget):
         lbl.setObjectName(name)
         return lbl
 
-    def _card(self, title, desc, buttons, accent=False):
+    def _card(self, title, buttons, accent=False):
         f = GlassCard(radius=14, accent=accent)
         f.setObjectName("actionCard")
         f.setMinimumHeight(ACTION_CARD_HEIGHT)
         cv = QVBoxLayout(f)
-        cv.setContentsMargins(28, 26, 28, 28)
-        cv.setSpacing(6)
+        cv.setContentsMargins(22, 20, 22, 22)
+        cv.setSpacing(0)
         cv.addWidget(self._label(title, "h1"))
-        d = self._label(desc, "dim13")
-        d.setWordWrap(True)
-        cv.addWidget(d)
         cv.addStretch(1)
         h = QHBoxLayout()
         h.setSpacing(10)
@@ -581,6 +675,20 @@ class StartScreen(QWidget):
         h.addStretch(1)
         cv.addLayout(h)
         return f
+
+    def _side_head(self, text, icon):
+        """左右それぞれの見出し。小さなアイコン + 英字の小見出し。"""
+        h = QHBoxLayout()
+        h.setSpacing(12)
+        if icon is not None:
+            pix = _icon_pixmap(icon, 26)
+            if pix is not None:
+                ic = QLabel()
+                ic.setPixmap(pix)
+                h.addWidget(ic, 0, Qt.AlignVCenter)
+        h.addWidget(self._label(text, "sideHead"), 0, Qt.AlignVCenter)
+        h.addStretch(1)
+        return h
 
     # ------------------------------------------------------------------
     def dragEnterEvent(self, ev):
@@ -682,6 +790,10 @@ class StartScreen(QWidget):
     def refresh_theme(self):
         """テーマ替え。COLORS は中身が差し替わるので、読み直して当て直す。"""
         self.setStyleSheet(self._qss())
+        self.lbl_name.setText(
+            '<span style="font-weight:300">NeoTJA</span>'
+            '<span style="font-weight:600; color:%s">Launcher</span>'
+            % COLORS["accent"])
         for row in self._rows:
             row.refresh_theme()
         self.update()
@@ -713,6 +825,14 @@ class StartScreen(QWidget):
         QLabel#appName {{ color: {p['fg_bright']}; {fam_css} font-size: 40px; font-weight: 300; letter-spacing: 2px; }}
         QLabel#appVer {{ color: {p['fg']}; font-size: 12px; letter-spacing: 0.5px; padding: 0 10px;
                         background-color: {_rgba(g['btn_fill'])}; border: 1px solid {_rgba(g['btn_border'])}; border-radius: 11px; }}
+        QLabel#sideHead {{ color: {p['fg_bright']}; {fam_css} font-size: 15px; font-weight: bold; letter-spacing: 4px; }}
+        QLabel#sideSub {{ color: {p['fg_dim']}; font-size: 13px; }}
+        QFrame#rule {{ background: {_rgba(g['btn_border'])}; }}
+        QPushButton#playerLaunch {{ background-color: {grad}; color: {g['primary_fg'].name()};
+                                   border: 1px solid {_rgba(g['primary_border'])}; border-radius: 14px;
+                                   font-size: 20px; font-weight: bold; letter-spacing: 2px; }}
+        QPushButton#playerLaunch:hover {{ background-color: {grad_hover}; }}
+        QPushButton#playerLaunch:focus {{ border: 1px solid {p['fg_bright']}; }}
         QLabel#tagline {{ color: {p['fg_dim']}; font-size: 13px; letter-spacing: 1px; }}
         QLabel#h1 {{ color: {p['fg_bright']}; font-size: 19px; font-weight: bold; }}
         QLabel#h2 {{ color: {p['fg']}; font-size: 15px; font-weight: bold; }}

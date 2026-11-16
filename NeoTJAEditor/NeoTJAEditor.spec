@@ -121,6 +121,8 @@ a = Analysis(
         # 窓のアイコン。exe に焼いたものは Windows のシェルが使うだけで、
         # Qt の setWindowIcon には別途ファイルが要る(settings.icon_path)。
         ('app_icon.ico', '.'),
+        # ランチャーの Player 側のアイコン(start_screen)。
+        ('app_icon_player.ico', '.'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
