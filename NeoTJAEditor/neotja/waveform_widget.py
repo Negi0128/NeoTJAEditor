@@ -673,8 +673,33 @@ class WaveformWidget(QWidget):
         self.set_stereo_view(checked)
         self.stereoToggled.emit(checked)
 
+    # ------------------------------------------------------------------
+    # 読むだけ(Player の詳細モード)
+    # ------------------------------------------------------------------
+    #: 読むだけか。**既定は書ける** — Editor は何も変わらない。
+    _read_only = False
+
+    def set_read_only(self, on: bool):
+        """譜面・ヘッダを変える道を全部ふさぐ(見る・動かす・再生はできる)。
+
+        この波形では OFFSET調整(ドラッグ・矢印)と「ここを DEMOSTART に」。
+        ボタンは隠し、モードにも入れない。作譜ペイン(ChartEditWaveform)は
+        これに音符・命令・選択・コピー貼り付け・右クリックの道を足す。"""
+        self._read_only = bool(on)
+        if on:
+            self.set_offset_mode(False)
+            self.btn_offset.hide()
+            self.btn_demo.hide()
+        else:
+            self.btn_offset.show()
+            self.btn_demo.setVisible(self._show_demo)
+        self.update()
+
+    def read_only(self) -> bool:
+        return bool(self._read_only)
+
     def set_offset_mode(self, on: bool):
-        on = bool(on)
+        on = bool(on) and not self._read_only
         if self.btn_offset.isChecked() != on:
             self.btn_offset.blockSignals(True)
             self.btn_offset.setChecked(on)
@@ -702,6 +727,8 @@ class WaveformWidget(QWidget):
         return float(value) + self._wave_lead
 
     def begin_offset_drag(self, x: float):
+        if self._read_only:
+            return
         self._offset_drag = (float(x), self.offset)
         self._readout = (f"OFFSET: {self._raw_offset(self.offset):+.3f} (Δ+0.000)")
         self.update()
@@ -744,6 +771,8 @@ class WaveformWidget(QWidget):
         return True
 
     def nudge_offset(self, delta: float) -> float:
+        if self._read_only:
+            return self.offset
         value = self.offset + delta
         self._apply_offset_local(value)
         self._readout = (f"OFFSET: {self._raw_offset(value):+.3f} (Δ{delta:+.3f})")

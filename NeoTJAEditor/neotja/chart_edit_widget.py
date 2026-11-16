@@ -823,6 +823,8 @@ class ChartEditWaveform(WaveformWidget):
 
         空で決定すればその歌詞を消す。値が文字なので、ほかの命令より
         欄を広く取る。"""
+        if self._read_only:
+            return None
         m, s = self._cursor_addr()
         cur = self.lyric_at(self.cursor_time())
 
@@ -1526,7 +1528,88 @@ class ChartEditWaveform(WaveformWidget):
             slot = grid - 1
         return (i, slot)
 
+    # ------------------------------------------------------------------
+    # 読むだけ(Player の詳細モード)
+    # ------------------------------------------------------------------
+    def set_read_only(self, on: bool):
+        """譜面を変える道を全部ふさぐ。**既定は書ける**(Editor は変わらない)。
+
+        残すのは見る・動かす・再生だけ:
+          キー  ← → (カーソル = 再生位置) / Home End / ↑ ↓ (目盛りの細かさ) /
+                H (行の名前) / Z C (再生速度) / Space (再生・一時停止) / 0 (拡大を戻す)
+          マウス 左で押した所・擦った所へ再生位置 / サイドボタンと左上の 1/16 で
+                目盛り / ホイールで景色・Alt+ホイールで拡大
+        ふさぐもの: 音符・連打・風船を置く/消す/変える(数字・F J D K 等・W Q・
+        Delete BackSpace・Shift+← →)、ゴーゴー(G)・小節線(S)・歌詞(L)、
+        範囲(Tab)と選択・つかんで動かす・小節の選択と削除、コピー/切り取り/
+        貼り付け、右クリックのメニュー(命令の追加・変更・道具)、命令の入力欄、
+        歌詞の端の引きずり、OFFSET調整、DEMOSTART。
+        キーで受けなかったものは親へ流す(Esc で Player のメニューが開く)。"""
+        super().set_read_only(on)
+        if on:
+            self._long = None
+            self._band = None
+            self._note_drag = None
+            self._lyric_drag = None
+            self._pending_measure = None
+            self._dragging = False
+            self.clear_selection()
+            self.clear_range()
+            self._sel_measures = set()
+            self._pending = {}
+        self.update()
+
+    def _read_only_key(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        if mods & (Qt.ControlModifier | Qt.MetaModifier | Qt.AltModifier):
+            event.ignore()
+            return
+        if key in (Qt.Key_Left, Qt.Key_Right):
+            self.move_cursor(-1 if key == Qt.Key_Left else 1)
+        elif key in (Qt.Key_Home, Qt.Key_End):
+            self.jump_to_edge(key == Qt.Key_End)
+        elif key in (Qt.Key_Up, Qt.Key_Down):
+            self.change_grid(1 if key == Qt.Key_Up else -1)
+        elif key == Qt.Key_H:
+            self.set_legend_visible(not self._show_legend)
+            self.legendToggled.emit(self._show_legend)
+        elif key in (Qt.Key_Z, Qt.Key_C) and self._step_speed_cb is not None:
+            self._step_speed_cb(-1 if key == Qt.Key_Z else 1)
+        elif key == Qt.Key_Space:
+            if self._toggle_play_cb:
+                self._toggle_play_cb()
+        elif key == Qt.Key_0:
+            self.reset_zoom()
+        else:
+            event.ignore()
+            return
+        event.accept()
+
+    _READ_ONLY_KEYS = frozenset((Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End,
+                                 Qt.Key_Up, Qt.Key_Down, Qt.Key_H, Qt.Key_Z,
+                                 Qt.Key_C, Qt.Key_Space, Qt.Key_0))
+
+    def _read_only_press(self, event):
+        """読むだけのときの押し方: 再生位置を動かすだけ。"""
+        self.setFocus(Qt.MouseFocusReason)
+        b = event.button()
+        x = event.position().x()
+        if b in (Qt.BackButton, Qt.ForwardButton):
+            self.change_grid(1 if b == Qt.ForwardButton else -1)
+        elif x < self.LANE_X0:
+            if (b == Qt.LeftButton
+                    and self.grid_label_rect().contains(event.position().toPoint())):
+                self.open_grid_picker()
+        elif b == Qt.LeftButton:
+            self._dragging = True
+            self._move_cursor_to_x(x)
+        event.accept()
+
     def mouseDoubleClickEvent(self, event):
+        if self._read_only:
+            event.accept()
+            return
         # サイドボタンの素早い2回押しは、2回目が DblClick で届く。既定の
         # 処理は mousePressEvent を呼び直すので、分割がもう1段余計に動いて
         # いた(2回押して3段。利用者の報告 2026-11-13)。1段ぶんは直前の
@@ -1544,6 +1627,9 @@ class ChartEditWaveform(WaveformWidget):
         こちらの帯は1行しか無いので、時間の範囲だけを選ぶ)。
 
         左の行名の列(x < LANE_X0)は時間軸の外なので、何も起きない。"""
+        if self._read_only:
+            self._read_only_press(event)
+            return
         # マウスのサイドボタンで分割を変える(利用者の希望 2026-11-02)。
         # ↑ ↓ と同じ向き — 進む(前)で細かく、戻る(後ろ)で粗く。帯の
         # どこで押しても効くので、いちばん手前で見る。
@@ -1670,6 +1756,11 @@ class ChartEditWaveform(WaveformWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._read_only:
+            if self._dragging and (event.buttons() & Qt.LeftButton):
+                self._move_cursor_to_x(event.position().x())
+            event.accept()
+            return
         if self._lyric_drag is not None and event.buttons() & Qt.LeftButton:
             self._update_lyric_drag(event.position().x())
             return
@@ -1714,6 +1805,10 @@ class ChartEditWaveform(WaveformWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._read_only:
+            self._dragging = False
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._lyric_drag is not None:
             drag = self._lyric_drag
             x = event.position().x()
@@ -2457,6 +2552,9 @@ class ChartEditWaveform(WaveformWidget):
         """操作を実行し、返ってきた暫定表示を反映する。"""
         if self._op_cb is None:
             return None
+        # 読むだけのときは問い合わせ(peek_*)以外を通さない(二重の守り)。
+        if self._read_only and not str(op.get("kind", "")).startswith("peek"):
+            return None
         # note_edit へは「その小節をいくつに割るか」を渡す(画面の 1/G では
         # ない)。拍子が 4/4 でない小節では数が変わる。
         a = op.get("a")
@@ -2523,6 +2621,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def copy_selection(self, cut=False):
         """選んだもの(または範囲)の中身をコピーする。cut なら消す。"""
+        if self._read_only:
+            return False
         src = self._clip_source()
         if src is None:
             return False
@@ -2549,6 +2649,8 @@ class ChartEditWaveform(WaveformWidget):
 
         位置は**いちばん早いものからの隔たり**で覚えてあるので、コピーした形の
         まま、カーソルを先頭にして並ぶ。"""
+        if self._read_only:
+            return False
         clip = ChartEditWaveform._clip
         if not clip:
             return False
@@ -2731,7 +2833,7 @@ class ChartEditWaveform(WaveformWidget):
 
     def _delete_selected_measures(self):
         """上の目盛りで選んだ小節を消してもらう(Delete と右クリックの両方)。"""
-        if not self._sel_measures:
+        if self._read_only or not self._sel_measures:
             return False
         ms = self.selected_measures()
         self._sel_measures = set()
@@ -2905,6 +3007,8 @@ class ChartEditWaveform(WaveformWidget):
 
     def _exec_menu(self, menu, global_pos):
         """メニューを出す(テストではここを差し替えて、出したメニューを調べる)。"""
+        if self._read_only:
+            return
         menu.exec(global_pos)
 
     # ------------------------------------------------------------------
@@ -3064,6 +3168,8 @@ class ChartEditWaveform(WaveformWidget):
 
         入力欄の初期値は、その位置に同じ命令があればその値、無ければその位置で
         今効いている値。初期値のまま決定しても命令は増やさない。"""
+        if self._read_only:
+            return None
         if self._op_cb is None or name not in self._COMMAND_LABELS:
             return None
         m, s = self._cursor_addr()
@@ -3168,6 +3274,20 @@ class ChartEditWaveform(WaveformWidget):
     )) | frozenset(_PLAIN_KEYS) | frozenset(_PEEPO_NOTE_KEYS) | frozenset(_PEEPO_LONG_KEYS)
 
     def event(self, e):
+        if self._read_only:
+            t = e.type()
+            if t == QEvent.ShortcutOverride:
+                # 読むだけのキーだけ名乗る(Esc・Ctrl+C/V などは名乗らない)。
+                if (not (e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier
+                                          | Qt.AltModifier))
+                        and e.key() in self._READ_ONLY_KEYS):
+                    e.accept()
+                    return True
+                return super().event(e)
+            if t == QEvent.KeyPress and e.key() == Qt.Key_Tab:
+                e.accept()          # 範囲は張らない。フォーカスも動かさない
+                return True
+            return super().event(e)
         if e.type() == QEvent.ShortcutOverride:
             mods = e.modifiers()
             key = e.key()
@@ -3231,6 +3351,9 @@ class ChartEditWaveform(WaveformWidget):
         event.accept()
 
     def keyReleaseEvent(self, event):
+        if self._read_only:
+            event.ignore()
+            return
         # 連打・風船のキーを離したところで置く。押しっぱなしの自動連射は
         # 離す/押すの組が届くので、自動連射ぶんは無視する。
         if (self._long is not None and not event.isAutoRepeat()
@@ -3240,6 +3363,9 @@ class ChartEditWaveform(WaveformWidget):
         super().keyReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        if self._read_only:
+            self._read_only_key(event)
+            return
         key = event.key()
         mods = event.modifiers()
 
@@ -3391,6 +3517,8 @@ class ChartEditWaveform(WaveformWidget):
         # 上書き/消したときに終端の 8 と BALLOON: の打数も一緒に片付ける
         # ため(1文字だけ書き換えると 8 が取り残されていた。利用者の報告
         # 2026-11-13)。暫定表示と打音は _run_op と窓の側が今までどおり出す。
+        if self._read_only:
+            return
         if char in "01234" and self._op_cb is not None:
             self._run_op({"kind": "place",
                           "a": (self._cur_measure, self._cur_slot),

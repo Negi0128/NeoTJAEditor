@@ -110,7 +110,7 @@ class PlayerHost(QWidget):
         self._seq = None
         #: 再生画面で流している曲 (tja, コースキー)。流していなければ None。
         self._play_ctx = None
-        #: 再生画面のモード。"normal"(通常プレイ)。"detail" は次の段。
+        #: 再生画面のモード。"normal"(通常プレイ)/ "detail"(詳細モード)。
         self.play_mode = "normal"
         self._finish_timer = QTimer(self)
         self._finish_timer.setInterval(self.FINISH_POLL_MS)
@@ -349,10 +349,17 @@ class PlayerHost(QWidget):
         path, course = ctx
         if key == "resume":
             self.play_page.hide_menu()
-            self.play_page.setFocus(Qt.OtherFocusReason)
+            if self.play_mode == "detail" and self._core is not None:
+                try:
+                    self._core.dock.chart_edit.setFocus(Qt.OtherFocusReason)
+                except Exception:  # noqa: BLE001
+                    self.play_page.setFocus(Qt.OtherFocusReason)
+            else:
+                self.play_page.setFocus(Qt.OtherFocusReason)
             if self._core is not None:
                 self._core.resume_chart()
-            self._finish_timer.start()
+            if self.play_mode == "normal":
+                self._finish_timer.start()
         elif key == "restart":
             # 暫定方針: 同じコース・表示設定で 5 秒の曲名表示からやり直す。
             # 本編は曲名表示の 5 秒目に読み直す(core.load)ので、譜面の状態・
@@ -362,7 +369,10 @@ class PlayerHost(QWidget):
                 self._core.stop_audio()
             self.start_intro(path, course)
         elif key == "detail":
-            self.switch_to_detail()
+            if self.play_mode == "detail":
+                self.switch_to_normal()
+            else:
+                self.switch_to_detail()
         elif key == "library":
             self._end_play()
             if self._core is not None:
@@ -379,21 +389,73 @@ class PlayerHost(QWidget):
             self._set_page(self.library, fade="black", done=focus_library)
 
     def switch_to_detail(self):
-        """詳細モードへ。
+        """詳細モードへ(メニューの3番目)。
 
-        TODO(次の段): 既存の作譜ペインを読取専用で出し、停止・シークを
-        許す(set_controls_locked(False) + 編集経路の無効化)。切り替え直後は
-        一時停止、メニューの3番目を「通常演奏に移行する」に(set_detail_mode)。
-        終端では一時停止して結果へ進まない。
-        いまはメニューの3番目を押せなくしてあるので、ここへは来ない。"""
-        return
+        暫定方針: 位置はそのまま、切り替えた直後は止まったまま(続けるか
+        Space で流す)。下に作譜ペインを読むだけで出し、止める・シーク・
+        速度・表示の切り替えを許す。譜面を変える道は PlayerCore の
+        PreviewDock が最初から set_read_only(True) でふさいでいる。
+        終わりまで流れても結果へは進まない(音源が止まる = そこで一時停止)。"""
+        if self._play_ctx is None:
+            return
+        core = self._core
+        self._finish_timer.stop()
+        self.play_page.hide_menu()
+        if core is not None:
+            core.pause_chart()
+            core.drop_hold()
+            try:
+                core.use_detail_mode()
+            except Exception:  # noqa: BLE001
+                pass
+        self.play_mode = "detail"
+        self.play_page.set_detail(True)
+        if core is not None:
+            try:
+                core.dock.set_speed_row_visible(True)
+            except Exception:  # noqa: BLE001
+                pass
+            self.play_page._fit()
+            try:
+                core.dock.chart_edit.setFocus(Qt.OtherFocusReason)
+            except Exception:  # noqa: BLE001
+                self.play_page.setFocus(Qt.OtherFocusReason)
+        else:
+            self.play_page.setFocus(Qt.OtherFocusReason)
+
+    def switch_to_normal(self):
+        """通常プレイへ戻る(詳細モードのメニューの3番目「通常演奏に移行する」)。
+        位置はそのまま、止まったまま。メニューの「続ける」で流れ、操作は
+        また締める。
+
+        TODO(結果画面の段): 詳細でシークしたあと通常で終わりまで流した
+        ときの結果は、いまは何もせずそのまま(既存の時刻ベースの集計)。"""
+        if self._play_ctx is None:
+            return
+        core = self._core
+        self.play_page.hide_menu()
+        if core is not None:
+            core.pause_chart()
+            core.drop_hold()
+            try:
+                core.dock.set_speed_row_visible(False)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                core.use_normal_play_mode()
+            except Exception:  # noqa: BLE001
+                pass
+        self.play_mode = "normal"
+        self.play_page.set_detail(False)
+        self.play_page.setFocus(Qt.OtherFocusReason)
 
     def _check_finished(self):
         core = self._core
         if core is None or self._play_ctx is None:
             self._finish_timer.stop()
             return
-        if self.play_page.menu_open() or self.body.is_fading():
+        if (self.play_page.menu_open() or self.body.is_fading()
+                or self.play_mode != "normal"):
             return
         try:
             done = bool(core.chart_finished())
@@ -424,6 +486,16 @@ class PlayerHost(QWidget):
         self._play_ctx = None
         self.play_page.hide_menu()
         self.play_page.unlock()
+        if self.play_mode == "detail":
+            # 次に再生画面へ入るときは通常プレイから(_enter_play が
+            # use_normal_play_mode と set_view_only を当て直す)。
+            self.play_mode = "normal"
+            core = self._core
+            if core is not None:
+                try:
+                    core.dock.set_speed_row_visible(False)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _intro_failed(self, path):
         """本編を読めなかった。難易度選択へ戻す。"""

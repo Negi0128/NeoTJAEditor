@@ -2640,9 +2640,12 @@ class ChartPreviewWidget(QWidget):
         締めているあいだのキーは何もせず key_cb(event) へ渡す(None なら
         event.ignore() で親へ流す)。ホイールは捨てる。外からの呼び出し
         (play/pause/seek の各メソッド)は止めない — 置いた側が自分の判断で
-        止める・流すのに使うため。"""
+        止める・流すのに使うため。
+
+        締めていないときに key_cb を渡すと、Esc だけがそちらへ行く(Player の
+        詳細モード: 操作はできるが、Esc はメニュー)。Editor は渡さない。"""
         self._controls_locked = bool(locked)
-        self._locked_key_cb = key_cb if locked else None
+        self._locked_key_cb = key_cb
         if locked:
             self._p_held = False
             self._p_moved = False
@@ -2735,6 +2738,10 @@ class ChartPreviewWidget(QWidget):
 
     def keyPressEvent(self, event):
         if self.locked_key(event):
+            return
+        if (event.key() == Qt.Key_Escape and self._locked_key_cb is not None):
+            self._locked_key_cb(event)
+            event.accept()
             return
         key = event.key()
         # --- 演奏モード ---------------------------------------------

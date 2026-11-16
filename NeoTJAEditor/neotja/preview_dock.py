@@ -815,9 +815,11 @@ class GamePreviewWindow(QWidget):
         if cb is not None:
             cb()
         if getattr(self, "_view_only", False):
-            # Player の再生画面: 絵だけ(set_view_only)。窓の大きさは絵の大きさ。
+            # Player の再生画面: 絵だけ(set_view_only)。窓の大きさは絵の大きさ
+            # (下の段を出すときはそのぶん足す)。
             self.scaled_host.refit()
-            self.setFixedSize(self.scaled_host.size())
+            w, h = self._view_content_size()
+            self.setFixedSize(w, h)
             cb = getattr(self, "_embed_cb", None)
             if cb is not None:
                 cb()
@@ -847,18 +849,32 @@ class GamePreviewWindow(QWidget):
         if cb is not None:
             cb()
 
-    def set_view_only(self, on: bool):
+    def set_view_only(self, on: bool, with_bottom: bool = False):
         """絵(ゲーム画面)だけを見せる。下部パネル(速度・波形・情報)と
         レーンの上のボタン類を隠す。NeoTJAPlayer が自分の画面の中へ再生画面を
-        置くときに使う。Editor は使わない(呼ばなければ今までどおり)。"""
+        置くときに使う。Editor は使わない(呼ばなければ今までどおり)。
+
+        with_bottom=True なら下部パネル(いまのモードのページ)は出す
+        (Player の詳細モード: 画面の下に作譜ペイン)。レーンの上のボタン類は
+        どちらでも隠す。この窓が自分で張ったキー(F11/Esc)は、置かれている
+        あいだ切る — 窓ではなく子として置かれているので、全画面へは出せず、
+        Esc を食うと置いた側のメニューが開かなくなるため。"""
         self._view_only = bool(on)
+        self._view_bottom = bool(on and with_bottom)
         if on:
-            self._bottom_widget.hide()
             self.set_overlay_visible(False)
+            self._bottom_widget.setVisible(self._view_bottom)
         else:
             self._bottom_widget.show()
             self.set_overlay_visible(True)
+        self._sync_own_shortcuts()
         self._refit()
+
+    def _sync_own_shortcuts(self):
+        on = not (getattr(self, "_view_only", False)
+                  or getattr(self, "_controls_locked", False))
+        for sc in getattr(self, "_own_shortcuts", ()):
+            sc.setEnabled(on)
 
     def set_controls_locked(self, locked: bool, key_cb=None):
         """再生の操作(再生・停止・シーク・速度・ホイール・レーンのクリック・
@@ -878,11 +894,19 @@ class GamePreviewWindow(QWidget):
             inner = getattr(cp, "chart_preview", None)
             if inner is not None and inner is not self._lane:
                 inner.set_controls_locked(locked, key_cb)
-        for sc in getattr(self, "_own_shortcuts", ()):
-            sc.setEnabled(not locked)
+        self._sync_own_shortcuts()
 
     def controls_locked(self) -> bool:
         return bool(getattr(self, "_controls_locked", False))
+
+    def _view_content_size(self):
+        """絵だけの表示で、いまの倍率で中身が占める大きさ(下の段を含む)。"""
+        w = self.scaled_host.width()
+        h = self.scaled_host.height()
+        if getattr(self, "_view_bottom", False):
+            h += self._bottom_widget.minimumHeight()
+            w = max(w, self._bottom_widget.minimumWidth())
+        return max(1, w), max(1, h)
 
     def fit_view_only(self, avail_w: int, avail_h: int):
         """絵だけの表示(set_view_only)で、avail に収まる最大の倍率にする。
@@ -892,8 +916,7 @@ class GamePreviewWindow(QWidget):
         avail_w, avail_h = max(1, int(avail_w)), max(1, int(avail_h))
         for _ in range(6):
             cur = self.scaled_host.scale()
-            cw = max(1, self.scaled_host.width())
-            ch = max(1, self.scaled_host.height())
+            cw, ch = self._view_content_size()
             r = min(avail_w / float(cw), avail_h / float(ch))
             if cw <= avail_w and ch <= avail_h and r <= 1.02:
                 break
@@ -2328,7 +2351,27 @@ class PreviewDock(QDockWidget):
         if not self._bottom_scaler.apply(s):
             return
         self._bottom_scale = self._bottom_scaler.scale
+        self._fit_pane_height()
         self._apply_bottom_height()
+
+    #: 作譜ペインの原寸の高さ(_build_edit_page の setFixedHeight と同じ)。
+    PANE_BASE_H = 300
+    #: 作譜ペインの高さも倍率に合わせるか。**既定は合わせない**(Editor は
+    #: 今までどおり)。Player の詳細モードで、拡大したときにペインの下が
+    #: 空き地にならないように使う。
+    _pane_follow_scale = False
+
+    def set_pane_follow_scale(self, on: bool):
+        self._pane_follow_scale = bool(on)
+        self._fit_pane_height()
+
+    def _fit_pane_height(self):
+        ce = getattr(self, "chart_edit", None)
+        if ce is None:
+            return
+        h = self._bh(self.PANE_BASE_H) if self._pane_follow_scale else self.PANE_BASE_H
+        if ce.height() != h or ce.minimumHeight() != h:
+            ce.setFixedHeight(h)
 
     def _bh(self, v):
         """原寸で持っている高さを、いまの倍率に直す。"""
@@ -2947,12 +2990,16 @@ class PreviewDock(QDockWidget):
     def _on_note_edited(self, m_index, slot, grid, char):
         """編集ペインで音符が置かれた。テキストへの書き戻しは MainWindow の
         担当(エディタと Undo を持っているのは向こう)なので、そのまま渡す。"""
+        if self._read_only:
+            return
         if self.note_edit_cb is not None:
             self.note_edit_cb(m_index, slot, grid, char)
 
     def _on_chart_op(self, op):
         """編集ペインの操作を MainWindow へ渡し、結果(暫定表示用)を返す。"""
         if self.chart_op_cb is None:
+            return None
+        if self._read_only and not str(op.get("kind", "")).startswith("peek"):
             return None
         res = self.chart_op_cb(op)
         if op.get("kind") == "peek_command":
@@ -3119,7 +3166,7 @@ class PreviewDock(QDockWidget):
         波形のボタン(_on_demostart_requested)と同じく**音源の時計**の秒を
         書く。再生位置は助走ぶん進んだ値なので、助走を引いて音源の頭を
         0 にする(時刻の表示 _fmt_time(ms - lead) と同じ直し方)。"""
-        if self.demostart_cb is None:
+        if self.demostart_cb is None or self._read_only:
             return
         sec = self.audio.position() / 1000.0 - self._lead_sec
         sec = max(0.0, float(sec or 0.0))
@@ -3183,6 +3230,8 @@ class PreviewDock(QDockWidget):
         self._key_help.show_near(self.game_preview_window)
 
     def _on_header_edit(self):
+        if self._read_only:
+            return
         if self.header_edit_cb is not None:
             self.header_edit_cb()
 
@@ -3449,11 +3498,52 @@ class PreviewDock(QDockWidget):
             if self.save_settings_cb is not None:
                 self.save_settings_cb()
 
+    # ------------------------------------------------------------------
+    # 読むだけ(Player の詳細モード)
+    # ------------------------------------------------------------------
+    #: 読むだけか。**既定は書ける**(Editor は呼ばない)。
+    _read_only = False
+
+    def set_read_only(self, on: bool):
+        """譜面・ヘッダを変える道を全部ふさぐ。見る・再生・シーク・速度・
+        表示の切り替えは残す。Player の PreviewDock が使う。
+
+          作譜ペイン・波形 … set_read_only(音符・命令・選択・貼り付け・
+                              右クリック・OFFSET調整・DEMOSTART)
+          命令パネル       … 出さない(命令の追加・変更・戻す/進む)
+          下の段のボタン   … 「ヘッダ…」「キー」を隠す
+          受け口           … 編集・OFFSET・DEMOSTART・ヘッダの受け口も
+                              何もしない(二重の守り)"""
+        self._read_only = bool(on)
+        for wf in self._waveforms():
+            if wf is not None and hasattr(wf, "set_read_only"):
+                wf.set_read_only(on)
+        for b in (getattr(self, "btn_header", None), getattr(self, "btn_keys", None)):
+            if b is not None:
+                b.setVisible(not on and not self._embedded)
+        if on and self.command_panel is not None:
+            self.command_panel.hide()
+        elif self.MODE_EDIT is not None and self.bottom_stack.currentIndex() == self.MODE_EDIT:
+            self._place_command_panel(True)
+
+    def is_read_only(self) -> bool:
+        return bool(self._read_only)
+
+    def set_speed_row_visible(self, on: bool):
+        """下の段の「時刻・シークバー・速度」の行だけを出す/隠す
+        (ボタン類を隠したまま、Player の詳細モードで使う)。"""
+        self._overlay_visible = bool(on)
+        self._speed_row.setVisible(bool(on))
+        self._apply_bottom_height()
+        self.game_preview_window.refit()
+
     def _place_command_panel(self, show):
         """命令パネルをゲーム画面の右上へ置く(作譜モードのときだけ)。"""
         panel = self.command_panel
         if panel is None:
             return
+        if self._read_only:
+            show = False         # 読むだけのときは命令を足す道を出さない
         if not show:
             panel.hide()
             return
@@ -5154,7 +5244,7 @@ class PreviewDock(QDockWidget):
 
         秒は**音源の時計**。波形の目盛りと同じものなので、押した所に
         そのまま印が立つ(譜面の OFFSET を引き直す必要はない)。"""
-        if self.demostart_cb is None:
+        if self.demostart_cb is None or self._read_only:
             return
         if hasattr(wf, "cursor_time"):
             sec = wf.cursor_time()
@@ -5207,6 +5297,8 @@ class PreviewDock(QDockWidget):
         self.status_label.setText(f"OFFSET調整中: {value:+.3f} 秒")
 
     def _on_waveform_offset_committed(self, value: float):
+        if self._read_only:
+            return
         # 確定はスピンボックス経由。valueChanged → _on_offset_value_changed →
         # _on_apply_offset → apply_offset_cb と、既存の OFFSET 書き込み経路を
         # そのまま使う(元に戻す操作もスピンボックスと同等)。
@@ -5229,4 +5321,6 @@ class PreviewDock(QDockWidget):
         self._on_apply_offset()
 
     def _on_apply_offset(self):
+        if self._read_only:
+            return
         self.apply_offset_cb(f"{self.spin_offset.value():.3f}")

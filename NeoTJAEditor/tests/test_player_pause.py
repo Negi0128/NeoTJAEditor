@@ -220,6 +220,13 @@ def _fake_core_class():
 
         def chart_finished(self):
             return self.finished
+
+        def drop_hold(self):
+            self.log.append('drop_hold')
+
+        def use_detail_mode(self):
+            self.log.append('detail_mode')
+            return True
     return FakeCore
 
 
@@ -303,13 +310,15 @@ class HostPauseTests(unittest.TestCase):
             QTest.keyClick(menu, Qt.Key_Down)
             self.assertEqual(menu.current, 1)
             QTest.keyClick(menu, Qt.Key_Down)
-            self.assertEqual(menu.current, 3)          # 3(詳細)は押せないので飛ばす
+            self.assertEqual(menu.current, 2)
+            QTest.keyClick(menu, Qt.Key_Down)
+            self.assertEqual(menu.current, 3)
+            QTest.keyClick(menu, Qt.Key_Down)
+            self.assertEqual(menu.current, 0)          # 下の端から上へ回る
             QTest.keyClick(menu, Qt.Key_Up)
-            self.assertEqual(menu.current, 1)
-            self.assertGreaterEqual(len(self.sounds) - n, 3)
-            QTest.keyClick(menu, Qt.Key_3)              # 詳細は次の段: 何も起きない
-            self.assertTrue(menu.is_open())
-            QTest.keyClick(menu, Qt.Key_Up)
+            self.assertEqual(menu.current, 3)
+            self.assertGreaterEqual(len(self.sounds) - n, 5)
+            QTest.keyClick(menu, Qt.Key_Down)
             QTest.keyClick(menu, Qt.Key_Return)
             self.assertFalse(menu.is_open())
             self.assertEqual(core.log[-1], 'resume_chart')
@@ -360,7 +369,7 @@ class HostPauseTests(unittest.TestCase):
             lib_page = host.library.pages.currentWidget()
             QTest.keyClick(host.play_page, Qt.Key_Escape)
             menu = host.play_page.menu
-            for _ in range(2):
+            for _ in range(3):
                 QTest.keyClick(menu, Qt.Key_Down)
             QTest.keyClick(menu, Qt.Key_Return)
             _wait(700)
@@ -451,6 +460,8 @@ class RealCorePauseTests(unittest.TestCase):
             finally:
                 core.stop_audio()
                 core.shutdown()
+                core.dock.chart_preview._timer.stop()
+                core.dock.game_preview_window.hide()
                 core.dock.game_preview_window.close()
                 core.dock.deleteLater()
 

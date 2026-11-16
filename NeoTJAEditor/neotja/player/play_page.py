@@ -11,7 +11,7 @@
 を出す合図を出す。止める・流すは PlayerHost がやる。
 """
 
-from PySide6.QtCore import QEvent, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -31,9 +31,8 @@ class PlayPage(QWidget):
         #: 重ねられないときは真っ黒から切り替えるだけにする。
         self.native_gl = False
         self.menu = PauseMenu(self)
-        # 詳細モードは次の段(TODO: 詳細モード — 読取専用の作譜ペイン・
-        # シーク・終端で一時停止)。それまで3番目は押せない。
-        self.menu.set_item_enabled("detail", False)
+        #: 詳細モード(下に作譜ペイン・操作できる)か。
+        self.detail = False
 
     def attach(self, gpw, native=False, key_cb=None):
         """再生ウィンドウをこの画面の子にする(1回だけ)。操作は締める。"""
@@ -42,6 +41,8 @@ class PlayPage(QWidget):
             gpw.installEventFilter(self)
             self.gpw = gpw
         self.native_gl = bool(native)
+        self.detail = False
+        self.menu.set_detail_mode(False)
         gpw.set_view_only(True)
         lock = getattr(gpw, "set_controls_locked", None)
         if lock is not None:
@@ -49,6 +50,24 @@ class PlayPage(QWidget):
         self._fit()
         gpw.show()
         self.menu.raise_()
+
+    def set_detail(self, on):
+        """詳細モード ⇔ 通常プレイ。詳細では下に作譜ペイン(と時刻・シーク
+        バー・速度の行)を出し、止める・動かすを許す。Esc はどちらでも
+        メニュー(締めていないあいだも Esc だけはこちらへ回してもらう)。"""
+        self.detail = bool(on)
+        self.menu.set_detail_mode(self.detail)
+        g = self.gpw
+        if g is None:
+            return
+        try:
+            g.set_view_only(True, with_bottom=self.detail)
+        except TypeError:
+            g.set_view_only(True)
+        lock = getattr(g, "set_controls_locked", None)
+        if lock is not None:
+            lock(not self.detail, self.handle_key)
+        self._fit()
 
     def unlock(self):
         """再生画面を離れるとき。締め切りを外す(次に置くときにまた締める)。"""
@@ -72,6 +91,10 @@ class PlayPage(QWidget):
             self.menu.setAttribute(Qt.WA_NativeWindow, True)
             if self.gpw is not None:
                 rect = QRectF(self.gpw.geometry())
+                sh = getattr(self.gpw, "scaled_host", None)
+                if sh is not None:
+                    # 絵はゲーム画面ぶんだけ(詳細モードでは下に作譜ペインがある)。
+                    rect = QRectF(QRect(sh.mapTo(self, QPoint(0, 0)), sh.size()))
         self.menu.open(backdrop, rect)
 
     def hide_menu(self):

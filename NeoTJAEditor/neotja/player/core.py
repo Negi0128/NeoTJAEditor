@@ -144,6 +144,13 @@ class PlayerCore:
             postroll_sec=5.0,
         )
         self.dock.hide()
+        # Player は譜面を書き換えない。作譜ペイン(詳細モード)も読むだけ。
+        # 編集の受け口(note_edit_cb・chart_op_cb・header_edit_cb・
+        # demostart_cb・undo/redo)は最初から渡していないので、仮に何かが
+        # すり抜けても Editor の本文へは届かない。
+        self.dock.set_read_only(True)
+        # 詳細モードで拡大したとき、作譜ペインも同じ倍率で高くする(下が空かない)。
+        self.dock.set_pane_follow_scale(True)
         # 「読めたら鳴らす」の予約を回収する口。
         self.dock.songReady.connect(self._on_song_ready)
         self.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
@@ -394,6 +401,30 @@ class PlayerCore:
             d.set_bottom_mode(idx)
         finally:
             d._restoring_mode = prev
+
+    def use_detail_mode(self):
+        """再生画面を「作譜」(詳細モード: 上にゲーム画面、下に作譜ペイン)に
+        する。位置は動かさない。設定(preview_bottom_mode)には書かない。"""
+        d = self.dock
+        idx = getattr(d, "MODE_EDIT", None)
+        if idx is None:
+            return False
+        prev = getattr(d, "_restoring_mode", False)
+        d._restoring_mode = True
+        try:
+            d.set_bottom_mode(idx)
+        finally:
+            d._restoring_mode = prev
+        try:
+            d.chart_edit.set_position(self.chart_position())
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    def drop_hold(self):
+        """止めたときに預かった「読めたら鳴らす」の予約を捨てる。モードを
+        替えたあと、勝手に頭から鳴りださないように(再生は手で始める)。"""
+        self._held = None
 
     def chart_ready(self):
         """load() した本編の音源が読み終わっているか。"""
