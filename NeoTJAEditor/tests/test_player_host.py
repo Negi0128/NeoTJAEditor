@@ -7,6 +7,39 @@ from pathlib import Path
 from gui_support import editor_session, real_qt_test
 
 
+class _SilentCore:
+    """試聴の係の代わり。この試験は選曲の画面を見るもので、音声デバイスを
+    開く本物の PlayerCore(裏に PreviewDock をもう1つ持つ)は要らない。
+    試聴そのものは test_player_preview.py で見る。"""
+
+    def __init__(self, cfg):
+        self.dock = type('D', (), {'set_master_volume': lambda self, v: None})()
+
+    def play_demo(self, path, demo):
+        pass
+
+    def stop_audio(self):
+        pass
+
+    def shutdown(self):
+        pass
+
+
+_ORIG_FACTORY = None
+
+
+def setUpModule():
+    global _ORIG_FACTORY
+    from neotja.player.host import PlayerHost
+    _ORIG_FACTORY = PlayerHost.core_factory
+    PlayerHost.core_factory = _SilentCore
+
+
+def tearDownModule():
+    from neotja.player.host import PlayerHost
+    PlayerHost.core_factory = _ORIG_FACTORY
+
+
 def _tja(path, title):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('TITLE:%s\nBPM:120\nCOURSE:Oni\nLEVEL:8\n#START\n1111,\n#END\n' % title,

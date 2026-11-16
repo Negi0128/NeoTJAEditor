@@ -955,7 +955,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("NeoTJAPlayer")
 
     def _restore_from_player(self):
-        """Player で隠したもの(メニュー・アイコン)を戻す。"""
+        """Player で隠したもの(メニュー・アイコン)を戻す。試聴も止める
+        (Editor の音と同時に鳴らさない)。"""
+        page = getattr(self, "player_page", None)
+        if page is not None:
+            page.stop_preview()
         self.menuBar().show()
         icon = getattr(self, "_editor_window_icon", None)
         if icon is not None:

@@ -189,6 +189,23 @@ class HostFlowTests(unittest.TestCase):
     @real_qt_test
     def test_song_choice_opens_difficulty_and_back_keeps_library(self):
         from neotja.player.host import PlayerHost
+
+        class SilentCore:      # 試聴は test_player_preview.py で見る
+            def __init__(self, cfg):
+                self.dock = type('D', (), {'set_master_volume': lambda self, v: None})()
+
+            def play_demo(self, *a):
+                pass
+
+            def stop_audio(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        orig = PlayerHost.core_factory
+        PlayerHost.core_factory = SilentCore
+        self.addCleanup(lambda: setattr(PlayerHost, 'core_factory', orig))
         with tempfile.TemporaryDirectory() as d:
             path = _chart(Path(d) / 'x.tja', [('Oni', 10)])
             cfg = {'player_saved': [{'path': path, 'title': 'テスト曲'}]}

@@ -75,8 +75,12 @@ class PlayerHost(QWidget):
         self.body.addWidget(self.library)
         self.difficulty = DifficultyPage(config_data, save_cb)
         self.difficulty.back_requested.connect(self.show_library)
-        self.difficulty.play_requested.connect(self.play_requested)
-        self.difficulty.record_requested.connect(self.record_requested)
+        self.difficulty.play_requested.connect(self._on_play)
+        self.difficulty.record_requested.connect(self._on_record)
+        #: 試聴を鳴らす係(PlayerCore)。初めて難易度選択を開いたときに作る。
+        #: PlayerCore は裏に PreviewDock(音声エンジン一式)を持つので、
+        #: 選曲だけで終わる人にまで音声デバイスを開かせない。
+        self._core = None
         self.body.addWidget(self.difficulty)
 
         self.refresh_theme()
@@ -105,16 +109,70 @@ class PlayerHost(QWidget):
         self.difficulty.close_settings()
         self.difficulty.set_song(path)
         self._set_page(self.difficulty)
+        self.start_preview(path)
         self.difficulty.setFocus()
 
     def show_library(self):
         """難易度選択の「戻る」。選曲は作り直さないので、開いていた
         フォルダ・検索・並び・選んだ行はそのまま。"""
+        self.stop_preview()
         self.difficulty.close_settings()
         self._set_page(self.library)
 
     def shutdown(self):
+        """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
         self.library.shutdown()
+        core, self._core = self._core, None
+        if core is not None:
+            try:
+                core.stop_audio()
+                core.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ------------------------------------------------------------------
+    # 難易度選択の試聴(DEMOSTART から流して、音源の終わりでまた DEMOSTART へ)
+    #: PlayerCore を作る呼び出し。試験で差し替える。
+    core_factory = None
+
+    def _ensure_core(self):
+        if self._core is None:
+            factory = self.core_factory
+            if factory is None:
+                from neotja.player.core import PlayerCore
+                factory = PlayerCore
+            self._core = factory(self.cfg)
+        return self._core
+
+    def start_preview(self, path):
+        """選んだ曲を DEMOSTART から試聴する。前の曲は必ず先に止める
+        (音源が無い曲へ移ったときに前の曲が鳴り続けないように)。"""
+        from neotja.player import core as core_mod
+        try:
+            content = core_mod.read_text(path)
+        except OSError:
+            self.stop_preview()
+            return
+        core = self._ensure_core()
+        core.stop_audio()
+        # 音量は Editor と同じ設定(config_data)をそのたびに当て直す。
+        try:
+            core.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
+        except Exception:  # noqa: BLE001
+            pass
+        core.play_demo(path, core_mod.demo_start_seconds(content))
+
+    def stop_preview(self):
+        if self._core is not None:
+            self._core.stop_audio()
+
+    def _on_play(self, path, course):
+        self.stop_preview()
+        self.play_requested.emit(path, course)
+
+    def _on_record(self, path, course):
+        self.stop_preview()
+        self.record_requested.emit(path, course)
 
     # ------------------------------------------------------------------
     # TJA を落とされたら、Editor で開かずに Player で選んだことにする

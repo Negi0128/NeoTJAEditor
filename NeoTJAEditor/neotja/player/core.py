@@ -258,6 +258,13 @@ class PlayerCore:
     def _fire_pending(self):
         wave, at, loop = self._pending
         self._pending = None
+        # DEMOSTART が音源より後ろを指していたら頭から(そのまま飛ぶと、
+        # 終わりの見張りが毎回そこへ戻して無音のまま回り続ける)。
+        dur = self.dock.duration_seconds()
+        if dur > 0 and at >= dur - 0.1:
+            at = 0.0
+            if loop and self._loop is not None:
+                self._loop = (0.0, self._loop[1])
         try:
             self.dock.audio.seek(int(at * 1000))
             self.dock.audio.play()
