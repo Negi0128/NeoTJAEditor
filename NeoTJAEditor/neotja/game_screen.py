@@ -162,7 +162,67 @@ SCORE_ADVANCE = 0.73
 # セル内で 1px 上に寄っている(他は y=1..30、5/6 は y=0..29)。数字ごとに
 # 下げ量を持たせて揃える。
 SCORE_DIGIT_Y_OFF = {5: 1, 6: 1}
-COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)
+COURSE_SYM_POS = (26, 237)           # コース記号(おに 等)。おにの左上
+# コース記号の**見えている所**の基準(おに を置いた位置で決める)。素材は
+# かんたん/ふつう/むずかしい が 89×60、おに/エディット が 71×63 で、
+# 絵の中の余白も違う。左上をそろえると松竹梅だけ右上へずれて見えた
+# (利用者の報告 2026-11-16)。おに は今の位置のまま、ほかは「見えている
+# 所の横の真ん中」と「見えている所の下端」を おに に合わせる。
+COURSE_SYM_REF = "Oni"
+#: これより薄い画素は「見えていない」扱い(縁のごくうすいにじみで
+#: 箱がずれないように)。
+COURSE_SYM_ALPHA_MIN = 8
+_visible_box_cache = {}
+
+
+def _visible_box(path):
+    """png の不透明な所の箱 (左, 上, 右, 下)。右と下は含まない端。
+
+    読めない・全部透明なら None。素材ごとに1回だけ数える(set_chart の
+    たびに画素を舐めない)。"""
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return None
+    if key in _visible_box_cache:
+        return _visible_box_cache[key]
+    box = None
+    img = QImage(path)
+    if not img.isNull():
+        img = img.convertToFormat(QImage.Format_ARGB32)
+        w, h = img.width(), img.height()
+        raw = bytes(img.constBits())[:img.sizeInBytes()]
+        bpl = img.bytesPerLine()
+        # ARGB32 はリトルエンディアンで B,G,R,A の並び。4 バイト目が α。
+        x0, y0, x1, y1 = w, h, -1, -1
+        for y in range(h):
+            row = raw[y * bpl + 3:y * bpl + 4 * w:4]
+            xs = [x for x, a in enumerate(row) if a >= COURSE_SYM_ALPHA_MIN]
+            if xs:
+                x0, x1 = min(x0, xs[0]), max(x1, xs[-1])
+                y0, y1 = min(y0, y), max(y1, y)
+        if x1 >= 0:
+            box = (x0, y0, x1 + 1, y1 + 1)
+    _visible_box_cache[key] = box
+    return box
+
+
+def course_sym_pos(path):
+    """コース記号 path を貼る左上。おに と見えている所をそろえる。
+
+    箱が取れないとき(素材が無い・おに が無い)は今までどおり
+    COURSE_SYM_POS の左上そろえ。"""
+    box = _visible_box(path) if path else None
+    ref = _visible_box(os.path.join(os.path.dirname(path or ""),
+                                    COURSE_SYM_REF + ".png")) if path else None
+    if box is None or ref is None:
+        return COURSE_SYM_POS
+    x, y = COURSE_SYM_POS
+    # 2倍のまま比べて、最後に四捨五入(半画素の差で左右に振れないように)。
+    cx2 = 2 * x + ref[0] + ref[2]
+    x = math.floor((cx2 - box[0] - box[2]) / 2 + 0.5)
+    y = y + ref[3] - box[3]
+    return (int(x), int(y))
 DRUM_POS = (208, 209)                # 太鼓 120x133
 # コンボの数字と「コンボ」文字は太鼓の上に載る。太鼓を動かしたら数字も
 # 一緒に動いてほしいので、基準は太鼓からの相対で持つ(以前は独立した座標に
@@ -1651,6 +1711,7 @@ class _GameScreenBase:
         self._beat_marks = None
         self._course_key = None
         self._course_sym = None
+        self._course_sym_pos = COURSE_SYM_POS
         # 素材は **ここでは読まない**。読むのは _ensure_skin()(説明はそちら)。
         # ここに入れておくのは「素材が1枚も無かったとき」と同じ値で、
         # 描画側はどれも None を見て自前の絵へ落ちるようにできている。
@@ -2663,6 +2724,7 @@ class _GameScreenBase:
         self._beat_marks = self._build_beat_marks(preview_data)
         self._course_key = course_key or (preview_data or {}).get("course_key")
         self._course_sym = None
+        self._course_sym_pos = COURSE_SYM_POS
         # アレンジは中身が裏譜面なので、そのまま出すと うら の印が付く。
         # 本家でも裏でもない見方なので、コース記号は出さない。
         if (preview_data or {}).get("arrange_ref"):
@@ -2677,6 +2739,8 @@ class _GameScreenBase:
                 if os.path.exists(path):
                     pm = QPixmap(path)
                     self._course_sym = pm if not pm.isNull() else None
+                    if self._course_sym is not None:
+                        self._course_sym_pos = course_sym_pos(path)
         # 曲名は静的キャッシュに焼いてある。ここで捨てないと、譜面を切り替えても
         # 前の曲名が出たままになる(update() だけではキャッシュを貼り直すだけ)。
         self._static_layer = None
@@ -2900,7 +2964,7 @@ class _GameScreenBase:
             op = self.course_sym_opacity
             if op < 1.0:
                 p.setOpacity(max(0.0, op))
-            blit_sprite(p, COURSE_SYM_POS[0], COURSE_SYM_POS[1],
+            blit_sprite(p, self._course_sym_pos[0], self._course_sym_pos[1],
                         self._course_sym, self._dpr)
             if op < 1.0:
                 p.setOpacity(1.0)
@@ -4445,9 +4509,11 @@ class _GameScreenBase:
         (利用者の案 2026-10-15)。記号の出ていないコース(アレンジなど)でも
         押せるように、素材が無いときも同じ所に場所を取る。"""
         pm = self._course_sym
-        x, y = COURSE_SYM_POS
         if pm is None:
+            x, y = COURSE_SYM_POS
             return QRect(x, y, *self.COURSE_SYM_FALLBACK)
+        # 絵を貼った所と同じ(見えている所でそろえた位置)。
+        x, y = self._course_sym_pos
         return QRect(x, y, pm.width(), pm.height())
 
 
