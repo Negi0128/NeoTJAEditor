@@ -229,6 +229,19 @@ def _selftest_crash():
     faulthandler._sigsegv()
 
 
+def _schedule_old_player_cleanup():
+    """旧 NeoTJAPlayer.exe(v15.3.x まで)をごみ箱へ移すのを、窓が出たあとに回す。
+
+    起動を待たせないよう少し遅らせる。中身は old_player_cleanup を参照。
+    ここで何が起きても起動は続ける(片付けは次の起動でもう一度試せる)。"""
+    try:
+        from PySide6.QtCore import QTimer
+        from neotja import old_player_cleanup
+        QTimer.singleShot(3000, old_player_cleanup.run_at_startup)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     # GPU 描画の面の作り方は **QApplication より先**に決める。
     # あとから setDefaultFormat しても、できあがった面には効かない。
@@ -249,6 +262,7 @@ def main():
     win = MainWindow(app)
     win.show()
     win.start_discord_presence()
+    _schedule_old_player_cleanup()
     if os.environ.get("NEOTJA_CRASH_SELFTEST") == "1":
         # 窓が出てから落とす。import の途中ではなく、ふだん落ちているのと
         # 同じ「Qt が回っている最中」で確かめたいため。
