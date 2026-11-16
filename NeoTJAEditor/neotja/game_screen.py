@@ -411,6 +411,13 @@ COMBO_ADVANCE_PX = 3.0
 # 2等分すると金色側だけ十数px下へずれるので、素材から不透明な帯を実際に
 # 測って使う(_measure_combo_text_bands)。測れなかったときの保険がこれ。
 COMBO_TEXT_BAND_FALLBACK = ((26, 23), (76, 23))   # ((y, 高さ), ...)
+# 4桁(1000〜)のコンボは字を詰める。素材の字のまま並べると横に広がり
+# すぎて太鼓からはみ出して見えた(利用者の報告 2026-11-16)。字送りを
+# 0.86 倍、字の横幅を 0.88 倍にする(見本 combo_digits_proposal で決めた値)。
+# 高さと伸び(COMBO_POP_*)は変えない。並びの中心は今までの位置のまま。
+COMBO_WIDE_AT = 1000
+COMBO_WIDE_PITCH = 0.86
+COMBO_WIDE_SCALE_X = 0.88
 # コンボ数字の色: 0-49 白 / 50-99 銀 / 100- 金
 COMBO_SILVER_AT, COMBO_GOLD_AT = 50, 100
 # 太鼓が光る時間(叩いた瞬間からの秒数)。明るさそのままで保つぶん。
@@ -2152,9 +2159,30 @@ class _GameScreenBase:
         dy = 0.0
         if sy != COMBO_SCALE:
             dy = sheet.height() * (COMBO_SCALE - sy)
+        sx = 1.0
+        if combo >= COMBO_WIDE_AT:
+            right, adv, sx = self._combo_wide_layout(sheet, combo, right, adv)
         self._draw_digits(p, sheet, combo, right=right - ox, advance=adv,
                           y=int(cy0 + COMBO_Y_OFF + dy) - oy,
-                          scale=COMBO_SCALE, scale_y=sy)
+                          scale=COMBO_SCALE, scale_y=sy, scale_x=sx)
+
+    @staticmethod
+    def _combo_wide_layout(sheet, combo, right, adv):
+        """4桁以上のコンボの (右端, 字送り, 字の横倍率)。
+
+        詰めたぶん並びが左へ寄らないよう、**詰める前と同じ中心**に置き直す。
+        中心は「最初の字の左端 〜 最後の字の右端」の真ん中(字は枠の中で
+        左右対称に描かれているので、枠の幅を縮めても字の中心は動かない)。"""
+        n = len(str(int(combo)))
+        cw = sheet.width() / 10
+        step = cw * COMBO_SCALE * adv
+        gw = cw * COMBO_SCALE
+        mid = right - step * n + (step * (n - 1) + gw) / 2
+        adv2 = adv * COMBO_WIDE_PITCH
+        step2 = cw * COMBO_SCALE * adv2
+        gw2 = cw * COMBO_SCALE * COMBO_WIDE_SCALE_X
+        left = mid - (step2 * (n - 1) + gw2) / 2
+        return left + step2 * n, adv2, COMBO_WIDE_SCALE_X
 
     def draw_judge_pop(self, p, ox=0, oy=0):
         """判定文字「良」。叩いた直後に判定円の上へ出て、昇りながら消える。
@@ -2778,12 +2806,15 @@ class _GameScreenBase:
 
     def _draw_digits(self, p, sheet, value, *, cols=10, rows=1, row=0,
                      right=None, left=None, y=0, scale=1.0, scale_y=None,
-                     advance=1.0, y_offsets=None):
+                     advance=1.0, y_offsets=None, scale_x=1.0):
         """0-9 が横に並んだシートから数字を描く。right 指定で右詰め。
 
         advance は「次の字までどれだけ送るか」を1文字枠に対する割合で指定する。
         シートの1枠には字の左右に余白が入っているため、1.0 のまま送ると
-        本家より字間が空いて間延びして見える。"""
+        本家より字間が空いて間延びして見える。
+
+        scale_x は字の横幅だけに掛ける倍率(4桁のコンボを詰めるとき)。
+        字送りは advance のほうで決める。"""
         if sheet is None:
             return
         cw = sheet.width() / cols
@@ -2793,21 +2824,26 @@ class _GameScreenBase:
         # 0-9 を「切り出し済み・指定倍率へ縮小済み」でキャッシュしておく。倍率は
         # どの呼び出しでも定数なので毎フレーム変倍する必要がない(スコア+コンボ+
         # 連打数で1フレーム十数回の変倍 blit になっていた)。
-        glyphs = self._digit_glyphs(sheet, cols, rows, row, scale, scale_y)
+        glyphs = self._digit_glyphs(sheet, cols, rows, row, scale, scale_y,
+                                    scale_x)
         for c in s:
             i = int(c)
             dy = (y_offsets or {}).get(i, 0)
             p.drawPixmap(int(x), int(y) + dy, glyphs[i])
             x += step
 
-    def _digit_glyphs(self, sheet, cols, rows, row, scale, scale_y=None):
+    def _digit_glyphs(self, sheet, cols, rows, row, scale, scale_y=None,
+                      scale_x=1.0):
         """数字シートの1行を、指定倍率で縮小済みの 0-9 のリストにして返す。
 
         scale_y を渡すと縦だけ別倍率にできる(合計スコアが上へ伸びるとき、
         横幅は変えたくないため。実機も幅は変わらない)。
 
         描画サイズは従来の QRect(int(w)+1, int(h)+1) と同一にしてあるので
-        見た目は変わらない。素材もレイアウトも実行中に変わらないため使い回せる。"""
+        見た目は変わらない。素材もレイアウトも実行中に変わらないため使い回せる。
+
+        scale_x は横幅だけに掛ける倍率(4桁のコンボ)。キャッシュのキーにも
+        入れる(入れないと 999→1000 で幅の違う字を引き当てる)。"""
         # QPixmap.cacheKey() は「その中身」に対する Qt の一意キー。id() だと
         # 素材を読み直したときに同じアドレスが再利用されて、別のシートの
         # キャッシュを引き当てる恐れがある。
@@ -2818,13 +2854,13 @@ class _GameScreenBase:
         dpr = max(1.0, float(getattr(self, "_dpr", 1.0)))
         sy = float(scale if scale_y is None else scale_y)
         key = (sheet.cacheKey(), cols, rows, row, round(float(scale), 4),
-               round(sy, 4), round(dpr, 4))
+               round(sy, 4), round(dpr, 4), round(float(scale_x), 4))
         got = self._digit_cache.get(key)
         if got is not None:
             return got
         cw, ch = sheet.width() / cols, sheet.height() / rows
         # 論理サイズは従来どおり int(cw*scale)+1。実寸だけ dpr 倍にする。
-        dw, dh = int(cw * scale) + 1, int(ch * sy) + 1
+        dw, dh = int(cw * scale * scale_x) + 1, int(ch * sy) + 1
         out = []
         for i in range(10):
             cell = sheet.copy(QRect(int(i * cw), int(row * ch), int(cw), int(ch)))
