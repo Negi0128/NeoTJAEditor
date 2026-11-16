@@ -193,8 +193,9 @@ class ReadOnlyPaneTests(unittest.TestCase):
                 _key(ce, Qt.Key_Right)
                 _key(ce, Qt.Key_Right)
                 self.assertEqual(len(seeks), 2)
-                _mouse(ce, 'press', ce.width() * 0.6, y_note, Qt.LeftButton)
-                _mouse(ce, 'release', ce.width() * 0.6, y_note, Qt.LeftButton)
+                cx = ce._sec_to_x(ce.cursor_time() + 1.5)      # 今の位置から離れた所
+                _mouse(ce, 'press', cx, y_note, Qt.LeftButton)
+                _mouse(ce, 'release', cx, y_note, Qt.LeftButton)
                 self.assertEqual(len(seeks), 3)
                 toggled = []
                 ce._toggle_play_cb = lambda: toggled.append(1)
@@ -408,10 +409,10 @@ class HostDetailTests(unittest.TestCase):
             self.assertEqual(menu.item('detail').text(), '詳細モードに移行する')
             QTest.keyClick(menu, Qt.Key_Escape)                  # 続ける
             self.assertEqual(core.log[-1], 'resume_chart')
-            # 通常に戻ったので、終わりで難易度選択へ。
+            # 通常に戻ったので、終わりで結果画面へ。
             core.finished = True
             _wait(900)
-            self.assertIs(host.body.currentWidget(), host.difficulty)
+            self.assertIs(host.body.currentWidget(), host.results)
             del QWidget
             host.shutdown()
             host.deleteLater()

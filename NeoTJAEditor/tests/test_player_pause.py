@@ -388,7 +388,7 @@ class HostPauseTests(unittest.TestCase):
             host.deleteLater()
 
     @real_qt_test
-    def test_end_of_chart_emits_and_returns_to_difficulty(self):
+    def test_end_of_chart_emits_and_goes_to_results(self):
         with tempfile.TemporaryDirectory() as d:
             host, a, core = self._playing_host(d, course='Edit')
             done = []
@@ -403,10 +403,10 @@ class HostPauseTests(unittest.TestCase):
             host._on_menu('resume')
             _wait(900)
             self.assertEqual(done, [(a, 'Edit')])
-            self.assertIs(host.body.currentWidget(), host.difficulty)
-            self.assertEqual(host.difficulty.current_course(), 'Edit')
+            self.assertIs(host.body.currentWidget(), host.results)   # 結果画面へ
+            self.assertEqual(host.results.course, 'Edit')
             self.assertIn('stop', core.log)
-            self.assertEqual(core.log[-1], 'demo')       # 試聴が戻る
+            self.assertNotIn('demo', core.log)
             self.assertFalse(host.in_play())
             host.shutdown()
             host.deleteLater()

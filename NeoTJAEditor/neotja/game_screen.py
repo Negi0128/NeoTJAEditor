@@ -3072,6 +3072,73 @@ class _GameScreenBase:
         # 事故が起きる(曲名で一度やった)。
         self._draw_nameplate(p)
 
+    # ------------------------------------------------------------------
+    # 譜面の終わりの値(Player の結果画面)
+    # ------------------------------------------------------------------
+    #: 「譜面の終わり」として引く時刻。どの音符・連打よりも後ろ。
+    RESULT_END_TIME = 1.0e9
+
+    def result_values(self, at=None):
+        """画面の HUD と**同じ計算**で、その時刻(省略時は譜面の終わり)の値を返す。
+
+        HUD(paint_screen)は「コンボ = レーンの game_state、スコア =
+        ScoreTimeline.at、魂ゲージ = GaugeModel.ratio(コンボ)」で描いている。
+        ここはそれを終わりの時刻で引くだけで、新しい数え方は足していない。
+        再生モード(オート)は全部の音符が良になる前提の表なので、良 = コンボ、
+        可・不可 = 0、最大コンボ = コンボ。連打数は ScoreTimeline が加算に
+        使っている打の数。演奏モード(PlayState)のときは叩いた記録の値。
+
+        返り値: score, good, ok, bad, rolls, max_combo, combo, note_count,
+        gauge_ratio, cleared"""
+        t = self.RESULT_END_TIME if at is None else float(at)
+        cp = self.chart_preview
+        notes = cp.total_notes()
+        gauge = self._gauge
+        tl = self._score_timeline
+        play = cp.play_state()
+        if play is not None:
+            hits = play.gauge_hits()
+            return {
+                "score": int(play.score), "good": int(play.good), "ok": int(play.ok),
+                "bad": int(play.bad), "rolls": int(play.roll_hits),
+                "max_combo": int(play.max_combo), "combo": int(play.combo),
+                "note_count": int(notes),
+                "gauge_ratio": gauge.ratio(hits) if gauge is not None else 0.0,
+                "cleared": bool(gauge.cleared(hits)) if gauge is not None else False,
+            }
+        combo = cp.combo_at(t)
+        return {
+            "score": int(tl.at(t)) if tl is not None else 0,
+            "good": int(combo), "ok": 0, "bad": 0,
+            "rolls": int(tl.roll_hits_at(t)) if tl is not None else 0,
+            "max_combo": int(combo), "combo": int(combo), "note_count": int(notes),
+            "gauge_ratio": gauge.ratio(combo) if gauge is not None else 0.0,
+            "cleared": bool(gauge.cleared(combo)) if gauge is not None else False,
+        }
+
+    def gauge_strip(self, ratio, now=0.0):
+        """魂ゲージだけを1枚の絵にして返す(画面と同じ _draw_gauge で描く)。
+        素材(Gauge.png)が無ければ None。"""
+        self._ensure_skin()
+        base = self._skin.get("gauge_base")
+        if base is None:
+            return None
+        from PySide6.QtGui import QPixmap as _QPixmap
+        pm = _QPixmap(base.width(), GAUGE_BAR_H)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gx, gy = GAUGE_POS
+        p.translate(-gx, -gy)
+        dpr = self._dpr
+        try:
+            self._dpr = 1.0
+            self._draw_gauge(p, ratio, now)
+        finally:
+            self._dpr = dpr
+            p.end()
+        return pm
+
     def _draw_gauge(self, p, ratio, now):
         """魂ゲージ。全良前提なので「叩いた数 / 総数」で満ちていく。"""
         base = self._skin.get("gauge_base")

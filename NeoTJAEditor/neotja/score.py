@@ -159,6 +159,10 @@ class ScoreTimeline:
                     end = min(end, start + hits / speed)
                 events += self._tick_events(start, end, hits)
 
+        # 連打・風船・くす玉の1打ずつの時刻(音符のぶんを除いたもの)。
+        # 結果画面の「連打数」はこれを数える(加算と同じ打ち方・同じ数)。
+        n_notes = len(data.get("notes") or [])
+        self._tick_times = sorted(e[0] for e in events[n_notes:])
         events.sort(key=lambda e: e[0])
         self._times = [e[0] for e in events]
         self._cum = []
@@ -208,6 +212,10 @@ class ScoreTimeline:
             return None
         gain = self._cum[i - 1] - (self._cum[i - 2] if i >= 2 else 0)
         return self._times[i - 1], gain
+
+    def roll_hits_at(self, seconds: float) -> int:
+        """その譜面時刻までに叩いた連打・風船・くす玉の打数(加算と同じ数)。"""
+        return bisect.bisect_right(self._tick_times, float(seconds))
 
     def at(self, seconds: float) -> int:
         """その譜面時刻までに入っているスコア。"""

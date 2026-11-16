@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from neotja.player.difficulty import DifficultyPage
 from neotja.player.intro import IntroPage, IntroSequence
 from neotja.player.play_page import PlayPage
+from neotja.player.results import ResultsPage
 from neotja.player.transitions import FadeStack
 from neotja.player.library_view import LibraryView, library_qss
 from neotja.start_screen import StartScreen, dropped_tja_path, wordmark_family
@@ -106,6 +107,14 @@ class PlayerHost(QWidget):
         self.play_page.esc_pressed.connect(self.open_pause_menu)
         self.play_page.menu.chosen.connect(self._on_menu)
         self.play_page.menu.sound_requested.connect(self.sounds.play)
+        # 結果画面(通常プレイで譜面が終わったとき)。
+        self.results = ResultsPage(config_data)
+        self.body.addWidget(self.results)
+        self.results.sound_requested.connect(self.sounds.play)
+        self.results.retry_requested.connect(self._on_results_retry)
+        self.results.library_requested.connect(self._on_results_library)
+        #: 結果画面に出している曲 (tja, コースキー)。
+        self._result_ctx = None
         #: いま進んでいる曲名表示の段取り(IntroSequence)。無ければ None。
         self._seq = None
         #: 再生画面で流している曲 (tja, コースキー)。流していなければ None。
@@ -134,7 +143,7 @@ class PlayerHost(QWidget):
 
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""
-        full = page in (self.difficulty, self.intro, self.play_page)
+        full = page in (self.difficulty, self.intro, self.play_page, self.results)
         self.top_bar.setVisible(not full)
         self.top_rule.setVisible(not full)
         if fade:
@@ -428,8 +437,8 @@ class PlayerHost(QWidget):
         位置はそのまま、止まったまま。メニューの「続ける」で流れ、操作は
         また締める。
 
-        TODO(結果画面の段): 詳細でシークしたあと通常で終わりまで流した
-        ときの結果は、いまは何もせずそのまま(既存の時刻ベースの集計)。"""
+        詳細でシークしたあと通常で終わりまで流したときの結果も、同じ計算の
+        「譜面の終わり」の値(on_play_finished)。"""
         if self._play_ctx is None:
             return
         core = self._core
@@ -465,20 +474,69 @@ class PlayerHost(QWidget):
             self.on_play_finished()
 
     def on_play_finished(self):
-        """通常プレイで譜面が終わった。
+        """通常プレイで譜面が終わった。結果画面へ(黒を挟んで)。
 
-        TODO(結果画面の段): ここで結果画面へ進む(既存プレビューと同じ計算の
-        終端値を渡す)。いまは難易度選択へフェードで戻る(同じコースを選んだ
-        状態で、試聴も戻る)。"""
+        値は再生画面の HUD と同じ計算を譜面の終わりの時刻で引いたもの
+        (game_screen.result_values)。詳細モードでシークしてから通常に戻して
+        終わった場合も、同じ計算の「譜面の終わり」の値になる(オートは時刻
+        から決まるので、途中を飛ばしても終わりの値は変わらない)。"""
         ctx = self._play_ctx
         if ctx is None:
             return
         path, course = ctx
+        values, gauge, judges = self._collect_results()
         self._end_play()
         if self._core is not None:
             self._core.stop_audio()
         self.play_finished.emit(path, course)
-        self.show_difficulty(path, course=course, fade="black")
+        self._result_ctx = (path, course)
+        self.results.set_result(path, course, self.difficulty.levels.get(course),
+                                values, gauge, judges)
+        self._set_page(self.results, fade="black",
+                       done=lambda: self.results.btn_retry.setFocus(Qt.OtherFocusReason))
+
+    def _collect_results(self):
+        """結果の値・魂ゲージの絵・良/可/不可の絵を再生画面からもらう。"""
+        values, gauge, judges = {}, None, {}
+        core = self._core
+        dock = getattr(core, "dock", None)
+        gs = getattr(dock, "game_screen", None)
+        try:
+            values = dict(gs.result_values())
+        except Exception:  # noqa: BLE001
+            values = {}
+        try:
+            gauge = gs.gauge_strip(float(values.get("gauge_ratio") or 0.0))
+        except Exception:  # noqa: BLE001
+            gauge = None
+        cp = getattr(dock, "chart_preview", None)
+        for k in ("good", "ok", "bad"):
+            try:
+                judges[k] = cp.judge_sprite(k)
+            except Exception:  # noqa: BLE001
+                pass
+        return values, gauge, judges
+
+    def _on_results_retry(self):
+        """もう一度プレイする: 同じコースで 5 秒の曲名表示から(全部初めから)。"""
+        ctx = self._result_ctx
+        if ctx is None:
+            return
+        self._result_ctx = None
+        self.start_intro(*ctx)
+
+    def _on_results_library(self):
+        """選曲画面に戻る(Esc も)。選曲の状態はそのまま。"""
+        self._result_ctx = None
+        if self._core is not None:
+            self._core.stop_audio()
+
+        def focus_library():
+            try:
+                self.library.pages.currentWidget().setFocus()
+            except Exception:  # noqa: BLE001
+                pass
+        self._set_page(self.library, fade="black", done=focus_library)
 
     def _end_play(self):
         """再生画面の後片付け(音は止めない — 呼んだ側が止める)。"""

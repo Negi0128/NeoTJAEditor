@@ -882,6 +882,10 @@ SKIN_MAP = {
     # 難易度選択と曲名表示で使う(neotja/player/difficulty.py の course_mark)。
     "Select_Marks.png":
         {"kind": KIND_COPY, "source": "TNDE-R/Graphics/3_SongSelect/Difficulty_Select/Difficulty_Mark.png", "rect": None, "exact": True, "note": None},
+    # 結果画面の王冠。4列x3行(1コマ 101x92)。Player は一番左の列だけ使う
+    # (上から 銀=クリア / 金=フルコンボ / 虹=全良。neotja/player/results.py)。
+    "Result_Crown.png":
+        {"kind": KIND_COPY, "source": "TNDE-R/Graphics/6_Result/Crown.png", "rect": None, "exact": True, "note": None},
     # 後ろの大きな角丸パネル。12色あるのはジャンル別だが、Player は
     # ジャンルを持たないので実機の見た目に合う teal(10番)を1枚だけ使う。
     "Select_Panel.png":

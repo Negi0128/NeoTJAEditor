@@ -991,8 +991,13 @@ class ChartPreviewWidget(QWidget):
             pend = self._pending_presses
             st.advance(min(real, pend[0][0]) if pend else real)
             return now, st.combo, self._play_recent_hit(st, now)
-        combo = bisect.bisect_right(self._note_times, now)
+        combo = self.combo_at(now)
         return now, combo, self._recent_hit(now)
+
+    def combo_at(self, chart_time) -> int:
+        """再生モードの、その譜面時刻までのコンボ(=判定線を通った音符の数)。
+        HUD の game_state と同じ数え方。結果画面もここを使う。"""
+        return bisect.bisect_right(self._note_times, float(chart_time))
 
     @staticmethod
     def _play_recent_hit(st, now):
