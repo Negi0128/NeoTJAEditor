@@ -303,6 +303,7 @@ class HostResultsTests(unittest.TestCase):
             QTest.keyClick(r.btn_back, Qt.Key_Up)
             self.assertTrue(r.btn_retry.hasFocus())
             self.sounds.clear()
+            core.finished = False                               # 次の演奏はまだ終わっていない
             QTest.keyClick(r.btn_retry, Qt.Key_Return)          # もう一度プレイする
             self.assertEqual(self.sounds, ['don'])
             self.assertIs(host.body.currentWidget(), host.intro)

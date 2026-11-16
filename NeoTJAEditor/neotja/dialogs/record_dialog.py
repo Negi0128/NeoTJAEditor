@@ -223,7 +223,7 @@ class RecordDialog(QDialog):
 
     def __init__(self, main_window, preview_data, offset, song_path,
                  song_seconds, default_dir, parent=None, layout="game",
-                 multi_previews=None, title=""):
+                 multi_previews=None, title="", bg_path=None):
         super().__init__(parent or main_window)
         # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
         # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
@@ -409,6 +409,11 @@ class RecordDialog(QDialog):
         # (利用者の指定 2026-11-06)。絵の道はそのまま。
         self._bg = recorder.bg_with_defaults(
             self._bg, cfg0.get("rec_bg_default"))
+        # 呼び出し側が「この譜面の背景」を持っていれば、それを最初の背景に
+        # する(Player: 譜面ごとの背景 player_chart_art)。渡されなければ
+        # 今までどおり共通の設定(rec_bg_path)。Editor は渡さない。
+        if bg_path:
+            self._bg.path = str(bg_path)
         # ジャケットの欄は**この譜面の基本ジャケット**(利用者の決定
         # 2026-11-13)。譜面の隣の .jacket.json の base に覚え、無ければ
         # 今までの共通の設定(rec_bg_art)を出す。歌詞ごとの絵との切り替えは

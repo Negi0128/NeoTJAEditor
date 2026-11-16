@@ -14,6 +14,7 @@ NeoTJAEditor.exe に同居させる)。
 """
 
 import os
+import time
 
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QRadialGradient
@@ -575,9 +576,111 @@ class PlayerHost(QWidget):
     def in_intro(self):
         return self._seq is not None
 
+    # ------------------------------------------------------------------
+    # 録画(難易度選択の「録画」→ Editor と同じ録画の窓)
+    #: 録画の窓を作る呼び出し(試験で差し替える)。None なら RecordDialog。
+    record_dialog_cls = None
+    #: 譜面の読み込みを待つ上限(秒)。
+    RECORD_LOAD_TIMEOUT = 15.0
+
+    def _record_owner(self):
+        """録画の窓の置き場。Editor と同じ MainWindow._record_dialog を使う
+        (同じ窓を2つ開かないため・窓を閉じるときの「書き出し中」の確認も
+        そのまま効くため)。単独で動かす試験では自分。"""
+        top = self.window()
+        if top is not self and hasattr(top, "_record_dialog"):
+            return top
+        return self
+
+    def record_dialog(self):
+        owner = self._record_owner()
+        dlg = getattr(owner, "_record_dialog", None)
+        if dlg is None:
+            return None
+        try:
+            dlg.isVisible()
+        except RuntimeError:          # C++ 側が消えていた
+            owner._record_dialog = None
+            return None
+        return dlg
+
     def _on_record(self, path, course):
+        """録画の窓を開く。すでに開いていれば(Editor のものでも)前へ出すだけ。
+
+        試聴を止め、PlayerCore に譜面とコースを読み込んで(見るだけ)から
+        RecordDialog を作る。閉じたら難易度選択へ戻って試聴をやり直す。"""
+        existing = self.record_dialog()
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
         self.stop_preview()
         self.record_requested.emit(path, course)
+        core = self._ensure_core()
+        from neotja.constants import PLAY_MODE_WATCH
+        try:
+            ok = bool(core.load(path, course_key=course, play_mode=PLAY_MODE_WATCH))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            self.start_preview(path)
+            return
+        self._record_pending = (path, course, time.monotonic())
+        self._record_wait()
+
+    _record_pending = None
+    #: 作れなかった理由(最後の1回)。
+    record_failed = ""
+    #: 作れなかったときに知らせの窓を出すか(試験では切る)。
+    show_record_errors = True
+
+    def _record_wait(self):
+        """音源が読めるのを待ってから窓を作る(長さが要るため)。"""
+        pend = self._record_pending
+        if pend is None:
+            return
+        path, course, t0 = pend
+        core = self._core
+        if core is None:
+            self._record_pending = None
+            return
+        if not core.chart_ready():
+            if time.monotonic() - t0 < self.RECORD_LOAD_TIMEOUT:
+                QTimer.singleShot(50, self._record_wait)
+                return
+            self._record_pending = None
+            self.start_preview(path)
+            return
+        self._record_pending = None
+        from neotja.player.record import build_dialog
+        owner = self._record_owner()
+        parent = owner if owner is not self else self.window()
+        dlg, why = build_dialog(core, path, self.cfg, parent, self.record_dialog_cls)
+        if dlg is None:
+            self.record_failed = why
+            self.start_preview(path)
+            if self.show_record_errors:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "動画を書き出す", why)
+            return
+        owner._record_dialog = dlg
+        dlg.finished.connect(lambda *_a, d=dlg, p=path: self._on_record_closed(d, p))
+        dlg.show()
+
+    def _on_record_closed(self, dlg, path):
+        """録画の窓が閉じた。置き場を空け、難易度選択なら試聴をやり直す。"""
+        owner = self._record_owner()
+        if getattr(owner, "_record_dialog", None) is dlg:
+            owner._record_dialog = None
+        try:
+            dlg.deleteLater()
+        except RuntimeError:
+            pass
+        if (self.body.currentWidget() is self.difficulty and self.isVisible()
+                and self.difficulty.path == path):
+            self.start_preview(path)
+            self.difficulty.setFocus()
 
     # ------------------------------------------------------------------
     # TJA を落とされたら、Editor で開かずに Player で選んだことにする
