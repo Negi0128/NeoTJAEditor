@@ -572,6 +572,10 @@ class SettingsDialog(QDialog):
         form.addRow(self._hint(
             "NeoTJAPlayer で譜面を開く前の画面に流れる曲の音量です。"
             "曲の音量に対する比率で、100% なら譜面と同じ音量になります。"))
+        # 旧 NeoTJAPlayer 専用の設定で、v15.4.0 で Player を外してからは何にも
+        # 効かない。値は新しい Player で使うかもしれないので消さずに残し、枠ごと
+        # 隠す(利用者の承認 2026-11-16)。
+        form.parentWidget().hide()
 
         outer.addStretch()
         return w
