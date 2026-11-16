@@ -1,0 +1,227 @@
+<title>NeoTJAPlayer 再設計図</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* 構成: 上に一文の構想 → 3本柱+土台の機能マップ(色=柱、印=既存/改修/新規、P=段階) → 段階ごとの道筋 → 決めること・気をつけること */
+:root{
+  --bg:#f3f5f8; --surface:#ffffff; --ink:#18202b; --muted:#5b6676; --line:#d9dfe7;
+  --don:#d23b2c; --don-soft:#fbe7e4; --ka:#2f76b8; --ka-soft:#e3eef8;
+  --gold:#b88412; --gold-soft:#f8efd9; --base:#5d6b7c; --base-soft:#e9edf2;
+  --display:"Dela Gothic One","Zen Kaku Gothic New",system-ui,sans-serif;
+  --body:"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#12161c; --surface:#1a2029; --ink:#e7ebf1; --muted:#9aa5b4; --line:#2c3440;
+  --don:#ff6a58; --don-soft:#3a1f1c; --ka:#5fa6ea; --ka-soft:#1a2a3b;
+  --gold:#e0b04a; --gold-soft:#33291a; --base:#a3afbf; --base-soft:#232a35; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12161c; --surface:#1a2029; --ink:#e7ebf1; --muted:#9aa5b4; --line:#2c3440;
+  --don:#ff6a58; --don-soft:#3a1f1c; --ka:#5fa6ea; --ka-soft:#1a2a3b;
+  --gold:#e0b04a; --gold-soft:#33291a; --base:#a3afbf; --base-soft:#232a35; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);line-height:1.75;font-size:15px}
+.wrap{max-width:1080px;margin:0 auto;padding-block:40px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:44px}
+h1,h2{font-family:var(--display);font-weight:400;line-height:1.3;text-wrap:balance;margin:0}
+h1{font-size:clamp(26px,4.4vw,40px)}
+h2{font-size:22px}
+p{margin:0}
+.eyebrow{font-size:12px;letter-spacing:.12em;color:var(--muted);font-weight:700}
+.lead{display:grid;gap:14px}
+.thesis{font-size:18px;max-width:46em}
+.thesis b{color:var(--don)}
+.rule{border-left:3px solid var(--ka);padding:10px 14px;background:var(--surface);max-width:46em;font-size:14px;color:var(--muted)}
+.rule b{color:var(--ink)}
+section{display:grid;gap:16px}
+.legend{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.dot.have{background:var(--base)}
+.dot.mod{background:transparent;border:2px solid var(--base)}
+.dot.new{background:transparent;border:2px dashed var(--muted)}
+.map{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.pillar{background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.pillar header{padding:14px 16px 12px;display:grid;gap:4px}
+.pillar header h3{margin:0;font-family:var(--display);font-weight:400;font-size:19px}
+.pillar header p{font-size:13px;color:var(--muted)}
+.pillar.watch header{background:var(--don-soft)} .pillar.watch h3{color:var(--don)}
+.pillar.film header{background:var(--gold-soft)} .pillar.film h3{color:var(--gold)}
+.pillar.test header{background:var(--ka-soft)} .pillar.test h3{color:var(--ka)}
+.feats{list-style:none;margin:0;padding:6px 0;display:grid}
+.feats li{display:grid;grid-template-columns:14px minmax(0,1fr) auto;gap:10px;align-items:start;padding:9px 16px;border-top:1px solid var(--line)}
+.feats li:first-child{border-top:0}
+.feats .dot{margin-top:7px}
+.fname{font-weight:700;font-size:14px;line-height:1.5}
+.fnote{display:block;font-weight:400;font-size:12.5px;color:var(--muted);line-height:1.6}
+.ph{font-family:var(--mono);font-size:11.5px;font-weight:600;padding:2px 7px;border-radius:999px;background:var(--base-soft);color:var(--ink);white-space:nowrap;margin-top:2px}
+.foundation{background:var(--base-soft);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:grid;gap:10px}
+.foundation h3{margin:0;font-size:15px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
+.chip code{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.road{display:grid;gap:10px}
+.step{display:grid;grid-template-columns:72px minmax(0,1fr);gap:16px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.step .tag{font-family:var(--mono);font-weight:600;font-size:20px;color:var(--muted);line-height:1.2}
+.step .tag small{display:block;font-family:var(--body);font-size:11px;font-weight:700;letter-spacing:.06em}
+.step h3{margin:0 0 4px;font-size:16px}
+.step ul{margin:6px 0 0;padding-left:1.2em;font-size:14px}
+.step .out{margin-top:8px;font-size:13px;color:var(--muted)}
+.step .out b{color:var(--ink)}
+.step.ship{border-color:var(--don)}
+.step.ship .tag{color:var(--don)}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.box{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:10px;min-width:0}
+.box h3{margin:0;font-size:16px}
+.box ol,.box ul{margin:0;padding-left:1.3em;font-size:14px;display:grid;gap:8px}
+.box li b{display:block}
+.box li span{color:var(--muted);font-size:13px}
+code{font-family:var(--mono);font-size:.9em}
+footer{font-size:12.5px;color:var(--muted)}
+@media (max-width:860px){.map{grid-template-columns:minmax(0,1fr)}.two{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:480px){.step{grid-template-columns:minmax(0,1fr);gap:6px}.step .tag small{display:inline;margin-left:8px}}
+</style>
+
+<div class="wrap">
+
+<div class="lead">
+  <div class="eyebrow">NEOTJAPLAYER ・ 再設計の全体像（案）</div>
+  <h1>作った譜面を、<br>見せる・残す・確かめる</h1>
+  <p class="thesis">Editor が「作る」道具なら、新しい Player は<b>作った譜面を人に届け、自分で確かめるための再生機</b>。遊ぶためのシミュは TNDE・Anasoko・Handler・1D2S・Nauts にまかせて、作譜者と鑑賞会の主催者にしか要らない機能に絞る。</p>
+  <p class="rule"><b>設計の決まりは1つだけ。</b>再生・描画・録画は Editor と同じ部品（PreviewDock・game_screen・recorder）を使い、作り直さない。直せば両方に効き、TNDE と同じ時刻の読み方もそのまま手に入る。</p>
+</div>
+
+<section>
+  <h2>機能マップ</h2>
+  <div class="legend">
+    <span><i class="dot have"></i>いまの Player にある（流用）</span>
+    <span><i class="dot mod"></i>あるものを広げる</span>
+    <span><i class="dot new"></i>新しく作る</span>
+    <span><code class="ph">P2</code>着手する段階</span>
+  </div>
+  <div class="map">
+    <article class="pillar watch">
+      <header><h3>見せる（鑑賞会）</h3><p>主催者が置いておけば、会が勝手に進む</p></header>
+      <ul class="feats">
+        <li><i class="dot new"></i><span class="fname">プレイリスト（メドレー）<span class="fnote">並べた順に流す。並べ替え・飛ばす・シャッフル。がばさんの案</span></span><code class="ph">P1</code></li>
+        <li><i class="dot new"></i><span class="fname">曲間のインターバル<span class="fnote">秒数を決めて、次の曲まで待つ</span></span><code class="ph">P2</code></li>
+        <li><i class="dot new"></i><span class="fname">曲紹介カード<span class="fnote">TITLE・MAKER・難易度・★を数秒出してから流す</span></span><code class="ph">P2</code></li>
+        <li><i class="dot mod"></i><span class="fname">全画面と主催者用の操作<span class="fnote">次へ・戻る・一時停止をキー1つで。マウスの矢印は隠す</span></span><code class="ph">P2</code></li>
+        <li><i class="dot new"></i><span class="fname">曲ごとの音量そろえ<span class="fnote">音圧の違う曲が続いても、聞こえ方をそろえる</span></span><code class="ph">P2</code></li>
+        <li><i class="dot have"></i><span class="fname">難易度選択画面<span class="fnote">本家の座標を再現したもの。単発で開くときに使う</span></span><code class="ph">P1</code></li>
+      </ul>
+    </article>
+    <article class="pillar film">
+      <header><h3>残す（映像制作）</h3><p>撮り直しなしで、編集ソフトに渡せる形にする</p></header>
+      <ul class="feats">
+        <li><i class="dot have"></i><span class="fname">まとめ録画<span class="fnote">並べた譜面を1本ずつ書き出す。失敗しても次へ進む</span></span><code class="ph">P1</code></li>
+        <li><i class="dot new"></i><span class="fname">プレイリストを1本の動画に<span class="fnote">曲紹介カードと間も入れて、メドレー動画にする</span></span><code class="ph">P3</code></li>
+        <li><i class="dot new"></i><span class="fname">チャプター書き出し<span class="fnote">YouTube の概要欄に貼れる「0:00 曲名」の一覧を同時に出す</span></span><code class="ph">P3</code></li>
+        <li><i class="dot new"></i><span class="fname">背景の透過・クロマキー<span class="fnote">レーンだけを書き出して、編集ソフトで重ねる</span></span><code class="ph">P3</code></li>
+        <li><i class="dot mod"></i><span class="fname">出力の形の選び直し<span class="fnote">4K・60fps・レーンだけ・縦長などを1つの欄で選ぶ</span></span><code class="ph">P3</code></li>
+      </ul>
+    </article>
+    <article class="pillar test">
+      <header><h3>確かめる（作譜に役立つ）</h3><p>叩いてみた結果を、譜面の直しに返す</p></header>
+      <ul class="feats">
+        <li><i class="dot have"></i><span class="fname">簡易プレイ<span class="fnote">いまの演奏モード。判定はすべて鬼の値</span></span><code class="ph">P4</code></li>
+        <li><i class="dot new"></i><span class="fname">小節ごとのミスの地図<span class="fnote">不可・ミスが多い小節を色で出す。押すと Editor でその小節を開く</span></span><code class="ph">P4</code></li>
+        <li><i class="dot new"></i><span class="fname">区間練習<span class="fnote">2点の間を繰り返す。速さも変えられる</span></span><code class="ph">P4</code></li>
+        <li><i class="dot new"></i><span class="fname">早い・遅いの分布<span class="fnote">押しにくい配置や、ずれやすいリズムを見つける</span></span><code class="ph">P4</code></li>
+        <li><i class="dot mod"></i><span class="fname">直す前と後を並べて流す<span class="fnote">同時再生の応用。2つの版の違いを目で比べる</span></span><code class="ph">P4</code></li>
+      </ul>
+    </article>
+  </div>
+  <div class="foundation">
+    <h3>土台（3本とも使う）</h3>
+    <div class="chips">
+      <span class="chip"><i class="dot have"></i>曲一覧 <code>player/library.py</code></span>
+      <span class="chip"><i class="dot have"></i>再生と4つのモード <code>preview_dock.py</code></span>
+      <span class="chip"><i class="dot have"></i>録画 <code>recorder.py</code></span>
+      <span class="chip"><i class="dot have"></i>判定の記録 <code>player/play_state.py</code></span>
+      <span class="chip"><i class="dot have"></i>設定は Editor と共有</span>
+      <span class="chip"><i class="dot new"></i>プレイリストのファイル形式</span>
+      <span class="chip"><i class="dot new"></i>新しい窓の骨組み</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>進め方</h2>
+  <div class="road">
+    <div class="step">
+      <div class="tag">P0<small>片付け</small></div>
+      <div><h3>次のアプデで、いまの Player を外す</h3>
+        <ul>
+          <li>Editor の「Player を起動」と「Player を落としますか？」の案内を外す</li>
+          <li>リリースに Player の exe が無くても、Editor の更新が通ることを実際に試す</li>
+          <li>告知:「手元の旧 Player は使えるが、更新は止まる。作り直し中」</li>
+        </ul>
+        <p class="out">出来上がり: <b>Editor だけのリリース</b></p></div>
+    </div>
+    <div class="step">
+      <div class="tag">P1<small>土台</small></div>
+      <div><h3>新しい窓と、プレイリスト</h3>
+        <ul>
+          <li>画面の案を1枚見せてから作る</li>
+          <li>曲一覧から選んでプレイリストに足す。並べ替え・保存・読み込み</li>
+          <li>いまの曲一覧・難易度選択・まとめ録画を新しい窓に載せ替える</li>
+        </ul>
+        <p class="out">出来上がり: <b>並べて、1曲ずつ流せる・録れる</b></p></div>
+    </div>
+    <div class="step ship">
+      <div class="tag">P2<small>最初に出す</small></div>
+      <div><h3>鑑賞会がほったらかしで回る</h3>
+        <ul>
+          <li>順番に流す・インターバル・曲紹介カード</li>
+          <li>全画面と、主催者用のキー操作</li>
+          <li>曲ごとの音量そろえ</li>
+        </ul>
+        <p class="out">出来上がり: <b>新 Player の最初のリリース</b>。ここで募集の声をもう一度聞く</p></div>
+    </div>
+    <div class="step">
+      <div class="tag">P3<small>映像</small></div>
+      <div><h3>メドレー動画を1回で書き出す</h3>
+        <ul>
+          <li>プレイリストを1本の動画に。チャプター一覧も一緒に出す</li>
+          <li>透過・クロマキー、出力の形の選び直し</li>
+        </ul></div>
+    </div>
+    <div class="step">
+      <div class="tag">P4<small>確かめる</small></div>
+      <div><h3>叩いた結果を譜面の直しに返す</h3>
+        <ul>
+          <li>小節ごとのミスの地図から、Editor の該当小節へ飛ぶ</li>
+          <li>区間練習、早い・遅いの分布、直す前と後の比較</li>
+        </ul></div>
+    </div>
+    <div class="step">
+      <div class="tag">P5<small>募集</small></div>
+      <div><h3>集まった要望を、3本の柱のどこかに入れる</h3>
+        <ul><li>どの柱にも入らない要望は「遊ぶためのシミュ」寄りなので、入れるかを相談する</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section class="two">
+  <div class="box">
+    <h3>先に決めること</h3>
+    <ol>
+      <li><b>P2 と P3 のどちらを先に出すか</b><span>鑑賞会が近いなら P2、動画の需要が強いなら P3</span></li>
+      <li><b>プレイリストのファイル</b><span>Editor で作る .json と同じ考え方で、人に渡せる形にするか</span></li>
+      <li><b>曲紹介カードに出す項目</b><span>TITLE・MAKER・難易度・★のほかに要るもの（応募番号など）</span></li>
+      <li><b>オートで流すときの打音</b><span>鳴らす・鳴らさない・音量</span></li>
+    </ol>
+  </div>
+  <div class="box">
+    <h3>気をつけること</h3>
+    <ul>
+      <li><b>Player を外す版の更新</b><span>旧 Player を持っている人の更新が止まらないか、出す前に試す</span></li>
+      <li><b>再生の部品は Editor と共有</b><span>Player のために変えた所は Editor にも効く。両方で確かめる</span></li>
+      <li><b>音量そろえは曲を先に読む</b><span>読み込みに時間がかかるので、裏で済ませて流すまでに間に合わせる</span></li>
+      <li><b>素材はこれまでどおり System から</b><span>TNDE などの素材は同梱しない</span></li>
+    </ul>
+  </div>
+</section>
+
+<footer>2026-11-16 時点の案。いまの Player の中身（library・batch・select_screen・play_state）を確かめたうえで、流用できる所に印を付けている。</footer>
+</div>
