@@ -58,6 +58,9 @@ def main():
     _gs_fmt.apply_gl_surface_format(settings_mod.load_settings())
     app = QApplication(sys.argv)
     app.setApplicationName("NeoTJAPlayer")
+    # Alt+Space で窓のシステムメニューが開くのを止める(Editor と同じ)。
+    from neotja import win_keys
+    win_keys.install(app)
     icon = settings_mod.icon_path(player=True)
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))

@@ -235,6 +235,9 @@ def main():
     from neotja import game_screen as _gs_fmt
     _gs_fmt.apply_gl_surface_format(settings_mod.load_settings())
     app = QApplication(sys.argv)
+    # Alt+Space で窓のシステムメニューが開くのを止める(win_keys の説明)。
+    from neotja import win_keys
+    win_keys.install(app)
     icon_path = settings_mod.icon_path()
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
