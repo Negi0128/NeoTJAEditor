@@ -19,7 +19,7 @@ import time
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QRadialGradient
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja.player.difficulty import DifficultyPage
@@ -53,6 +53,10 @@ class PlayerHost(QWidget):
         self.sounds = UiSounds(audio_provider)
         self.setAcceptDrops(True)
         self.cfg = config_data
+        self._save_cb = save_cb
+        self._art_dialog = None
+        self._art_pending = None
+        self._shutting_down = False
         self.current_song = ""
 
         v = QVBoxLayout(self)
@@ -95,6 +99,7 @@ class PlayerHost(QWidget):
         self.difficulty.sound_requested.connect(self.sounds.play)
         self.difficulty.play_requested.connect(self._on_play)
         self.difficulty.record_requested.connect(self._on_record)
+        self.difficulty.art_requested.connect(self._on_art)
         #: 試聴を鳴らす係(PlayerCore)。初めて難易度選択を開いたときに作る。
         #: PlayerCore は裏に PreviewDock(音声エンジン一式)を持つので、
         #: 選曲だけで終わる人にまで音声デバイスを開かせない。
@@ -191,6 +196,10 @@ class PlayerHost(QWidget):
 
     def shutdown(self):
         """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
+        self._shutting_down = True
+        self._art_pending = None
+        if self._art_dialog is not None:
+            self._art_dialog.reject()
         self.library.shutdown()
         self._abort_sequence()
         self._end_play()
@@ -681,6 +690,101 @@ class PlayerHost(QWidget):
                 and self.difficulty.path == path):
             self.start_preview(path)
             self.difficulty.setFocus()
+
+    # ------------------------------------------------------------------
+    # 難易度設定から開く、曲別の背景・ジャケット。
+    art_dialog_builder = None  # 試験で差し替える。
+
+    def _on_art(self, path, course):
+        existing = self._art_dialog or self.record_dialog()
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        if self._art_pending is not None:
+            return
+        self.stop_preview()
+        self.difficulty.settings.btn_art.setEnabled(False)
+        core = self._ensure_core()
+        from neotja.constants import PLAY_MODE_WATCH
+        try:
+            ok = bool(core.load(path, course_key=course, play_mode=PLAY_MODE_WATCH))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            self.difficulty.settings.btn_art.setEnabled(True)
+            self.start_preview(path)
+            return
+        self._art_pending = (path, course, time.monotonic())
+        self._art_wait()
+
+    def _art_wait(self):
+        pending = self._art_pending
+        if pending is None:
+            return
+        path, course, started = pending
+        if (self._shutting_down or self._core is None
+                or self.body.currentWidget() is not self.difficulty
+                or self.difficulty.path != path):
+            self._art_pending = None
+            self.difficulty.settings.btn_art.setEnabled(True)
+            return
+        if not self._core.chart_ready():
+            if time.monotonic() - started < self.RECORD_LOAD_TIMEOUT:
+                QTimer.singleShot(50, self._art_wait)
+                return
+            self._art_pending = None
+            self.difficulty.settings.btn_art.setEnabled(True)
+            self.start_preview(path)
+            return
+        self._art_pending = None
+        try:
+            builder = self.art_dialog_builder
+            if builder is None:
+                from neotja.player.record import build_art_dialog as builder
+            dlg = builder(self._core, path, self.cfg, self.window())
+        except Exception as exc:  # noqa: BLE001
+            self.difficulty.settings.btn_art.setEnabled(True)
+            self.start_preview(path)
+            if self.show_record_errors:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "背景・ジャケット", str(exc))
+            return
+        self._art_dialog = dlg
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.finished.connect(lambda result, d=dlg, p=path: self._on_art_closed(d, p, result))
+        dlg.show()
+
+    def _on_art_closed(self, dlg, path, result):
+        if self._art_dialog is dlg:
+            self._art_dialog = None
+        self.difficulty.settings.btn_art.setEnabled(True)
+        try:
+            if result == QDialog.Accepted:
+                from neotja.chart_art import set_record_background
+                from neotja.player.record import matching_editor
+                bg = dlg.background()
+                # sidecarのbaseだけ更新し、歌詞ごとの絵や未保存編集を保持。
+                set_record_background(self.cfg, path, bg)
+                editor = matching_editor(self.window(), path)
+                if editor is not None:
+                    editor.set_jacket_base(bg.art)
+                self._save_cb()
+                if self.difficulty.path == path:
+                    self.difficulty._load_art()
+                    self.difficulty.update()
+        except Exception as exc:  # noqa: BLE001
+            if self.show_record_errors:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "背景・ジャケット", "保存できませんでした。\n%s" % exc)
+        finally:
+            dlg.deleteLater()
+            if (not self._shutting_down and self.isVisible()
+                    and self.body.currentWidget() is self.difficulty
+                    and self.difficulty.path == path):
+                self.start_preview(path)
+                self.difficulty.settings.btn_art.setFocus()
 
     # ------------------------------------------------------------------
     # TJA を落とされたら、Editor で開かずに Player で選んだことにする

@@ -223,7 +223,7 @@ class RecordDialog(QDialog):
 
     def __init__(self, main_window, preview_data, offset, song_path,
                  song_seconds, default_dir, parent=None, layout="game",
-                 multi_previews=None, title="", bg_path=None):
+                 multi_previews=None, title="", bg_path=None, allow_bg_defaults=True):
         super().__init__(parent or main_window)
         # モーダルにしない。書き出し中にメインウィンドウを触れるようにするのが
         # 目的なので、ここで入力を横取りしてはいけない(呼び出し側も exec() では
@@ -231,6 +231,8 @@ class RecordDialog(QDialog):
         self.setModal(False)
         self.setWindowModality(Qt.NonModal)
         self._mw = main_window
+        self._allow_bg_defaults = bool(allow_bg_defaults)
+        self._chart_path = str(getattr(main_window, "current_file", "") or "")
         self._preview = preview_data or {}
         self._offset = offset
         self._song = song_path
@@ -425,6 +427,11 @@ class RecordDialog(QDialog):
         #: 窓を開いたときに欄に出した値。変えたときだけ譜面へ書く(見て
         #: 閉じただけで共通の値が譜面の基本へ写り、対応表ができてしまう
         #: のを防ぐ)。
+        from neotja.chart_art import record_background
+        self._bg = record_background(cfg0, self._chart_path, self._bg)
+        # Editor の未保存の基本ジャケットはディスクより新しい。
+        if jk is not None and getattr(main_window, "_jacket_dirty", False):
+            self._bg.art = jk.base
         self._art_shown = self._bg.art
         bg_row = QHBoxLayout()
         self.ed_bg = QLineEdit(self._bg.path)
@@ -596,6 +603,7 @@ class RecordDialog(QDialog):
                                      art_track=self._art_track,
                                      chart_path=self._mw.current_file or "",
                                      file_title=self._file_title(),
+                                     allow_defaults=self._allow_bg_defaults,
                                      art_note=(
                                          "この譜面の基本ジャケット。歌詞に"
                                          "ジャケットを付けた所では、その絵に"
@@ -610,16 +618,24 @@ class RecordDialog(QDialog):
             accepted = dlg.exec() == QDialog.Accepted
         finally:
             self._bg_dialog_open = False
-        if accepted:
-            self._bg = dlg.background()
-            self.ed_bg.setText(self._bg.path)
-            if self._bg.art != self._art_shown:
-                # 変えたときだけ譜面の基本へ(上の _art_shown の説明)。保存で
-                # .jacket.json に書かれ、未保存の印も付く。
-                setter = getattr(self._mw, "set_jacket_base", None)
-                if setter is not None:
-                    setter(self._bg.art)
-                self._art_shown = self._bg.art
+        try:
+            if accepted:
+                self._bg = dlg.background()
+                self.ed_bg.setText(self._bg.path)
+                if self._bg.art != self._art_shown:
+                    # 変えたときだけ譜面の基本へ(上の _art_shown の説明)。保存で
+                    # .jacket.json に書かれ、未保存の印も付く。
+                    setter = getattr(self._mw, "set_jacket_base", None)
+                    if setter is not None:
+                        setter(self._bg.art)
+                    self._art_shown = self._bg.art
+                if self._chart_path:
+                    from neotja.chart_art import set_record_background
+                    set_record_background(self._mw.config_data, self._chart_path,
+                                          self._bg, save_jacket=False)
+                    settings_mod.save_settings(self._mw.config_data)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "背景・ジャケット", str(exc))
         # 閉じた窓は消す。この窓を親にしたまま残すと、開くたびに1つずつ
         # 溜まり、どれも画面外の画面を見張ったまま生き続ける
         # (利用者の報告 2026-11-13 の固まり・落ち)。
@@ -983,26 +999,31 @@ class RecordDialog(QDialog):
         cfg["record_last_dir"] = os.path.dirname(out)
         # 背景の設定は Player と共有する。**自分のキーだけ**書き戻す。
         bg = self._bg_now()
-        cfg["rec_bg_path"] = bg.path
-        cfg["rec_bg_offset"] = bg.offset
-        cfg["rec_bg_dim"] = int(round(bg.dim * 100))
-        cfg["rec_bg_lane"] = int(round(bg.lane * 100))
-        cfg["rec_bg_fade_in"] = bg.fade_in
-        cfg["rec_bg_fade_out"] = bg.fade_out
-        cfg["rec_bg_fade_target"] = bg.fade_target
-        # ジャケットは譜面ごとに持つようになったので、共通の値は書き換えない
-        # (書くと、この譜面の基本が次に開く別の譜面にも写ってしまう)。
-        cfg["rec_bg_art"] = self._art_global
-        cfg["rec_bg_art_pct"] = bg.art_pct
-        cfg["rec_bg_art_pad"] = bg.art_pad
-        cfg["rec_bg_art_x"] = bg.art_x
-        cfg["rec_bg_art_y"] = bg.art_y
-        cfg["rec_bg_art_edge"] = bg.art_edge
-        cfg["rec_bg_art_edge_color"] = bg.art_edge_color
-        cfg["rec_bg_wave"] = bg.wave
-        cfg["rec_bg_wave_pct"] = bg.wave_pct
-        cfg["rec_bg_wave_color"] = bg.wave_color
-        cfg["rec_bg_wave_alpha"] = bg.wave_alpha
+        if self._chart_path:
+            from neotja.chart_art import set_record_background
+            set_record_background(cfg, self._chart_path, self._bg,
+                                  save_jacket=False)
+        elif self._allow_bg_defaults:
+            cfg["rec_bg_path"] = bg.path
+            cfg["rec_bg_offset"] = bg.offset
+            cfg["rec_bg_dim"] = int(round(bg.dim * 100))
+            cfg["rec_bg_lane"] = int(round(bg.lane * 100))
+            cfg["rec_bg_fade_in"] = bg.fade_in
+            cfg["rec_bg_fade_out"] = bg.fade_out
+            cfg["rec_bg_fade_target"] = bg.fade_target
+            # ジャケットは譜面ごとに持つようになったので、共通の値は書き換えない
+            # (書くと、この譜面の基本が次に開く別の譜面にも写ってしまう)。
+            cfg["rec_bg_art"] = self._art_global
+            cfg["rec_bg_art_pct"] = bg.art_pct
+            cfg["rec_bg_art_pad"] = bg.art_pad
+            cfg["rec_bg_art_x"] = bg.art_x
+            cfg["rec_bg_art_y"] = bg.art_y
+            cfg["rec_bg_art_edge"] = bg.art_edge
+            cfg["rec_bg_art_edge_color"] = bg.art_edge_color
+            cfg["rec_bg_wave"] = bg.wave
+            cfg["rec_bg_wave_pct"] = bg.wave_pct
+            cfg["rec_bg_wave_color"] = bg.wave_color
+            cfg["rec_bg_wave_alpha"] = bg.wave_alpha
         settings_mod.save_settings(cfg)
         # 描画用ウィジェットは見積もりのときに作ってある(_begin_measure)。
         # 作り直さないのは、スキンの読み込みぶんだけ待ちが増えるのと、

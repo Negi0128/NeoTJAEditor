@@ -56,11 +56,12 @@ def _fakes(wave):
         made = []
 
         def __init__(self, ctx, preview, offset, song, secs, out_dir, parent=None,
-                     layout='game', title='', bg_path=None, multi_previews=None):
+                     layout='game', title='', bg_path=None, multi_previews=None, allow_bg_defaults=True):
             super().__init__(parent)
             self.ctx, self.preview, self.offset, self.song = ctx, preview, offset, song
             self.secs, self.out_dir, self.layout = secs, out_dir, layout
             self.title_text, self.bg_path = title, bg_path
+            self.allow_bg_defaults = allow_bg_defaults
             self.raised = 0
             FakeDialog.made.append(self)
 
@@ -191,8 +192,9 @@ class HostRecordTests(unittest.TestCase):
             self.assertEqual(os.path.normcase(dlg.bg_path), os.path.normcase(self.bg))
             self.assertEqual(os.path.normcase(dlg.ctx.lyric_jackets.base),
                              os.path.normcase(self.jacket))
-            # Editor の譜面ごとのジャケットへ書く口は持たせない。
-            self.assertFalse(hasattr(dlg.ctx, 'set_jacket_base'))
+            # 曲別ジャケットへ保存し、全曲の既定を変更しない。
+            self.assertTrue(hasattr(dlg.ctx, 'set_jacket_base'))
+            self.assertFalse(dlg.allow_bg_defaults)
             self.assertNotIn('demo', core.log)                 # 開いているあいだは止めたまま
             # もう一度押しても2つ目は作らない(前へ出すだけ)。
             host.difficulty.btn_record.click()
@@ -205,7 +207,7 @@ class HostRecordTests(unittest.TestCase):
             self.assertIsNone(host.record_dialog())
             self.assertEqual(core.log[-1], 'demo')
             self.assertIs(host.body.currentWidget(), host.difficulty)
-            self.assertEqual(os.listdir(str(Path(d) / 'a')), ['a.tja', 'song.ogg'])  # .jacket.json は作らない
+            self.assertTrue((Path(d) / 'a' / 'a.tja.jacket.json').exists())  # 曲別共有
             host.shutdown()
             host.deleteLater()
 
@@ -295,7 +297,7 @@ class RealDialogTests(unittest.TestCase):
                 _wait(200)
                 self.assertEqual(starts, [])
                 self.assertEqual((cfg.get('rec_bg_path'), cfg.get('rec_bg_art')), rec_bg0)
-                self.assertEqual([n for n in os.listdir(str(root)) if n.endswith('.jacket.json')], [])
+                self.assertEqual([n for n in os.listdir(str(root)) if n.endswith('.jacket.json')], ['test.tja.jacket.json'])
                 self.assertEqual(tja.read_bytes(), raw0)
             finally:
                 if dlg is not None:
@@ -305,7 +307,16 @@ class RealDialogTests(unittest.TestCase):
                 core.dock.chart_preview._timer.stop()
                 core.dock.game_preview_window.hide()
                 core.dock.game_preview_window.close()
+                # Qt音声へフォールバックした環境でも、一時音源を解放する。
+                from PySide6.QtCore import QUrl, QCoreApplication, QEvent
+                for dock in (core.dock, win.preview_dock):
+                    player = getattr(dock.audio, 'player', None)
+                    if player is not None:
+                        player.stop()
+                        player.setSource(QUrl())
                 core.dock.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                _wait(100)
 
 
 if __name__ == '__main__':

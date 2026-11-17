@@ -144,12 +144,13 @@ class RecordBackgroundDialog(QDialog):
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
                  song_path="", canvas_wh=None, art_track=None, art_note="",
-                 chart_path="", file_title=""):
+                 chart_path="", file_title="", allow_defaults=True):
         super().__init__(parent)
         #: 基本ジャケット → 歌詞に合わせた切り替えの区切り、を作る呼び出し
         #: (録画の窓が渡す)。見本の1コマを「見ている時刻の絵」にするため。
         #: まとめ録画からは渡らない(切り替えない)。
         self._art_track = art_track
+        self._allow_defaults = bool(allow_defaults)
         self.setWindowTitle("録画の背景")
         self._make_widget = make_widget
         self._widget = None
@@ -526,6 +527,10 @@ class RecordBackgroundDialog(QDialog):
         lay.addLayout(row_def)
         lay.addWidget(box)
         self._sync_default_buttons()
+        if not self._allow_defaults:
+            self.btn_def.hide()
+            self.btn_def_clear.hide()
+            self.lbl_def.hide()
 
         # 窓の大きさが変わったら見本も焼き直す(収まる大きさが変わるため)。
         self.view.installEventFilter(self)
@@ -604,6 +609,8 @@ class RecordBackgroundDialog(QDialog):
         self.lbl_def.setText("既定を覚えています。" if has else "")
 
     def _save_default(self):
+        if not self._allow_defaults:
+            return
         cfg = settings_mod.load_settings()
         cfg["rec_bg_default"] = recorder.bg_defaults(self.background())
         settings_mod.save_settings(cfg)
@@ -611,6 +618,8 @@ class RecordBackgroundDialog(QDialog):
         self.lbl_def.setText("いまの設定を既定にしました。")
 
     def _clear_default(self):
+        if not self._allow_defaults:
+            return
         cfg = settings_mod.load_settings()
         cfg.pop("rec_bg_default", None)
         settings_mod.save_settings(cfg)

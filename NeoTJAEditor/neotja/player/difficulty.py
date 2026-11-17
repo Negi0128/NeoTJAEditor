@@ -575,11 +575,33 @@ class ToggleSwitch(_GlassButton):
         p.end()
 
 
+class SettingsAction(_GlassButton):
+    """設定パネル内の曲別素材への入口。"""
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.setText(text)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.4)
+        paint_glass(p, self.inner(), BTN_RADIUS * self.scale, self.scale,
+                    lit=self.lit() and self.isEnabled(), down=self.isDown(),
+                    focus=self.hasFocus(), base_alpha=175, edge=TOP_EDGE)
+        p.setFont(thin_font(21 * self.scale, QFont.DemiBold))
+        p.setPen(QColor(235, 242, 250))
+        p.drawText(self.inner(), Qt.AlignCenter, self.text())
+        p.end()
+
+
 class SettingsPanel(QFrame):
     """右から重ねる設定。後ろの並びは動かさない。"""
 
     closed = Signal()
     changed = Signal(str, bool)   # (設定キー, 値)
+    art_requested = Signal()
 
     ROWS = (("player_show_jacket", "ジャケット"),
             ("player_show_bg", "背景"),
@@ -603,6 +625,9 @@ class SettingsPanel(QFrame):
         v.addLayout(head)
         self.grid = QGridLayout()
         v.addLayout(self.grid)
+        self.btn_art = SettingsAction("背景・ジャケットを指定")
+        self.btn_art.clicked.connect(self.art_requested)
+        v.addWidget(self.btn_art)
         v.addStretch(1)
         self.labels = []
         lbl = QLabel("オート再生")
@@ -642,6 +667,9 @@ class SettingsPanel(QFrame):
             lbl.setFont(thin_font(25 * s, QFont.DemiBold))
         self.btn_close.scale = s
         self.btn_close.setFixedSize(int(48 * s + 2 * GLOW * s), int(48 * s + 2 * GLOW * s))
+        self.btn_art.scale = s
+        self.btn_art.setFixedHeight(int(64 * s))
+        self.btn_art.update()
         for sw in self.switches.values():
             sw.scale = s
             sw.setFixedSize(sw.sizeHint())
@@ -670,6 +698,7 @@ class DifficultyPage(QWidget):
     back_requested = Signal()
     play_requested = Signal(str, str)     # (tja, コースキー)
     record_requested = Signal(str, str)
+    art_requested = Signal(str, str)
     #: 操作音の合図。"don"(Play)/ "pi"(それ以外: カード・戻る・設定・録画…)。
     sound_requested = Signal(str)
 
@@ -725,6 +754,9 @@ class DifficultyPage(QWidget):
         self.settings.closed.connect(self.close_settings)
         self.settings.changed.connect(lambda *_: self.sound_requested.emit("pi"))
         self.settings.changed.connect(self._on_setting)
+        self.settings.art_requested.connect(lambda: self.sound_requested.emit("pi"))
+        self.settings.art_requested.connect(
+            lambda: self.current_course() and self.art_requested.emit(self.path, self.current_course()))
         self._anim = QPropertyAnimation(self.settings, b"pos", self)
         self._anim.setDuration(180)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)

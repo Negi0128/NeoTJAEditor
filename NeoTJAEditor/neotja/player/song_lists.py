@@ -255,42 +255,10 @@ def rename_simulator(cfg, old, new):
 # ----------------------------------------------------------------------
 # 譜面ごとのジャケット・背景(表示用)
 # ----------------------------------------------------------------------
-# player_chart_art … {path_key: {"path", "jacket", "background"}}
-# いまは Player の表示だけに使う。Editor の録画の設定(rec_bg_*)との関係は
-# まだ決めていないので、そちらには触らない。曲名ではなくファイルの道筋で
-# 引くので、同じ題の別譜面を取り違えない。
-ART_KINDS = ("jacket", "background")
-
-
-def chart_art(cfg, path):
-    """{"jacket": パス or "", "background": パス or ""}。"""
-    raw = cfg.get("player_chart_art")
-    e = raw.get(path_key(path)) if isinstance(raw, dict) else None
-    out = {}
-    for kind in ART_KINDS:
-        v = e.get(kind) if isinstance(e, dict) else None
-        out[kind] = v if isinstance(v, str) else ""
-    return out
-
-
-def set_chart_art(cfg, path, **kinds):
-    """jacket= / background= を差し替える("" で外す)。"""
-    raw = cfg.get("player_chart_art")
-    raw = dict(raw) if isinstance(raw, dict) else {}
-    k = path_key(path)
-    e = dict(raw.get(k) or {})
-    e["path"] = os.path.normpath(os.path.abspath(path))
-    for kind, value in kinds.items():
-        if kind in ART_KINDS:
-            e[kind] = os.path.normpath(os.path.abspath(value)) if value else ""
-    raw[k] = e
-    cfg["player_chart_art"] = raw
-
-
-def existing_art(cfg, path, kind):
-    """登録があって、ファイルが今もあるときだけそのパス。無ければ ""。"""
-    p = chart_art(cfg, path).get(kind, "")
-    return p if p and os.path.isfile(p) else ""
+# 曲別素材の実装は Editor と共有する。既存呼び出し元向けに同名を公開。
+from neotja.chart_art import (  # noqa: E402,F401
+    ART_KINDS, chart_art, set_chart_art, existing_art,
+)
 
 
 # ----------------------------------------------------------------------
