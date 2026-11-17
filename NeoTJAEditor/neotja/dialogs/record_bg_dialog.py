@@ -13,11 +13,12 @@ import inspect
 import os
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSlider, QSpinBox, QVBoxLayout,
+    QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter,
+    QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
 )
 
 from neotja import recorder
@@ -103,6 +104,34 @@ def _tight(widget):
     return row
 
 
+class _FadeCheckBox(QCheckBox):
+    """暗色テーマでも未選択・選択が読めるフェードのチェック欄。"""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        rect = self.style().subElementRect(QStyle.SE_CheckBoxIndicator,
+                                           option, self).adjusted(1, 1, -1, -1)
+        painter = QPainter(self)
+        edge = "#8acfe6" if self.isEnabled() else "#475767"
+        fill = "#397491" if self.isChecked() else "#0c1521"
+        if not self.isEnabled():
+            fill = "#273849" if self.isChecked() else "#141e2b"
+        painter.setPen(QPen(QColor(edge), 1))
+        painter.setBrush(QColor(fill))
+        painter.drawRect(rect)
+        if self.isChecked():
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor("#ffffff" if self.isEnabled() else "#91a1b1"),
+                                2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(rect.left() + 3, rect.center().y(),
+                             rect.left() + 6, rect.bottom() - 3)
+            painter.drawLine(rect.left() + 6, rect.bottom() - 3,
+                             rect.right() - 2, rect.top() + 3)
+        painter.end()
+
+
 class RecordBackgroundDialog(QDialog):
     """背景の調整。OK を押したら background() が新しい設定を返す。
 
@@ -111,7 +140,7 @@ class RecordBackgroundDialog(QDialog):
     同じ中身でなければ、見本が本番と食い違う)。
     """
 
-    MAX_VIEW_W = 900
+    MAX_VIEW_W = 1920
 
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
                  song_path="", canvas_wh=None, art_track=None, art_note="",
@@ -144,7 +173,101 @@ class RecordBackgroundDialog(QDialog):
         self._canvas_wh = tuple(canvas_wh) if canvas_wh else None
         self._duration = max(0.1, float(duration or 0.1))
 
+        self.setObjectName("RecordBackgroundDialog")
+        self.resize(1380, 840)
+        self.setMinimumSize(800, 520)
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        self.setStyleSheet("""
+            QDialog#RecordBackgroundDialog { background: #101925; color: #e5edf7; }
+            #RecordBackgroundDialog QWidget { color: #e5edf7; font-family: "Yu Gothic UI"; font-size: 13px; }
+            #RecordBackgroundDialog QGroupBox {
+                background: #152132; border: 1px solid #2c4056; border-radius: 3px;
+                margin-top: 12px; padding: 18px 12px 12px; font-weight: 600;
+            }
+            #RecordBackgroundDialog QGroupBox::title {
+                subcontrol-origin: margin; left: 12px; padding: 0 5px;
+                color: #b9d9ed;
+            }
+            #RecordBackgroundDialog QLabel { background: transparent; border: none; }
+            #RecordBackgroundDialog QLineEdit,
+            #RecordBackgroundDialog QAbstractSpinBox,
+            #RecordBackgroundDialog QComboBox {
+                background: #0c1521; border: 1px solid #3b536d;
+                border-radius: 2px; padding: 5px 7px; min-height: 20px;
+                selection-background-color: #356d9b;
+            }
+            #RecordBackgroundDialog QLineEdit:focus,
+            #RecordBackgroundDialog QAbstractSpinBox:focus,
+            #RecordBackgroundDialog QComboBox:focus { border-color: #8bcfe5; }
+            #RecordBackgroundDialog QComboBox QAbstractItemView {
+                background: #152132; selection-background-color: #2b506b;
+            }
+            #RecordBackgroundDialog QPushButton {
+                background: #19283a; border: 1px solid #54758d; border-radius: 3px;
+                padding: 7px 12px; min-height: 20px; font-weight: 600;
+            }
+            #RecordBackgroundDialog QPushButton:hover { background: #233d54; border-color: #8ad9ee; }
+            #RecordBackgroundDialog QPushButton:pressed { background: #101d2c; }
+            #RecordBackgroundDialog QPushButton:default { border-color: #8ad9ee; background: #23415a; }
+            #RecordBackgroundDialog QWidget:disabled { color: #687789; }
+            #RecordBackgroundDialog QPushButton:disabled { border-color: #2b3b4d; background: #172230; }
+            #RecordBackgroundDialog QAbstractSpinBox:disabled,
+            #RecordBackgroundDialog QComboBox:disabled { border-color: #29394b; }
+            #RecordBackgroundDialog QCheckBox { spacing: 7px; background: transparent; }
+            #RecordBackgroundDialog QCheckBox::indicator { width: 16px; height: 16px; }
+            #RecordBackgroundDialog QSlider::groove:horizontal { height: 4px; background: #33485d; }
+            #RecordBackgroundDialog QSlider::sub-page:horizontal { background: #76bedb; }
+            #RecordBackgroundDialog QSlider::handle:horizontal {
+                width: 10px; margin: -5px 0; background: #b0e0ef; border-radius: 2px;
+            }
+            #RecordBackgroundDialog QScrollArea { border: none; background: transparent; }
+            #RecordBackgroundDialog QWidget#BackgroundControls { background: #101925; }
+            #RecordBackgroundDialog QLabel#BackgroundPreview { background: #080e16; border: 1px solid #2c4056; }
+            #RecordBackgroundDialog QSplitter::handle { background: #101925; width: 12px; }
+            #RecordBackgroundDialog QScrollBar:vertical { width: 10px; background: #101925; }
+            #RecordBackgroundDialog QScrollBar::handle:vertical { background: #415a70; min-height: 30px; }
+            #RecordBackgroundDialog QScrollBar::add-line:vertical,
+            #RecordBackgroundDialog QScrollBar::sub-line:vertical { height: 0; }
+        """)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(12)
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        preview_pane = QWidget()
+        preview_lay = QVBoxLayout(preview_pane)
+        preview_lay.setContentsMargins(0, 0, 0, 0)
+        preview_lay.setSpacing(12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(414)
+        controls = QWidget()
+        controls.setObjectName("BackgroundControls")
+        settings_lay = QVBoxLayout(controls)
+        settings_lay.setContentsMargins(2, 0, 6, 0)
+        settings_lay.setSpacing(14)
+        scroll.setWidget(controls)
+        split.addWidget(preview_pane)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        split.setSizes([930, 430])
+        lay.addWidget(split, 1)
+        bg_group = QGroupBox("背景")
+        bg_lay = QVBoxLayout(bg_group)
+        bg_lay.setSpacing(12)
+        settings_lay.addWidget(bg_group)
+        art_group = QGroupBox("ジャケット")
+        art_lay = QVBoxLayout(art_group)
+        art_lay.setSpacing(12)
+        settings_lay.addWidget(art_group)
+        fade_group = QGroupBox("フェード")
+        fade_form = QFormLayout(fade_group)
+        fade_form.setHorizontalSpacing(14)
+        fade_form.setVerticalSpacing(12)
+        settings_lay.addWidget(fade_group)
+        settings_lay.addStretch(1)
 
         # ---- ファイル ----
         row = QHBoxLayout()
@@ -158,18 +281,21 @@ class RecordBackgroundDialog(QDialog):
         self.btn_yt.clicked.connect(self._from_youtube)
         btn_none = QPushButton("なし")
         btn_none.clicked.connect(lambda: self.ed_path.setText(""))
-        row.addWidget(QLabel("ファイル"))
-        row.addWidget(self.ed_path, 1)
+        bg_lay.addWidget(self.ed_path)
         for b in (btn_pick, self.btn_yt, btn_none):
             row.addWidget(b)
-        lay.addLayout(row)
+        row.addStretch(1)
+        bg_lay.addLayout(row)
 
         # ---- 見本 ----
         self.view = QLabel("背景を選ぶと、ここに重なった1コマが出ます。")
         self.view.setAlignment(Qt.AlignCenter)
-        self.view.setMinimumHeight(240)
+        self.view.setObjectName("BackgroundPreview")
+        self.view.setMinimumSize(240, 180)
+        self.view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.view.setFrameShape(QFrame.StyledPanel)
-        lay.addWidget(self.view, 1)
+        self.view.setToolTip("縦横が合わないときは上下を合わせて、左右は黒で埋めます。")
+        preview_lay.addWidget(self.view, 1)
 
         at_row = QHBoxLayout()
         self.sl_at = QSlider(Qt.Horizontal)
@@ -189,11 +315,17 @@ class RecordBackgroundDialog(QDialog):
             "いまの設定と見る位置で、出来上がりと同じ大きさの1コマを"
             + chr(10) + "PNG で保存します。")
         self.btn_png.clicked.connect(self._save_png)
-        at_row.addWidget(self.btn_png)
-        lay.addLayout(at_row)
+        preview_lay.addLayout(at_row)
+        png_row = QHBoxLayout()
+        png_row.addStretch(1)
+        png_row.addWidget(self.btn_png)
+        preview_lay.addLayout(png_row)
 
         # ---- つまみ ----
         form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(12)
+        bg_lay.addLayout(form)
         off_row = QHBoxLayout()
         self.sp_offset = QDoubleSpinBox()
         self.sp_offset.setDecimals(3)
@@ -212,9 +344,11 @@ class RecordBackgroundDialog(QDialog):
         self.lb_sure = QLabel()
         off_row.addWidget(self.sp_offset)
         off_row.addWidget(self.btn_guess)
-        off_row.addWidget(self.lb_sure)
+        self.lb_sure.setWordWrap(True)
+        self.lb_sure.hide()
         off_row.addStretch(1)
         form.addRow("開始位置", off_row)
+        form.addRow("", self.lb_sure)
 
         self.sp_dim = QSpinBox()
         self.sp_dim.setRange(0, 80)
@@ -236,7 +370,7 @@ class RecordBackgroundDialog(QDialog):
 
         # フェード。入りと終わりで別々に秒数を決める(利用者の指定 2026-10-25)。
         fade = QHBoxLayout()
-        self.chk_in = QCheckBox("入り")
+        self.chk_in = _FadeCheckBox("入り")
         self.chk_in.setChecked(bool(getattr(bg, "fade_in", 0.0)))
         self.sp_in = QDoubleSpinBox()
         self.sp_in.setDecimals(1)
@@ -244,7 +378,7 @@ class RecordBackgroundDialog(QDialog):
         self.sp_in.setSingleStep(0.5)
         self.sp_in.setSuffix(" 秒")
         self.sp_in.setValue(float(getattr(bg, "fade_in", 0.0)) or 1.0)
-        self.chk_out = QCheckBox("終わり")
+        self.chk_out = _FadeCheckBox("終わり")
         self.chk_out.setChecked(bool(getattr(bg, "fade_out", 0.0)))
         self.sp_out = QDoubleSpinBox()
         self.sp_out.setDecimals(1)
@@ -257,16 +391,21 @@ class RecordBackgroundDialog(QDialog):
         self.cb_target.addItem("背景だけ", "bg")
         i = self.cb_target.findData(getattr(bg, "fade_target", "all"))
         self.cb_target.setCurrentIndex(max(0, i))
-        for wdg in (self.chk_in, self.sp_in, self.chk_out, self.sp_out,
-                    self.cb_target):
-            fade.addWidget(wdg)
+        fade.addWidget(self.chk_in)
+        fade.addWidget(self.sp_in)
         fade.addStretch(1)
+        fade_form.addRow("", fade)
+        fade_end = QHBoxLayout()
+        fade_end.addWidget(self.chk_out)
+        fade_end.addWidget(self.sp_out)
+        fade_end.addStretch(1)
+        fade_form.addRow("", fade_end)
+        fade_form.addRow("対象", self.cb_target)
         self.chk_in.toggled.connect(self.sp_in.setEnabled)
         self.chk_out.toggled.connect(self.sp_out.setEnabled)
         self.sp_in.setEnabled(self.chk_in.isChecked())
         self.sp_out.setEnabled(self.chk_out.isChecked())
-        form.addRow("フェード", fade)
-        lay.addLayout(form)
+
 
         # ---- 飾り(ジャケット写真) ----
         # 以下の欄は **bg is not None** で見る。背景の道が空の bg は偽に
@@ -283,12 +422,15 @@ class RecordBackgroundDialog(QDialog):
         btn_art.clicked.connect(self._browse_art)
         btn_art_none = QPushButton("なし")
         btn_art_none.clicked.connect(lambda: self.ed_art.setText(""))
-        art_row.addWidget(self.ed_art, 1)
+        art_lay.addWidget(self.ed_art)
         art_row.addWidget(btn_art)
         art_row.addWidget(btn_art_none)
-        form.addRow("ジャケット", art_row)
+        art_row.addStretch(1)
+        art_lay.addLayout(art_row)
 
-        art_opt = QHBoxLayout()
+        art_opt = QFormLayout()
+        art_opt.setHorizontalSpacing(14)
+        art_opt.setVerticalSpacing(12)
         self.sp_art_pct = QSpinBox()
         self.sp_art_pct.setRange(2, 60)
         self.sp_art_pct.setSuffix(" %")
@@ -325,12 +467,9 @@ class RecordBackgroundDialog(QDialog):
         self.sp_art_y.setValue(int(getattr(bg, "art_y", dy) if bg is not None else dy))
         self.sp_art_y.setToolTip("縦の位置。下へ +、上へ −。" + pos_tip)
         self.sp_art_y.valueChanged.connect(self._schedule)
-        art_opt.addWidget(QLabel("大きさ"))
-        art_opt.addWidget(self.sp_art_pct)
-        art_opt.addWidget(QLabel("位置 X"))
-        art_opt.addWidget(self.sp_art_x)
-        art_opt.addWidget(QLabel("Y"))
-        art_opt.addWidget(self.sp_art_y)
+        art_opt.addRow("大きさ", _tight(self.sp_art_pct))
+        art_opt.addRow("位置 X", _tight(self.sp_art_x))
+        art_opt.addRow("位置 Y", _tight(self.sp_art_y))
         self.sp_art_edge = QSpinBox()
         self.sp_art_edge.setRange(0, 40)
         self.sp_art_edge.setSuffix(" px")
@@ -341,12 +480,17 @@ class RecordBackgroundDialog(QDialog):
                               if bg is not None else "#ffffff")
         self.btn_art_color = QPushButton("枠の色")
         self.btn_art_color.clicked.connect(self._pick_art_color)
-        art_opt.addWidget(QLabel("枠"))
-        art_opt.addWidget(self.sp_art_edge)
-        art_opt.addWidget(self.btn_art_color)
-        art_opt.addStretch(1)
+        edge_row = QHBoxLayout()
+        edge_row.addWidget(self.sp_art_edge)
+        edge_row.addWidget(self.btn_art_color)
+        edge_row.addStretch(1)
+        art_opt.addRow("枠", edge_row)
         self._show_art_color()
-        form.addRow("", art_opt)
+        art_lay.addLayout(art_opt)
+        for spin in (self.sp_offset, self.sp_dim, self.sp_lane, self.sp_in,
+                     self.sp_out, self.sp_art_pct, self.sp_art_x,
+                     self.sp_art_y, self.sp_art_edge):
+            spin.setAlignment(Qt.AlignCenter)
 
         # ---- 波形(音に合わせて動く棒) ----
         # **出さない。** 使わないことにした(利用者の指定 2026-10-31
@@ -354,12 +498,12 @@ class RecordBackgroundDialog(QDialog):
         # 窓から入れる口が無いので、どの道これ以降は描かれない。
         self._wave_color = "#ffb300"
 
-        lay.addWidget(QLabel(
-            "※ 縦横が合わないときは上下を合わせて、左右は黒で埋めます。"))
-
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
+        box.button(QDialogButtonBox.Ok).setText("OK")
+        box.button(QDialogButtonBox.Cancel).setText("キャンセル")
+        box.button(QDialogButtonBox.Ok).setDefault(True)
         # 「既定にする」= いまの**見た目**を覚えて、次に開いたときの
         # 始まりにする(利用者の指定 2026-11-06)。絵の道は覚えない —
         # 曲ごとに選び直すもの。
@@ -373,6 +517,7 @@ class RecordBackgroundDialog(QDialog):
         self.btn_def_clear.setToolTip("覚えた既定を忘れて、元の初期値に戻します。")
         self.btn_def_clear.clicked.connect(self._clear_default)
         self.lbl_def = QLabel("")
+        self.lbl_def.setWordWrap(True)
         box.addButton(self.btn_def, QDialogButtonBox.ResetRole)
         box.addButton(self.btn_def_clear, QDialogButtonBox.ResetRole)
         row_def = QHBoxLayout()
@@ -651,6 +796,7 @@ class RecordBackgroundDialog(QDialog):
                 "背景の動画に音が入っていないか、曲と違う音のようです。")
             return
         self.sp_offset.setValue(got)
+        self.lb_sure.show()
         self.lb_sure.setText("推定 %.3f 秒（確からしさ %d%%）"
                              % (got, int(round(sure * 100))))
 
