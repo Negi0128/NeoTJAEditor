@@ -957,9 +957,33 @@ class MainWindow(QMainWindow):
         host.on_shown()
         self.setWindowTitle("NeoTJAPlayer")
 
+    def _toggle_player_fullscreen(self):
+        """Playerの全画面。元の最大化/通常サイズへ戻せるよう保持する。"""
+        if not self.is_player_visible():
+            return
+        if self.isFullScreen():
+            self._restore_player_fullscreen()
+            return
+        self._player_fullscreen_restore = (self.windowState(), self.saveGeometry())
+        self.showFullScreen()
+
+    def _restore_player_fullscreen(self):
+        saved = getattr(self, "_player_fullscreen_restore", None)
+        if saved is None:
+            if self.isFullScreen():
+                self.showNormal()
+            return
+        self._player_fullscreen_restore = None
+        state, geometry = saved
+        self.showNormal()
+        self.restoreGeometry(geometry)
+        self.setWindowState(state & ~Qt.WindowFullScreen)
+
     def _restore_from_player(self):
         """Player で隠したもの(メニュー・アイコン)を戻す。試聴も止める
         (Editor の音と同時に鳴らさない)。"""
+        if getattr(self, "_player_fullscreen_restore", None) is not None:
+            self._restore_player_fullscreen()
         page = getattr(self, "player_page", None)
         if page is not None:
             page.stop_preview()
@@ -3432,6 +3456,15 @@ class MainWindow(QMainWindow):
         t = event.type()
         if t not in _APP_FILTER_TYPES:
             return False
+        if (t in _ALT_EVENT_TYPES and event.key() == Qt.Key_F11
+                and event.modifiers() == Qt.NoModifier
+                and self.is_player_visible()
+                and isinstance(obj, QWidget) and obj.window() is self
+                and QApplication.activeModalWidget() is None):
+            if t == QEvent.KeyPress and not event.isAutoRepeat():
+                self._toggle_player_fullscreen()
+            event.accept()
+            return True
         if t in _ALT_EVENT_TYPES and event.key() == Qt.Key_Alt:
             return True
         if t == QEvent.ShortcutOverride:
