@@ -558,6 +558,45 @@ def list_dir(path):
     return genres, dirs, tjas
 
 
+#: 登録フォルダの直下にジャンルと別に曲・フォルダがあるときの、左の列の項目名。
+ROOT_OTHER_LABEL = "その他"
+
+
+def sidebar_entries(path):
+    """登録フォルダを左の列にどう並べるか。[(種類, 道, 名前, 色)] を返す。
+
+    - 直下に box.def のジャンルがあれば、ジャンルを1つずつ("genre"。名前は
+      box.def の題、色は #BGCOLOR / #BOXCOLOR)。
+    - そのうえで直下にふつうのフォルダ(中身のあるもの)か TJA もあれば、
+      登録フォルダそのものを「その他」として最後に1つ("other")。
+    - ジャンルが1つも無い(または読めない)フォルダは、今までどおり登録
+      フォルダを1つ("root"。名前はフォルダ名)。"""
+    name = os.path.basename(os.path.normpath(path)) or path
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: natural_key(e.name))
+    except OSError:
+        return [("root", path, name, None)]
+    genres, other = [], False
+    for e in entries:
+        try:
+            if e.is_dir():
+                box = parse_box_def(e.path)
+                if box is not None:
+                    genres.append(("genre", e.path, box["title"], box["color"]))
+                elif not other:
+                    sub_dirs, sub_tjas = _peek(e.path)
+                    other = bool(sub_dirs or sub_tjas)
+            elif e.name.lower().endswith(".tja"):
+                other = True
+        except OSError:
+            continue
+    if not genres:
+        return [("root", path, name, None)]
+    if other:
+        genres.append(("other", path, ROOT_OTHER_LABEL, None))
+    return genres
+
+
 def _peek(path):
     has_dirs, tjas = False, []
     try:

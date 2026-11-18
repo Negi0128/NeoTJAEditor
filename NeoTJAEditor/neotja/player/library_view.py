@@ -171,6 +171,16 @@ def _chip_style(color_key):
                _rgba(_c(col, g["chip_border_alpha"]))))
 
 
+def _is_under(path, root):
+    """path が root そのものか、その下か。"""
+    try:
+        a = song_lists.path_key(path)
+        b = song_lists.path_key(root)
+        return a == b or os.path.commonpath([a, b]) == b
+    except ValueError:
+        return False
+
+
 class SongThumb(QWidget):
     """行の左のジャケット(角を丸めた正方形)。絵が無ければ空の枠だけ描く
     (題名の位置をそろえるため、枠はいつも出す)。"""
@@ -777,9 +787,23 @@ class NavButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.kind = kind
         self.setProperty("kind", kind)
+        #: ジャンル(box.def)の色。あれば文字の左に小さな丸を出す。
+        self.dot_color = None
+
+    def set_dot_color(self, color):
+        self.dot_color = QColor(color) if color else None
+        self.setProperty("dot", self.dot_color is not None)
+        self.update()
 
     def paintEvent(self, ev):
         super().paintEvent(ev)
+        if self.dot_color is not None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(self.dot_color)
+            p.drawEllipse(QPointF(34.0, self.height() / 2.0), 4.0, 4.0)
+            p.end()
         if self.isChecked():
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
@@ -964,6 +988,12 @@ class LibraryView(QWidget):
         sv.addLayout(self.folder_box)
         self.folder_navs = []
         self.category_labels = []
+        #: 登録フォルダごとの左の列の並び(song_lists.sidebar_entries)。
+        #: 足す・外すときに読み直す。
+        self._sidebar_cache = {}
+        #: ジャンルを左の列に出している登録フォルダを「その他」で開いたとき、
+        #: その一段ではジャンルの行を出さない(左に並んでいるので)。
+        self._hide_genres_in = ""
         sv.addSpacing(10)
         self.btn_add_folder = QPushButton("＋  フォルダを追加")
         self.btn_add_folder.setObjectName("addFolder")
@@ -1135,7 +1165,10 @@ class LibraryView(QWidget):
             nav = next((b for b in self.folder_navs
                         if song_lists.path_key(b.path) == song_lists.path_key(folder)), None)
             self._check_nav(nav)
+            # パンくずは開いた所(ジャンルならジャンル)から始める。
             self._folder_root = folder
+            self._hide_genres_in = (song_lists.path_key(folder)
+                                    if getattr(nav, "entry", "") == "other" else "")
             self.open_dir(folder)
             self.pages.setCurrentWidget(self.page_folder)
 
@@ -1455,25 +1488,43 @@ class LibraryView(QWidget):
             self.folder_box.addWidget(head)
             self.folder_box.addSpacing(6)
             self.category_labels.append(head)
-            for path in song_lists.folders_of(self.cfg, sim):
-                name = os.path.basename(os.path.normpath(path)) or path
-                b = NavButton(name, "folder")
-                b.setProperty("sub", True)
-                b.path = path
-                b.simulator = sim
-                b.setToolTip(path)
-                if not os.path.isdir(path):
-                    b.setProperty("missing", True)
-                b.clicked.connect(lambda _=False, p=path: self.show_section("folder", p))
-                b.clicked.connect(self._pi)
-                b.setContextMenuPolicy(Qt.CustomContextMenu)
-                b.customContextMenuRequested.connect(
-                    lambda pos, btn=b: self._folder_menu(btn, pos))
-                self.folder_box.addWidget(b)
-                self.folder_navs.append(b)
+            for root in song_lists.folders_of(self.cfg, sim):
+                for kind, path, name, color in self._sidebar_entries(root):
+                    b = NavButton(name, "folder")
+                    b.setProperty("sub", True)
+                    b.path = path
+                    #: 右クリックの「外す」「カテゴリを変更」は登録フォルダへ。
+                    b.root = root
+                    b.entry = kind
+                    b.simulator = sim
+                    b.setToolTip(path)
+                    if kind == "genre":
+                        b.set_dot_color(color or "#8a96a8")
+                    if not os.path.isdir(path):
+                        b.setProperty("missing", True)
+                    b.clicked.connect(lambda _=False, p=path: self.show_section("folder", p))
+                    b.clicked.connect(self._pi)
+                    b.setContextMenuPolicy(Qt.CustomContextMenu)
+                    b.customContextMenuRequested.connect(
+                        lambda pos, btn=b: self._folder_menu(btn, pos))
+                    self.folder_box.addWidget(b)
+                    self.folder_navs.append(b)
         if isinstance(cur, tuple):
             for b in self.folder_navs:
                 b.setChecked(song_lists.path_key(b.path) == song_lists.path_key(cur[1]))
+
+    def _sidebar_entries(self, root):
+        key = song_lists.path_key(root)
+        got = self._sidebar_cache.get(key)
+        if got is None:
+            got = song_lists.sidebar_entries(root)
+            self._sidebar_cache[key] = got
+        return got
+
+    def refresh_sidebar(self):
+        """登録フォルダの中を読み直して左の列を作り直す。"""
+        self._sidebar_cache = {}
+        self._rebuild_folder_navs()
 
     def _folder_menu(self, btn, pos):
         menu = QMenu(btn)
@@ -1481,9 +1532,18 @@ class LibraryView(QWidget):
         act_cat = menu.addAction("カテゴリを変更")
         act = menu.exec(btn.mapToGlobal(pos))
         if act is act_remove:
-            self.remove_folder(btn.path)
+            self.folder_action(btn, "remove")
         elif act is act_cat:
-            self.change_folder_category(btn.path)
+            self.folder_action(btn, "category")
+
+    def folder_action(self, btn, key):
+        """左の列の項目の右クリックの中身。ジャンルや「その他」から選んでも、
+        相手は登録フォルダ(btn.root)。"""
+        root = getattr(btn, "root", btn.path)
+        if key == "remove":
+            self.remove_folder(root)
+        elif key == "category":
+            self.change_folder_category(root)
 
     def _category_menu(self, label, name, pos):
         menu = QMenu(label)
@@ -1513,8 +1573,14 @@ class LibraryView(QWidget):
             return
         if song_lists.add_folder(self.cfg, path, simulator):
             self._save()
+            self._sidebar_cache.pop(song_lists.path_key(path), None)
             self._rebuild_folder_navs()
-        self.show_section("folder", os.path.normpath(os.path.abspath(path)))
+        path = os.path.normpath(os.path.abspath(path))
+        # ジャンルに分けて並べたなら、その最初を開く。
+        first = next((b for b in self.folder_navs
+                      if song_lists.path_key(getattr(b, "root", "")) == song_lists.path_key(path)),
+                     None)
+        self.show_section("folder", first.path if first is not None else path)
 
     def change_folder_category(self, path):
         cur = song_lists.folder_simulator(self.cfg, path) or ""
@@ -1534,8 +1600,9 @@ class LibraryView(QWidget):
         was = self.current_section()
         if song_lists.remove_folder(self.cfg, path):
             self._save()
+            self._sidebar_cache.pop(song_lists.path_key(path), None)
             self._rebuild_folder_navs()
-            if isinstance(was, tuple) and song_lists.path_key(was[1]) == song_lists.path_key(path):
+            if isinstance(was, tuple) and _is_under(was[1], path):
                 self.show_default()
 
     def open_dir(self, directory):
@@ -1584,6 +1651,9 @@ class LibraryView(QWidget):
     def _on_listed(self, worker, genres, dirs):
         if worker is not self._worker:
             return
+        if (self._hide_genres_in
+                and song_lists.path_key(self._folder_dir) == self._hide_genres_in):
+            genres = []          # 左の列にジャンルとして並んでいる
         for d, box in genres:
             row = GenreRow(d, box)
             row.opened.connect(self._pi)
@@ -1715,6 +1785,7 @@ def library_qss():
                        letter-spacing: 1px; padding: 1px 0 1px 10px; margin-left: 2px;
                        border-left: 3px solid {p['accent']}; }}
     QPushButton#nav[sub="true"] {{ padding-left: 30px; font-size: 13px; }}
+    QPushButton#nav[dot="true"] {{ padding-left: 46px; }}
     QLabel#bpm {{ color: {p['fg_dim']}; font-size: 12px; }}
     QPushButton#seg {{ background-color: {_rgba(g['btn_fill'])}; border: 1px solid {_rgba(g['btn_border'])};
                        border-radius: 0; padding: 6px 14px; font-size: 12px; color: {p['fg_dim']}; }}

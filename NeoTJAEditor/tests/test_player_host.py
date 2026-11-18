@@ -390,7 +390,10 @@ class PlayerHostTests(unittest.TestCase):
                 orig(self, *a, **k)
             library_view.GenreRow.__init__ = spy
             try:
-                lib.show_section('folder', str(top))
+                # 左の列の「その他」から開くとジャンルの行は出さない(左に並ぶ)
+                # ので、ここでは登録フォルダの一段をそのまま開く。
+                lib._folder_root = str(top)
+                lib.open_dir(str(top))
                 for _ in range(200):
                     if len(lib.folder_list.rows()) >= 3:
                         break
