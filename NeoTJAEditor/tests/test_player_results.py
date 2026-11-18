@@ -298,6 +298,78 @@ class HostResultsTests(unittest.TestCase):
             ResultsPage.paintEvent = orig
 
     @real_qt_test
+    def test_background_video_runs_on_results_and_is_released(self):
+        from PySide6.QtCore import QObject
+        from neotja.player import song_lists
+
+        class Video(QObject):
+            made = []
+
+            def __init__(self, core, frame, clear, parent=None):
+                super().__init__(parent)
+                self.frame, self._clear_callback = frame, clear
+                self.stopped, self.free, self.path = False, False, ''
+                Video.made.append(self)
+
+            def start(self, path, free=False):
+                self.path, self.free = path, free
+
+            def stop(self):
+                self.stopped = True
+
+            def set_targets(self, frame, clear):
+                self.frame, self._clear_callback = frame, clear
+
+            def free_run(self):
+                self.free = True
+        with tempfile.TemporaryDirectory() as d:
+            host, a, core = self._results_host(d)
+            movie = os.path.join(d, 'bg.mp4')
+            Path(movie).write_bytes(b'fake')
+            song_lists.set_chart_art(host.cfg, a, background=movie)
+            host.video_factory = Video
+            core.finished = False
+            host._enter_play(a, 'Oni')
+            _wait(700)
+            self.assertIsNone(host._demo_video)              # 演奏中は流さない
+            core.finished = True
+            _wait(900)
+            self.assertIs(host.body.currentWidget(), host.results)
+            video = host._demo_video
+            self.assertIsNotNone(video)
+            self.assertTrue(video.free)                      # 無音・自分の時計でループ
+            self.assertEqual(video.path, movie)
+            self.assertEqual(video.frame, host.results.set_video_frame)
+            self.assertIsNone(host.results._bg)              # 動画を静止画として読まない
+            # 「もう一度」: 同じ動画を曲名表示へ引き継ぐ。
+            host._on_results_retry()
+            self.assertIs(host._demo_video, video)
+            self.assertFalse(video.stopped)
+            self.assertEqual(video.frame, host.intro.set_video_frame)
+            host.stop_preview()
+            self.assertTrue(video.stopped)
+            # 結果画面から選曲へ: 止めて手放す。
+            core.finished = False
+            host._enter_play(a, 'Oni')
+            _wait(700)
+            core.finished = True
+            _wait(900)
+            video = host._demo_video
+            host._on_results_library()
+            self.assertTrue(video.stopped)
+            self.assertIsNone(host._demo_video)
+            # 背景を出さない設定なら作らない。
+            host.cfg['player_show_bg'] = False
+            core.finished = False
+            host._enter_play(a, 'Oni')
+            _wait(700)
+            core.finished = True
+            _wait(900)
+            self.assertIsNone(host._demo_video)
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
     def test_esc_returns_to_library(self):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest

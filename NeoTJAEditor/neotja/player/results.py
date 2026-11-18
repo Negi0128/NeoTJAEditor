@@ -152,6 +152,7 @@ class ResultsPage(QWidget):
         self.judges = {}
         self._jacket = None
         self._bg = None
+        self._video_bg = None
         self._bg_scaled = None
         #: 王冠の素材の場所(試験で差し替える)。None なら skin キャッシュ。
         self.crown_sheet = None
@@ -183,19 +184,35 @@ class ResultsPage(QWidget):
                        if v is not None and not v.isNull()}
 
         def load(kind):
+            from neotja.player.demo_video import is_video_path
             pth = song_lists.existing_art(self.cfg, path, kind)
-            if not pth:
-                return None
+            if not pth or is_video_path(pth):
+                return None          # 動画は DemoVideo が1コマずつ渡す
             pm = QPixmap(pth)
             return None if pm.isNull() else pm
         self._jacket = load("jacket")
         self._bg = load("background")
+        self._video_bg = None
         self._bg_scaled = None
         self.btn_retry.setFocus(Qt.OtherFocusReason)
         self.update()
 
     def crown_pixmap(self):
         return crown_pixmap(self.crown, self.crown_sheet)
+
+    def set_video_frame(self, image):
+        """背景動画の1コマ(PlayerHost の DemoVideo から。無音・ループ)。"""
+        if image is None or image.isNull():
+            return
+        self._video_bg = QPixmap.fromImage(image)
+        self._bg_scaled = None
+        self.update()
+
+    def clear_video_frame(self):
+        if self._video_bg is not None:
+            self._video_bg = None
+            self._bg_scaled = None
+            self.update()
 
     # ------------------------------------------------------------------
     # キー: Esc = 選曲画面に戻る、矢印・Tab で2つを行き来、Enter/Space で押す。
@@ -257,11 +274,12 @@ class ResultsPage(QWidget):
             b.setGeometry(int(x - g), int(y - g), int(bw + 2 * g), int(bh + 2 * g))
 
     def _bg_pixmap(self):
-        if self._bg is None:
+        source = self._video_bg if self._video_bg is not None else self._bg
+        if source is None:
             return None
         size = self.size()
         if self._bg_scaled is None or self._bg_scaled.size() != size:
-            sc = self._bg.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            sc = source.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             x = (sc.width() - size.width()) // 2
             y = (sc.height() - size.height()) // 2
             self._bg_scaled = sc.copy(x, y, size.width(), size.height())

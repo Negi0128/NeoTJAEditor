@@ -612,6 +612,9 @@ class PlayerHost(QWidget):
         self._result_ctx = (path, course)
         self.results.set_result(path, course, self.difficulty.levels.get(course),
                                 values, gauge, judges)
+        # 背景が動画なら、結果画面でも無音・ループで流す(離れるときに止める)。
+        self._video_handoff(path, self.results.set_video_frame,
+                            self.results.clear_video_frame)
         self._set_page(self.results, fade="black",
                        done=lambda: self.results.btn_retry.setFocus(Qt.OtherFocusReason))
 
@@ -648,6 +651,7 @@ class PlayerHost(QWidget):
     def _on_results_library(self):
         """選曲画面に戻る(Esc も)。選曲の状態はそのまま。"""
         self._result_ctx = None
+        self._stop_demo_video()
         if self._core is not None:
             self._core.stop_audio()
 
