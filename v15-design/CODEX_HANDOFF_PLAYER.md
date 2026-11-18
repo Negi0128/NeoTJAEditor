@@ -1,3 +1,15 @@
+## 2026-11-19 Player 不具合まとめ対応 第4弾（Claude）
+
+項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
+
+- 18 再生画面の背景・ジャケット: ゲーム画面に「下に敷くもの」`set_underlay`（既定 None・Editor と録画は使わない）を足し、`player/backdrop.ChartBackdrop` を通常プレイ・詳細モードで敷く。値は録画と同じ曲別の値（`player_background`: 開始位置・暗さ・レーンの濃さ・ジャケットの大きさ/場所/枠）。`player_show_bg` / `player_show_jacket` / `jacket_hidden` を守る。背景は上下を合わせて左右は黒、暗さは黒を重ねる、ジャケットは `record_bg_check._baked_art` を `recorder.art_xy` の場所へ（背景があれば画面の下、無ければ上 = 録画と同じ）。背景があるときは `set_background_passthrough(True, lane)`。詳細モードは画面が上半分なので同じ絵の上半分だけ（下背景が無いのでジャケットは出さない＝判断）。静止画は1回だけ縮めて覚える。
+- 動画: QMediaPlayer の 1080p `toImage` が GUI で 1コマ約 7ms かかるため使わない。ffmpeg に縮めた大きさ（GPU 画面は 720 まで・CPU 画面は出す大きさ 1080 まで、30fps まで、`-hwaccel auto`、2スレッド、低い優先度、fps→scale の順）で生の画素を吐かせ、大きな入れ物のパイプ（3コマ）から**GUI のスレッドで待たずに**（PeekNamedPipe で1コマ揃ったときだけ）読む。時刻は「レーンの時刻 − 助走 + offset」（録画の -ss と同じ）。時計からコマを選ぶので速度の寄せは不要。戻る・3秒より先へ飛ぶ（詳細モードのシーク・やり直し）ときだけ ffmpeg をその位置から起こし直す（起こした直後は最初のコマまで5秒待つ）。止めている間は読まない（パイプが詰まって ffmpeg も止まる）。頭より前は黒、終わったら最後のコマ。離れる（`_end_play`）で止める。
+- 20 YouTube の画質: `VIDEO_PLAYER_CLIENTS = [None, tv, web_safari, mweb, ios, android]`（音声は今までどおり）、`format_sort = res:1080, vcodec:h264, acodec:m4a`。落としたあと高さ（info の height、無ければ ffmpeg -i）が 720 未満なら次のクライアントで取り直し、一番良いものを返す。それでも低ければ録画の背景の窓のボタンの横に「360p」だけ出す。
+- fps（1920×1009 の窓・通常プレイ・自動演奏中、paint_screen の回数。GTX970 / 4コア8スレッド。揺れが大きいので2回ずつ）: GL 背景なし 375〜405 / 画像 340〜397 / 360p30 の MV 360〜372（約 −6%）/ 1080p30（YouTube 相当 5Mbps）326〜334（約 −16%）/ 1080p60 の録画 254〜290（約 −25%）。CPU 描画 背景なし 54 / 画像 50 / 360p30 44〜48 / 1080p30 42 / 1080p60 40。重さの大半は ffmpeg が復号すること自体（別の ffmpeg を走らせるだけで GL が 347 → 240〜270 に落ちた）。
+- 試験（新規）: `test_player_backdrop`（11件）、`test_ytdlp_video_quality`（14件）。関係する player 系・録画系の試験を流して確認。実設定（settings.json）は変更なし。
+- 画像（1920×1009・CPU 描画）: scratchpad の `batch4/` に batch4_play_image_jacket / batch4_play_video / batch4_detail_image / batch4_detail_video。
+- 残り: 20 は実際の URL で確かめてほしい（ネットに出ていない）。GPU の native 窓で背景動画の見え方・音とのずれを実機で見てほしい。歌詞ごとのジャケット切り替え・録画のフェード／棒は Player の画面には出していない。
+
 ## 2026-11-18 Player 不具合まとめ対応 第3弾（Claude）
 
 項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
