@@ -1,3 +1,18 @@
+## 2026-11-18 Player 不具合まとめ対応 第3弾（Claude）
+
+項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
+
+- 3 再生画面へのフェード: ゲーム画面に黒の濃さ `_fade_dim`（既定 0・`set_fade_dim`）を持たせ、`paint_screen` の最後で塗る（GL の窓・QOpenGLWidget・CPU どれでも同じ）。`FadeStack` は `supports_fade_dim()` を持つ画面（`PlayPage`）なら、入るときは真っ黒(1)で出してから 0 へ、出るとき（結果・選曲へ）は画面自身を 0→1 にしてから切り替える。曲は**明け切ってから**流す（利用者の指定）。録画は別に作る CPU 版の画面なので 0 のまま。
+- 25 左右の黒い帯: 通常の窓（最大化・全画面でない）で通常プレイの再生画面のあいだだけ、窓の縁を引きずっても 16:9 を保ち（`MainWindow.nativeEvent` の WM_SIZING → `player/window_aspect.sizing_rect`）、再生画面へ入るときに1回 16:9 に合わせる（`snap_client_size`、画面に入らなければ幅を縮める）。詳細モードは下にペインがあるので保たない（判断）。アプリ全体の native フィルタには WM_SIZING が来ないため窓の nativeEvent を使う。Player を出している間だけ見る。
+- 5 選曲の行のジャケット: 行の左に 48px・角丸の絵。無い曲・表示しない曲は空の枠（題名の位置をそろえる）。ワーカーで QImage まで縮め、QPixmap は GUI で作る。(道, 更新日時) を鍵に 300 枚まで（`player/thumbs.py`）。背景・ジャケットを指定したらその曲の行だけ出し直す。
+- 7 左の列のジャンル: 登録フォルダの直下の box.def のジャンルを、カテゴリの下に直接並べる（名前は題、左に色の丸）。直下にほかの曲・中身のあるフォルダもあれば最後に「その他」（登録フォルダそのもの。その一段ではジャンルの行を出さない）。ジャンルの無いフォルダは今までどおり1つ。右クリックの外す・カテゴリを変更は登録フォルダへ（`folder_action`）。並びは覚えておき、足す・外すで読み直す（`refresh_sidebar` もある）。パンくずはジャンルから。
+- 13 詳細モードの数字: 右上（作譜モードの命令パネルの場所）に BPM・HS・見た目BPM（`neotja/value_readout.py`、`PreviewDock.set_value_readout`、既定 OFF）。値は命令パネルと同じカーソル(=再生位置)の所の値を 50ms ごとに見て、変わったら縁を `#7aa2f7` で 0.7 秒光らせて戻す。下のペインは変えていない。
+- 21 ジャケットを表示しない: Player から開く「背景・ジャケットを指定」のジャケットの行に「表示しない」。曲別の `player_chart_art` に `jacket_hidden`（道は残す）。`chart_art.existing_art` がジャケットを "" で返すので、難易度選択・曲名表示・結果・選曲の行は No Image / 空の枠。**録画にも入れない**（`RecordDialog._bg_used`。Editor から同じ曲を録画しても同じ）。録画の窓の欄には道がそのまま出る。
+- 24 TJAを開いたあと: ファイルを選ぶ・落とすと、その曲の画面（`player/opened.py`）へクロスフェード。ジャケット・曲名・副題・コースの札、「保存済みに追加」（押すと「✓ 保存済み」で押せない・この画面にとどまる）と「すぐに再生」（難易度選択へ・試聴つき）、左上の戻る・Esc で選曲へ。ボタンは横一列（`actions`）なので「プレイリストに追加」を足せる。選曲の行を押したとき・`library.choose` は今までどおり直接難易度選択。演奏中などに落とされたら鳴っているものを止める。
+- 試験（新規）: `test_player_fade_dim`、`test_player_window_aspect`（WM_SIZING を実際に送る1件を含む）、`test_player_jacket_hidden`、`test_player_library_thumbs`、`test_player_sidebar_genres`、`test_player_value_readout`、`test_player_opened`。仕様変更に合わせて `test_player_host`（ジャンルの行の試験は登録フォルダの一段を直接開く）と `test_player_recent`（落とすと開いた曲の画面）を直した。関係する player 系の試験を流して確認。実設定（settings.json）は変更なし。
+- 画像（1920×1009・CPU 描画）: scratchpad の `batch3/` に batch3_5_library_thumbs / 7_sidebar_genres / 7_sidebar_other / 13_detail_readout / 13_detail_flash / 21_art_dialog / 24_opened_before / 24_opened_after / 3_play_midfade。3 の途中の絵は撮るためにフェードを3秒に延ばして撮った（実際は 350ms）。
+- 残り: 25 は実機の窓で縁を引きずって確かめてほしい（試験は WM_SIZING を直接送ったもの）。GPU の native 窓での 3 の明け方も実機で見てほしい。`test_player_host` はまれに code 127 で落ちる（以前からと同じ。再実行で通る）。
+
 ## 2026-11-18 Player 不具合まとめ対応 第2弾（Claude）
 
 項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
