@@ -726,6 +726,8 @@ class SettingsPanel(QFrame):
     changed = Signal(str, bool)   # (設定キー, 値)
     #: 数の設定が変わった (設定キー, 値)。
     number_changed = Signal(str, int)
+    #: 音量が変わった (設定キー, 0.0〜1.0)。保存と反映は PlayerHost。
+    volume_changed = Signal(str, float)
     art_requested = Signal()
 
     #: 数の設定 (キー, 名前, 下限, 上限, 既定, 単位)。連打秒速は Editor の
@@ -792,6 +794,24 @@ class SettingsPanel(QFrame):
             self.labels.append(lbl)
             self.steppers[key] = st
             self._number_defaults[key] = default
+        # 音量(全体・曲・効果音)。Editor と同じ設定キー。
+        from neotja.player.volume import VOLUME_KEYS, VolumeSlider
+        self.volume_sliders = {}
+        row = len(self.ROWS) + len(self.NUMBERS) + 1
+        for i, (key, text, _d) in enumerate(VOLUME_KEYS, start=row):
+            lbl = QLabel(text)
+            lbl.setObjectName("setLabel")
+            sl = VolumeSlider()
+            sl.valueChanged.connect(lambda v, k=key: self.volume_changed.emit(k, v / 100.0))
+            self.grid.addWidget(lbl, i, 0)
+            self.grid.addWidget(sl, i, 1, Qt.AlignRight | Qt.AlignVCenter)
+            self.labels.append(lbl)
+            self.volume_sliders[key] = sl
+
+    def set_volume_values(self, cfg):
+        from neotja.player.volume import level_of
+        for key, sl in self.volume_sliders.items():
+            sl.setValue(level_of(cfg, key) * 100.0)
 
     def set_values(self, cfg):
         for key, sw in self.switches.items():
@@ -801,6 +821,7 @@ class SettingsPanel(QFrame):
             sw.update()
         for key, st in self.steppers.items():
             st.setValue(cfg.get(key, self._number_defaults[key]))
+        self.set_volume_values(cfg)
 
     def apply_scale(self, s):
         self.scale = s
@@ -817,7 +838,8 @@ class SettingsPanel(QFrame):
         self.btn_art.scale = s
         self.btn_art.setFixedHeight(int(64 * s))
         self.btn_art.update()
-        for sw in list(self.switches.values()) + list(self.steppers.values()):
+        for sw in (list(self.switches.values()) + list(self.steppers.values())
+                   + list(self.volume_sliders.values())):
             sw.scale = s
             sw.setFixedSize(sw.sizeHint())
 

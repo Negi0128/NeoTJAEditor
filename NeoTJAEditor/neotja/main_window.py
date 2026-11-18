@@ -932,7 +932,10 @@ class MainWindow(QMainWindow):
                               lambda: settings_mod.save_settings(self.config_data),
                               # 操作音は Editor の音声エンジンで鳴らす(Player の
                               # あいだ Editor の曲は止めてあるので空いている)。
-                              audio_provider=lambda: self.preview_dock.audio)
+                              audio_provider=lambda: self.preview_dock.audio,
+                              # Player で変えた音量を Editor の音と欄へすぐ当てる
+                              # (操作音は Editor のエンジンで鳴る)。
+                              editor_audio_cb=self._apply_volumes_from_config)
             host.back_requested.connect(self._leave_player)
             self.player_page = host
             self.central_stack.addWidget(host)
@@ -992,6 +995,11 @@ class MainWindow(QMainWindow):
             spin = getattr(self, "roll_speed_spin", None)
             if spin is not None:
                 spin.setValue(int(self.config_data.get("roll_speed", 45)))
+            # 音量も同じ config_data。Editor の音と欄へ当て直し、保存を済ませる。
+            flush = getattr(page, "flush_volume_save", None)
+            if flush is not None:
+                flush()
+            self._apply_volumes_from_config()
         self.menuBar().show()
         icon = getattr(self, "_editor_window_icon", None)
         if icon is not None:
@@ -1813,6 +1821,20 @@ class MainWindow(QMainWindow):
     def _save_master_volume(self, volume: float):
         self.config_data["master_volume"] = volume
         settings_mod.save_settings(self.config_data)
+
+    def _apply_volumes_from_config(self):
+        """config_data の音量(マスター・曲・SE)を Editor のプレビューへ当てる。
+        欄(スライダー)も一緒に合わせる。保存はしない(Player が保存する)。"""
+        pd = getattr(self, "preview_dock", None)
+        if pd is None:
+            return
+        cfg = self.config_data
+        try:
+            pd.set_master_volume(float(cfg.get("master_volume", 1.0)))
+            pd.set_volume(float(cfg.get("preview_volume", 0.8)))
+            pd.set_sfx_volume(float(cfg.get("sfx_volume", 0.9)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_wireless_offset(self):
         """ワイヤレス調整(出力遅延の補正)を再生側へ流す。オフのときは 0ms、

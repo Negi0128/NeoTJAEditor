@@ -44,9 +44,13 @@ class PlayerHost(QWidget):
     #: 譜面の終わりを見張る間合い(ms)。
     FINISH_POLL_MS = 100
 
-    def __init__(self, config_data, save_cb, parent=None, audio_provider=None):
+    def __init__(self, config_data, save_cb, parent=None, audio_provider=None,
+                 editor_audio_cb=None):
         super().__init__(parent)
         self.setObjectName("playerHost")
+        #: Player で音量を変えたとき、Editor の音声エンジンと欄へ当て直す口
+        #: (MainWindow から。操作音は Editor のエンジンで鳴るので、すぐ要る)。
+        self._editor_audio_cb = editor_audio_cb
         # 操作音。鳴らす道は呼び出し側(MainWindow)の音声エンジンを借りる
         # (neotja/player/ui_sound.py の説明)。
         from neotja.player.ui_sound import UiSounds
@@ -81,6 +85,10 @@ class PlayerHost(QWidget):
         self.lbl_name.setTextFormat(Qt.RichText)
         th.addWidget(self.lbl_name, 0, Qt.AlignVCenter)
         th.addStretch(1)
+        from neotja.player.volume import SpeakerButton, VolumePopover
+        self.btn_volume = SpeakerButton()
+        self.btn_volume.toggled.connect(self._toggle_volume_popover)
+        th.addWidget(self.btn_volume, 0, Qt.AlignVCenter)
         v.addWidget(top)
         rule = QFrame()
         self.top_rule = rule
@@ -133,16 +141,93 @@ class PlayerHost(QWidget):
         self._finish_timer.setInterval(self.FINISH_POLL_MS)
         self._finish_timer.timeout.connect(self._check_finished)
 
+        # 音量(全体・曲・効果音)。選曲の小窓・難易度設定・途中メニューの3か所
+        # から同じ値を変える。保存は動かし終わってからまとめて1回。
+        self.volume_popover = VolumePopover(self)
+        self.volume_popover.rows.changed.connect(self.set_audio_level)
+        self.difficulty.settings.volume_changed.connect(self.set_audio_level)
+        self.play_page.menu.volume.changed.connect(self.set_audio_level)
+        self._volume_save = QTimer(self)
+        self._volume_save.setSingleShot(True)
+        self._volume_save.setInterval(400)
+        self._volume_save.timeout.connect(self._flush_volume_save)
+        self._sync_volume_widgets()
+
         self.refresh_theme()
 
     # ------------------------------------------------------------------
     def on_shown(self):
         """ランチャーから入ったとき。選曲の最初の画面へ。"""
+        # Editor 側で変えた音量を、こちらの欄にも出す。
+        self._sync_volume_widgets()
         self._set_page(self.library)
         self.library.show_default()
         # 押した「Player を起動」が消えて、フォーカスが「戻る」へ流れ着く
         # のを避ける(Enter 一つでランチャーへ戻ってしまう)。
         self.library.pages.currentWidget().setFocus()
+
+    # ------------------------------------------------------------------
+    # 音量(Editor と同じ master_volume / preview_volume / sfx_volume)
+    def set_audio_level(self, key, value):
+        """音量を1つ変える。設定へ書き、Player と Editor の音へすぐ当て、
+        ほかの欄もそろえる。保存は少し待ってまとめて。"""
+        from neotja.player.volume import DEFAULTS
+        if key not in DEFAULTS:
+            return
+        try:
+            value = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return
+        self.cfg[key] = value
+        self._sync_volume_widgets()
+        self.apply_audio_settings()
+        self._volume_save.start()
+
+    def apply_audio_settings(self):
+        """設定の音を Player の音声エンジン(あれば)と Editor の両方へ当てる。"""
+        core = self._core
+        fn = getattr(core, "apply_audio_settings", None) if core is not None else None
+        if fn is not None:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+        cb = self._editor_audio_cb
+        if cb is not None:
+            try:
+                cb()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _sync_volume_widgets(self):
+        from neotja.player.volume import level_of
+        self.volume_popover.rows.set_values(self.cfg)
+        self.play_page.menu.volume.set_values(self.cfg)
+        self.difficulty.settings.set_volume_values(self.cfg)
+        muted = level_of(self.cfg, "master_volume") <= 0.0
+        if self.btn_volume.muted != muted:
+            self.btn_volume.muted = muted
+            self.btn_volume.update()
+
+    def _flush_volume_save(self):
+        self._volume_save.stop()
+        try:
+            self._save_cb()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def flush_volume_save(self):
+        """Player を離れる・閉じるとき。待たせている保存を今すぐ。"""
+        if self._volume_save.isActive():
+            self._flush_volume_save()
+
+    def _toggle_volume_popover(self, on):
+        self.sounds.pi()
+        if on:
+            self._sync_volume_widgets()
+            self.volume_popover.open_under(self.btn_volume)
+        else:
+            self.volume_popover.close_popover()
 
     def _on_song_chosen(self, path):
         self.current_song = path
@@ -152,6 +237,8 @@ class PlayerHost(QWidget):
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""
         full = page in (self.difficulty, self.intro, self.play_page, self.results)
+        if full:
+            self.volume_popover.close_popover()
         self.top_bar.setVisible(not full)
         self.top_rule.setVisible(not full)
         if fade:
@@ -200,6 +287,8 @@ class PlayerHost(QWidget):
     def shutdown(self):
         """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
         self._shutting_down = True
+        self.volume_popover.close_popover()
+        self.flush_volume_save()
         self._stop_demo_video()
         self._art_pending = None
         if self._art_dialog is not None:
@@ -244,11 +333,9 @@ class PlayerHost(QWidget):
             self.stop_preview()
             return
         core = self._ensure_core()
-        # 音量は Editor と同じ設定(config_data)をそのたびに当て直す。
-        try:
-            core.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
-        except Exception:  # noqa: BLE001
-            pass
+        # 音の設定(音量・打音・ワイヤレス調整・出力デバイス)は Editor と同じ
+        # config_data。Editor で変えられていてもよいように、そのたびに当て直す。
+        self.apply_audio_settings()
         demo = core_mod.demo_start_seconds(content)
         if not restart and getattr(core, "demo_active_for", None) and core.demo_active_for(path):
             if self._demo_video is None:
@@ -422,6 +509,8 @@ class PlayerHost(QWidget):
             # 渡さない(締めてあるので渡っても再生画面へ回るが、GL の窓だと
             # 窓ごと前に出てしまうため)。
             self.play_page.setFocus(Qt.OtherFocusReason)
+            # 曲名表示で下げた音量を戻し、音の設定を当て直してから流す。
+            self.apply_audio_settings()
             core.play_chart(0.0)
             self._finish_timer.start()
         self._set_page(self.play_page, fade="black", done=go)
@@ -442,6 +531,7 @@ class PlayerHost(QWidget):
         if core is not None:
             core.pause_chart()
         self.sounds.pi()
+        self._sync_volume_widgets()
         self.play_page.show_menu(self._game_snapshot())
 
     def _game_snapshot(self):

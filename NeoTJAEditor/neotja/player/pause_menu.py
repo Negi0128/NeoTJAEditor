@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QAbstractButton, QWidget
 
 from neotja.player.difficulty import (BASE_H, BASE_W, BTN_RADIUS, SELECT_COLOR,
                                       TOP_EDGE, paint_glass, thin_font)
+from neotja.player.volume import VOLUME_KEYS, VolumeRows
 
 #: (合図, 表記)。並びと数字キーはこの順。
 ITEMS = (
@@ -37,6 +38,9 @@ ITEM_H = 74
 ITEM_GAP = 14
 PAD = 34
 HEAD_H = 44
+#: 項目の下の音量の段(1段の高さ・上の余白)。
+VOL_ROW_H = 56
+VOL_GAP = 26
 
 
 class _MenuItem(QAbstractButton):
@@ -109,6 +113,9 @@ class PauseMenu(QWidget):
             it.key = key
             it.clicked.connect(lambda _=False, k=key: self._click(k))
             self.items.append(it)
+        #: 音量(全体・曲・効果音)。マウスで動かす(キーは項目の選択に使う)。
+        #: 動かしても止めたまま(続けるのは「演奏を続ける」だけ)。
+        self.volume = VolumeRows(self, focusable=False, label_px=22)
         self._panel = QRectF()
         self.hide()
 
@@ -226,7 +233,9 @@ class PauseMenu(QWidget):
         self.scale = s
         n = len(self.items)
         pw = PANEL_W * s
-        ph = PAD * s * 2 + HEAD_H * s + ITEM_GAP * s + n * ITEM_H * s + (n - 1) * ITEM_GAP * s
+        vol_h = len(VOLUME_KEYS) * VOL_ROW_H * s
+        ph = (PAD * s * 2 + HEAD_H * s + ITEM_GAP * s + n * ITEM_H * s + (n - 1) * ITEM_GAP * s
+              + VOL_GAP * s + vol_h)
         x = (self.width() - pw) / 2.0
         y = (self.height() - ph) / 2.0
         self._panel = QRectF(x, y, pw, ph)
@@ -235,6 +244,10 @@ class PauseMenu(QWidget):
             it.scale = s
             it.setGeometry(int(x + PAD * s), int(iy), int(pw - 2 * PAD * s), int(ITEM_H * s))
             iy += (ITEM_H + ITEM_GAP) * s
+        self._vol_line = iy - ITEM_GAP * s + VOL_GAP * s / 2
+        self.volume.apply_scale(s)
+        self.volume.setGeometry(int(x + PAD * s), int(iy - ITEM_GAP * s + VOL_GAP * s),
+                                int(pw - 2 * PAD * s), int(vol_h))
 
     def paintEvent(self, ev):
         s = self.scale
@@ -258,4 +271,9 @@ class PauseMenu(QWidget):
         ly = head.bottom() + ITEM_GAP * s / 2
         p.setPen(QPen(QColor(150, 215, 235, 90), 1.0 * max(1.0, s)))
         p.drawLine(int(head.left()), int(ly), int(head.right()), int(ly))
+        # 項目と音量のあいだの線。
+        vy = getattr(self, "_vol_line", None)
+        if vy is not None:
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1.0 * max(1.0, s)))
+            p.drawLine(int(head.left()), int(vy), int(head.right()), int(vy))
         p.end()

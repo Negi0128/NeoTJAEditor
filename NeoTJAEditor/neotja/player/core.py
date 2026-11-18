@@ -160,11 +160,57 @@ class PlayerCore:
         self.dock.set_pane_follow_scale(True)
         # 「読めたら鳴らす」の予約を回収する口。
         self.dock.songReady.connect(self._on_song_ready)
-        self.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
-        self.dock.set_volume(float(self.cfg.get("preview_volume", 0.8)))
-        self.dock.set_sfx_volume(float(self.cfg.get("sfx_volume", 0.9)))
-        don, ka = settings_mod.effective_hit_sound_paths(self.cfg)
-        self.dock.set_hit_sound_files(don, ka)
+        self.apply_audio_settings()
+
+    #: 最後に渡した打音の WAV(同じなら読み直さない)。
+    _hit_paths = None
+
+    def apply_audio_settings(self):
+        """音の設定(Editor と共有の config_data)を、この PlayerCore の音声
+        エンジンへ当て直す。全体・曲・効果音の音量、打音の WAV、ワイヤレス
+        調整(出力遅延の補正)、出力デバイス。
+
+        以前は作ったときに1回だけ当てていたので、Editor の環境設定で変えた
+        打音・ワイヤレス調整・出力デバイスが Player には届かなかった。
+        試聴を始めるとき・本編を流す前・Player の音量を変えたときに呼ぶ。"""
+        cfg = self.cfg
+        d = self.dock
+        from neotja.player.volume import level_of
+        try:
+            d.set_master_volume(level_of(cfg, "master_volume"))
+            d.set_sfx_volume(level_of(cfg, "sfx_volume"))
+        except Exception:  # noqa: BLE001
+            pass
+        self._apply_volume()
+        try:
+            paths = tuple(settings_mod.effective_hit_sound_paths(cfg))
+            if paths != self._hit_paths:
+                self._hit_paths = paths
+                d.set_hit_sound_files(*paths)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            d.set_output_offset_ms(output_offset_ms(cfg))
+        except Exception:  # noqa: BLE001
+            pass
+        self._apply_output_device()
+
+    def _apply_output_device(self):
+        """出力デバイスが設定と違えば開き直す。**一覧の読み直し(rescan)は
+        しない** — PortAudio を初期化し直すと、同じプロセスの Editor の出力まで
+        無効になるため。"""
+        audio = getattr(self.dock, "audio", None)
+        current = getattr(audio, "output_device_name", None)
+        reopen = getattr(audio, "reopen_stream", None)
+        if current is None or reopen is None:
+            return
+        want = self.cfg.get("audio_output_device", "") or ""
+        try:
+            if (current() or "") == want:
+                return
+            reopen(want)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     @property
@@ -209,7 +255,8 @@ class PlayerCore:
         選曲画面の BGM だけ、設定の比率を掛けて控えめに鳴らす。待っている
         あいだ流すものなので、譜面と同じ音量だとうるさい。譜面の試聴や本編に
         移るときは掛けるのをやめて、元の音量へ戻す。"""
-        vol = float(self.cfg.get("preview_volume", 0.8) or 0.0)
+        from neotja.player.volume import level_of
+        vol = level_of(self.cfg, "preview_volume")
         if select_bgm:
             vol *= float(self.cfg.get("player_select_bgm_volume", 0.6) or 0.0)
         try:
@@ -650,6 +697,17 @@ class PlayerCore:
             self.dock.shutdown_audio()
         except Exception:  # noqa: BLE001
             pass
+
+
+def output_offset_ms(cfg):
+    """ワイヤレス調整(出力遅延の補正)の ms。切っていれば 0。Editor の
+    MainWindow._apply_wireless_offset と同じ決まり。"""
+    if not cfg.get("wireless_offset_enabled", False):
+        return 0.0
+    try:
+        return float(cfg.get("wireless_offset_ms", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _find_wave(tja_path):
