@@ -12,3 +12,6 @@ NeoTJAEditor/skin/
 # 更新用の鍵(アクセストークン)。組み立てる人の手元にだけ置く。絶対にコミットしない。
 NeoTJAEditor/update_token.txt
 NeoTJAEditor/neotja/_update_token.py
+
+# 利用者のデータ(録画・YouTube・プレイリスト・ジャケット)。ソースから動かしたときはここに作られる。
+NeoTJAEditor/ユーザーデータ/

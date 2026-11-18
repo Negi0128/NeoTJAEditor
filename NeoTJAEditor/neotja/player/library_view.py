@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from neotja.player import song_lists, thumbs
+from neotja.player import playlists, song_lists, thumbs
+from neotja.player.playlist_view import PlaylistDialog, PlaylistRow, playlist_jacket_pixmap
 from neotja.start_screen import (
     COURSE_COLOR_KEY, ElidedText, GlassCard, wordmark_family,
 )
@@ -1131,7 +1132,8 @@ class LibraryView(QWidget):
         self.nav_open = NavButton("TJAを開く", "open")
         self.nav_recent = NavButton("最近開いた楽曲", "recent")
         self.nav_saved = NavButton("保存済み楽曲", "saved")
-        for b in (self.nav_open, self.nav_recent, self.nav_saved):
+        self.nav_playlists = NavButton("プレイリスト", "playlists")
+        for b in (self.nav_open, self.nav_recent, self.nav_saved, self.nav_playlists):
             b.setProperty("sub", True)
             b.clicked.connect(lambda _=False, k=b.kind: self.show_section(k))
             b.clicked.connect(self._pi)
@@ -1216,6 +1218,32 @@ class LibraryView(QWidget):
         self.saved_list = self.page_saved.add_list()
         self.pages.addWidget(self.page_saved)
 
+        # プレイリストの一覧と、開いた1つの曲の一覧。
+        #: プレイリストの保存(最初に開いたときに読む)。
+        self._playlist_store = None
+        #: 開いているプレイリストの id。
+        self._playlist_id = ""
+        #: 作成/編集の窓と削除の確かめの差し替え口(試験は窓を出さない)。
+        #: playlist_editor(pl または None) → (題, 説明, 絵, 絵を外すか) / None。
+        #: playlist_confirm(見出し, 実行の字, はいのときの呼び出し)。
+        self.playlist_editor = None
+        self.playlist_confirm = None
+        self.page_playlists = _Page("プレイリスト")
+        self.btn_new_playlist = QPushButton("＋  プレイリストを作成")
+        self.btn_new_playlist.setObjectName("flat")
+        self.btn_new_playlist.setCursor(Qt.PointingHandCursor)
+        self.btn_new_playlist.clicked.connect(self._pi)
+        self.btn_new_playlist.clicked.connect(self.create_playlist)
+        self.page_playlists.tools.addWidget(self.btn_new_playlist)
+        self.page_playlists.tools.addStretch(1)
+        self.playlists_list = self.page_playlists.add_list()
+        self.pages.addWidget(self.page_playlists)
+
+        self.page_playlist = _Page("")
+        self.page_playlist.add_search()
+        self.playlist_song_list = self.page_playlist.add_list()
+        self.pages.addWidget(self.page_playlist)
+
         self.page_folder = _Page("")
         self.page_folder.add_search()
         self.page_folder.add_sort(song_lists.SORT_MODES[1:])
@@ -1286,7 +1314,8 @@ class LibraryView(QWidget):
             pass
 
     def _all_navs(self):
-        return [self.nav_open, self.nav_recent, self.nav_saved] + self.folder_navs
+        return ([self.nav_open, self.nav_recent, self.nav_saved, self.nav_playlists]
+                + self.folder_navs)
 
     def _check_nav(self, target):
         for b in self._all_navs():
@@ -1308,6 +1337,8 @@ class LibraryView(QWidget):
         if page is self.page_folder:
             q = self.page_folder.search.text().strip()
             return (page, song_lists.path_key(self._folder_dir) if self._folder_dir else "", q)
+        if page is self.page_playlist:
+            return (page, self._playlist_id)
         return (page,)
 
     def _note_switch(self, before):
@@ -1333,6 +1364,13 @@ class LibraryView(QWidget):
             self._check_nav(self.nav_saved)
             self._fill_saved()
             self.pages.setCurrentWidget(self.page_saved)
+        elif kind == "playlists":
+            self._check_nav(self.nav_playlists)
+            self._fill_playlists()
+            self.pages.setCurrentWidget(self.page_playlists)
+        elif kind == "playlist" and folder:
+            self._check_nav(self.nav_playlists)
+            self._open_playlist(folder)
         elif kind == "folder" and folder:
             nav = next((b for b in self.folder_navs
                         if song_lists.path_key(b.path) == song_lists.path_key(folder)), None)
@@ -1409,7 +1447,7 @@ class LibraryView(QWidget):
 
     def _mark_chosen(self):
         key = song_lists.path_key(self._chosen) if self._chosen else None
-        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
+        for lst in self._song_lists():
             for r in lst.rows():
                 if isinstance(r, SongRow):
                     r.set_chosen(key is not None and song_lists.path_key(r.path) == key,
@@ -1505,7 +1543,7 @@ class LibraryView(QWidget):
 
     def _song_rows_by_key(self):
         out = {}
-        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
+        for lst in self._song_lists():
             for row in lst.rows():
                 if isinstance(row, SongRow):
                     out.setdefault(song_lists.path_key(row.path), []).append(row)
@@ -1670,6 +1708,170 @@ class LibraryView(QWidget):
         if new and song_lists.relink_saved(self.cfg, path, new):
             self._save()
             self._fill_saved()
+
+    # ------------------------------------------------------------------
+    # プレイリスト
+    def playlist_store(self):
+        if self._playlist_store is None:
+            self._playlist_store = playlists.PlaylistStore()
+        return self._playlist_store
+
+    def _fill_playlists(self):
+        self.playlists_list.clear()
+        for pl in self.playlist_store().items:
+            row = PlaylistRow(pl)
+            row.jacket.set_pixmap(playlist_jacket_pixmap(pl, self.cfg))
+            row.opened.connect(self._pi)
+            row.opened.connect(self.open_playlist)
+            row.menu_requested.connect(self._playlist_menu)
+            self.playlists_list.add(row)
+
+    def open_playlist(self, pid):
+        """プレイリストを開く(いつものジャンルと同じ曲の一覧)。"""
+        self.show_section("playlist", pid)
+
+    def _open_playlist(self, pid):
+        pl = self.playlist_store().get(pid)
+        if pl is None:
+            self._fill_playlists()
+            self.pages.setCurrentWidget(self.page_playlists)
+            return
+        self._playlist_id = pid
+        page = self.page_playlist
+        page.lbl_title.setText(pl["title"])
+        self._build_playlist_crumbs(pl)
+        page.search.blockSignals(True)
+        page.search.clear()
+        page.search.blockSignals(False)
+        self.playlist_song_list.clear()
+        self._pending_rows = {}
+        paths = []
+        for item in pl["items"]:
+            path = item["path"]
+            row = self._song_row(path, os.path.basename(path),
+                                 saved=song_lists.is_saved(self.cfg, path))
+            self.playlist_song_list.add(row)
+            if row.missing:
+                row.set_missing_chip()
+            else:
+                self._pending_rows.setdefault(song_lists.path_key(path), []).append(row)
+                paths.append(path)
+        if paths:
+            self._start_worker(paths=paths)
+        self.pages.setCurrentWidget(page)
+
+    def _build_playlist_crumbs(self, pl):
+        lay = self.page_playlist.crumbs
+        while lay.count() > 1:
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        b = QPushButton("プレイリスト")
+        b.setObjectName("crumb")
+        b.setCursor(Qt.PointingHandCursor)
+        b.clicked.connect(self._pi)
+        b.clicked.connect(lambda _=False: self.show_section("playlists"))
+        lay.insertWidget(lay.count() - 1, b)
+        sep = QLabel("›")
+        sep.setObjectName("crumbSep")
+        lay.insertWidget(lay.count() - 1, sep)
+        cur = QPushButton(pl["title"])
+        cur.setObjectName("crumbCur")
+        lay.insertWidget(lay.count() - 1, cur)
+
+    def _edit_values(self, pl):
+        """作成/編集の窓。やめたら None。"""
+        if self.playlist_editor is not None:
+            return self.playlist_editor(pl)
+        dlg = PlaylistDialog(pl, parent=self.window(), cfg=self.cfg)
+        try:
+            if dlg.exec() == QDialog.Accepted:
+                return dlg.values()
+            return None
+        finally:
+            dlg.deleteLater()
+
+    def create_playlist(self):
+        got = self._edit_values(None)
+        if not got or not str(got[0]).strip():
+            return None
+        title, desc, jacket, _clear = got
+        title = str(title).strip()
+        try:
+            pl = self.playlist_store().create(title, desc, jacket)
+        except OSError:
+            return None
+        if self.pages.currentWidget() is self.page_playlists:
+            self._fill_playlists()
+        return pl
+
+    def edit_playlist(self, pid):
+        pl = self.playlist_store().get(pid)
+        if pl is None:
+            return None
+        got = self._edit_values(pl)
+        if not got or not str(got[0]).strip():
+            return None
+        title, desc, jacket, clear = got
+        title = str(title).strip()
+        try:
+            pl = self.playlist_store().update(pid, title, desc, jacket, clear)
+        except OSError:
+            return None
+        self._refresh_playlist_views()
+        return pl
+
+    def ask_delete_playlist(self, pid):
+        """削除。確かめの窓で「削除」なら消す(閉じるのを待たない)。"""
+        pl = self.playlist_store().get(pid)
+        if pl is None:
+            return
+        heading = "「%s」を削除" % pl["title"]
+        if self.playlist_confirm is not None:
+            self.playlist_confirm(heading, "削除", lambda: self.delete_playlist(pid))
+            return
+        dlg = ConfirmDialog(heading, "削除", self.window())
+        dlg.accepted.connect(lambda: self.delete_playlist(pid))
+        dlg.finished.connect(lambda *_a: (dlg.deleteLater(), self._pi()))
+        dlg.open()
+
+    def delete_playlist(self, pid):
+        if not self.playlist_store().delete(pid):
+            return False
+        if self.pages.currentWidget() is self.page_playlist and self._playlist_id == pid:
+            self.show_section("playlists")
+        else:
+            self._refresh_playlist_views()
+        return True
+
+    def _refresh_playlist_views(self):
+        page = self.pages.currentWidget()
+        if page is self.page_playlists:
+            self._fill_playlists()
+        elif page is self.page_playlist and self._playlist_id:
+            pl = self.playlist_store().get(self._playlist_id)
+            if pl is not None:
+                page.lbl_title.setText(pl["title"])
+                self._build_playlist_crumbs(pl)
+
+    def _playlist_menu(self, pid, global_pos):
+        menu = QMenu(self)
+        act_edit = menu.addAction("編集")
+        act_del = menu.addAction("削除")
+        act = menu.exec(global_pos)
+        if act is act_edit:
+            self.playlist_action(pid, "edit")
+        elif act is act_del:
+            self.playlist_action(pid, "delete")
+
+    def playlist_action(self, pid, key):
+        """プレイリストの右クリックの中身("edit" / "delete")。"""
+        if key == "edit":
+            self.edit_playlist(pid)
+        elif key == "delete":
+            self.ask_delete_playlist(pid)
 
     # ------------------------------------------------------------------
     # 登録フォルダ
@@ -1961,8 +2163,12 @@ class LibraryView(QWidget):
         self.search_list.sort_songs(m, r)
 
     # ------------------------------------------------------------------
+    def _song_lists(self):
+        return (self.recent_list, self.saved_list, self.folder_list, self.search_list,
+                self.playlist_song_list)
+
     def refresh_theme(self):
-        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
+        for lst in self._song_lists() + (self.playlists_list,):
             for r in lst.rows():
                 r.refresh_theme()
         self.update()
@@ -2038,4 +2244,10 @@ def library_qss():
     QPushButton#seg:checked {{ color: {g['primary_fg'].name()}; background-color: {_rgba(_c(p['accent'], 0.55))};
                                font-weight: bold; }}
     QPushButton#sortDir {{ padding: 0; border-radius: 8px; font-size: 15px; font-weight: bold; color: {p['fg']}; }}
+    QPushButton#flat {{ background-color: rgba(16, 28, 44, 170); border: 1px solid rgba(139, 217, 238, 150);
+                        border-radius: 3px; padding: 8px 18px; font-family: "Yu Gothic UI"; font-size: 13px;
+                        font-weight: bold; color: #e5edf7; }}
+    QPushButton#flat:hover {{ background-color: rgba(35, 61, 84, 200); border-color: #8ad9ee; }}
+    QPushButton#flat:pressed {{ background-color: rgba(16, 29, 44, 220); }}
+    QPushButton#flat:focus {{ border-color: {p['accent']}; }}
     """

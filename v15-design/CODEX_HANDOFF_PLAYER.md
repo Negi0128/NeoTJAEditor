@@ -1,3 +1,15 @@
+## 2026-11-19 プレイリスト 第1段（Claude）
+
+仕様は `v15-design/PLAYLIST_SPEC.md`。第1段だけ（器・一覧・作成/編集/削除）。曲の追加・連続再生・録画はまだ。版上げ・ビルド・リリースはしていない。
+
+- 利用者フォルダ `neotja/user_dirs.py`: exe（sys.frozen）なら sys.executable のフォルダ、ソースならアプリのフォルダ（NeoTJAEditor/NeoTJAEditor）の下の `ユーザーデータ/` に `録画` / `YouTube` / `プレイリスト` / `ジャケット`（使うときに初めて作る。読むだけでは作らない）。書けなければ `%LOCALAPPDATA%\NeoTJAEditor\ユーザーデータ` へ退避。試験は `NEOTJA_USER_DIR` か `user_dirs.base_override` で差し替え（差し替え先の直下に種類のフォルダ）。いま使っているのはプレイリストとそのジャケットだけ。録画・YouTube・曲のジャケットの保存先はまだ変えていない（次の段）。`.gitignore` に `NeoTJAEditor/ユーザーデータ/`。
+- 保存 `neotja/player/playlists.py`: `プレイリスト/playlists.json` = `{"version":1,"playlists":[{id,title,description,jacket,items:[{path,course}]}]}`。一時ファイル→os.replace。壊れたファイルは `playlists.json.broken-日時` へ退かして空から。ジャケットは選んだ絵を `ジャケット/<id>_<日時>.<拡張子>` へ写し、json にはファイル名だけ（フォルダごと動かしても切れない）。替える・外す・削除で古い写しを消す。`PlaylistStore`（create/update/delete、変えたらすぐ保存）。
+- 選曲: 左の列の「保存済み楽曲」の直下に「プレイリスト」（`nav_playlists`、kind "playlists"）。右に `page_playlists`（「＋ プレイリストを作成」= QSS `QPushButton#flat`、行 `playlist_view.PlaylistRow`: 88px のジャケット・題・説明・›）。ジャケットが無ければ1曲目のジャケット（`chart_art.existing_art`）、それも無ければ No Image の枠。右クリック 編集 / 削除（削除は `ConfirmDialog`、open() で待たない）。押すと `page_playlist`（パンくず「プレイリスト › 題」・検索欄・曲の一覧。今は空で「なし」）。`_list_key` に開いている id を入れたので、一覧⇔開く・別のプレイリストで `list_switched`（試聴を止める）。並び替えの段は出していない（プレイリストの順を保つため＝判断）。
+- 作成/編集の窓 `playlist_view.PlaylistDialog`: 録画の背景の窓と同じ色・形（#101925・角 2〜3px・Yu Gothic UI）。タイトル / 説明（複数行）/ ジャケット（見本・「画像を選択…」・「外す」）、キャンセル / 作成（編集は「保存」）。題が空なら押せない。説明の字は足していない。
+- 差し替え口（試験は窓を出さない）: `LibraryView.playlist_editor(pl or None)` → (題, 説明, 絵, 外すか) / None、`LibraryView.playlist_confirm(見出し, 実行の字, はいの呼び出し)`、`PlaylistDialog.pick_image`。
+- 試験（新規）: `test_player_playlists`（12件）。`test_player_sidebar_genres` / `test_player_library_preview` / `test_player_library_thumbs` / `test_player_recent` も通過。実設定（settings.json）は変更なし。
+- 画像（1920×1009・widget.grab）: scratchpad の `playlist1/` に pl1_sidebar_list / pl1_opened_empty / pl1_create_dialog / pl1_edit_dialog。
+
 ## 2026-11-19 Player 不具合まとめ対応 第5弾（Claude）
 
 項目ごとにコミット・push 済み（789e321 / a407803 / b16594a / 6e8b2d9 / 9a2e389）。版上げ・ビルド・リリースはしていない。
