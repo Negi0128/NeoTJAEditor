@@ -77,6 +77,65 @@ class DockViewFpsTests(unittest.TestCase):
             dock.deleteLater()
 
 
+class DockViewFpsScaleTests(unittest.TestCase):
+    """fps 表示の字と箱は、ゲーム画面の幅に対して決まった比(CPU・GPU とも)。"""
+
+    def _run(self, **gpu):
+        from neotja.player.core import PlayerCore
+        cfg = settings.default_settings()
+        cfg.update(master_volume=0.0, **gpu)
+        core = PlayerCore(cfg)
+        dock = core.dock
+        gpw = dock.game_preview_window
+        dpi = None
+        try:
+            for detail in (False, True):
+                gpw.set_view_only(True, with_bottom=detail)
+                dock.set_view_fps(True)
+                gpw.show()
+                rows = []
+                for w, h in ((480, 270), (1280, 720), (1920, 1009), (2560, 1440)):
+                    gpw.fit_view_only(w, h)
+                    _wait(20)
+                    lbl, host = dock.fps_label, gpw.scaled_host
+                    dpi = float(lbl.logicalDpiY() or 96)
+                    font_px = lbl.font().pointSizeF() * dpi / 72.0
+                    rows.append((host.width(), font_px, lbl.height(), lbl.x()))
+                base = dock.VIEW_FPS_BASE_W
+                for hw, font_px, lh, lx in rows:
+                    k = hw / base
+                    # 字は丸めずに比のまま。
+                    self.assertAlmostEqual(font_px / hw, dock.VIEW_FPS_FONT_PX / base,
+                                           places=5)
+                    # 箱と余白は1px の丸めだけ。
+                    self.assertLessEqual(abs(lh - dock.VIEW_FPS_BOX[1] * k), 0.51)
+                    self.assertLessEqual(abs(lx - dock.VIEW_FPS_MARGIN[0] * k), 0.51)
+                # 小さい画面で 7px に張り付かない(以前の下限)。
+                self.assertLess(rows[0][1], 7.0)
+            # 外すと Editor と同じ原寸の字(px)へ戻る。
+            dock.set_view_fps(False)
+            dock._scale_lane_overlays(1.0)
+            self.assertEqual(dock.fps_label.font().pixelSize(), 12)
+        finally:
+            core.stop_audio()
+            core.shutdown()
+            dock.chart_preview._timer.stop()
+            gpw.close()
+            dock.deleteLater()
+
+    @real_qt_test
+    def test_ratio_cpu(self):
+        self._run(gpu_render=False)
+
+    @real_qt_test
+    def test_ratio_gpu_widget(self):
+        self._run(gpu_render=True, gpu_screen_window=False)
+
+    @real_qt_test
+    def test_ratio_gpu_native_window(self):
+        self._run(gpu_render=True, gpu_screen_window=True)
+
+
 class FakeDock:
     def __init__(self, log):
         from PySide6.QtWidgets import QWidget

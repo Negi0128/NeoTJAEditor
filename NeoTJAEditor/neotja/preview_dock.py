@@ -3,7 +3,7 @@ import os
 import re
 import time as _time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (QKeySequence, QMouseEvent, QPainter,
                            QRegion, QShortcut)
 from PySide6.QtWidgets import (
@@ -290,6 +290,20 @@ class ChartInfoBar(QWidget):
         self.lbl_scroll.setText(f"{self._trunc(scroll, 3):.3f}")
         self.lbl_measure.setText(f"{num}/{den}")
         self.lbl_roll_est.setText(str(cumulative_hits))
+
+
+class _ResizeWatcher(QObject):
+    """target の大きさが変わったら cb() を呼ぶだけの見張り(target の子)。"""
+
+    def __init__(self, target, cb):
+        super().__init__(target)
+        self._cb = cb
+        target.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Resize:
+            self._cb()
+        return False
 
 
 class ScaledHost(QWidget):
@@ -2429,7 +2443,8 @@ class PreviewDock(QDockWidget):
             w.setFont(f)
             if w is self.fps_label and self._view_fps:
                 # Player の絵だけの表示: ほかのボタンは無いので左上の隅へ。
-                w.move(x0, y)
+                # 大きさは画面の幅から決める(_fit_view_fps)。
+                self._fit_view_fps()
                 x += bw + px(gap, s)
                 continue
             if isinstance(w, QPushButton):
@@ -3524,9 +3539,51 @@ class PreviewDock(QDockWidget):
             lbl.setFont(f)
             lbl.setStyleSheet(css)
         self._view_fps = on
+        host = self.game_preview_window.scaled_host
+        if on and not getattr(self, "_view_fps_filter", None):
+            # 画面の大きさが変わったら(倍率・GPU の画面の取り直し・詳細
+            # モードの出し入れ)、どの道で変わっても字の大きさを当て直す。
+            self._view_fps_filter = _ResizeWatcher(host, self._fit_view_fps)
         self._scale_lane_overlays(self._lane_scale)
         gpw = self.game_preview_window
         gpw.set_view_extra(self.fps_label if self._view_fps else None)
+
+    #: Player の fps 表示の大きさ。ゲーム画面の幅 VIEW_FPS_BASE_W のときの
+    #: 箱(幅・高さ)・字・左上の余白(px)。画面の幅に比例させる
+    #: (利用者の指定 2026-11-19「FPSの表記の文字の大きさの比率を固定」)。
+    VIEW_FPS_BASE_W = 1280.0
+    VIEW_FPS_BOX = (74.0, 26.0)
+    VIEW_FPS_FONT_PX = 12.0
+    VIEW_FPS_MARGIN = (8.0, 6.0)
+
+    def view_fps_ratio(self):
+        """いまの画面の幅 / VIEW_FPS_BASE_W(fps 表示の倍率)。"""
+        w = self.game_preview_window.scaled_host.width()
+        return max(1, w) / self.VIEW_FPS_BASE_W
+
+    def _fit_view_fps(self):
+        """Player の fps 表示を、ゲーム画面の幅に対して決まった比で置く。
+        字は小数の大きさ(pt)で当てるので、整数への丸めで比がずれない。
+        CPU・GPU どちらの画面でも入れ物(ScaledHost)の幅は見えている絵の
+        幅なので、同じ式で足りる。"""
+        if not self._view_fps:
+            return
+        lbl = self.fps_label
+        k = self.view_fps_ratio()
+        bw, bh = self.VIEW_FPS_BOX
+        mx, my = self.VIEW_FPS_MARGIN
+        size = (max(1, round(bw * k)), max(1, round(bh * k)))
+        if (lbl.width(), lbl.height()) != size:
+            lbl.setFixedSize(*size)
+        f = lbl.font()
+        dpi = float(lbl.logicalDpiY() or 96)
+        pt = max(1.0, self.VIEW_FPS_FONT_PX * k * 72.0 / dpi)
+        if f.pixelSize() > 0 or abs(f.pointSizeF() - pt) > 1e-3:
+            f.setPointSizeF(pt)
+            lbl.setFont(f)
+        pos = (round(mx * k), round(my * k))
+        if (lbl.x(), lbl.y()) != pos:
+            lbl.move(*pos)
 
     def _lane_text_w(self, text):
         """レーンのボタンに text を入れるのに要る幅(原寸)。"""
