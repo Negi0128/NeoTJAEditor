@@ -21,6 +21,7 @@ settings._primary_settings_path = lambda: _CFG
 settings._fallback_settings_path = lambda: _CFG
 
 from gui_support import real_qt_test  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 
 
 def _wait(ms):
@@ -137,6 +138,51 @@ class SidebarTests(unittest.TestCase):
             lib.add_folder_path(root, 'TNDE')
             self.assertEqual([b.text() for b in lib.folder_navs], ['ポップス', 'アニメ', 'その他'])
             self.assertEqual(lib.current_section(), ('folder', g1))
+            lib.shutdown()
+            lib.deleteLater()
+
+
+    @real_qt_test
+    def test_category_head_collapses_its_genres(self):
+        """シミュレーターの見出しを押すと、その下のジャンルを畳む・開く。
+        畳んだ名前は player_collapsed に覚え、作り直しても畳んだまま。"""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        from neotja.player.library_view import CategoryHead, LibraryView
+        with tempfile.TemporaryDirectory() as d:
+            root, g1, g2 = _songs_root(d)
+            other = Path(d) / 'Other'
+            _tja(other / 'x.tja', 'X')
+            saves = []
+            cfg = {'master_volume': 0.0,
+                   'player_folders': [{'simulator': 'TNDE', 'path': root},
+                                      {'simulator': 'OpenTaiko', 'path': str(other)}]}
+            lib = LibraryView(cfg, lambda: saves.append(1))
+            lib.resize(1400, 900)
+            lib.show()
+            lib.show_default()
+            heads = lib.category_labels
+            self.assertTrue(all(isinstance(h, CategoryHead) for h in heads))
+            self.assertEqual(sorted(h.text() for h in heads), ['OpenTaiko', 'TNDE'])
+            tnde = next(h for h in heads if h.name == 'TNDE')
+            ot = next(h for h in heads if h.name == 'OpenTaiko')
+            self.assertEqual(len(tnde.navs), 3)
+            self.assertTrue(all(b.isVisible() for b in lib.folder_navs))
+            QTest.mouseClick(tnde, Qt.LeftButton, pos=QPoint(20, tnde.height() // 2))
+            self.assertTrue(tnde.collapsed)
+            self.assertTrue(all(not b.isVisible() for b in tnde.navs))
+            self.assertTrue(all(b.isVisible() for b in ot.navs))
+            self.assertEqual(cfg['player_collapsed'], ['TNDE'])
+            self.assertTrue(saves)
+            # 作り直しても畳んだまま。
+            lib.refresh_sidebar()
+            tnde = next(h for h in lib.category_labels if h.name == 'TNDE')
+            self.assertTrue(tnde.collapsed)
+            self.assertTrue(all(not b.isVisible() for b in tnde.navs))
+            QTest.mouseClick(tnde, Qt.LeftButton, pos=QPoint(20, tnde.height() // 2))
+            self.assertFalse(tnde.collapsed)
+            self.assertTrue(all(b.isVisible() for b in tnde.navs))
+            self.assertEqual(cfg['player_collapsed'], [])
             lib.shutdown()
             lib.deleteLater()
 

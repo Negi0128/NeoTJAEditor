@@ -863,6 +863,56 @@ class SortBar(QWidget):
         self.changed.emit(self.mode, self.reverse)
 
 
+class CategoryHead(QLabel):
+    """左の列のシミュレーター(カテゴリ)の見出し。押すとその下のジャンルを
+    畳む・開く。右端に小さな ▸/▾。"""
+
+    toggled = Signal(str, bool)   # (名前, 畳んだか)
+
+    def __init__(self, name, collapsed=False, parent=None):
+        super().__init__(name, parent)
+        self.name = name
+        self.setObjectName("category")
+        self.setCursor(Qt.PointingHandCursor)
+        self.collapsed = bool(collapsed)
+        #: この見出しの下の項目(NavButton)。
+        self.navs = []
+
+    def set_collapsed(self, on):
+        self.collapsed = bool(on)
+        for b in self.navs:
+            b.setVisible(not self.collapsed)
+        self.update()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.set_collapsed(not self.collapsed)
+            self.toggled.emit(self.name, self.collapsed)
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(COLORS["fg_dim"]))
+        cx, cy, r = self.width() - 12.0, self.height() / 2.0, 4.5
+        path = QPainterPath()
+        if self.collapsed:          # ▸
+            path.moveTo(cx - r * 0.6, cy - r)
+            path.lineTo(cx + r * 0.8, cy)
+            path.lineTo(cx - r * 0.6, cy + r)
+        else:                       # ▾
+            path.moveTo(cx - r, cy - r * 0.6)
+            path.lineTo(cx + r, cy - r * 0.6)
+            path.lineTo(cx, cy + r * 0.8)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.end()
+
+
 class _Sidebar(QWidget):
     """左の列。少し暗くして、右端に細い線。"""
 
@@ -1489,7 +1539,9 @@ class LibraryView(QWidget):
         for i, sim in enumerate(song_lists.simulators(self.cfg)):
             if i:
                 self.folder_box.addSpacing(20)
-            head = self._category_head(sim)
+            head = CategoryHead(sim, collapsed=sim in self._collapsed())
+            head.toggled.connect(self._on_category_toggled)
+            head.toggled.connect(self._pi)
             head.setContextMenuPolicy(Qt.CustomContextMenu)
             head.customContextMenuRequested.connect(
                 lambda pos, lbl=head, name=sim: self._category_menu(lbl, name, pos))
@@ -1517,9 +1569,25 @@ class LibraryView(QWidget):
                         lambda pos, btn=b: self._folder_menu(btn, pos))
                     self.folder_box.addWidget(b)
                     self.folder_navs.append(b)
+                    head.navs.append(b)
+            head.set_collapsed(head.collapsed)
         if isinstance(cur, tuple):
             for b in self.folder_navs:
                 b.setChecked(song_lists.path_key(b.path) == song_lists.path_key(cur[1]))
+
+    def _collapsed(self):
+        """畳んでいるシミュレーターの名前(設定 player_collapsed)。"""
+        got = self.cfg.get("player_collapsed")
+        return set(got) if isinstance(got, list) else set()
+
+    def _on_category_toggled(self, name, collapsed):
+        names = self._collapsed()
+        if collapsed:
+            names.add(name)
+        else:
+            names.discard(name)
+        self.cfg["player_collapsed"] = sorted(names)
+        self._save()
 
     def _sidebar_entries(self, root):
         key = song_lists.path_key(root)
@@ -1600,6 +1668,12 @@ class LibraryView(QWidget):
     def rename_category(self, old):
         name = self.ask_category(current=old, heading="名前を変更", ok_text="変更")
         if name and song_lists.rename_simulator(self.cfg, old, name):
+            names = self._collapsed()
+            if old in names:
+                # 畳んでいた見出しは、名前を変えても畳んだまま。
+                names.discard(old)
+                names.add(name)
+                self.cfg["player_collapsed"] = sorted(names)
             self._save()
             self._rebuild_folder_navs()
 
