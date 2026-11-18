@@ -294,6 +294,12 @@ class RecordBackgroundDialog(QDialog):
         bg_lay.addWidget(self.ed_path)
         for b in (btn_pick, self.btn_yt, btn_none):
             row.addWidget(b)
+        # YouTube から落とした動画が 720p 未満だったときだけ、その高さを出す。
+        self.lb_yt_res = QLabel()
+        self.lb_yt_res.setObjectName("YouTubeResolution")
+        self.lb_yt_res.hide()
+        self.ed_path.textChanged.connect(lambda _t: self.lb_yt_res.hide())
+        row.addWidget(self.lb_yt_res)
         row.addStretch(1)
         bg_lay.addLayout(row)
 
@@ -783,6 +789,7 @@ class RecordBackgroundDialog(QDialog):
             if self._closed:
                 return
             self.ed_path.setText(path)
+            self.show_youtube_height(getattr(worker, "video_height", None))
             self.setWindowTitle("録画の背景 — %s" % (title or ""))
 
         @_guarded
@@ -804,6 +811,16 @@ class RecordBackgroundDialog(QDialog):
             sig.connect(slot)
         prog.canceled.connect(worker.cancel)
         worker.start()
+
+    def show_youtube_height(self, height):
+        """落とした動画が低い解像度(720p 未満)なら、その値だけ出す。"""
+        from neotja.ytdlp_worker import MIN_VIDEO_HEIGHT
+        if height and int(height) < MIN_VIDEO_HEIGHT:
+            self.lb_yt_res.setText("%dp" % int(height))
+            self.lb_yt_res.show()
+        else:
+            self.lb_yt_res.clear()
+            self.lb_yt_res.hide()
 
     @_guarded
     def _guess_offset(self):
