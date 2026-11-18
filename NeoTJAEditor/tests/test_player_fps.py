@@ -81,17 +81,27 @@ class DockViewFpsScaleTests(unittest.TestCase):
     """fps 表示の字と箱は、ゲーム画面の幅に対して決まった比(CPU・GPU とも)。"""
 
     def _run(self, **gpu):
+        from PySide6.QtGui import QFontInfo
+        from PySide6.QtWidgets import QWidget
         from neotja.player.core import PlayerCore
         cfg = settings.default_settings()
         cfg.update(master_volume=0.0, **gpu)
         core = PlayerCore(cfg)
         dock = core.dock
         gpw = dock.game_preview_window
+        # Player の画面(PlayerHost)は QSS で「QWidget { font-size: 13px }」を
+        # 当てている(StartScreen._qss)。その中では setFont だけでは字が
+        # 変わらず 13px のままだった。同じ QSS の親の中に置いて確かめる。
+        holder = QWidget()
+        holder.setStyleSheet('QWidget { font-size: 13px; }')
+        holder.resize(2600, 1500)
+        gpw.setParent(holder)
         dpi = None
         try:
             for detail in (False, True):
                 gpw.set_view_only(True, with_bottom=detail)
                 dock.set_view_fps(True)
+                holder.show()
                 gpw.show()
                 rows = []
                 for w, h in ((480, 270), (1280, 720), (1920, 1009), (2560, 1440)):
@@ -100,6 +110,9 @@ class DockViewFpsScaleTests(unittest.TestCase):
                     lbl, host = dock.fps_label, gpw.scaled_host
                     dpi = float(lbl.logicalDpiY() or 96)
                     font_px = lbl.font().pointSizeF() * dpi / 72.0
+                    # 実際に使われる字(丸めた px)も比どおり。
+                    self.assertLessEqual(
+                        abs(QFontInfo(lbl.font()).pixelSize() - font_px), 1.0)
                     rows.append((host.width(), font_px, lbl.height(), lbl.x()))
                 base = dock.VIEW_FPS_BASE_W
                 for hw, font_px, lh, lx in rows:
@@ -112,16 +125,19 @@ class DockViewFpsScaleTests(unittest.TestCase):
                     self.assertLessEqual(abs(lx - dock.VIEW_FPS_MARGIN[0] * k), 0.51)
                 # 小さい画面で 7px に張り付かない(以前の下限)。
                 self.assertLess(rows[0][1], 7.0)
-            # 外すと Editor と同じ原寸の字(px)へ戻る。
+            # 外すと Editor と同じ作り(字の大きさを QSS に書かない)へ戻る。
             dock.set_view_fps(False)
             dock._scale_lane_overlays(1.0)
-            self.assertEqual(dock.fps_label.font().pixelSize(), 12)
+            self.assertNotIn('font-size', dock.fps_label.styleSheet())
         finally:
             core.stop_audio()
             core.shutdown()
             dock.chart_preview._timer.stop()
             gpw.close()
             dock.deleteLater()
+            gpw.setParent(None)
+            holder.close()
+            holder.deleteLater()
 
     @real_qt_test
     def test_ratio_cpu(self):

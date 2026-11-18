@@ -3529,9 +3529,11 @@ class PreviewDock(QDockWidget):
             f = lbl.font()
             f.setBold(True)
             lbl.setFont(f)
-            lbl.setStyleSheet(
+            self._view_fps_css = (
                 "color: #7ddc7d; background: %s; border: none; border-radius: 3px;"
                 " font-weight: bold;" % theme.THEMES["dark"]["toolbar_btn"])
+            self._view_fps_pt = None
+            lbl.setStyleSheet(self._view_fps_css)
         elif not on and self._view_fps:
             css, bold = getattr(self, "_fps_style_saved", (lbl.styleSheet(), lbl.font().bold()))
             f = lbl.font()
@@ -3575,12 +3577,16 @@ class PreviewDock(QDockWidget):
         size = (max(1, round(bw * k)), max(1, round(bh * k)))
         if (lbl.width(), lbl.height()) != size:
             lbl.setFixedSize(*size)
-        f = lbl.font()
         dpi = float(lbl.logicalDpiY() or 96)
-        pt = max(1.0, self.VIEW_FPS_FONT_PX * k * 72.0 / dpi)
-        if f.pixelSize() > 0 or abs(f.pointSizeF() - pt) > 1e-3:
-            f.setPointSizeF(pt)
-            lbl.setFont(f)
+        pt = round(max(1.0, self.VIEW_FPS_FONT_PX * k * 72.0 / dpi), 3)
+        if pt != getattr(self, "_view_fps_pt", None):
+            # **字の大きさは自分の QSS に書く。** Player の画面(PlayerHost)
+            # の QSS「QWidget { font-size: 13px }」(StartScreen._qss)が子へ
+            # 効くので、setFont だけでは 13px のまま動かなかった(Player を
+            # 実際に開いた窓で確認)。
+            self._view_fps_pt = pt
+            lbl.setStyleSheet("%s font-size: %.3fpt;" % (
+                getattr(self, "_view_fps_css", ""), pt))
         pos = (round(mx * k), round(my * k))
         if (lbl.x(), lbl.y()) != pos:
             lbl.move(*pos)
