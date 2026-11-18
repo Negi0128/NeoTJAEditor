@@ -274,6 +274,30 @@ class HostResultsTests(unittest.TestCase):
             host.deleteLater()
 
     @real_qt_test
+    def test_first_paint_already_has_final_layout(self):
+        """初めて結果画面を出したとき、最初に塗る時点でボタンが右下にある
+        (前の大きさのまま1コマ出て、配置が一瞬崩れて見えない)。"""
+        from neotja.player.results import ResultsPage
+        seen = []
+        orig = ResultsPage.paintEvent
+
+        def spy(page, ev):
+            seen.append((page.size(), page.btn_retry.geometry(), page.btn_back.geometry()))
+            orig(page, ev)
+        ResultsPage.paintEvent = spy
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                host, a, core = self._results_host(d)
+                r = host.results
+                self.assertTrue(seen)
+                self.assertEqual(seen[0], (r.size(), r.btn_retry.geometry(), r.btn_back.geometry()))
+                self.assertEqual(r.size(), host.body.contentsRect().size())
+                host.shutdown()
+                host.deleteLater()
+        finally:
+            ResultsPage.paintEvent = orig
+
+    @real_qt_test
     def test_esc_returns_to_library(self):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest

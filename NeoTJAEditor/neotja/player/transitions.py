@@ -10,9 +10,9 @@
 あとで結果画面などの切り替えにもそのまま使う。
 """
 
-from PySide6.QtCore import QEasingCurve, Qt, QVariantAnimation
+from PySide6.QtCore import QEasingCurve, QEvent, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QStackedWidget, QWidget
 
 
 class _FadeOverlay(QWidget):
@@ -58,6 +58,43 @@ class FadeStack(QStackedWidget):
         super().resizeEvent(ev)
         self._overlay.setGeometry(self.rect())
 
+    # ------------------------------------------------------------------
+    # 出す前に大きさを決める。QStackedWidget は**いま出ている画面だけ**に
+    # 大きさを渡すので、初めて出す画面は前の(既定の)大きさのまま1コマ
+    # 塗られ、resizeEvent で置く部品(結果画面のボタンなど)が一瞬ずれて
+    # 見えていた。切り替える前・絵に撮る前に、ここで大きさと中の配置を
+    # 済ませておく。
+    def presize(self, widget):
+        if widget is None:
+            return
+        r = self.contentsRect()
+        if r.width() <= 0 or r.height() <= 0:
+            return
+        if widget.geometry() != r:
+            widget.setGeometry(r)
+        if widget.testAttribute(Qt.WA_PendingResizeEvent):
+            # 隠れている部品の resizeEvent は「出す直前」まで待たされる。
+            # 配置をここで確定させるため、今すぐ届ける。
+            QApplication.sendEvent(widget, _resize_event(widget))
+            widget.setAttribute(Qt.WA_PendingResizeEvent, False)
+        QApplication.sendPostedEvents(widget, QEvent.LayoutRequest)
+        lay = widget.layout()
+        if lay is not None:
+            lay.activate()
+
+    def addWidget(self, widget):
+        idx = super().addWidget(widget)
+        self.presize(widget)
+        return idx
+
+    def setCurrentWidget(self, widget):
+        self.presize(widget)
+        super().setCurrentWidget(widget)
+
+    def setCurrentIndex(self, index):
+        self.presize(self.widget(index))
+        super().setCurrentIndex(index)
+
     def fade_to(self, widget, mode="cross", ms=350, done=None):
         """widget へフェードで切り替える。done は終わったときに呼ぶ。"""
         self._finish_now()
@@ -66,6 +103,7 @@ class FadeStack(QStackedWidget):
         self._ms = max(1, int(ms))
         ov = self._overlay
         ov.setGeometry(self.rect())
+        self.presize(widget)
         if mode == "cross":
             cur = self.currentWidget()
             ov.pixmap = cur.grab() if cur is not None else None
@@ -117,7 +155,7 @@ class FadeStack(QStackedWidget):
             return
         self._anim.stop()
         if self._target is not None:
-            QStackedWidget.setCurrentWidget(self, self._target)
+            self.setCurrentWidget(self._target)
         self._phase = None
         self._overlay.hide()
         self._overlay.pixmap = None
@@ -125,3 +163,8 @@ class FadeStack(QStackedWidget):
 
     def cancel(self):
         self._finish_now()
+
+
+def _resize_event(widget):
+    from PySide6.QtGui import QResizeEvent
+    return QResizeEvent(widget.size(), widget.size())
