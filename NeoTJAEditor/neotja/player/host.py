@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from neotja.player.difficulty import DifficultyPage
 from neotja.player.intro import IntroPage, IntroSequence
+from neotja.player.opened import OpenedPage
 from neotja.player.play_page import PlayPage
 from neotja.player.results import ResultsPage
 from neotja.player.transitions import FadeStack
@@ -114,7 +115,15 @@ class PlayerHost(QWidget):
         self._select_timer.timeout.connect(self._start_selected_preview)
         self._select_path = str()
         self.library.sound_requested.connect(self.sounds.play)
+        self.library.file_opened.connect(self.show_opened)
         self.body.addWidget(self.library)
+        # 「TJAを開く」(選ぶ・落とす)のあとの、その曲の画面。
+        self.opened = OpenedPage(config_data)
+        self.opened.sound_requested.connect(self.sounds.play)
+        self.opened.back_requested.connect(self._opened_back)
+        self.opened.add_requested.connect(self._opened_add)
+        self.opened.play_requested.connect(self._opened_play)
+        self.body.addWidget(self.opened)
         self.difficulty = DifficultyPage(config_data, save_cb)
         self.difficulty.back_requested.connect(self.show_library)
         self.difficulty.sound_requested.connect(self.sounds.play)
@@ -276,7 +285,8 @@ class PlayerHost(QWidget):
 
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""
-        full = page in (self.difficulty, self.intro, self.play_page, self.results)
+        full = page in (self.difficulty, self.intro, self.play_page, self.results,
+                        self.opened)
         if full:
             self.volume_popover.close_popover()
         self.top_bar.setVisible(not full)
@@ -286,6 +296,47 @@ class PlayerHost(QWidget):
         else:
             self.body.cancel()
             self.body.setCurrentWidget(page)
+
+    # ------------------------------------------------------------------
+    # 「TJAを開く」のあとの画面
+    def show_opened(self, path):
+        """開いた(選んだ・落とした)TJA の画面へフェードで。"""
+        if not path or not os.path.isfile(path):
+            return
+        path = os.path.normpath(os.path.abspath(path))
+        if self.body.currentWidget() not in (self.library, self.opened):
+            # 演奏・難易度選択などの途中で落とされた: 鳴っているものを止める
+            # (選曲の試聴はそのまま)。
+            self.stop_preview()
+        self._select_timer.stop()
+        self._select_path = str()
+        self._abort_sequence()
+        self.opened.set_song(path)
+        self._set_page(self.opened, fade="cross",
+                       done=lambda: self.opened.setFocus(Qt.OtherFocusReason))
+
+    def _opened_back(self):
+        self.library.refresh_recent()
+        self._set_page(self.library, fade="cross")
+
+    def _opened_add(self, path):
+        from neotja.player import song_lists
+        if song_lists.add_saved(self.cfg, path) or song_lists.is_saved(self.cfg, path):
+            try:
+                self._save_cb()
+            except Exception:  # noqa: BLE001
+                pass
+            self.opened.set_added(True)
+            # 保存済みの一覧は、次に開いたときに作り直される(_fill_saved)。
+            if self.library.current_section() == "saved":
+                self.library._fill_saved()
+
+    def _opened_play(self, path):
+        """すぐに再生: 難易度選択へ(試聴つき)。"""
+        self.library.mark_chosen(path)
+        self.current_song = path
+        self.song_chosen.emit(path)
+        self.show_difficulty(path, fade="cross")
 
     def show_difficulty(self, path, course=None, fade=None, restart=True):
         """難易度選択へ。course を渡すとそのコースを選んだ状態にする
@@ -1111,7 +1162,7 @@ class PlayerHost(QWidget):
             super().dropEvent(ev)
             return
         ev.acceptProposedAction()
-        self.library.choose(path)
+        self.show_opened(path)
 
     # ------------------------------------------------------------------
     def paintEvent(self, ev):

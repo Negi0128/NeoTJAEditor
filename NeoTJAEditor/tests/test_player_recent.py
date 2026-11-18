@@ -253,17 +253,17 @@ class RecentTests(unittest.TestCase):
             enter(mime(str(txt)))
             self.assertFalse(lib.open_card.drop_hot)
             self.assertIs(lib.pages.currentWidget(), lib.page_recent)
-            # 落とすと今までどおり難易度選択へ。選曲の画面は元に戻してある。
+            # 落とすと開いた曲の画面(player/opened.py)へ。選曲の画面は元に戻してある。
             enter(m)
             QApplication.sendEvent(host, QDropEvent(QPointF(pos), Qt.CopyAction, m,
                                                     Qt.LeftButton, Qt.NoModifier))
             self.assertFalse(lib.open_card.drop_hot)
-            self.assertIs(host.body.currentWidget(), host.difficulty)
+            self.assertIs(host.body.currentWidget(), host.opened)
             self.assertIs(lib.pages.currentWidget(), lib.page_recent)
-            # 難易度選択の上では画面を切り替えない(落とせば今までどおり開く)。
+            # 選曲以外の上では画面を切り替えない(落とせば今までどおり開く)。
             enter(m)
             self.assertFalse(lib.drop_hint_active())
-            self.assertIs(host.body.currentWidget(), host.difficulty)
+            self.assertIs(host.body.currentWidget(), host.opened)
             QApplication.sendEvent(host, QDragLeaveEvent())
             host.shutdown()
             host.deleteLater()

@@ -931,6 +931,8 @@ class LibraryView(QWidget):
     #: 曲の行を1回押した(選んだだけ。試聴を始める合図)。もう一度押すと
     #: song_chosen(難易度選択へ)。
     song_selected = Signal(str)
+    #: 「TJAを開く」でファイルを選んだ(開いた曲の画面へ)。
+    file_opened = Signal(str)
     #: 操作音の合図("pi")。鳴らすのは PlayerHost(ui_sound)。
     sound_requested = Signal(str)
 
@@ -1244,7 +1246,13 @@ class LibraryView(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self, "TJAを開く", start, "TJA (*.tja);;すべてのファイル (*.*)")
         if path:
-            self.choose(path)
+            self.file_opened.emit(path)
+
+    def mark_chosen(self, path):
+        """path を選んでいる曲にする(難易度選択へは進めない)。"""
+        if path:
+            self._chosen = path
+            self._mark_chosen()
 
     # ------------------------------------------------------------------
     # 一覧を作る
