@@ -118,6 +118,7 @@ class PlayerHost(QWidget):
         self._select_path = str()
         self.library.sound_requested.connect(self.sounds.play)
         self.library.file_opened.connect(self.show_opened)
+        self.library.list_switched.connect(self._on_list_switched)
         self.body.addWidget(self.library)
         # 「TJAを開く」(選ぶ・落とす)のあとの、その曲の画面。
         self.opened = OpenedPage(config_data)
@@ -276,6 +277,18 @@ class PlayerHost(QWidget):
             return
         # 同じ曲がもう流れていればそのまま(違う曲なら DEMOSTART から)。
         self.start_preview(path, restart=False)
+
+    def _on_list_switched(self):
+        """選曲で右の一覧を替えた(ジャンル・カテゴリ・最近/保存済み・検索の
+        結果など)。流している試聴は止める(難易度選択から戻ったときは
+        一覧を替えないので続いたまま)。"""
+        if self.body.currentWidget() is not self.library:
+            return
+        self._select_timer.stop()
+        self._select_path = str()
+        self._stop_demo_video()
+        if self._core is not None:
+            self._core.stop_audio()
 
     def _on_song_chosen(self, path):
         # 選んでいた曲をもう一度押した: 試聴は止めずに難易度選択へ。

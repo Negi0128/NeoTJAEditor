@@ -182,5 +182,67 @@ class LibraryPreviewTests(unittest.TestCase):
                 host.deleteLater()
 
 
+    @real_qt_test
+    def test_switching_list_stops_preview(self):
+        """一覧を替えたら(最近/保存済み・ジャンル・フォルダの段・検索の結果)
+        試聴を止める。難易度選択から戻ったときは止めない(上の試験)。"""
+        from neotja.player.host import PlayerHost
+        from neotja.player import song_lists
+        with tempfile.TemporaryDirectory() as d:
+            a = _chart(Path(d) / 'songs' / 'a', 'a', 12.5)
+            sub = Path(d) / 'songs' / 'sub'
+            _chart(sub / 'b', 'b', 3)
+            cfg = {'master_volume': 0.0,
+                   'player_folders': [{'simulator': 'TNDE', 'path': str(Path(d) / 'songs')}]}
+            song_lists.add_recent(cfg, a)
+            host = PlayerHost(cfg, lambda: None)
+            host.resize(1600, 900)
+            host.show()
+            host.on_shown()
+            lib = host.library
+            try:
+                _wait(50)
+                core = Core.instances[0]
+
+                def preview():
+                    lib._last_select = 0.0
+                    lib._chosen = ''
+                    lib.click_song(a)
+                    _wait(250)
+                    self.assertEqual(core.current, a)
+                    core.log.clear()
+
+                preview()
+                lib.show_section('saved')
+                self.assertIsNone(core.current)
+                self.assertIn(('stop',), core.log)
+                # 同じ一覧をもう一度押しただけなら替わっていない。
+                lib.show_section('recent')
+                preview()
+                lib.show_section('recent')
+                self.assertEqual(core.current, a)
+                # 登録フォルダ → その下の段 → 検索の結果。
+                lib.show_section('folder', str(Path(d) / 'songs'))
+                self.assertIsNone(core.current)
+                preview()
+                lib.open_dir(str(sub))
+                self.assertIsNone(core.current)
+                preview()
+                lib.page_folder.search.setText('b')
+                _wait(400)
+                self.assertIsNone(core.current)
+                # 選んでから押すまでの間に替えたら、試聴は始まらない。
+                lib._chosen = ''
+                lib._last_select = 0.0
+                lib.click_song(a)
+                lib.show_section('saved')
+                _wait(250)
+                self.assertIsNone(core.current)
+            finally:
+                host.shutdown()
+                host.close()
+                host.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -985,6 +985,9 @@ class LibraryView(QWidget):
     file_opened = Signal(str)
     #: 操作音の合図("pi")。鳴らすのは PlayerHost(ui_sound)。
     sound_requested = Signal(str)
+    #: 右に出す一覧を替えた(カテゴリ・ジャンル・フォルダの段・検索の結果)。
+    #: 試聴を止める合図(PlayerHost)。
+    list_switched = Signal()
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -1199,7 +1202,24 @@ class LibraryView(QWidget):
         """Player に入ったとき。履歴があれば最近開いた楽曲、無ければ TJAを開く。"""
         self.show_section("recent" if song_lists.recent(self.cfg) else "open")
 
+    def _list_key(self):
+        """いま右に出している一覧を表すもの(替わったかを見る)。"""
+        page = self.pages.currentWidget()
+        if page is self.page_folder:
+            q = self.page_folder.search.text().strip()
+            return (page, song_lists.path_key(self._folder_dir) if self._folder_dir else "", q)
+        return (page,)
+
+    def _note_switch(self, before):
+        if self._list_key() != before:
+            self.list_switched.emit()
+
     def show_section(self, kind, folder=None):
+        before = self._list_key()
+        self._show_section(kind, folder)
+        self._note_switch(before)
+
+    def _show_section(self, kind, folder=None):
         if kind == "open":
             self._check_nav(self.nav_open)
             self.pages.setCurrentWidget(self.page_open)
@@ -1221,7 +1241,7 @@ class LibraryView(QWidget):
             self._folder_root = folder
             self._hide_genres_in = (song_lists.path_key(folder)
                                     if getattr(nav, "entry", "") == "other" else "")
-            self.open_dir(folder)
+            self._open_dir(folder)
             self.pages.setCurrentWidget(self.page_folder)
 
     # ------------------------------------------------------------------
@@ -1689,6 +1709,11 @@ class LibraryView(QWidget):
 
     def open_dir(self, directory):
         """登録フォルダの中の一段を開く。"""
+        before = self._list_key()
+        self._open_dir(directory)
+        self._note_switch(before)
+
+    def _open_dir(self, directory):
         self._folder_dir = directory
         page = self.page_folder
         page.lbl_title.setText(song_lists.display_name(directory))
@@ -1697,6 +1722,7 @@ class LibraryView(QWidget):
         page.search.clear()
         page.search.blockSignals(False)
         self._stop_search()
+        self._searched = ""
         self.folder_list.clear()
         self._pending_rows = {}
         if os.path.isdir(directory):
@@ -1756,8 +1782,15 @@ class LibraryView(QWidget):
         self.search_list.clear()
         self.folder_stack.setCurrentWidget(self.folder_list)
 
+    #: 最後に一覧を出した検索の文字(替わったら試聴を止める)。
+    _searched = ""
+
     def _run_folder_search(self):
         q = self.page_folder.search.text().strip()
+        if q != self._searched:
+            self._searched = q
+            if self.pages.currentWidget() is self.page_folder:
+                self.list_switched.emit()
         if not q or not self._folder_dir:
             self._stop_search()
             return
