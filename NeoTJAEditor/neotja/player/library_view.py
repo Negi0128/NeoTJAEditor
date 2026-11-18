@@ -451,7 +451,64 @@ class GenreRow(GlassCard):
         super().keyPressEvent(ev)
 
 
-class CategoryDialog(QDialog):
+class _GlassDialog(QDialog):
+    """選曲で出す小さな窓の見た目(縁のない平らな板)。"""
+
+    def paintEvent(self, ev):
+        g = glass_colors()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(g["accent_border"], 1))
+        p.setBrush(QColor(COLORS["bg"]))
+        p.drawRoundedRect(rect, 14, 14)
+        p.setBrush(g["fill"])
+        p.drawRoundedRect(rect, 14, 14)
+        hl = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        hl.setColorAt(0, _c(g["highlight"], 0))
+        hl.setColorAt(0.5, g["highlight"])
+        hl.setColorAt(1, _c(g["highlight"], 0))
+        p.setPen(QPen(QBrush(hl), 1))
+        p.drawLine(QPointF(rect.left() + 14, rect.top() + 1),
+                   QPointF(rect.right() - 14, rect.top() + 1))
+        p.end()
+
+
+class ConfirmDialog(_GlassDialog):
+    """見出しと「キャンセル/実行」だけの確かめの窓(CategoryDialog と同じ見た目)。"""
+
+    def __init__(self, heading, ok_text, parent=None):
+        super().__init__(parent)
+        self.setObjectName("confirmDialog")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(400)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(30, 26, 30, 24)
+        v.setSpacing(0)
+        head = QLabel(heading)
+        head.setObjectName("dlgHead")
+        v.addWidget(head)
+        v.addSpacing(26)
+        bh = QHBoxLayout()
+        bh.setSpacing(10)
+        bh.addStretch(1)
+        self.btn_cancel = QPushButton("キャンセル")
+        self.btn_cancel.clicked.connect(self.reject)
+        bh.addWidget(self.btn_cancel)
+        self.btn_ok = QPushButton(ok_text)
+        self.btn_ok.setObjectName("primary")
+        self.btn_ok.clicked.connect(self.accept)
+        bh.addWidget(self.btn_ok)
+        v.addLayout(bh)
+        from neotja.start_screen import StartScreen
+        self.setStyleSheet(StartScreen._qss() + library_qss())
+        # 消すほうへ Enter 一つで進まないよう、最初はキャンセルに置く。
+        self.btn_cancel.setDefault(True)
+        self.btn_cancel.setFocus()
+
+
+class CategoryDialog(_GlassDialog):
     """登録フォルダのカテゴリ(シミュレーター名)を打つ小さな窓。
 
     候補は利用者がこれまでに付けた名前だけ。決まった名前の一覧は持たない
@@ -511,25 +568,6 @@ class CategoryDialog(QDialog):
 
     def _sync(self):
         self.btn_ok.setEnabled(bool(self.value()))
-
-    def paintEvent(self, ev):
-        g = glass_colors()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(g["accent_border"], 1))
-        p.setBrush(QColor(COLORS["bg"]))
-        p.drawRoundedRect(rect, 14, 14)
-        p.setBrush(g["fill"])
-        p.drawRoundedRect(rect, 14, 14)
-        hl = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        hl.setColorAt(0, _c(g["highlight"], 0))
-        hl.setColorAt(0.5, g["highlight"])
-        hl.setColorAt(1, _c(g["highlight"], 0))
-        p.setPen(QPen(QBrush(hl), 1))
-        p.drawLine(QPointF(rect.left() + 14, rect.top() + 1),
-                   QPointF(rect.right() - 14, rect.top() + 1))
-        p.end()
 
 
 class _FolderIcon(QWidget):
@@ -859,6 +897,12 @@ class LibraryView(QWidget):
         self.page_recent.add_sort(song_lists.SORT_MODES)
         self.page_recent.sort.changed.connect(
             lambda m, r: self._on_sort_changed(True, m, r))
+        self.page_recent.tools.addSpacing(6)
+        self.btn_clear_recent = QPushButton("履歴を消す")
+        self.btn_clear_recent.clicked.connect(self._pi)
+        self.btn_clear_recent.clicked.connect(self.ask_clear_recent)
+        self.page_recent.tools.addWidget(self.btn_clear_recent)
+        self._clear_dialog = None
         self.recent_list = self.page_recent.add_list()
         self.pages.addWidget(self.page_recent)
 
@@ -1099,9 +1143,34 @@ class LibraryView(QWidget):
                 self._pending_rows.setdefault(song_lists.path_key(e["path"]), []).append(row)
                 paths.append(e["path"])
         self.recent_list.apply_filter(self.page_recent.search.text())
+        self.btn_clear_recent.setEnabled(bool(song_lists.recent(self.cfg)))
         self._resort()
         if paths:
             self._start_worker(paths=paths)
+
+    def ask_clear_recent(self):
+        """「履歴を消す」。確かめの窓を出し(閉じるのを待たない)、
+        「消す」なら最近開いた楽曲を空にする。元の TJA には触らない。"""
+        if self._clear_dialog is not None or not song_lists.recent(self.cfg):
+            return
+        dlg = ConfirmDialog("履歴を消す", "消す", self)
+        self._clear_dialog = dlg
+        dlg.accepted.connect(self.clear_recent)
+        dlg.finished.connect(self._on_clear_dialog_closed)
+        dlg.open()
+
+    def _on_clear_dialog_closed(self, *_a):
+        dlg, self._clear_dialog = self._clear_dialog, None
+        if dlg is not None:
+            dlg.deleteLater()
+        self._pi()
+
+    def clear_recent(self):
+        song_lists.clear_recent(self.cfg)
+        self._save()
+        self._recent_stale = False
+        if self.pages.currentWidget() is self.page_recent:
+            self._fill_recent()
 
     def _fill_saved(self):
         self.saved_list.clear()

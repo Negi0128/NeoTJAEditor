@@ -173,6 +173,47 @@ class RecentTests(unittest.TestCase):
                 host.deleteLater()
 
     @real_qt_test
+    def test_clear_history_asks_then_clears(self):
+        from neotja.player import song_lists
+        from neotja.player.library_view import ConfirmDialog
+        with tempfile.TemporaryDirectory() as d:
+            a = _tja(Path(d) / 'a', 'A')
+            b = _tja(Path(d) / 'b', 'B')
+            cfg = {'master_volume': 0.0}
+            song_lists.add_recent(cfg, a)
+            song_lists.add_recent(cfg, b)
+            host = _host(cfg)
+            lib = host.library
+            self.assertIs(lib.pages.currentWidget(), lib.page_recent)
+            btn = lib.btn_clear_recent
+            self.assertTrue(btn.isVisible() and btn.isEnabled())
+            self.assertEqual(btn.text(), '履歴を消す')
+            # キャンセル: 何も消えない。窓は閉じるのを待たない(試験が止まらない)。
+            btn.click()
+            dlg = lib._clear_dialog
+            self.assertIsInstance(dlg, ConfirmDialog)
+            self.assertTrue(dlg.isVisible())
+            self.assertTrue(dlg.btn_cancel.isDefault())
+            dlg.btn_cancel.click()
+            _wait(30)
+            self.assertIsNone(lib._clear_dialog)
+            self.assertEqual(len(song_lists.recent(cfg)), 2)
+            self.assertEqual(len(_recent_titles(host)), 2)
+            # 消す: 一覧も空になり、ボタンは押せなくなる。元の TJA は残る。
+            btn.click()
+            lib._clear_dialog.btn_ok.click()
+            _wait(30)
+            self.assertEqual(song_lists.recent(cfg), [])
+            self.assertEqual(cfg['player_recent'], [])
+            self.assertEqual(_recent_titles(host), [])
+            self.assertFalse(btn.isEnabled())
+            self.assertTrue(os.path.isfile(a) and os.path.isfile(b))
+            btn.click()                                   # 空なら窓も出ない
+            self.assertIsNone(lib._clear_dialog)
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
     def test_record_dialog_announces_start(self):
         from neotja.dialogs.record_dialog import RecordDialog
         self.assertTrue(hasattr(RecordDialog, 'recording_started'))
