@@ -4562,11 +4562,16 @@ class PreviewDock(QDockWidget):
                 return
             self._last_pos_ui_wall = now
         self.waveform.set_position(ms / 1000.0)
+        # 試聴中(set_audition)は音だけ鳴らし、譜面は動かさない。ここで
+        # playing=True を渡すとレーンが走り出し、風船の破裂音
+        # (_scan_balloon_pops)が試聴に混ざる。ゲーム画面の波形・作譜ペインも
+        # 試聴の位置へは動かさない。
+        audition = bool(getattr(self, "_audition", False))
         # 再生中は作譜モードの波形をレーンの 120fps クロック(frame_cb →
         # set_position_smooth)で駆動するので、ここでは触らない(30fpsの生値と
         # 120fpsの外挿値が競合してカクつくのを避ける)。停止/一時停止/シーク中
         # だけこちらで反映する。
-        if not playing:
+        if not playing and not audition:
             self.game_waveform.set_position(ms / 1000.0)
             # 作譜ペインにも渡す。ここが抜けていて、停止中にカーソルを動かすと
             # 音源はシークされるのに、作譜ペインの赤い線と表示が元の位置に
@@ -4574,7 +4579,7 @@ class PreviewDock(QDockWidget):
             ce = getattr(self, "chart_edit", None)
             if ce is not None:
                 ce.set_position(ms / 1000.0)
-        self.chart_preview.set_playback(ms / 1000.0, playing)
+        self.chart_preview.set_playback(ms / 1000.0, playing and not audition)
         # 命令パネルの数値を、いまカーソルが居る場所の値に合わせ続ける
         # (利用者の指定 2026-10-03: 移動したとき・再生したときに、その位置の
         #  数値が出ていてほしい)。触っている欄は書き換えない(set_values)。
