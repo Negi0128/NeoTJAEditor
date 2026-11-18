@@ -119,6 +119,89 @@ def _ready(core, path):
 
 
 class CoreDemoTests(unittest.TestCase):
+    def test_video_shorter_loops_audio_at_shared_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _chart(Path(d), 'demo', 12.5)
+            core = _core(60.0)
+            core.play_demo(path, 12.5)
+            core.set_demo_video_duration(20.0)
+            self.assertFalse(core.demo_ready())
+            _ready(core, os.path.join(d, 'demo.ogg'))
+            self.assertTrue(core.demo_ready())
+            self.assertEqual(core.demo_start(), 12.5)
+            core.dock.audio.calls.clear()
+            core.dock.audio.pos = 19980
+            core._tick_loop()
+            self.assertEqual(core.dock.audio.calls, [('seek', 12500), ('play',)])
+            self.assertEqual(core.demo_position(), 12.5)
+
+    def test_video_duration_before_and_after_audio_ready_corrects_start(self):
+        for early in (False, True):
+            with self.subTest(early=early), tempfile.TemporaryDirectory() as d:
+                path = _chart(Path(d), 'demo', 40.0)
+                core = _core(60.0)
+                core.play_demo(path, 40.0)
+                if early:
+                    core.set_demo_video_duration(30.0)
+                _ready(core, os.path.join(d, 'demo.ogg'))
+                if not early:
+                    core.set_demo_video_duration(30.0)
+                self.assertEqual(core.demo_start(), 0.0)
+                self.assertEqual(core.demo_position(), 0.0)
+                self.assertEqual(core.dock.audio.calls[-2:], [('seek', 0), ('play',)])
+
+    def test_short_audio_and_new_demo_ignore_previous_video_length(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _chart(Path(d), 'demo', 5)
+            core = _core(15.0)
+            core.play_demo(path, 5)
+            core.set_demo_video_duration(100)
+            _ready(core, os.path.join(d, 'demo.ogg'))
+            core.dock.audio.calls.clear()
+            core.dock.audio.pos = 14980
+            core._tick_loop()
+            self.assertEqual(core.dock.audio.calls, [('seek', 5000), ('play',)])
+            core.set_demo_video_duration(2)
+            core.play_demo(path, 5)
+            _ready(core, os.path.join(d, 'demo.ogg'))
+            self.assertEqual(core.demo_start(), 5.0)
+            self.assertIsNone(core._demo_video_duration)
+            core.stop_audio()
+            self.assertFalse(core.demo_ready())
+            self.assertFalse(core.restart_demo())
+            self.assertFalse(core._loop_timer.running)
+
+    def test_video_duration_ignored_for_selection_bgm(self):
+        with tempfile.TemporaryDirectory() as d:
+            wave = Path(d) / 'bgm.ogg'
+            wave.write_bytes(b'audio')
+            core = _core(60.0)
+            core._start_audio(str(wave), 0, loop=True)
+            core.set_demo_video_duration(10)
+            _ready(core, str(wave))
+            core.dock.audio.calls.clear()
+            core.dock.audio.pos = 11000
+            core._tick_loop()
+            self.assertEqual(core.dock.audio.calls, [])
+            self.assertFalse(core.demo_ready())
+            self.assertFalse(core.restart_demo())
+
+    def test_removing_video_duration_keeps_continuous_intro_audio(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _chart(Path(d), 'demo', 40)
+            core = _core(60.0)
+            core.play_demo(path, 40)
+            core.set_demo_video_duration(30)
+            _ready(core, os.path.join(d, 'demo.ogg'))
+            self.assertEqual(core.demo_start(), 0.0)
+            core.dock.audio.pos = 7000
+            core.dock.audio.calls.clear()
+            core.set_demo_video_duration(None)
+            self.assertEqual(core.dock.audio.calls, [])
+            self.assertEqual(core.demo_position(), 7.0)
+            self.assertEqual(core.demo_start(), 0.0)
+            self.assertIsNone(core._demo_video_duration)
+
     def test_demostart_parse(self):
         from neotja.player.core import demo_start_seconds
         self.assertEqual(demo_start_seconds('DEMOSTART:12.5\n'), 12.5)

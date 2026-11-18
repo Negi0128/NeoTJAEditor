@@ -6,6 +6,7 @@
 
 import io
 import json
+import math
 import os
 
 from neotja import settings as settings_mod
@@ -111,6 +112,9 @@ class PlayerCore:
         self.branch_level = "M"
         # 選曲画面で流している音の折り返し位置。None なら何も流していない。
         self._loop = None
+        self._demo_active = False
+        self._demo_video_duration = None
+        self._demo_requested_start = 0.0
         # 「この音源が読めたら、この秒から鳴らす」という予約。
         self._pending = None
         # 最後に読み終わった音源。
@@ -185,6 +189,8 @@ class PlayerCore:
         鳴らす仕掛けは譜面の音源とまったく同じ(ミキサーに PCM を渡すだけ)。
         BGM 専用の再生経路を作ると、音量・出力デバイスの扱いが二重になる。
         """
+        self._demo_active = False
+        self._demo_video_duration = None
         if not self.cfg.get("player_select_bgm", True):
             return
         path = settings_mod.skin_dir() / "SelectBgm.ogg"
@@ -213,12 +219,84 @@ class PlayerCore:
 
         本家の選曲画面と同じ聞こえ方にするため。DEMOSTART が無ければ頭から。
         """
+        self._demo_video_duration = None
+        self._pending = None
+        self._loop = None
+        self._loop_timer.stop()
+        self._demo_active = True
+        try:
+            start = float(demo_start or 0.0)
+            start = max(0.0, start) if math.isfinite(start) else 0.0
+        except (TypeError, ValueError):
+            start = 0.0
+        self._demo_requested_start = start
         wave = _find_wave(path)
         if wave:
             self.dock.set_audition(True)
             self._apply_volume()
-            self._start_audio(wave, max(0.0, float(demo_start or 0.0)),
-                              loop=True)
+            self._start_audio(wave, start, loop=True)
+
+    def demo_position(self):
+        """試聴用の音声時計（秒）。背景映像もこの時計に従う。"""
+        return self.chart_position() if self.demo_ready() else 0.0
+
+    def demo_playing(self):
+        return self.demo_ready() and self.chart_playing()
+
+    def demo_ready(self):
+        return bool(getattr(self, "_demo_active", False) and self._loop
+                    and self._pending is None
+                    and self._ready == self._loop[1]
+                    and not self.dock.is_decoding())
+
+    def demo_start(self):
+        """音源・動画の尺で補正した折り返し位置。"""
+        if not getattr(self, "_demo_active", False) or not self._loop:
+            return 0.0
+        return float(self._loop[0])
+
+    def _demo_loop_duration(self, audio_duration):
+        video = getattr(self, "_demo_video_duration", None)
+        if getattr(self, "_demo_active", False) and video is not None:
+            return min(audio_duration, video) if audio_duration > 0 else video
+        return audio_duration
+
+    def set_demo_video_duration(self, seconds):
+        """動画が先に読み終わっても、音源の準備完了時に短い方へ揃える。"""
+        if not getattr(self, "_demo_active", False):
+            return
+        try:
+            value = float(seconds) if seconds is not None else None
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                value = None
+        except (TypeError, ValueError):
+            value = None
+        self._demo_video_duration = value
+        # 曲名表示へ移る際、動画だけ外しても試聴音声は連続させる。
+        # 元の DEMOSTART への復帰は次の play_demo に任せる。
+        if value is None:
+            return
+        if not self.demo_ready():
+            return
+        dur = self._demo_loop_duration(self.dock.duration_seconds())
+        start = self._demo_requested_start
+        if dur > 0 and start >= dur - 0.1:
+            start = 0.0
+        changed = start != self._loop[0]
+        self._loop = (start, self._loop[1])
+        if changed or (dur > 0 and self.demo_position() >= dur - 0.05):
+            self.restart_demo()
+
+    def restart_demo(self):
+        """試聴を共通の折り返し位置から再開。本編・選曲BGMには作用しない。"""
+        if not self.demo_ready():
+            return False
+        try:
+            self.dock.audio.seek(int(self.demo_start() * 1000))
+            self.dock.audio.play()
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     def play_chart(self, at_seconds=0.0):
         """本編を、音源が読めたところで自動的に流す。
@@ -227,6 +305,9 @@ class PlayerCore:
         無い。読み込みは裏で進むので、押せるようになるのを待つのではなく
         「読めたら鳴らす」と予約しておく。
         """
+        self._demo_active = False
+        self._demo_video_duration = None
+        self._loop = None
         # ここから先は本編。試聴モードを解く(譜面も一緒に走らせる)。
         self.dock.set_audition(False)
         self._apply_volume()
@@ -311,6 +392,10 @@ class PlayerCore:
         self._held = None
         self._chart_started = False
         self._loop = None
+        self._demo_active = False
+        self._demo_video_duration = None
+        self._demo_requested_start = 0.0
+        self._loop_timer.stop()
         try:
             self.dock.audio.pause()
         except Exception:  # noqa: BLE001
@@ -327,6 +412,7 @@ class PlayerCore:
         self._loop = (float(at_sec), wave_path) if loop else None
         if not self.dock.load_wave_only(wave_path):
             self._pending = None
+            self._loop = None
             return
         if not self.dock.is_decoding() and self._ready == wave_path:
             # 既に読み終わっているもの(同じ曲を選び直した等)。
@@ -343,6 +429,8 @@ class PlayerCore:
         # DEMOSTART が音源より後ろを指していたら頭から(そのまま飛ぶと、
         # 終わりの見張りが毎回そこへ戻して無音のまま回り続ける)。
         dur = self.dock.duration_seconds()
+        if loop:
+            dur = self._demo_loop_duration(dur)
         if dur > 0 and at >= dur - 0.1:
             at = 0.0
             if loop and self._loop is not None:
@@ -360,7 +448,9 @@ class PlayerCore:
         if self._loop is None:
             self._loop_timer.stop()
             return
-        dur = self.dock.duration_seconds()
+        if self._pending is not None or self.dock.is_decoding():
+            return
+        dur = self._demo_loop_duration(self.dock.duration_seconds())
         if dur <= 0:
             return
         pos = self.dock.audio.position() / 1000.0

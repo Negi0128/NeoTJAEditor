@@ -715,6 +715,7 @@ class DifficultyPage(QWidget):
         self.oni_side = "Oni"      # おにの枠でいま見せているもの(Oni / Edit)
         self._jacket = None
         self._bg = None
+        self._video_bg = None
         self._bg_scaled = None
         self.scale = 1.0
         self.setFocusPolicy(Qt.StrongFocus)
@@ -795,7 +796,28 @@ class DifficultyPage(QWidget):
             return None if pm.isNull() else pm
         self._jacket = load("jacket")
         self._bg = load("background")
+        self._video_bg = None
         self._bg_scaled = None
+
+    def set_video_frame(self, image):
+        """GUIスレッドで受け取った無音動画のフレームを表示する。
+
+        再生時計・音声・古い要求の破棄は呼び出し側が管理する。
+        静止画像は残し、動画終了時に同じ背景へ戻せるようにする。
+        """
+        if image is None or image.isNull():
+            return
+        self._video_bg = QPixmap.fromImage(image)
+        self._bg_scaled = None
+        if self.show_bg():
+            self.update()
+
+    def clear_video_frame(self):
+        """動画の表示だけを解除し、読み込み済みの静止背景へ戻す。"""
+        if self._video_bg is not None:
+            self._video_bg = None
+            self._bg_scaled = None
+            self.update()
 
     # ------------------------------------------------------------------
     # コース
@@ -980,11 +1002,12 @@ class DifficultyPage(QWidget):
     # ------------------------------------------------------------------
     # 描画
     def _bg_pixmap(self):
-        if self._bg is None:
+        source = self._video_bg if self._video_bg is not None else self._bg
+        if source is None:
             return None
         size = self.size()
         if self._bg_scaled is None or self._bg_scaled.size() != size:
-            scaled = self._bg.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            scaled = source.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             x = (scaled.width() - size.width()) // 2
             y = (scaled.height() - size.height()) // 2
             self._bg_scaled = scaled.copy(x, y, size.width(), size.height())

@@ -56,6 +56,7 @@ class PlayerHost(QWidget):
         self._save_cb = save_cb
         self._art_dialog = None
         self._art_pending = None
+        self._demo_video = None
         self._shutting_down = False
         self.current_song = ""
 
@@ -100,6 +101,7 @@ class PlayerHost(QWidget):
         self.difficulty.play_requested.connect(self._on_play)
         self.difficulty.record_requested.connect(self._on_record)
         self.difficulty.art_requested.connect(self._on_art)
+        self.difficulty.settings.changed.connect(self._on_demo_setting)
         #: 試聴を鳴らす係(PlayerCore)。初めて難易度選択を開いたときに作る。
         #: PlayerCore は裏に PreviewDock(音声エンジン一式)を持つので、
         #: 選曲だけで終わる人にまで音声デバイスを開かせない。
@@ -197,6 +199,7 @@ class PlayerHost(QWidget):
     def shutdown(self):
         """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
         self._shutting_down = True
+        self._stop_demo_video()
         self._art_pending = None
         if self._art_dialog is not None:
             self._art_dialog.reject()
@@ -228,6 +231,7 @@ class PlayerHost(QWidget):
     def start_preview(self, path):
         """選んだ曲を DEMOSTART から試聴する。前の曲は必ず先に止める
         (音源が無い曲へ移ったときに前の曲が鳴り続けないように)。"""
+        self._stop_demo_video()
         from neotja.player import core as core_mod
         try:
             content = core_mod.read_text(path)
@@ -242,9 +246,38 @@ class PlayerHost(QWidget):
         except Exception:  # noqa: BLE001
             pass
         core.play_demo(path, core_mod.demo_start_seconds(content))
+        self._start_demo_video(path)
+
+    def _stop_demo_video(self):
+        video, self._demo_video = self._demo_video, None
+        if video is not None:
+            video.stop()
+            video.deleteLater()
+
+    def _start_demo_video(self, path):
+        self._stop_demo_video()
+        if not self.cfg.get("player_show_bg", True) or self._core is None:
+            return
+        from neotja.player.song_lists import existing_art
+        from neotja.player.demo_video import DemoVideo, is_video_path
+        video_path = existing_art(self.cfg, path, "background")
+        if not is_video_path(video_path):
+            return
+        self._demo_video = DemoVideo(
+            self._core, self.difficulty.set_video_frame,
+            self.difficulty.clear_video_frame, self)
+        self._demo_video.start(video_path)
+
+    def _on_demo_setting(self, key, value):
+        if key == "player_show_bg" and self.body.currentWidget() is self.difficulty:
+            if value:
+                self._start_demo_video(self.difficulty.path)
+            else:
+                self._stop_demo_video()
 
     def stop_preview(self):
         """鳴っているものを全部止める(試聴・曲名表示の段取り・本編)。"""
+        self._stop_demo_video()
         self._abort_sequence()
         self._end_play()
         if self._core is not None:
@@ -260,6 +293,7 @@ class PlayerHost(QWidget):
         """Play のあと。曲名表示へフェードし、試聴は 2 秒そのまま→3 秒で
         0 へ。そのあいだに本編の音源を先読みし、5 秒(間に合わなければ準備が
         できるまで)で再生画面へ。"""
+        self._stop_demo_video()
         self._abort_sequence()
         core = self._ensure_core()
         self.intro.set_song(path, course, self.difficulty.levels.get(course))
