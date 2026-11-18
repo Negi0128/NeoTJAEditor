@@ -4266,10 +4266,17 @@ class PreviewDock(QDockWidget):
         DEMOSTART からの試聴。どちらも「譜面は関係なく音だけ鳴らしたい」ので、
         refresh_from_content(譜面の中身から全部を組み直す経路)は通せない。
 
-        同じ音源なら読み直さない(選び直すたびに鳴り止むのを避ける)。"""
+        同じ音源なら読み直さない(選び直すたびに鳴り止むのを避ける)。
+        ただし読み直さずに済むのは、**ミキサーがいま試聴用の中身(助走なし)を
+        持っている**ときだけ。本編を読んだあと(助走・余韻つきの PCM)や、
+        別の曲の本編に差し替わったあとに道筋だけ見て素通りすると、
+        DEMOSTART が助走ぶんずれたり、読み終わりの知らせが来ずに鳴らなく
+        なったりする。"""
         if not wave_path or not os.path.exists(wave_path):
             return False
-        if wave_path == self._audition_wave_path:
+        if wave_path == self._audition_wave_path and (
+                self._mixer_holds == ("audition", wave_path)
+                or (self._decode_audition and self._decoding_path == wave_path)):
             return True
         # **_current_wave_path は絶対に触らない。** あれは
         # refresh_from_content(譜面から全部を組み直す経路)が「同じ曲なら
@@ -4278,8 +4285,13 @@ class PreviewDock(QDockWidget):
         # 打音・メトロノームの予定まで飛ばされる**。譜面が1小節ぶんずれる、
         # という形で実際に起きた。試聴用の記録は自前で持つ。
         self._audition_wave_path = wave_path
+        if self._current_wave_path:
+            # ミキサーの中身が本編のものでなくなる。次に本編を読むときは、
+            # 道筋が同じでも読み直させる(助走つきの PCM を入れ直すため)。
+            self._wave_reload = True
         self.audio.load(wave_path)
-        self._start_waveform_decode(wave_path)
+        self._mixer_holds = None
+        self._start_waveform_decode(wave_path, audition=True)
         return True
 
     def is_decoding(self, wave_path=None):
@@ -4308,13 +4320,15 @@ class PreviewDock(QDockWidget):
         self.chart_preview.set_offset(self._grid_offset(offset))
         self.chart_edit.set_time_offset(self._edit_offset(offset))
 
-    def _with_lead(self, pcm, sr, path):
+    def _with_lead(self, pcm, sr, path, audition=False):
         """ミキサーへ渡す PCM の頭に助走ぶんの無音を足す。
 
         選曲画面の試聴/BGM(load_wave_only)には足さない — 譜面と関係なく
-        音だけ鳴らすので、助走は意味を持たない。"""
-        lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
-        tail = self._pcm_tail_sec if path == self._current_wave_path else 0.0
+        音だけ鳴らすので、助走は意味を持たない。本編と同じ音源を試聴で
+        読み直したとき(audition)も足さない。"""
+        chart = path == self._current_wave_path and not audition
+        lead = self._pcm_lead_sec if chart else 0.0
+        tail = self._pcm_tail_sec if chart else 0.0
         if pcm is None or (lead <= 0 and tail <= 0) or not sr:
             return pcm
         import numpy as np
@@ -4383,11 +4397,20 @@ class PreviewDock(QDockWidget):
         worker.start()
         return True
 
-    def cancel_predecode(self):
+    def cancel_predecode(self, restart=True):
+        """先読みを取り消す。本編の読み込みがその先読みを待っていたら、
+        ふつうの読み込みに切り替える(待ったまま _decoding_path が残ると、
+        いつまでも「読み込み中」のままになる)。"""
+        pre = self._pre
+        waiting = self._pre_waiting
         detach_worker(self._pre_worker)
         self._pre_worker = None
         self._pre = None
         self._pre_waiting = False
+        if waiting and pre is not None and self._decoding_path == pre[0]:
+            self._decoding_path = None
+            if restart:
+                self._start_waveform_decode(pre[0])
 
     def _on_predecoded(self, path, data):
         if self._pre is None or self._pre[0] != path:
@@ -4414,9 +4437,20 @@ class PreviewDock(QDockWidget):
         pcm, sr, peaks, dur, mips = pre[1]
         self._on_decoded(pre[0], pcm, sr, peaks, dur, mips)
 
-    def _start_waveform_decode(self, wave_path):
+    #: 読み込みを頼んだ回数。試聴(audition)が絡むときだけ、古い頼みの
+    #: 結果を捨てるのに使う(Editor の読み込みは今までどおり)。
+    _decode_seq = 0
+    #: いま最後に頼んだ読み込みが試聴用か。
+    _decode_audition = False
+    #: ミキサーがいま持っている中身 ("audition" | "chart", 道筋)。
+    _mixer_holds = None
+
+    def _start_waveform_decode(self, wave_path, audition=False):
+        self._decode_seq += 1
+        seq = self._decode_seq
+        self._decode_audition = bool(audition)
         pre = self._pre
-        if pre is not None and pre[0] == wave_path:
+        if pre is not None and pre[0] == wave_path and not audition:
             # 先読みしてあるもの。読み直さずにそれを渡す(届いていなければ待つ)。
             detach_worker(self._decode_worker)
             self._decode_worker = None
@@ -4440,27 +4474,36 @@ class PreviewDock(QDockWidget):
         worker = SongDecodeWorker(wave_path)
         worker.path = wave_path
         worker.decoded.connect(
-            lambda pcm, sr, peaks, dur, mips, p=wave_path: self._on_decoded(p, pcm, sr, peaks, dur, mips))
-        worker.failed.connect(lambda msg, p=wave_path: self._on_decode_failed(p, msg))
+            lambda pcm, sr, peaks, dur, mips, p=wave_path, a=bool(audition), s=seq:
+            self._on_decoded(p, pcm, sr, peaks, dur, mips, audition=a, seq=s))
+        worker.failed.connect(
+            lambda msg, p=wave_path, s=seq: self._on_decode_failed(p, msg, seq=s))
         self._decode_worker = worker
         worker.start()
 
-    def _on_decoded(self, path, pcm, sr, peaks, duration, mips):
+    def _on_decoded(self, path, pcm, sr, peaks, duration, mips, audition=False, seq=None):
         # 本編の音源だけでなく、選曲画面の試聴/BGM(load_wave_only)で読んだ
         # ものも受け取る。ここで弾いていたせいで、試聴用に読んだ音の長さが
         # いつまでも 0 のままになり、**BGM が鳴らなくなっていた**。
+        if (seq is not None and seq != self._decode_seq
+                and (audition or self._decode_audition)):
+            # 試聴と本編が同じ音源を読み合ったときの、追い越された結果。
+            # 受け取ると「読めた」の知らせが早く出て、違う中身(助走の有無)
+            # のまま鳴らしてしまう。最後に頼んだものだけを使う。
+            return
         if self._decoding_path == path:
             self._decoding_path = None
         if path not in (self._current_wave_path, self._audition_wave_path):
             return
+        chart = path == self._current_wave_path and not audition
         # ミップチェインは1本だけ作って両方の波形で共有する(コピーしない)。
         self._waveform_mips = mips
         # 3つの波形すべてに同じミップチェインを配る(コピーはしない)。
         # 渡し忘れると duration が 0 のままになり、波形が出ないだけでなく
         # 追従表示の view_start が曲頭にクランプされて位置が動かなくなる。
-        lead = self._pcm_lead_sec if path == self._current_wave_path else 0.0
+        lead = self._pcm_lead_sec if chart else 0.0
         tail = 0.0
-        if path == self._current_wave_path:
+        if chart:
             # 後ろの余韻は音源の長さが分かったここで決める。
             if pcm is not None and sr:
                 song = len(pcm) / float(sr)
@@ -4478,7 +4521,8 @@ class PreviewDock(QDockWidget):
         # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
         if self._mixer_active:
-            self.audio.set_song_pcm(self._with_lead(pcm, sr, path), sr)
+            self.audio.set_song_pcm(self._with_lead(pcm, sr, path, audition=not chart), sr)
+            self._mixer_holds = ("chart" if chart else "audition", path)
             # 頭に助走を足したぶん、開いた直後の赤い線は**音源の頭**へ
             # 置き直す(そうしないと助走の先頭に立って、譜面が右の外)。
             if lead > 0 and self.audio.position() <= 0:
@@ -4515,9 +4559,13 @@ class PreviewDock(QDockWidget):
                 pass
         detach_worker(self._decode_worker)
         self._decode_worker = None
-        self.cancel_predecode()
+        self.cancel_predecode(restart=False)
 
-    def _on_decode_failed(self, path, msg):
+    def _on_decode_failed(self, path, msg, seq=None):
+        # 失敗でも「読み込み中」は解く(残ると is_decoding() がずっと真で、
+        # 試聴の「読めたら鳴らす」予約がいつまでも待ち続ける)。
+        if self._decoding_path == path and (seq is None or seq == self._decode_seq):
+            self._decoding_path = None
         if path != self._current_wave_path:
             return
         self.status_label.setText(f"波形の読み込みに失敗しました: {msg}")

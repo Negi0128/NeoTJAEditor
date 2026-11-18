@@ -228,10 +228,14 @@ class PlayerHost(QWidget):
             self._core = factory(self.cfg)
         return self._core
 
-    def start_preview(self, path):
-        """選んだ曲を DEMOSTART から試聴する。前の曲は必ず先に止める
-        (音源が無い曲へ移ったときに前の曲が鳴り続けないように)。"""
-        self._stop_demo_video()
+    def start_preview(self, path, restart=True):
+        """選んだ曲を試聴する。
+
+        restart=True(既定): **必ず DEMOSTART から**始め直す。開き直し・
+        録画や設定から戻ったときはこちら。前の曲は必ず先に止める(音源が
+        無い曲へ移ったときに前の曲が鳴り続けないように)。
+        restart=False: 同じ曲の試聴が続いていれば位置を変えずにそのまま
+        (選曲画面から試聴を引き継ぐ場合のための口)。違う曲なら restart と同じ。"""
         from neotja.player import core as core_mod
         try:
             content = core_mod.read_text(path)
@@ -239,13 +243,19 @@ class PlayerHost(QWidget):
             self.stop_preview()
             return
         core = self._ensure_core()
-        core.stop_audio()
         # 音量は Editor と同じ設定(config_data)をそのたびに当て直す。
         try:
             core.dock.set_master_volume(float(self.cfg.get("master_volume", 1.0)))
         except Exception:  # noqa: BLE001
             pass
-        core.play_demo(path, core_mod.demo_start_seconds(content))
+        demo = core_mod.demo_start_seconds(content)
+        if not restart and getattr(core, "demo_active_for", None) and core.demo_active_for(path):
+            if self._demo_video is None:
+                self._start_demo_video(path)
+            return
+        self._stop_demo_video()
+        core.stop_audio()
+        core.play_demo(path, demo)
         self._start_demo_video(path)
 
     def _stop_demo_video(self):

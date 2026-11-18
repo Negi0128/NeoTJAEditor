@@ -218,6 +218,9 @@ class PlayerCore:
         """譜面の音源を DEMOSTART から流す。終わったらまた同じ所から。
 
         本家の選曲画面と同じ聞こえ方にするため。DEMOSTART が無ければ頭から。
+        **いつ呼んでも DEMOSTART から始め直す**(続きから鳴らすときは
+        continue_demo)。同じ音源を読み終えていても、前に止めた位置からは
+        鳴らさない。
         """
         self._demo_video_duration = None
         self._pending = None
@@ -231,10 +234,29 @@ class PlayerCore:
             start = 0.0
         self._demo_requested_start = start
         wave = _find_wave(path)
+        self._demo_wave = wave or None
         if wave:
             self.dock.set_audition(True)
             self._apply_volume()
             self._start_audio(wave, start, loop=True)
+
+    #: 試聴している音源(play_demo)。止めたら None。
+    _demo_wave = None
+
+    def demo_active_for(self, path):
+        """path の曲の試聴が続いている(鳴っている/読めたら鳴る)か。"""
+        wave = _find_wave(path)
+        return bool(wave and getattr(self, "_demo_active", False)
+                    and self._demo_wave == wave)
+
+    def continue_demo(self, path, demo_start):
+        """同じ曲の試聴が続いていればそのまま(位置も変えない)。違えば
+        play_demo と同じく DEMOSTART から。続けたら False、始め直したら True。"""
+        if self.demo_active_for(path):
+            return False
+        self.stop_audio()
+        self.play_demo(path, demo_start)
+        return True
 
     def demo_position(self):
         """試聴用の音声時計（秒）。背景映像もこの時計に従う。"""
@@ -307,6 +329,7 @@ class PlayerCore:
         """
         self._demo_active = False
         self._demo_video_duration = None
+        self._demo_wave = None
         self._loop = None
         # ここから先は本編。試聴モードを解く(譜面も一緒に走らせる)。
         self.dock.set_audition(False)
@@ -395,6 +418,7 @@ class PlayerCore:
         self._demo_active = False
         self._demo_video_duration = None
         self._demo_requested_start = 0.0
+        self._demo_wave = None
         self._loop_timer.stop()
         try:
             self.dock.audio.pause()

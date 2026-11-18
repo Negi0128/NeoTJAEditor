@@ -78,7 +78,70 @@ def _close(host):
     host.deleteLater()
 
 
-class AuditionLaneTests(unittest.TestCase):
+class ReopenStartsAtDemoStartTests(unittest.TestCase):
+    @real_qt_test
+    def test_reopen_same_song_restarts_from_demostart(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, wa = _song(Path(d) / 'a', 'a', demostart=10)
+            b, _wb = _song(Path(d) / 'b', 'b', demostart=4)
+            host = _host()
+            try:
+                host.library.choose(a)
+                core = host._core
+                self.assertTrue(_until(core.chart_playing))
+                _wait(1200)
+                self.assertGreater(core.chart_position(), 10.5)
+                host.difficulty.btn_back.click()
+                _wait(200)
+                self.assertFalse(core.chart_playing())
+                # 1) そのまま開き直す → DEMOSTART から(止めた所からではない)。
+                host.library.choose(a)
+                self.assertTrue(_until(core.chart_playing))
+                _wait(150)     # シークは音声スレッドが次の回で反映する
+                self.assertLess(core.chart_position(), 10.5)
+                self.assertGreaterEqual(core.chart_position(), 9.9)
+                # 2) 本編(助走つき)を読んだあとでも、試聴は助走なしで DEMOSTART。
+                host.stop_preview()
+                self.assertTrue(core.load(a, course_key='Oni'))
+                self.assertTrue(_until(core.chart_ready))
+                self.assertEqual(core.dock._mixer_holds, ('chart', wa))
+                lead = core.dock._pcm_lead_sec
+                self.assertGreater(lead, 0)
+                host.show_difficulty(a)
+                self.assertTrue(_until(lambda: core.chart_playing()
+                                       and core.dock._mixer_holds == ('audition', wa)))
+                _wait(150)
+                self.assertAlmostEqual(core.dock.duration_seconds(), 20.0, delta=0.05)
+                self.assertGreaterEqual(core.chart_position(), 9.9)
+                self.assertLess(core.chart_position(), 10.6)
+                # 次に本編を読むときは読み直す(助走つきへ戻る)。
+                host.stop_preview()
+                self.assertTrue(core.load(a, course_key='Oni'))
+                self.assertTrue(core.dock.is_decoding())
+                self.assertTrue(_until(core.chart_ready))
+                self.assertEqual(core.dock._mixer_holds, ('chart', wa))
+                self.assertGreater(core.dock.duration_seconds(), 20.0 + lead - 0.05)
+                # 3) 別の曲を挟んでも同じ。
+                host.show_difficulty(b)
+                self.assertTrue(_until(core.chart_playing))
+                host.show_difficulty(a)
+                self.assertTrue(_until(lambda: core.chart_playing()
+                                       and core.dock._mixer_holds == ('audition', wa)))
+                _wait(150)
+                self.assertLess(core.chart_position(), 10.6)
+                # 4) 続ける口(restart=False)は同じ曲なら位置を変えない。
+                _wait(800)
+                p0 = core.chart_position()
+                host.start_preview(a, restart=False)
+                _wait(50)
+                self.assertGreaterEqual(core.chart_position(), p0)
+                self.assertTrue(core.chart_playing())
+                host.start_preview(a)          # 既定は DEMOSTART から
+                _wait(150)
+                self.assertLess(core.chart_position(), p0)
+            finally:
+                _close(host)
+
     @real_qt_test
     def test_audition_never_runs_the_lane_or_pops_balloons(self):
         with tempfile.TemporaryDirectory() as d:
@@ -107,6 +170,42 @@ class AuditionLaneTests(unittest.TestCase):
                 self.assertTrue(cp._playing)
             finally:
                 _close(host)
+
+
+class DecodeBookkeepingTests(unittest.TestCase):
+    @real_qt_test
+    def test_failed_decode_and_cancelled_predecode_do_not_stay_decoding(self):
+        from neotja.player.core import PlayerCore
+        with tempfile.TemporaryDirectory() as d:
+            a, wa = _song(Path(d) / 'a', 'a')
+            cfg = settings.default_settings()
+            cfg.update(master_volume=0.0, gpu_render=False)
+            core = PlayerCore(cfg)
+            dock = core.dock
+            try:
+                dock._decoding_path = wa
+                dock._on_decode_failed(wa, 'broken', seq=dock._decode_seq)
+                self.assertFalse(dock.is_decoding())
+                # 本編の読み込みが先読みを待っている最中に取り消された。
+                dock._pre = [wa, None]
+                dock._pre_waiting = True
+                dock._decoding_path = wa
+                calls = []
+                orig = dock._start_waveform_decode
+                dock._start_waveform_decode = lambda p, audition=False: calls.append(p)
+                dock.cancel_predecode()
+                self.assertEqual(calls, [wa])          # ふつうに読み直す
+                dock._pre, dock._pre_waiting, dock._decoding_path = [wa, None], True, wa
+                dock.cancel_predecode(restart=False)
+                self.assertEqual(calls, [wa])
+                self.assertFalse(dock.is_decoding())
+                dock._start_waveform_decode = orig
+            finally:
+                core.stop_audio()
+                core.shutdown()
+                dock.chart_preview._timer.stop()
+                dock.game_preview_window.close()
+                dock.deleteLater()
 
 
 if __name__ == '__main__':
