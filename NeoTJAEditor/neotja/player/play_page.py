@@ -11,7 +11,7 @@
 を出す合図を出す。止める・流すは PlayerHost がやる。
 """
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -33,6 +33,10 @@ class PlayPage(QWidget):
         self.menu = PauseMenu(self)
         #: 詳細モード(下に作譜ペイン・操作できる)か。
         self.detail = False
+        self._pause_game_frame = None
+        self._backdrop_timer = QTimer(self)
+        self._backdrop_timer.setSingleShot(True)
+        self._backdrop_timer.timeout.connect(self._refresh_menu_backdrop)
 
     def attach(self, gpw, native=False, key_cb=None):
         """再生ウィンドウをこの画面の子にする(1回だけ)。操作は締める。"""
@@ -86,18 +90,39 @@ class PlayPage(QWidget):
         """メニューを出す。backdrop は止めた瞬間の画面(GL の窓のときだけ。
         native な窓の上ではふつうのウィジェットが透けないので、絵を敷く)。"""
         rect = None
+        self._pause_game_frame = backdrop
         if self.native_gl:
-            # GL の窓より前に出すには、メニュー自身も native にする。
             self.menu.setAttribute(Qt.WA_NativeWindow, True)
-            if self.gpw is not None:
-                rect = QRectF(self.gpw.geometry())
-                sh = getattr(self.gpw, "scaled_host", None)
-                if sh is not None:
-                    # 絵はゲーム画面ぶんだけ(詳細モードでは下に作譜ペインがある)。
-                    rect = QRectF(QRect(sh.mapTo(self, QPoint(0, 0)), sh.size()))
+            backdrop, rect = self._compose_pause_backdrop()
         self.menu.open(backdrop, rect)
 
+    def _compose_pause_backdrop(self):
+        """Qtの作譜ペインとGPU停止画像を同じ画面へ合成する。"""
+        g = self.gpw
+        if g is None:
+            return None, None
+        # grabだけではnative GLが抜けるため、保存済みGPUフレームで補う。
+        image = g.grab().toImage()
+        frame = self._pause_game_frame
+        if frame is not None and not frame.isNull():
+            sh = getattr(g, "scaled_host", None)
+            target = (QRectF(QRect(sh.mapTo(g, QPoint(0, 0)), sh.size()))
+                      if sh is not None else QRectF(g.rect()))
+            painter = QPainter(image)
+            painter.drawImage(target, frame)
+            painter.end()
+        return image, QRectF(g.geometry())
+
+    def _refresh_menu_backdrop(self):
+        if self.native_gl and self.menu.is_open():
+            image, rect = self._compose_pause_backdrop()
+            self.menu.backdrop = image
+            self.menu.backdrop_rect = rect
+            self.menu.update()
+
     def hide_menu(self):
+        self._backdrop_timer.stop()
+        self._pause_game_frame = None
         self.menu.close_menu()
 
     def menu_open(self):
@@ -131,6 +156,7 @@ class PlayPage(QWidget):
         self._fit()
         if self.menu.is_open():
             self.menu.setGeometry(self.rect())
+            self._backdrop_timer.start(0)
 
     def eventFilter(self, obj, ev):
         # 再生ウィンドウが自分で大きさを取り直したら(モード・打音表記の
@@ -144,6 +170,8 @@ class PlayPage(QWidget):
         if g is not None:
             g.move(max(0, (self.width() - g.width()) // 2),
                    max(0, (self.height() - g.height()) // 2))
+            if self.menu.is_open():
+                self._backdrop_timer.start(0)
 
     def _fit(self):
         g = self.gpw
