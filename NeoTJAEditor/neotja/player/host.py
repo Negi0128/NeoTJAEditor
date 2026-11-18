@@ -274,9 +274,8 @@ class PlayerHost(QWidget):
         video_path = existing_art(self.cfg, path, "background")
         if not is_video_path(video_path):
             return
-        self._demo_video = DemoVideo(
-            self._core, self.difficulty.set_video_frame,
-            self.difficulty.clear_video_frame, self)
+        self._demo_video = self._make_video(
+            self.difficulty.set_video_frame, self.difficulty.clear_video_frame)
         self._demo_video.start(video_path)
 
     def _on_demo_setting(self, key, value):
@@ -306,10 +305,13 @@ class PlayerHost(QWidget):
         """Play のあと。曲名表示へフェードし、試聴は 2 秒そのまま→3 秒で
         0 へ。そのあいだに本編の音源を先読みし、5 秒(間に合わなければ準備が
         できるまで)で再生画面へ。"""
-        self._stop_demo_video()
         self._abort_sequence()
         core = self._ensure_core()
         self.intro.set_song(path, course, self.difficulty.levels.get(course))
+        # 背景動画は止めずに曲名表示へ引き継ぐ(難易度選択・結果画面で流して
+        # いたもの)。流していなければ、ここから無音で流す。
+        prev_clear = self._video_handoff(path, self.intro.set_video_frame,
+                                         self.intro.clear_video_frame)
         try:
             core.predecode(path)
         except Exception:  # noqa: BLE001
@@ -317,15 +319,58 @@ class PlayerHost(QWidget):
         base = float(self.cfg.get("preview_volume", 0.8) or 0.0)
         seq = IntroSequence(
             set_volume=self._set_demo_volume, base_volume=base,
-            stop_demo=core.stop_audio,
+            stop_demo=lambda: self._stop_demo_audio(core),
             begin_load=lambda: self._begin_load(path, course),
             is_ready=core.chart_ready, parent=self)
         seq.finished.connect(lambda: self._enter_play(path, course))
         seq.failed.connect(lambda: self._intro_failed(path))
         self._seq = seq
         self._set_page(self.intro, fade="cross")
+        if prev_clear is not None:
+            # 前の画面の絵は、クロスフェード用に撮ったあとで外す。
+            prev_clear()
         self.intro.setFocus()
         seq.start()
+
+    def _stop_demo_audio(self, core):
+        """曲名表示の5秒目。試聴を止め、背景動画は自分の時計で流し続ける。"""
+        video = self._demo_video
+        if video is not None:
+            video.free_run()
+        core.stop_audio()
+
+    def _bg_video_path(self, path):
+        """曲の背景が動画で、背景を出す設定なら、その道。でなければ ""。"""
+        if not self.cfg.get("player_show_bg", True):
+            return ""
+        from neotja.player.song_lists import existing_art
+        from neotja.player.demo_video import is_video_path
+        p = existing_art(self.cfg, path, "background")
+        return p if is_video_path(p) else ""
+
+    #: 背景動画を作る呼び出し(試験で差し替える)。None なら DemoVideo。
+    video_factory = None
+
+    def _make_video(self, frame_cb, clear_cb):
+        factory = self.video_factory
+        if factory is None:
+            from neotja.player.demo_video import DemoVideo as factory
+        return factory(self._core, frame_cb, clear_cb, self)
+
+    def _video_handoff(self, path, frame_cb, clear_cb):
+        """流している背景動画の渡し先を替える。同じ動画でなければ止めて、
+        無音・自分の時計で流し直す。前の渡し先の「外す」を返す(無ければ None)。"""
+        want = self._bg_video_path(path)
+        video = self._demo_video
+        if video is not None and want and getattr(video, "path", "") == want:
+            prev = getattr(video, "_clear_callback", None)
+            video.set_targets(frame_cb, clear_cb)
+            return prev
+        self._stop_demo_video()
+        if want:
+            self._demo_video = self._make_video(frame_cb, clear_cb)
+            self._demo_video.start(want, free=True)
+        return None
 
     def _set_demo_volume(self, v):
         core = self._core
@@ -350,6 +395,7 @@ class PlayerHost(QWidget):
         """準備ができた。黒を挟んで再生画面へ移り、ふつうの頭から流す
         (助走・OFFSET は Editor のプレビューと同じ決まり。DEMOSTART ではない)。"""
         self._seq = None
+        self._stop_demo_video()
         core = self._core
         if core is None:
             return

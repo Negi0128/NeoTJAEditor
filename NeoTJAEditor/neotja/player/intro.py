@@ -126,8 +126,24 @@ class IntroPage(QWidget):
         self.level = None
         self._jacket = None
         self._bg = None
+        self._video_bg = None
         self._bg_scaled = None
         self.setFocusPolicy(Qt.StrongFocus)
+
+    def set_video_frame(self, image):
+        """背景動画の1コマ(PlayerHost の DemoVideo から)。静止画より優先する。"""
+        if image is None or image.isNull():
+            return
+        self._video_bg = QPixmap.fromImage(image)
+        self._bg_scaled = None
+        if self.cfg.get("player_show_bg", True):
+            self.update()
+
+    def clear_video_frame(self):
+        if self._video_bg is not None:
+            self._video_bg = None
+            self._bg_scaled = None
+            self.update()
 
     def set_song(self, path, course, level):
         info = song_lists.song_info(path)
@@ -137,9 +153,10 @@ class IntroPage(QWidget):
         self.level = level
 
         def load(kind):
+            from neotja.player.demo_video import is_video_path
             p = song_lists.existing_art(self.cfg, path, kind)
-            if not p:
-                return None
+            if not p or is_video_path(p):
+                return None          # 動画は DemoVideo が1コマずつ渡す
             pm = QPixmap(p)
             return None if pm.isNull() else pm
         self._jacket = load("jacket")
@@ -180,11 +197,12 @@ class IntroPage(QWidget):
         self._bg_scaled = None
 
     def _bg_pixmap(self):
-        if self._bg is None:
+        source = self._video_bg if self._video_bg is not None else self._bg
+        if source is None:
             return None
         size = self.size()
         if self._bg_scaled is None or self._bg_scaled.size() != size:
-            sc = self._bg.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            sc = source.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             x = (sc.width() - size.width()) // 2
             y = (sc.height() - size.height()) // 2
             self._bg_scaled = sc.copy(x, y, size.width(), size.height())
