@@ -1,3 +1,14 @@
+## 2026-11-18 Player 不具合まとめ対応 第2弾（Claude）
+
+項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
+
+- 10 音量: 選曲の上の段の右にスピーカー（押すと小さな板）、難易度設定と途中メニュー（4項目の下）に「全体／曲／効果音」の3段（`player/volume.py`）。キーは Editor と同じ `master_volume` / `preview_volume` / `sfx_volume`。変えたら `PlayerHost.set_audio_level` が設定へ書き、Player と Editor の音（`editor_audio_cb` → `MainWindow._apply_volumes_from_config`。Editor の欄も動く）へすぐ当て、保存は400ms後にまとめて1回。Player を出るときに保存を済ませる。`PlayerCore.apply_audio_settings` が音量・打音WAV・ワイヤレス調整・出力デバイスを当て直す（試聴開始・本編の前・音量変更時）。デバイスの開き直しは rescan しない（同じプロセスの Editor の出力まで無効になるため）。途中メニューで動かしても止めたまま。
+- 16 背景動画のずれ: 実測で、1080p・キーフレーム間隔250の H264 は試聴の音より常に約+45ms 先（0.25秒のシーク閾値では直らない）。ずれを「届いたフレームの時刻 − 音源の時計（出力遅延とワイヤレス調整を引いた位置）」で測り、20ms 以上は再生速度を ±3% まで変えて寄せ、8ms 未満で1倍へ。0.4秒超え・折り返し・始めだけシーク。対策後は平均+10ms 前後（1フレーム未満）。
+- 8 試聴の出だし: DEMOSTART から10秒だけ先に読んで（ffmpeg -ss/-t）、曲の長さぶんの無音の入れ物に置いて鳴らし、全体が読めたら位置を保ったまま差し替える（ミキサーの `song_swap`、`PreviewDock.start_audition_segment`）。読み終わった曲は最大3曲・300MB まで持つ（`audio_engine.DecodeCache`。Player の PreviewDock だけ）。試聴・曲名表示の先読み・本編で読み直さない。本編は持っている PCM に助走・余韻を足して渡す。Player を出たら手放す。実測（3.0MB・3分50秒の ogg）: 初めての曲 1282ms → 約170ms、戻った曲 1270ms → 約14ms。
+- 6 選曲で試聴: 曲の行を1回押すと選ぶだけ（水色の縁）で、150ms 後にその曲の DEMOSTART から試聴（続けて押したら最後の曲だけ）。選んでいる曲をもう一度押す（Enter も同じ）と難易度選択へ、試聴は続けたまま（`restart=False`）。選んだ直後150ms の2回目は無視。難易度選択から戻っても試聴は止めない（背景動画は止める）。Player を出たら止める。`PlayerCore` は選曲が出たときに裏で作る。TJAを開く・落としたときは今までどおり直接難易度選択へ。
+- 試験（新規）: `test_player_volume`、`test_player_fast_preview`、`test_player_library_preview`、`test_player_demo_video` に追従の2件。「戻る」で試聴を止めない仕様に合わせて `test_player_preview` / `test_player_audition` / `test_player_difficulty` を直した。実設定（settings.json）は変更なし。
+- 残り: 背景動画は画面の更新ぶん、実際はさらに少し遅れて見える。耳と目での確認をしてほしい。試験の後始末で、読み込み中に PreviewDock を消すと波形の「C++ object already deleted」が出ることがある（試験だけ。アプリでは PreviewDock を途中で消さない）。
+
 ## 2026-11-18 Player 不具合まとめ対応 第1弾（Claude）
 
 項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
