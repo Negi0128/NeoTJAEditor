@@ -1,3 +1,12 @@
+## 2026-11-19 FPS/詳細モード数値（Claude）
+
+項目ごとにコミット・push 済み（432cde4・77db2bd / b0f395c）。版上げ・ビルド・リリースはしていない。
+
+- FPS 表示の比: Player の fps 表示（`set_view_fps`）の箱・字・左上の余白を、ゲーム画面（ScaledHost）の幅に比例させる（幅 1280 で 74×26・字 12px・余白 8,6。`PreviewDock._fit_view_fps`、大きさが変わるたびに当て直す）。字は小数の pt で**自分の QSS に書く** — PlayerHost の QSS「QWidget { font-size: 13px }」（StartScreen._qss）が子へ効き、setFont では 13px のまま動いていなかった（箱だけ伸びていた）のが元の不具合。CPU・QOpenGLWidget・native GL の窓で同じ比を確認。外すと Editor と同じ作りへ戻る（Editor は呼ばない）。
+- 詳細モードの数値: `value_readout.ValueReadout` を作り直し、作譜モードの命令パネルと同じ色・字（枠 rgba(20,24,34,220)・線 #33405c・見出し #8fa3c0 12px・欄 #10141d/#2e3a50・値 14px 白）で「BPM」「拍子」（欄2つと /）「SCROLL」「見た目BPM」の4つの独立した枠に。矢印・追加/変更ボタンは無し、値に合わせた幅（見本より長い値が来たら広げる）。値が変わった枠だけ縁を #7aa2f7 で光らせて 0.7 秒で戻す。表記は命令パネルと同じ桁（BPM 3桁・SCROLL 3桁・見た目BPM 1桁）。拍子は `_measure_times_of` から（命令パネルと同じ）。
+- 試験: `test_player_fps`（比の3件: CPU / GL widget / native、13px の QSS の親の中で）、`test_player_value_readout`（枠ごとの光り・4枠・倍率）。実設定（settings.json）は変更なし。
+- 画像（1920×1009・CPU 描画）: scratchpad の `fpsval/` に fv_detail_readout / fv_detail_flash（と _crop）/ fv_detail_small_window（1100×640 の窓）。
+
 ## 2026-11-19 Player 不具合まとめ対応 第4弾（Claude）
 
 項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
