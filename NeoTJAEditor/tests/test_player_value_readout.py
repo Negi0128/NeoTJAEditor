@@ -1,4 +1,4 @@
-"""詳細モードの右上の数字(BPM・HS・見た目BPM)。値が変わったら縁が青く光る。
+"""詳細モードの右上の枠(BPM・拍子・SCROLL・見た目BPM)。値が変わった枠は縁が青く光る。
 
 実行: アプリのフォルダで `PYTHONPATH=. .venv/Scripts/python.exe tests/test_player_value_readout.py`
 """
@@ -16,6 +16,7 @@ from neotja import settings  # noqa: E402
 
 _TMP = tempfile.mkdtemp(prefix='neotja-readout-test-')
 _CFG = Path(_TMP) / 'settings.json'
+_CFG.write_text('{"master_volume": 0.0}', encoding='utf-8')
 settings.settings_path = lambda: _CFG
 settings._primary_settings_path = lambda: _CFG
 settings._fallback_settings_path = lambda: _CFG
@@ -41,30 +42,59 @@ class Clock:
 
 class ReadoutWidgetTests(unittest.TestCase):
     @real_qt_test
-    def test_first_value_is_quiet_then_changes_flash_and_fade(self):
+    def test_first_value_is_quiet_then_changed_boxes_flash_and_fade(self):
         from neotja.value_readout import ValueReadout
         rd = ValueReadout()
         clock = Clock()
         rd.clock = clock
-        rd.set_values(120.0, 1.0)
-        self.assertEqual(rd.texts, ('120', '1', '120'))
+        rd.set_values(120.0, 1.0, '4/4')
+        self.assertEqual(rd.texts, ('120.000', ('4', '4'), '1.000', '120.0'))
         self.assertEqual(rd.flash_level(), 0.0)
-        self.assertFalse(rd.set_values(120.0, 1.0))          # 同じなら何もしない
-        self.assertTrue(rd.set_values(180.0, 1.5))
-        self.assertEqual(rd.texts, ('180', '1.5', '270'))
-        self.assertEqual(rd.flash_level(), 1.0)
-        self.assertEqual(rd.border_color().name(), rd.FLASH.name())
+        self.assertFalse(rd.set_values(120.0, 1.0, '4/4'))   # 同じなら何もしない
+        # 拍子だけ変わった → 拍子の枠だけ光る。
+        self.assertTrue(rd.set_values(120.0, 1.0, '3/4'))
+        self.assertEqual([rd.flash_level(i) for i in range(4)], [0.0, 1.0, 0.0, 0.0])
+        clock.t += 1.0
+        # BPM が変わると見た目BPM も変わる。
+        self.assertTrue(rd.set_values(180.0, 1.0, '3/4'))
+        self.assertEqual([rd.flash_level(i) for i in range(4)], [1.0, 0.0, 0.0, 1.0])
+        self.assertEqual(rd.border_color(0).name(), rd.FLASH.name())
+        self.assertEqual(rd.border_color(2), rd.BORDER)
+        clock.t += 1.0
+        self.assertTrue(rd.set_values(180.0, 1.5, '3/4'))
+        self.assertEqual(rd.texts, ('180.000', ('3', '4'), '1.500', '270.0'))
+        self.assertEqual([rd.flash_level(i) for i in range(4)], [0.0, 0.0, 1.0, 1.0])
         clock.t += rd.FLASH_MS / 2000.0
-        self.assertAlmostEqual(rd.flash_level(), 0.5, places=3)
+        self.assertAlmostEqual(rd.flash_level(2), 0.5, places=3)
         clock.t += 1.0
         self.assertEqual(rd.flash_level(), 0.0)
-        self.assertEqual(rd.border_color(), rd.BORDER)
-        rd.set_values(None, None)
-        self.assertEqual(rd.texts, ('-', '-', '-'))
+        self.assertEqual(rd.border_color(2), rd.BORDER)
+        rd.set_values(None, None, None)
+        self.assertEqual(rd.texts, rd.EMPTY)
+        rd.deleteLater()
+
+    @real_qt_test
+    def test_four_separate_boxes_scale_with_screen(self):
+        from neotja.value_readout import ValueReadout
+        rd = ValueReadout()
+        rd.set_values(195.0, 1.0, '4/4')
+        boxes = rd.box_rects()
+        self.assertEqual(len(boxes), 4)
+        for a, b in zip(boxes, boxes[1:]):
+            self.assertGreater(b.left(), a.right())           # 離して並べる
+        w1, h1 = rd.width(), rd.height()
+        rd.set_ui_scale(1.5)
+        self.assertLessEqual(abs(rd.width() - w1 * 1.5), 1.5)
+        self.assertLessEqual(abs(rd.height() - h1 * 1.5), 1.5)
+        # 見本より長い値が来たら欄を広げる(字がはみ出さない)。
+        rd.set_ui_scale(1.0)
+        rd.set_values(1234.5, 1.0, '4/4')
+        self.assertGreater(rd.width(), w1)
         rd.deleteLater()
 
 
-BODY = '\n'.join(['1111,', '1111,', '#BPMCHANGE 180', '#SCROLL 1.5', '1111,', '1111,'])
+BODY = '\n'.join(['1111,', '1111,', '#BPMCHANGE 180', '#SCROLL 1.5', '#MEASURE 3/4',
+                  '111,', '111,'])
 
 
 class DockReadoutTests(unittest.TestCase):
@@ -100,7 +130,7 @@ class DockReadoutTests(unittest.TestCase):
                 dock.set_value_readout(True)
                 rd = dock.value_readout()
                 self.assertTrue(rd.isVisible())
-                self.assertEqual(rd.texts, ('120', '1', '120'))
+                self.assertEqual(rd.texts, ('120.000', ('4', '4'), '1.000', '120.0'))
                 self.assertEqual(rd.flash_level(), 0.0)
                 # 命令パネルは出さない(読むだけ)。数字の表示は右上。
                 if dock.command_panel is not None:
@@ -108,14 +138,15 @@ class DockReadoutTests(unittest.TestCase):
                 host = gpw.scaled_host
                 self.assertGreater(rd.x(), host.width() // 2)
                 self.assertLess(rd.y() + rd.height(), host.height() // 2)
-                # カーソルを3小節目(BPM 180・HS 1.5)へ。
+                # カーソルを3小節目(BPM 180・HS 1.5・3/4)へ。
                 ce = dock.chart_edit
                 for _ in range(80):
                     ce.move_cursor(1)
                     if ce._cur_measure >= 2:
                         break
                 _wait(150)
-                self.assertEqual(rd.texts, ('180', '1.5', '270'))
+                self.assertEqual(rd.texts, ('180.000', ('3', '4'), '1.500', '270.0'))
+                self.assertGreater(rd.flash_level(1), 0.0)
                 self.assertGreater(rd.flash_level(), 0.0)
                 dock.set_value_readout(False)
                 self.assertFalse(rd.isVisible())

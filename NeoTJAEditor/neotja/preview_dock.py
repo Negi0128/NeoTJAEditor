@@ -3450,8 +3450,8 @@ class PreviewDock(QDockWidget):
     VALUE_READOUT_MS = 50
 
     def set_value_readout(self, on: bool):
-        """ゲーム画面の右上(作譜モードの命令パネルの場所)に、BPM・HS・
-        見た目BPM を数字だけで出す。値は作譜モードの命令パネルと同じく、
+        """ゲーム画面の右上(作譜モードの命令パネルの場所)に、BPM・拍子・
+        SCROLL・見た目BPM の枠を出す。値は作譜モードの命令パネルと同じく、
         カーソル(=再生位置)の所で効いている値。押せるものは無い。"""
         on = bool(on)
         rd = self._value_readout
@@ -3470,7 +3470,7 @@ class PreviewDock(QDockWidget):
             t.setInterval(self.VALUE_READOUT_MS)
             t.timeout.connect(self._tick_value_readout)
             self._value_readout_timer = t
-        rd.texts = ("-", "-", "-")          # 出した最初の値では光らせない
+        rd.texts = rd.EMPTY                 # 出した最初の値では光らせない
         self._tick_value_readout()
         rd.show()
         rd.raise_()
@@ -3482,14 +3482,14 @@ class PreviewDock(QDockWidget):
         return self._value_readout
 
     def _value_readout_values(self):
-        """(BPM, HS)。_sync_command_panel と同じ時刻で引く。"""
+        """(BPM, HS, 拍子 "n/d")。_sync_command_panel と同じ時刻で引く。"""
         ce = getattr(self, "chart_edit", None)
-        bpm = scroll = None
+        bpm = scroll = measure = None
         try:
             offset = float(getattr(ce, "offset", 0.0) or 0.0) if ce is not None else 0.0
             t = (ce.cursor_time() if ce is not None else 0.0) + offset
         except Exception:  # noqa: BLE001
-            return None, None
+            return None, None, None
         try:
             bpm = float(self.chart_preview.bpm_at(t))
         except Exception:  # noqa: BLE001
@@ -3498,7 +3498,15 @@ class PreviewDock(QDockWidget):
             scroll = float(self.chart_preview.scroll_at(t))
         except Exception:  # noqa: BLE001
             pass
-        return bpm, scroll
+        try:
+            import bisect as _bisect
+            mc, mt = self._measure_times_of()
+            if mc:
+                j = max(0, _bisect.bisect_right(mt, t) - 1)
+                measure = "%d/%d" % (int(mc[j][1]), int(mc[j][2]))
+        except Exception:  # noqa: BLE001
+            pass
+        return bpm, scroll, measure
 
     def _tick_value_readout(self):
         rd = self._value_readout
@@ -3508,14 +3516,15 @@ class PreviewDock(QDockWidget):
         host = self.game_preview_window.scaled_host
         scale = host.scale() if hasattr(host, "scale") else 1.0
         rd.set_ui_scale(scale)
+        # 値で枠の幅が変わることがあるので、先に入れてから置く。
+        bpm, scroll, measure = self._value_readout_values()
+        rd.set_values(bpm, scroll, measure)
         lane_top = int((_gs.LANE_Y - 56) * scale)
         y = max(6, lane_top - rd.height() - int(round(4 * scale)))
         y = max(0, min(y, max(0, host.height() - rd.height())))
         x = max(0, host.width() - rd.width() - int(round(10 * scale)))
         if rd.pos().x() != x or rd.pos().y() != y:
             rd.move(x, y)
-        bpm, scroll = self._value_readout_values()
-        rd.set_values(bpm, scroll)
 
     def set_view_fps(self, on: bool):
         """絵だけの表示(set_view_only)のあいだも実測 fps を左上に出す。
