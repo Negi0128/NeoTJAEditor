@@ -451,6 +451,31 @@ class GenreRow(GlassCard):
         super().keyPressEvent(ev)
 
 
+class _DropCard(GlassCard):
+    """「TJAを開く」の板。TJA を Player の上へ引きずっているあいだは
+    縁をアクセント色で太くし、ここへ落とせることを見せる。"""
+
+    drop_hot = False
+
+    def set_drop_hot(self, on):
+        on = bool(on)
+        if on != self.drop_hot:
+            self.drop_hot = on
+            self.update()
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if not self.drop_hot:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        p.setPen(QPen(QColor(COLORS["accent"]), 3))
+        p.setBrush(_c(COLORS["accent"], 0.10))
+        p.drawRoundedRect(rect, 16, 16)
+        p.end()
+
+
 class _GlassDialog(QDialog):
     """選曲で出す小さな窓の見た目(縁のない平らな板)。"""
 
@@ -870,8 +895,11 @@ class LibraryView(QWidget):
         h.addWidget(self.pages, 1)
 
         self.page_open = _Page("TJAを開く")
-        card = GlassCard(radius=16, accent=True)
+        card = _DropCard(radius=16, accent=True)
         card.setObjectName("openCard")
+        self.open_card = card
+        #: TJA を引きずっているあいだ、元に戻す画面 (ページ, 左の項目)。
+        self._drop_restore = None
         card.setFixedSize(520, 200)
         cv = QVBoxLayout(card)
         cv.setContentsMargins(30, 28, 30, 30)
@@ -1147,6 +1175,33 @@ class LibraryView(QWidget):
         self._resort()
         if paths:
             self._start_worker(paths=paths)
+
+    # ------------------------------------------------------------------
+    # TJA を引きずっているあいだ(PlayerHost の dragEnter/dragLeave/drop)
+    def begin_drop_hint(self):
+        """「TJAを開く」を出して板を光らせる。離れたら end_drop_hint で戻す。"""
+        if self._drop_restore is None:
+            nav = next((b for b in self._all_navs() if b.isChecked()), None)
+            self._drop_restore = (self.pages.currentWidget(), nav)
+        self._check_nav(self.nav_open)
+        self.pages.setCurrentWidget(self.page_open)
+        self.open_card.set_drop_hot(True)
+
+    def end_drop_hint(self):
+        """引きずるのをやめた・落とした。元の画面へ戻す(一覧は作り直さない)。"""
+        self.open_card.set_drop_hot(False)
+        restore, self._drop_restore = self._drop_restore, None
+        if restore is None:
+            return
+        page, nav = restore
+        try:
+            self.pages.setCurrentWidget(page)
+            self._check_nav(nav)
+        except RuntimeError:
+            pass
+
+    def drop_hint_active(self):
+        return self._drop_restore is not None
 
     def ask_clear_recent(self):
         """「履歴を消す」。確かめの窓を出し(閉じるのを待たない)、

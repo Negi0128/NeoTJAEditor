@@ -214,6 +214,61 @@ class RecentTests(unittest.TestCase):
             host.deleteLater()
 
     @real_qt_test
+    def test_dragging_tja_lights_open_card_and_restores(self):
+        from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
+        from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDropEvent
+        from PySide6.QtWidgets import QApplication
+        from neotja.player import song_lists
+        with tempfile.TemporaryDirectory() as d:
+            a = _tja(Path(d) / 'a', 'A')
+            cfg = {'master_volume': 0.0}
+            song_lists.add_recent(cfg, a)
+            host = _host(cfg)
+            lib = host.library
+            self.assertIs(lib.pages.currentWidget(), lib.page_recent)
+
+            def mime(path):
+                m = QMimeData()
+                m.setUrls([QUrl.fromLocalFile(path)])
+                return m
+            pos = QPoint(400, 400)
+
+            def enter(m):
+                ev = QDragEnterEvent(pos, Qt.CopyAction, m, Qt.LeftButton, Qt.NoModifier)
+                QApplication.sendEvent(host, ev)
+                return ev
+            m = mime(a)
+            ev = enter(m)
+            self.assertTrue(ev.isAccepted())
+            self.assertIs(lib.pages.currentWidget(), lib.page_open)
+            self.assertTrue(lib.nav_open.isChecked())
+            self.assertTrue(lib.open_card.drop_hot)
+            QApplication.sendEvent(host, QDragLeaveEvent())
+            self.assertFalse(lib.open_card.drop_hot)
+            self.assertIs(lib.pages.currentWidget(), lib.page_recent)
+            self.assertTrue(lib.nav_recent.isChecked())
+            # TJA でないものは光らせない。
+            txt = Path(d) / 'cover.png'
+            txt.write_bytes(b'x')
+            enter(mime(str(txt)))
+            self.assertFalse(lib.open_card.drop_hot)
+            self.assertIs(lib.pages.currentWidget(), lib.page_recent)
+            # 落とすと今までどおり難易度選択へ。選曲の画面は元に戻してある。
+            enter(m)
+            QApplication.sendEvent(host, QDropEvent(QPointF(pos), Qt.CopyAction, m,
+                                                    Qt.LeftButton, Qt.NoModifier))
+            self.assertFalse(lib.open_card.drop_hot)
+            self.assertIs(host.body.currentWidget(), host.difficulty)
+            self.assertIs(lib.pages.currentWidget(), lib.page_recent)
+            # 難易度選択の上では画面を切り替えない(落とせば今までどおり開く)。
+            enter(m)
+            self.assertFalse(lib.drop_hint_active())
+            self.assertIs(host.body.currentWidget(), host.difficulty)
+            QApplication.sendEvent(host, QDragLeaveEvent())
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
     def test_record_dialog_announces_start(self):
         from neotja.dialogs.record_dialog import RecordDialog
         self.assertTrue(hasattr(RecordDialog, 'recording_started'))

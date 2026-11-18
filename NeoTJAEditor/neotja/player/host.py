@@ -845,8 +845,16 @@ class PlayerHost(QWidget):
     def dragEnterEvent(self, ev):
         if dropped_tja_path(ev):
             ev.acceptProposedAction()
+            # 落とせる場所だと分かるように「TJAを開く」を光らせる(選曲の
+            # 画面にいるときだけ。ほかの画面は切り替えない)。
+            if self.body.currentWidget() is self.library and not self.body.is_fading():
+                self.library.begin_drop_hint()
         else:
             super().dragEnterEvent(ev)
+
+    def dragLeaveEvent(self, ev):
+        self.library.end_drop_hint()
+        super().dragLeaveEvent(ev)
 
     def dragMoveEvent(self, ev):
         if dropped_tja_path(ev):
@@ -855,6 +863,7 @@ class PlayerHost(QWidget):
             super().dragMoveEvent(ev)
 
     def dropEvent(self, ev):
+        self.library.end_drop_hint()
         path = dropped_tja_path(ev)
         if not path or not os.path.isfile(path):
             super().dropEvent(ev)
