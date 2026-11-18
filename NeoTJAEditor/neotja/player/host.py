@@ -683,10 +683,16 @@ class PlayerHost(QWidget):
         return self._play_ctx is not None
 
     def wants_aspect_lock(self):
-        """窓の比を 16:9 に保ちたいか。通常プレイの再生画面のあいだだけ
-        (詳細モードは下に作譜ペインがあるので保たない)。"""
-        return (self._play_ctx is not None and self.play_mode == "normal"
-                and self.isVisible())
+        """窓の比を 16:9 に保ちたいか。Player を出しているあいだはずっと
+        (選曲・難易度選択・曲名表示・再生・結果・詳細モード。利用者の指定
+        2026-11-19)。最大化・全画面かどうかは MainWindow が見る。"""
+        return self.isVisible()
+
+    def aspect_widget(self):
+        """16:9 に保つ部分。Player 全体(上の段を出す画面と出さない画面で
+        窓の大きさが変わらないように)。上の段を隠す再生画面では、これが
+        そのままゲーム画面の部分になる。"""
+        return self
 
     def open_pause_menu(self):
         """Esc。音源・譜面の時計をまとめて止めてメニューを出す。"""

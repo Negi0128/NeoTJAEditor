@@ -28,6 +28,14 @@ def _inner(rect, ew, eh):
     return (r - l) - ew, (b - t) - eh
 
 
+def _wait(ms):
+    import time
+    from PySide6.QtTest import QTest
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        QTest.qWait(5)
+
+
 class SizingRectTests(unittest.TestCase):
     EW, EH = 16, 39            # 枠とタイトルバー
 
@@ -117,6 +125,7 @@ class WindowsFilterTests(unittest.TestCase):
 class MainWindowSnapTests(unittest.TestCase):
     @real_qt_test
     def test_snap_once_in_normal_window_but_not_maximized(self):
+        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
         from neotja.main_window import MainWindow
 
@@ -135,7 +144,9 @@ class MainWindowSnapTests(unittest.TestCase):
         class Win(QMainWindow):
             _player_aspect_active = MainWindow._player_aspect_active
             _snap_player_aspect = MainWindow._snap_player_aspect
+            _player_aspect_widget = MainWindow._player_aspect_widget
             nativeEvent = MainWindow.nativeEvent
+            changeEvent = MainWindow.changeEvent
             _player_aspect_on = True
 
             def is_player_visible(self):
@@ -162,13 +173,22 @@ class MainWindowSnapTests(unittest.TestCase):
         w.showMaximized()
         QApplication.processEvents()
         self.assertFalse(w._player_aspect_active())
+        # 最大化から戻ったら、戻った大きさが 16:9 でなくても合わせる。
+        w.showNormal()
+        w.resize(1100, 500)
+        w.setWindowState(Qt.WindowMaximized)
+        _wait(100)
+        w.setWindowState(Qt.WindowNoState)
+        _wait(150)
+        self.assertFalse(w.isMaximized())
+        self.assertLessEqual(abs(b.height() - round(b.width() * 9 / 16)), 1)
         w.close()
         w.deleteLater()
 
 
 class HostLockTests(unittest.TestCase):
     @real_qt_test
-    def test_lock_only_in_normal_play_and_signal_on_enter(self):
+    def test_lock_in_every_player_screen_and_signal_on_enter(self):
         from PySide6.QtWidgets import QWidget
         from neotja.player.host import PlayerHost
 
@@ -220,7 +240,9 @@ class HostLockTests(unittest.TestCase):
             host.resize(1200, 800)
             host.show()
             host.on_shown()
-            self.assertFalse(host.wants_aspect_lock())
+            # Player を出しているあいだはどの画面でも保つ(選曲から)。
+            self.assertTrue(host.wants_aspect_lock())
+            self.assertIs(host.aspect_widget(), host)
             hits = []
             host.play_entering.connect(lambda: hits.append(1))
             host._ensure_core()
@@ -228,10 +250,12 @@ class HostLockTests(unittest.TestCase):
             self.assertEqual(hits, [1])
             self.assertTrue(host.wants_aspect_lock())
             host.switch_to_detail()
-            self.assertFalse(host.wants_aspect_lock())
+            self.assertTrue(host.wants_aspect_lock())
             host.switch_to_normal()
             self.assertTrue(host.wants_aspect_lock())
             host._end_play()
+            self.assertTrue(host.wants_aspect_lock())
+            host.hide()
             self.assertFalse(host.wants_aspect_lock())
             host.shutdown()
             host.deleteLater()

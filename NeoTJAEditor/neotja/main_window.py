@@ -961,6 +961,9 @@ class MainWindow(QMainWindow):
         host.on_shown()
         self.setWindowTitle("NeoTJAPlayer")
         self._install_player_aspect()
+        # 通常の窓なら、入ったところで 16:9 に合わせる(以後は縁を引きずっても
+        # 保つ)。レイアウトが落ち着いてから。
+        QTimer.singleShot(0, self._snap_player_aspect)
 
     # --- 再生画面のあいだ、窓を 16:9 に保つ(player/window_aspect.py) ---
     def _player_aspect_active(self):
@@ -985,22 +988,52 @@ class MainWindow(QMainWindow):
     def _uninstall_player_aspect(self):
         self._player_aspect_on = False
 
+    def _player_aspect_widget(self):
+        """16:9 に保つ部分(PlayerHost.aspect_widget。無ければ host.body)。"""
+        host = getattr(self, "player_page", None)
+        if host is None:
+            return None
+        fn = getattr(host, "aspect_widget", None)
+        return fn() if fn is not None else host.body
+
     def nativeEvent(self, event_type, message):
         if self._player_aspect_on:
             from neotja.player import window_aspect
             host = getattr(self, "player_page", None)
             if host is not None and window_aspect.handle_native(
-                    self, message, self._player_aspect_active, lambda: host.body):
+                    self, message, self._player_aspect_active,
+                    self._player_aspect_widget):
                 return True, 1
         return False, 0
+
+    def changeEvent(self, event):
+        QMainWindow.changeEvent(self, event)
+        # 最大化・全画面から戻ったとき、戻った大きさが 16:9 でなければ合わせる
+        # (Player のあいだだけ。Editor では何もしない)。
+        if (event.type() == QEvent.WindowStateChange and self._player_aspect_on
+                and not (self.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen
+                                               | Qt.WindowMinimized))):
+            # 戻った大きさが付くのは状態が変わったあと(次の resizeEvent)。
+            # 来なかったときのために少し待ってからも1回(合っていれば何もしない)。
+            self._player_snap_pending = True
+            QTimer.singleShot(250, self._snap_player_aspect)
+
+    _player_snap_pending = False
+
+    def resizeEvent(self, event):
+        QMainWindow.resizeEvent(self, event)
+        if self._player_snap_pending:
+            self._player_snap_pending = False
+            QTimer.singleShot(0, self._snap_player_aspect)
 
     def _snap_player_aspect(self):
         """再生画面へ入るとき、通常の窓なら1回だけ 16:9 に合わせる。"""
         if not self._player_aspect_active():
             return
         from neotja.player import window_aspect
-        host = self.player_page
-        page = host.body
+        page = self._player_aspect_widget()
+        if page is None:
+            return
         client = self.size()
         frame_h = max(0, self.frameGeometry().height() - self.geometry().height())
         avail = None
