@@ -29,6 +29,7 @@ PLAYER_KEYS = (
     "wireless_offset_enabled", "wireless_offset_ms",
     "record_output_dir", "record_last_dir",
     "player_folders", "player_last_file", "player_select_bgm",
+    "player_show_fps",
     "player_select_bgm_volume", "gpu_render", "gpu_vsync",
     # 演奏モード(実験的機能)。Player の環境設定で入れても書き戻せるように。
     "player_play_mode",

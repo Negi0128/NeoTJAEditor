@@ -605,7 +605,10 @@ class SettingsPanel(QFrame):
 
     ROWS = (("player_show_jacket", "ジャケット"),
             ("player_show_bg", "背景"),
-            ("player_show_lyric", "LYRIC"))
+            ("player_show_lyric", "LYRIC"),
+            ("player_show_fps", "FPS表示"))
+    #: 既定が OFF の項目(ほかは ON)。
+    DEFAULT_OFF = ("player_show_fps",)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -651,7 +654,7 @@ class SettingsPanel(QFrame):
     def set_values(self, cfg):
         for key, sw in self.switches.items():
             sw.blockSignals(True)
-            sw.setChecked(bool(cfg.get(key, True)))
+            sw.setChecked(bool(cfg.get(key, key not in self.DEFAULT_OFF)))
             sw.blockSignals(False)
             sw.update()
 

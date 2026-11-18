@@ -864,11 +864,35 @@ class GamePreviewWindow(QWidget):
         if on:
             self.set_overlay_visible(False)
             self._bottom_widget.setVisible(self._view_bottom)
+            self._apply_view_extra()
         else:
             self._bottom_widget.show()
             self.set_overlay_visible(True)
         self._sync_own_shortcuts()
         self._refit()
+
+    #: 絵だけの表示(set_view_only)でも出しておく小物(Player の fps 表示)。
+    #: 既定は無し(Editor は使わない)。
+    _view_extra = None
+
+    def set_view_extra(self, widget):
+        """絵だけの表示のあいだも出しておく、レーンの上の小物を1つ決める。
+        None で外す(隠す)。"""
+        old = self._view_extra
+        self._view_extra = widget
+        if old is not None and old is not widget and getattr(self, "_view_only", False):
+            old.hide()
+        if getattr(self, "_view_only", False):
+            self._apply_view_extra()
+
+    def _apply_view_extra(self):
+        w = self._view_extra
+        if w is None:
+            return
+        w.show()
+        w.raise_()
+        # GL の窓(native)の上へ出し直す(ScaledHost.raise_overlays 参照)。
+        self.scaled_host.raise_overlays()
 
     def _sync_own_shortcuts(self):
         on = not (getattr(self, "_view_only", False)
@@ -2396,12 +2420,18 @@ class PreviewDock(QDockWidget):
         y = px(6, s)
         h = px(LANE_BUTTON_H, s)
         fs = max(7, int(round(LANE_BUTTON_FONT_PX * s)))
+        x0 = x
         for w, bw, gap in items:
             bw = px(bw, s)
             w.setFixedSize(bw, h)
             f = w.font()
             f.setPixelSize(fs)
             w.setFont(f)
+            if w is self.fps_label and self._view_fps:
+                # Player の絵だけの表示: ほかのボタンは無いので左上の隅へ。
+                w.move(x0, y)
+                x += bw + px(gap, s)
+                continue
             if isinstance(w, QPushButton):
                 # ボタンの中の余白は OS が原寸で入れる。背を低くすると
                 # 字の場所が無くなって**文字が消える**(実機で確認)。
@@ -3393,6 +3423,34 @@ class PreviewDock(QDockWidget):
 
     #: レーンの上の小物へ最後に当てた倍率(_scale_lane_overlays)。
     _lane_scale = 1.0
+    #: Player: 絵だけの表示でも fps を出す(set_view_fps)。既定 OFF。
+    _view_fps = False
+
+    def set_view_fps(self, on: bool):
+        """絵だけの表示(set_view_only)のあいだも実測 fps を左上に出す。
+        Player の詳細モード・設定「FPS表示」用。Editor は呼ばない。"""
+        on = bool(on)
+        lbl = self.fps_label
+        if on and not self._view_fps:
+            # 絵の上に直に置くので、Editor の内蔵画面と同じ読みやすい作り
+            # (濃い下地に緑の太字)にする。外したら元へ戻す。
+            self._fps_style_saved = (lbl.styleSheet(), lbl.font().bold())
+            f = lbl.font()
+            f.setBold(True)
+            lbl.setFont(f)
+            lbl.setStyleSheet(
+                "color: #7ddc7d; background: %s; border: none; border-radius: 3px;"
+                " font-weight: bold;" % theme.THEMES["dark"]["toolbar_btn"])
+        elif not on and self._view_fps:
+            css, bold = getattr(self, "_fps_style_saved", (lbl.styleSheet(), lbl.font().bold()))
+            f = lbl.font()
+            f.setBold(bold)
+            lbl.setFont(f)
+            lbl.setStyleSheet(css)
+        self._view_fps = on
+        self._scale_lane_overlays(self._lane_scale)
+        gpw = self.game_preview_window
+        gpw.set_view_extra(self.fps_label if self._view_fps else None)
 
     def _lane_text_w(self, text):
         """レーンのボタンに text を入れるのに要る幅(原寸)。"""

@@ -369,6 +369,7 @@ class PlayerHost(QWidget):
         self.play_page.hide_menu()
         self.play_page.attach(dock.game_preview_window, native)
         self._play_ctx = (path, course)
+        self._apply_fps_overlay()
 
         def go():
             # キーは再生画面(PlayPage)が受ける。ゲーム画面にフォーカスを
@@ -477,6 +478,7 @@ class PlayerHost(QWidget):
                 pass
         self.play_mode = "detail"
         self.play_page.set_detail(True)
+        self._apply_fps_overlay()
         if core is not None:
             try:
                 core.dock.set_speed_row_visible(True)
@@ -514,7 +516,21 @@ class PlayerHost(QWidget):
                 pass
         self.play_mode = "normal"
         self.play_page.set_detail(False)
+        self._apply_fps_overlay()
         self.play_page.setFocus(Qt.OtherFocusReason)
+
+    def _apply_fps_overlay(self):
+        """実測 fps の表示。詳細モードでは常に、通常プレイでは設定
+        「FPS表示」(player_show_fps、既定 OFF)が ON のときだけ出す。"""
+        core = self._core
+        fn = getattr(getattr(core, "dock", None), "set_view_fps", None)
+        if fn is None:
+            return
+        on = self.play_mode == "detail" or bool(self.cfg.get("player_show_fps", False))
+        try:
+            fn(on)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _check_finished(self):
         core = self._core
