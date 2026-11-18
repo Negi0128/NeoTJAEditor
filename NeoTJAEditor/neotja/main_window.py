@@ -937,6 +937,7 @@ class MainWindow(QMainWindow):
                               # (操作音は Editor のエンジンで鳴る)。
                               editor_audio_cb=self._apply_volumes_from_config)
             host.back_requested.connect(self._leave_player)
+            host.play_entering.connect(self._snap_player_aspect)
             self.player_page = host
             self.central_stack.addWidget(host)
         # Editor の再生が鳴っていたら止める(Player の音と重ねない)。
@@ -959,6 +960,64 @@ class MainWindow(QMainWindow):
         self.central_stack.setCurrentWidget(host)
         host.on_shown()
         self.setWindowTitle("NeoTJAPlayer")
+        self._install_player_aspect()
+
+    # --- 再生画面のあいだ、窓を 16:9 に保つ(player/window_aspect.py) ---
+    def _player_aspect_active(self):
+        host = getattr(self, "player_page", None)
+        if host is None or not self.is_player_visible():
+            return False
+        if self.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen
+                                 | Qt.WindowMinimized):
+            return False
+        try:
+            return bool(host.wants_aspect_lock())
+        except Exception:  # noqa: BLE001
+            return False
+
+    #: Player を出しているあいだだけ真。nativeEvent はこれが偽なら何もしない
+    #: (Editor の窓のメッセージには一切手を出さない)。
+    _player_aspect_on = False
+
+    def _install_player_aspect(self):
+        self._player_aspect_on = True
+
+    def _uninstall_player_aspect(self):
+        self._player_aspect_on = False
+
+    def nativeEvent(self, event_type, message):
+        if self._player_aspect_on:
+            from neotja.player import window_aspect
+            host = getattr(self, "player_page", None)
+            if host is not None and window_aspect.handle_native(
+                    self, message, self._player_aspect_active, lambda: host.body):
+                return True, 1
+        return False, 0
+
+    def _snap_player_aspect(self):
+        """再生画面へ入るとき、通常の窓なら1回だけ 16:9 に合わせる。"""
+        if not self._player_aspect_active():
+            return
+        from neotja.player import window_aspect
+        host = self.player_page
+        page = host.body
+        client = self.size()
+        frame_h = max(0, self.frameGeometry().height() - self.geometry().height())
+        avail = None
+        scr = self.screen()
+        if scr is not None:
+            avail = scr.availableGeometry()
+        max_h = (avail.height() - frame_h) if avail is not None else None
+        w, h = window_aspect.snap_client_size(client.width(), client.height(),
+                                              page.width(), page.height(), max_h)
+        if (w, h) == (client.width(), client.height()):
+            return
+        self.resize(w, h)
+        if avail is not None:
+            fg = self.frameGeometry()
+            dy = fg.bottom() - avail.bottom()
+            if dy > 0:
+                self.move(self.x(), max(avail.top(), self.y() - dy))
 
     def _toggle_player_fullscreen(self):
         """Playerの全画面。元の最大化/通常サイズへ戻せるよう保持する。"""
@@ -985,6 +1044,7 @@ class MainWindow(QMainWindow):
     def _restore_from_player(self):
         """Player で隠したもの(メニュー・アイコン)を戻す。試聴も止める
         (Editor の音と同時に鳴らさない)。"""
+        self._uninstall_player_aspect()
         if getattr(self, "_player_fullscreen_restore", None) is not None:
             self._restore_player_fullscreen()
         page = getattr(self, "player_page", None)

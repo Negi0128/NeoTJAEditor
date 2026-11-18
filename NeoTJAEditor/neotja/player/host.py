@@ -40,6 +40,8 @@ class PlayerHost(QWidget):
     record_requested = Signal(str, str)
     #: 通常プレイで譜面が終わりまで流れた(tja, コースキー)。結果画面の入口。
     play_finished = Signal(str, str)
+    #: 再生画面へ入るところ(窓を 16:9 に1回合わせる合図。MainWindow が受ける)。
+    play_entering = Signal()
 
     #: 譜面の終わりを見張る間合い(ms)。
     FINISH_POLL_MS = 100
@@ -560,6 +562,9 @@ class PlayerHost(QWidget):
                               screen_fn=lambda: getattr(dock, "game_screen", None))
         self._play_ctx = (path, course)
         self._apply_fps_overlay()
+        # 通常の窓なら、ゲーム画面の部分が 16:9 になるよう窓を1回合わせる
+        # (左右の黒い帯を出さない)。
+        self.play_entering.emit()
 
         def go():
             # キーは再生画面(PlayPage)が受ける。ゲーム画面にフォーカスを
@@ -576,6 +581,12 @@ class PlayerHost(QWidget):
     # 通常プレイの途中メニュー(Esc)と終わり
     def in_play(self):
         return self._play_ctx is not None
+
+    def wants_aspect_lock(self):
+        """窓の比を 16:9 に保ちたいか。通常プレイの再生画面のあいだだけ
+        (詳細モードは下に作譜ペインがあるので保たない)。"""
+        return (self._play_ctx is not None and self.play_mode == "normal"
+                and self.isVisible())
 
     def open_pause_menu(self):
         """Esc。音源・譜面の時計をまとめて止めてメニューを出す。"""
