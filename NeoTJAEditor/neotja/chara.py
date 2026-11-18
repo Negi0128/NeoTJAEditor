@@ -34,7 +34,9 @@ Game_Chara_Motion_* / Game_Chara_Beat_* を読むが、TNDE-R のスキンには
 
 import os
 
-from PySide6.QtCore import QThread
+import time
+
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QImage, QPixmap
 
 from neotja import settings as settings_mod
@@ -161,6 +163,10 @@ class CharaSprites:
         self._boxes = {}
         self._preloader = None
         self._preloaded = False
+        #: 裏で復号したが、まだ QPixmap にしていないコマ {key: QImage}。
+        self._pending = {}
+        self._pending_order = []
+        self._absorb_done = None
         for state in STATES:
             self._counts[state] = self._count_frames(state)
 
@@ -184,7 +190,7 @@ class CharaSprites:
 
         読み込みそのものを速くする道(縮小して持つ・アトラスに焼く)も考えたが、
         絵が変わってしまう/焼くのに結局同じだけかかるので採らない。"""
-        if self._preloaded or self._preloader is not None:
+        if self._preloaded or self._preloader is not None or self._pending_order:
             return
         if not self.available():
             self._preloaded = True
@@ -208,8 +214,15 @@ class CharaSprites:
         w.finished.connect(lambda: self._absorb(on_done))
         w.start()
 
+    #: 1回に QPixmap へ直す時間の上限(秒)。300枚あまりを一度に直すと
+    #: GUI が 60〜80ms 止まり、そのあいだ音声のコールバックも GIL を取れずに
+    #: 音が途切れた(Player で曲が始まった直後の「ザー」)。少しずつ直す。
+    ABSORB_SLICE_SEC = 0.004
+
     def _absorb(self, on_done=None):
         """裏で復号した QImage を QPixmap に直して抱える(GUI スレッド)。
+        一度にではなく、イベントループへ戻りながら少しずつ(_absorb_some)。
+        直す前に描くコマが要れば、そのコマだけ先に直す(frame)。
 
         ついでに状態ごとの content_box もここで済ませる。再生中に初めて
         測ると、その状態が出た最初のコマだけ止まって見えるため。"""
@@ -218,21 +231,49 @@ class CharaSprites:
         if w is None:
             return
         for key, img in w.images:
-            if key in self._cache:
+            if key in self._cache or key in self._pending:
                 continue
             if img is None:
                 self._cache[key] = None
                 continue
-            pm = QPixmap.fromImage(img)
-            self._cache[key] = None if pm.isNull() else pm
             if key[1] == 0 and key[0] not in self._boxes:
                 self._boxes[key[0]] = _content_box_of(img)
+            self._pending[key] = img
+            self._pending_order.append(key)
+        self._pending_order.reverse()       # 頭のコマから(pop は後ろから取る)
+        self._absorb_done = on_done
+        self._absorb_some()
+
+    def _absorb_some(self):
+        end = time.perf_counter() + self.ABSORB_SLICE_SEC
+        order = self._pending_order
+        while order:
+            key = order.pop()
+            img = self._pending.pop(key, None)
+            if img is not None:
+                self._take(key, img)
+            if time.perf_counter() >= end:
+                break
+        if order:
+            QTimer.singleShot(0, self._absorb_some)
+            return
+        self._pending.clear()
         self._preloaded = True
-        if on_done:
-            on_done()
+        cb, self._absorb_done = self._absorb_done, None
+        if cb:
+            cb()
+
+    def _take(self, key, img):
+        pm = QPixmap.fromImage(img)
+        pm = None if pm.isNull() else pm
+        self._cache[key] = pm
+        return pm
 
     def cancel_preload(self):
         """走っている先読みを切り離す(ウィジェットが消えるときなど)。"""
+        self._pending.clear()
+        self._pending_order = []
+        self._absorb_done = None
         w = self._preloader
         self._preloader = None
         if w is not None:
@@ -306,6 +347,9 @@ class CharaSprites:
         index = max(0, min(int(index), n - 1))
         key = (state, index)
         pm = self._cache.get(key)
+        if pm is None and key in self._pending:
+            # 先読みしたが、まだ直していないコマ(直すのは 1 枚ぶんだけ)。
+            return self._take(key, self._pending.pop(key))
         if pm is None:
             path = os.path.join(self._state_dir(state), "%d.png" % index)
             pm = QPixmap(path)

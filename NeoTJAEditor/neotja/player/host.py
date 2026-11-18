@@ -185,6 +185,9 @@ class PlayerHost(QWidget):
         """ランチャーから入ったとき。選曲の最初の画面へ。"""
         # Editor 側で変えた音量を、こちらの欄にも出す。
         self._sync_volume_widgets()
+        # 音声のコールバックが GUI の描画に待たされないように(core の説明)。
+        from neotja.player.core import audio_friendly_gil
+        audio_friendly_gil(True)
         self._set_page(self.library)
         self.library.show_default()
         # 押した「Player を起動」が消えて、フォーカスが「戻る」へ流れ着く
@@ -429,6 +432,8 @@ class PlayerHost(QWidget):
     def shutdown(self):
         """窓を閉じるとき。試聴を止めて、Player の音声デバイスを閉じる。"""
         self._shutting_down = True
+        from neotja.player.core import audio_friendly_gil
+        audio_friendly_gil(False)
         self.volume_popover.close_popover()
         self.flush_volume_save()
         self._stop_demo_video()
@@ -516,6 +521,8 @@ class PlayerHost(QWidget):
 
     def release_audio_cache(self):
         """Player を出るとき。持っている曲(読み終わった PCM)を手放す。"""
+        from neotja.player.core import audio_friendly_gil
+        audio_friendly_gil(False)
         fn = getattr(self._core, "release_cache", None) if self._core is not None else None
         if fn is not None:
             try:
@@ -1014,7 +1021,11 @@ class PlayerHost(QWidget):
             seq.abort()
         if self._core is not None:
             try:
-                self._core.dock.cancel_predecode()
+                fn = getattr(self._core, "cancel_predecode", None)
+                if fn is not None:
+                    fn()
+                else:
+                    self._core.dock.cancel_predecode()
             except Exception:  # noqa: BLE001
                 pass
         if self.body.is_fading():

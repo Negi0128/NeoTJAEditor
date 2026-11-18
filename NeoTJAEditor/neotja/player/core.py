@@ -561,6 +561,14 @@ class PlayerCore:
             cache.clear()
 
     def _on_song_ready(self, path):
+        after = self._predecode_after
+        if after is not None and _same_file(after, path):
+            # 試聴で読み終わった(DecodeCache に入っている)。本編の先読みへ。
+            self._predecode_after = None
+            try:
+                self.dock.predecode_wave(path)
+            except Exception:  # noqa: BLE001
+                pass
         self._ready = path
         if self._segment_live == path:
             self._segment_live = None      # 全体へ差し替わった
@@ -615,11 +623,31 @@ class PlayerCore:
         wave = parse_preview_headers(content).get("wave") or ""
         return os.path.join(os.path.dirname(path), wave) if wave else ""
 
+    #: 試聴で読んでいる最中の音源。読み終わったら(読んだものを持っているので
+    #: 読み直さずに)先読みへ回す。
+    _predecode_after = None
+
     def predecode(self, path):
-        """本編の音源を、鳴っている試聴に触らずに読んでおく。"""
+        """本編の音源を、鳴っている試聴に触らずに読んでおく。
+
+        試聴が同じ音源をまだ読んでいる最中(選んですぐ演奏を押した)なら、
+        もう1本読み始めずに、それが読み終わるのを待つ。2本同時に読むと
+        ffmpeg の出力を受け取るたびに GIL を取り合い、流れている試聴が
+        ぶつぶつ切れた。"""
+        self._predecode_after = None
         wave = self.chart_wave_path(path)
-        if wave:
-            self.dock.predecode_wave(wave)
+        if not wave:
+            return
+        cur = getattr(self.dock, "_decoding_path", None)
+        if cur and _same_file(cur, wave) and not getattr(self.dock, "_pre", None):
+            self._predecode_after = cur
+            return
+        self.dock.predecode_wave(wave)
+
+    def cancel_predecode(self):
+        """先読みをやめる(曲名表示を途中でやめた)。"""
+        self._predecode_after = None
+        self.dock.cancel_predecode()
 
     def use_normal_play_mode(self):
         """再生画面を「通常再生」にする。PreviewDock は開くと作譜で始まる
@@ -769,6 +797,28 @@ class PlayerCore:
             pass
 
 
+#: Player を出しているあいだの GIL の持ち替えの間合い(秒)。既定の 5ms だと、
+#: GUI が Python の描画(フェードの1コマ・画面の撮影)を続けているあいだ、
+#: 音声のコールバック(sounddevice は Python で呼ぶ)が GIL を待たされて
+#: 出力の締切(約 22ms)に間に合わず、音がぶつぶつ切れた。1ms にすると
+#: コールバックが割り込めるので、移り目の遅れが 20〜27ms → 15〜17ms に減った。
+AUDIO_SWITCH_INTERVAL = 0.001
+_saved_switch_interval = None
+
+
+def audio_friendly_gil(on):
+    """Player のあいだだけ GIL の持ち替えを細かくする(出るときに元へ戻す)。"""
+    global _saved_switch_interval
+    import sys
+    if on:
+        if _saved_switch_interval is None:
+            _saved_switch_interval = sys.getswitchinterval()
+            sys.setswitchinterval(AUDIO_SWITCH_INTERVAL)
+    elif _saved_switch_interval is not None:
+        sys.setswitchinterval(_saved_switch_interval)
+        _saved_switch_interval = None
+
+
 def output_offset_ms(cfg):
     """ワイヤレス調整(出力遅延の補正)の ms。切っていれば 0。Editor の
     MainWindow._apply_wireless_offset と同じ決まり。"""
@@ -778,6 +828,14 @@ def output_offset_ms(cfg):
         return float(cfg.get("wireless_offset_ms", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _same_file(a, b):
+    try:
+        return (os.path.normcase(os.path.abspath(a))
+                == os.path.normcase(os.path.abspath(b)))
+    except (TypeError, ValueError):
+        return False
 
 
 def _find_wave(tja_path):

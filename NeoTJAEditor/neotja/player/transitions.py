@@ -18,16 +18,45 @@ from PySide6.QtWidgets import QApplication, QStackedWidget, QWidget
 
 
 class _FadeOverlay(QWidget):
+    """フェードの絵。cross のときは新しい画面も1枚の絵(under)にして下に敷き、
+    自分だけで塗りきる(不透明)。こうしないと1コマごとに下の画面
+    (曲名表示・Player の地の光)まで描き直しになり、1コマ 15ms 前後 GUI を
+    ふさいで、そのあいだ流れている試聴の音声コールバックが GIL を待たされた。"""
+
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.pixmap = None
+        #: 新しい画面の絵(cross のときだけ)。撮るまでは None。
+        self.under = None
+        #: under を撮る口(1回目に要ったときに呼ぶ)。
+        self.under_fn = None
         self.opacity = 0.0
         self.hide()
 
+    def set_opaque(self, on):
+        self.setAttribute(Qt.WA_OpaquePaintEvent, bool(on))
+
     def paintEvent(self, ev):
         p = QPainter(self)
-        p.setOpacity(max(0.0, min(1.0, self.opacity)))
+        op = max(0.0, min(1.0, self.opacity))
+        if self.pixmap is not None and self.under_fn is not None:
+            # cross: 下に新しい画面、上に前の画面を op の濃さで。
+            # 最初のコマ(op=1)は前の画面だけで塗りきれるので、新しい画面を
+            # 撮るのは薄くなり始めてから(撮る重さを1コマに重ねない)。
+            if op < 1.0:
+                if self.under is None:
+                    fn = self.under_fn
+                    self.under = fn() if fn is not None else None
+                if self.under is not None:
+                    p.drawPixmap(self.rect(), self.under)
+                else:
+                    p.fillRect(self.rect(), QColor(0, 0, 0))
+            p.setOpacity(op)
+            p.drawPixmap(self.rect(), self.pixmap)
+            p.end()
+            return
+        p.setOpacity(op)
         if self.pixmap is not None:
             p.drawPixmap(self.rect(), self.pixmap)
         else:
@@ -108,10 +137,16 @@ class FadeStack(QStackedWidget):
         ov = self._overlay
         ov.setGeometry(self.rect())
         self.presize(widget)
+        ov.under = None
+        ov.under_fn = None
+        ov.set_opaque(False)
         if mode == "cross":
             cur = self.currentWidget()
             ov.pixmap = cur.grab() if cur is not None else None
             self.setCurrentWidget(widget)
+            if ov.pixmap is not None:
+                ov.under_fn = widget.grab
+                ov.set_opaque(True)
             self._start("out", 1.0, 0.0, self._ms)
         else:
             ov.pixmap = None
@@ -170,6 +205,9 @@ class FadeStack(QStackedWidget):
             if getattr(target, "native_gl", False):
                 self._end()         # GL の窓の上には重ねられない
                 return
+            self._overlay.under = None
+            self._overlay.under_fn = None
+            self._overlay.set_opaque(False)
             self._overlay.opacity = 1.0
             self._overlay.show()
             self._overlay.raise_()
@@ -183,11 +221,18 @@ class FadeStack(QStackedWidget):
         if w is not None:
             _set_dim(w, 0.0)
 
+    def _release_overlay(self):
+        ov = self._overlay
+        ov.hide()
+        ov.pixmap = None
+        ov.under = None
+        ov.under_fn = None
+        ov.set_opaque(False)
+
     def _end(self):
         self._phase = None
         self._clear_dim()
-        self._overlay.hide()
-        self._overlay.pixmap = None
+        self._release_overlay()
         cb, self._done_cb = self._done_cb, None
         if cb is not None:
             cb()
@@ -201,8 +246,7 @@ class FadeStack(QStackedWidget):
             self.setCurrentWidget(self._target)
         self._phase = None
         self._clear_dim()
-        self._overlay.hide()
-        self._overlay.pixmap = None
+        self._release_overlay()
         self._done_cb = None
 
     def cancel(self):
