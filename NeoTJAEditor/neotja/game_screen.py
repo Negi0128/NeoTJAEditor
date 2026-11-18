@@ -3581,6 +3581,40 @@ class _GameScreenBase:
     def fade_dim(self):
         return self._fade_dim
 
+    #: 画面の下に敷くもの(Player の再生画面の背景・ジャケット)。既定 None で
+    #: 何もしない — Editor と録画は触らない。録画は ffmpeg で重ねるので使わない。
+    #: 持たせるものは paint_under(screen, p) / paint_over(screen, p) を持つ。
+    #: paint_under は下地(背景を描かない passthrough の下地)より先、
+    #: paint_over は歌詞の後(ペイン・フェードの黒より前)に呼ぶ。座標は論理。
+    _underlay = None
+
+    def set_underlay(self, underlay):
+        """下に敷くものを決める(None で外す)。背景を透かすかどうか
+        (set_background_passthrough)は敷く側が決める。"""
+        if underlay is self._underlay:
+            return
+        self._underlay = underlay
+        self.update()
+
+    def underlay(self):
+        return self._underlay
+
+    def _paint_underlay(self, p, over=False):
+        ul = self._underlay
+        if ul is None:
+            return
+        fn = getattr(ul, "paint_over" if over else "paint_under", None)
+        if fn is None:
+            return
+        p.save()
+        try:
+            fn(self, p)
+        except Exception:  # noqa: BLE001
+            # 敷き物が壊れても画面は止めない(下の絵が欠けるだけ)。
+            pass
+        finally:
+            p.restore()
+
     def _draw_fade_dim(self, p):
         a = self._fade_dim
         if a <= 0.0:
@@ -4240,6 +4274,8 @@ class _GameScreenBase:
                 or abs(self._static_layer_dpr - self._dpr) > 1e-4):
             self._static_layer = self._build_static_layer(self._dpr)
             self._static_layer_dpr = self._dpr
+        # Player の背景・ジャケット(既定 None で何もしない)。
+        self._paint_underlay(p)
         # 重ね式の上背景はキャッシュに焼けないので、先に敷いてから被せる。
         # 背景を敷くときは、動く上背景も虹も描かない(そこへ動画が来る)。
         if self._layered_top() and not self._bg_passthrough:
@@ -4379,6 +4415,9 @@ class _GameScreenBase:
         # 別のものに使われているので出さない。
         if not self._compact and not self._lite:
             self._draw_lyric(p, now)
+
+        # --- Player の画面の上に重ねるもの(背景なしのジャケット)。既定は無し ---
+        self._paint_underlay(p, over=True)
 
         # --- 下のペイン(作譜/音声波形)も、この面の中へ続けて描く ---
         pane = self._pane

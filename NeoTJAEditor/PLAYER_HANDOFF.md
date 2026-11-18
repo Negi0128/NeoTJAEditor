@@ -65,6 +65,7 @@
 - ミキサーの `ui_now` … 操作音
 - `game_screen.result_values()` / `gauge_strip()`、`ScoreTimeline.roll_hits_at`、`ChartPreviewWidget.combo_at` … 結果は HUD と同じ計算を譜面の終わりで引く
 - `PreviewDock.set_speed_row_visible` / `set_pane_follow_scale`、`RecordDialog(bg_path=)`
+- ゲーム画面の `set_underlay(u)`(既定 None)… 再生画面の背景・ジャケット(`player/backdrop.ChartBackdrop`)を下地の下(背景なしのジャケットは上)へ描く。録画は使わない
 
 ### 設定のキー(config_data を Editor と共有)
 `player_folders` `player_recent` `player_saved` `player_sort` `player_last_file` `player_chart_art`(曲ごとのジャケット・背景) `player_show_jacket` `player_show_bg` `player_show_lyric` `player_select_bgm` `player_select_bgm_volume`。skin キャッシュに `Select_Marks.png` `Result_Crown.png` を追加(TNDE の素材から。同梱しない)。

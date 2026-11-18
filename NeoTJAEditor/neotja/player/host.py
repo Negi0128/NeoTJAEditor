@@ -66,6 +66,8 @@ class PlayerHost(QWidget):
         self._art_dialog = None
         self._art_pending = None
         self._demo_video = None
+        #: 再生画面の背景・ジャケット(backdrop.ChartBackdrop)。再生中だけ。
+        self._backdrop = None
         self._shutting_down = False
         self.current_song = ""
 
@@ -613,6 +615,9 @@ class PlayerHost(QWidget):
                               screen_fn=lambda: getattr(dock, "game_screen", None))
         self._play_ctx = (path, course)
         self._apply_fps_overlay()
+        # 曲の背景・ジャケットを録画と同じ見え方で画面の下へ敷く(フェードの
+        # 黒が明けたときにはもう出ているよう、切り替える前に)。
+        self._start_backdrop(path)
         # 通常の窓なら、ゲーム画面の部分が 16:9 になるよう窓を1回合わせる
         # (左右の黒い帯を出さない)。
         self.play_entering.emit()
@@ -884,9 +889,53 @@ class PlayerHost(QWidget):
         self.library.refresh_recent()
         self._set_page(self.library, fade="black", done=focus_library)
 
+    #: 背景を作る呼び出し(試験で差し替える)。None なら ChartBackdrop。
+    backdrop_factory = None
+
+    def _start_backdrop(self, path):
+        """再生画面の背景・ジャケット。背景/ジャケットを出す設定と、曲別の
+        「表示しない」を守る。どちらも無ければ何も敷かない。"""
+        self._stop_backdrop()
+        core = self._core
+        dock = getattr(core, "dock", None)
+        screen = getattr(dock, "game_screen", None)
+        if dock is None or screen is None or not hasattr(screen, "set_underlay"):
+            return
+        from neotja.player.backdrop import ChartBackdrop, player_background
+        try:
+            bg = player_background(self.cfg, path)
+        except Exception:  # noqa: BLE001
+            return
+
+        def clock():
+            cp = dock.chart_preview
+            lead = float(getattr(dock, "_lead_sec", 0.0) or 0.0)
+            return (cp._current_audio_time() - lead,
+                    bool(getattr(cp, "_playing", False)))
+        factory = self.backdrop_factory or ChartBackdrop
+        backdrop = factory(clock, self)
+        backdrop.configure(bg, show_bg=bool(self.cfg.get("player_show_bg", True)),
+                           show_jacket=bool(self.cfg.get("player_show_jacket", True)))
+        if not backdrop.active():
+            backdrop.stop()
+            backdrop.deleteLater()
+            return
+        backdrop.attach(screen)
+        self._backdrop = backdrop
+
+    def _stop_backdrop(self):
+        backdrop, self._backdrop = self._backdrop, None
+        if backdrop is not None:
+            backdrop.stop()
+            backdrop.deleteLater()
+
+    def backdrop(self):
+        return self._backdrop
+
     def _end_play(self):
         """再生画面の後片付け(音は止めない — 呼んだ側が止める)。"""
         self._finish_timer.stop()
+        self._stop_backdrop()
         self._play_ctx = None
         self.play_page.hide_menu()
         self.play_page.unlock()
