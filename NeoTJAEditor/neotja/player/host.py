@@ -119,6 +119,7 @@ class PlayerHost(QWidget):
         self.library.sound_requested.connect(self.sounds.play)
         self.library.file_opened.connect(self.show_opened)
         self.library.list_switched.connect(self._on_list_switched)
+        self.library.preview_toggled.connect(self._on_preview_toggled)
         self.body.addWidget(self.library)
         # 「TJAを開く」(選ぶ・落とす)のあとの、その曲の画面。
         self.opened = OpenedPage(config_data)
@@ -273,7 +274,8 @@ class PlayerHost(QWidget):
         path, self._select_path = self._select_path, str()
         if (not path or self._shutting_down or not self.isVisible()
                 or self.body.currentWidget() is not self.library
-                or self.library.selected_path() != path):
+                or self.library.selected_path() != path
+                or not self.library.preview_playing()):
             return
         # 同じ曲がもう流れていればそのまま(違う曲なら DEMOSTART から)。
         self.start_preview(path, restart=False)
@@ -289,6 +291,33 @@ class PlayerHost(QWidget):
         self._stop_demo_video()
         if self._core is not None:
             self._core.stop_audio()
+        self.library.set_preview_playing(False)
+
+    def _on_preview_toggled(self, path, play):
+        """選んでいる行の右の印: 止める / DEMOSTART から流し直す。"""
+        if self.body.currentWidget() is not self.library:
+            return
+        self._select_timer.stop()
+        self._select_path = str()
+        if play:
+            self.start_preview(path, restart=True)
+        else:
+            self._stop_demo_video()
+            if self._core is not None:
+                self._core.stop_audio()
+
+    def _sync_library_mark(self):
+        """選曲へ戻るとき。選んでいる曲の試聴が流れているかを印へ。"""
+        path = self.library.selected_path()
+        core = self._core
+        on = False
+        if path and core is not None:
+            fn = getattr(core, "demo_active_for", None)
+            try:
+                on = bool(fn(path)) if fn is not None else False
+            except Exception:  # noqa: BLE001
+                on = False
+        self.library.set_preview_playing(on)
 
     def _on_song_chosen(self, path):
         # 選んでいた曲をもう一度押した: 試聴は止めずに難易度選択へ。
@@ -332,6 +361,7 @@ class PlayerHost(QWidget):
 
     def _opened_back(self):
         self.library.refresh_recent()
+        self._sync_library_mark()
         self._set_page(self.library, fade="cross")
 
     def _opened_add(self, path):
@@ -393,6 +423,7 @@ class PlayerHost(QWidget):
         self._end_play()
         self.difficulty.close_settings()
         self.library.refresh_recent()
+        self._sync_library_mark()
         self._set_page(self.library)
 
     def shutdown(self):
@@ -727,6 +758,7 @@ class PlayerHost(QWidget):
             # 選曲は作り直さないので、開いていたフォルダ・検索・選んだ行は
             # そのまま残っている(最近開いた楽曲だけは演奏した曲を足す)。
             self.library.refresh_recent()
+            self._sync_library_mark()
             self._set_page(self.library, fade="black", done=focus_library)
 
     def switch_to_detail(self):
@@ -900,6 +932,7 @@ class PlayerHost(QWidget):
             except Exception:  # noqa: BLE001
                 pass
         self.library.refresh_recent()
+        self._sync_library_mark()
         self._set_page(self.library, fade="black", done=focus_library)
 
     #: 背景を作る呼び出し(試験で差し替える)。None なら ChartBackdrop。

@@ -244,5 +244,75 @@ class LibraryPreviewTests(unittest.TestCase):
                 host.deleteLater()
 
 
+    @real_qt_test
+    def test_play_mark_stops_and_restarts_preview(self):
+        """選んだ行の右の印: 流しているあいだは playing、押すと止めて paused、
+        もう一度押すと DEMOSTART から流し直す。印を押しても難易度選択へは
+        進まない。行の本体の押下は今までどおり。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from neotja.player.host import PlayerHost
+        from neotja.player import song_lists
+        with tempfile.TemporaryDirectory() as d:
+            a = _chart(Path(d) / 'a', 'a', 12.5)
+            b = _chart(Path(d) / 'b', 'b', 3)
+            cfg = {'master_volume': 0.0}
+            for p in (b, a):
+                song_lists.add_recent(cfg, p)
+            host = PlayerHost(cfg, lambda: None)
+            host.resize(1600, 900)
+            host.show()
+            host.on_shown()
+            lib = host.library
+            try:
+                _wait(50)
+                core = Core.instances[0]
+
+                def row(path):
+                    for r in lib.recent_list.rows():
+                        if getattr(r, 'path', None) == path:
+                            return r
+                    raise AssertionError(path)
+
+                self.assertIsNone(row(a).mark.state)
+                QTest.mouseClick(row(a), Qt.LeftButton)
+                self.assertEqual(row(a).mark.state, 'playing')
+                self.assertIsNone(row(b).mark.state)
+                _wait(250)
+                self.assertEqual(core.current, a)
+                lib._last_select = 0.0
+                # 止める(続けて押しても難易度選択へは進まない)。
+                QTest.mouseClick(row(a).mark, Qt.LeftButton)
+                self.assertIs(host.body.currentWidget(), host.library)
+                self.assertIsNone(core.current)
+                self.assertEqual(row(a).mark.state, 'paused')
+                core.log.clear()
+                QTest.mouseClick(row(a).mark, Qt.LeftButton)
+                self.assertIs(host.body.currentWidget(), host.library)
+                self.assertEqual(core.log, [('stop',), ('play', 'a', 12.5)])
+                self.assertEqual(row(a).mark.state, 'playing')
+                # 選んだ直後に印を押して止めたら、待っていた試聴も始めない。
+                QTest.mouseClick(row(b), Qt.LeftButton)
+                QTest.mouseClick(row(b).mark, Qt.LeftButton)
+                _wait(250)
+                self.assertEqual(row(b).mark.state, 'paused')
+                self.assertNotEqual(core.current, b)
+                # 止めたまま行を押すと難易度選択へ(そこで流れる)。戻ると playing。
+                lib._last_select = 0.0
+                QTest.mouseClick(row(b), Qt.LeftButton)
+                self.assertIs(host.body.currentWidget(), host.difficulty)
+                self.assertEqual(core.current, b)
+                host.difficulty.btn_back.click()
+                self.assertEqual(row(b).mark.state, 'playing')
+                # 一覧を替えたら止まって paused。
+                lib.show_section('saved')
+                lib.show_section('recent')
+                self.assertEqual(row(b).mark.state, 'paused')
+            finally:
+                host.shutdown()
+                host.close()
+                host.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()

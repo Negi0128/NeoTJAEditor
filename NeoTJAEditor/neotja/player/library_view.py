@@ -222,10 +222,102 @@ class SongThumb(QWidget):
         p.end()
 
 
+class PlayMark(QWidget):
+    """選んでいる(試聴している)行の右端の印。流しているあいだは水色の
+    棒が揺れ、止めると丸の中の ⏸。押すと止める・流し直す(行の押下には
+    しない)。選んでいない行では何も描かず、押しても行へ通す。"""
+
+    clicked = Signal()
+    SIZE = 32
+    #: 棒を揺らす間合い(ms)。
+    TICK_MS = 90
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.state = None        # None / "playing" / "paused"
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TICK_MS)
+        self._timer.timeout.connect(self._tick)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_state(self, state):
+        if state == self.state:
+            return
+        self.state = state
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, state is None)
+        self.setCursor(Qt.PointingHandCursor if state else Qt.ArrowCursor)
+        self._sync_timer()
+        self.update()
+
+    def _sync_timer(self):
+        if self.state == "playing" and self.isVisible():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._sync_timer()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        self._timer.stop()
+
+    def _tick(self):
+        self._phase += self.TICK_MS / 1000.0
+        self.update()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.state is not None:
+            self.clicked.emit()
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev):
+        # 速い2回押しも止める/流すの2回(行へ回して難易度選択へ進ませない)。
+        self.mousePressEvent(ev)
+
+    def paintEvent(self, ev):
+        if self.state is None:
+            return
+        import math
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cyan = QColor(127, 227, 255)
+        c = QPointF(self.width() / 2.0, self.height() / 2.0)
+        if self.state == "playing":
+            p.setPen(Qt.NoPen)
+            p.setBrush(_c(cyan, 0.16))
+            p.drawEllipse(c, 15.0, 15.0)
+            p.setBrush(cyan)
+            w, gap, top = 3.4, 2.6, 16.0
+            x0 = c.x() - (3 * w + 2 * gap) / 2.0
+            base = c.y() + top / 2.0
+            for i, (sp, off) in enumerate(((7.0, 0.0), (9.5, 1.7), (6.0, 3.1))):
+                k = 0.5 + 0.5 * math.sin(self._phase * sp + off)
+                hgt = 5.0 + (top - 5.0) * k
+                p.drawRoundedRect(QRectF(x0 + i * (w + gap), base - hgt, w, hgt), 1.5, 1.5)
+        else:
+            p.setPen(QPen(_c(cyan, 0.75), 1.5))
+            p.setBrush(QColor(10, 20, 36, 150))
+            p.drawEllipse(c, 14.0, 14.0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(_c(cyan, 0.9))
+            for dx in (-4.2, 1.4):
+                p.drawRoundedRect(QRectF(c.x() + dx, c.y() - 6.5, 2.8, 13.0), 1.2, 1.2)
+        p.end()
+
+
 class SongRow(GlassCard):
     """曲の1行。左の色帯はいちばん難しい難易度の色。"""
 
     chosen = Signal(str)
+    #: 右端の印(試聴を止める・流し直す)を押した。
+    mark_clicked = Signal(str)
     save_toggled = Signal(str, bool)
     remove_requested = Signal(str)
     relink_requested = Signal(str)
@@ -305,6 +397,11 @@ class SongRow(GlassCard):
             self.btn_remove.setObjectName("small")
             self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.path))
             h.addWidget(self.btn_remove)
+        # 試聴の印(選んでいる行だけ描く。場所はいつも取っておき、選んでも
+        # 並びがずれないように)。
+        self.mark = PlayMark()
+        self.mark.clicked.connect(lambda: self.mark_clicked.emit(self.path))
+        h.addWidget(self.mark, 0, Qt.AlignVCenter)
         self._restyle()
 
     # ------------------------------------------------------------------
@@ -347,8 +444,9 @@ class SongRow(GlassCard):
     def matches(self, q):
         return song_lists.matches(q, self.info, self.path)
 
-    def set_chosen(self, on):
+    def set_chosen(self, on, playing=True):
         self._accent = bool(on)
+        self.mark.set_state(None if not on else ("playing" if playing else "paused"))
         self.update()
 
     def paintEvent(self, ev):
@@ -988,6 +1086,8 @@ class LibraryView(QWidget):
     #: 右に出す一覧を替えた(カテゴリ・ジャンル・フォルダの段・検索の結果)。
     #: 試聴を止める合図(PlayerHost)。
     list_switched = Signal()
+    #: 選んでいる行の右の印を押した (曲, 流すか)。
+    preview_toggled = Signal(str, bool)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -1267,8 +1367,32 @@ class LibraryView(QWidget):
             return
         self._chosen = path
         self._last_select = now
+        self._preview_playing = True
         self._mark_chosen()
         self.song_selected.emit(path)
+
+    #: 選んでいる曲の試聴を流しているか(行の右の印)。
+    _preview_playing = True
+
+    def preview_playing(self):
+        return bool(self._chosen) and self._preview_playing
+
+    def set_preview_playing(self, on):
+        """試聴を流している/止めたを印へ(PlayerHost から)。"""
+        on = bool(on)
+        if on != self._preview_playing:
+            self._preview_playing = on
+            self._mark_chosen()
+
+    def toggle_preview(self, path=None):
+        """選んでいる行の右の印を押した。止める ⇔ 流し直す。"""
+        if not self._chosen:
+            return
+        if path and song_lists.path_key(path) != song_lists.path_key(self._chosen):
+            return
+        self._preview_playing = not self._preview_playing
+        self._mark_chosen()
+        self.preview_toggled.emit(self._chosen, self._preview_playing)
 
     def selected_path(self):
         return self._chosen
@@ -1288,7 +1412,8 @@ class LibraryView(QWidget):
         for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
             for r in lst.rows():
                 if isinstance(r, SongRow):
-                    r.set_chosen(key is not None and song_lists.path_key(r.path) == key)
+                    r.set_chosen(key is not None and song_lists.path_key(r.path) == key,
+                                 self._preview_playing)
 
     def note_played(self, path):
         """演奏・録画を始めた曲を「最近開いた楽曲」の先頭へ入れて保存する。"""
@@ -1330,12 +1455,14 @@ class LibraryView(QWidget):
         row = SongRow(path, title, **kw)
         row.chosen.connect(self._pi)
         row.chosen.connect(self.click_song)
+        row.mark_clicked.connect(self._pi)
+        row.mark_clicked.connect(self.toggle_preview)
         row.save_toggled.connect(self._pi)
         row.save_toggled.connect(self._on_save_toggled)
         row.remove_requested.connect(self.remove_saved)
         row.relink_requested.connect(self.relink_saved)
         if self._chosen and song_lists.path_key(path) == song_lists.path_key(self._chosen):
-            row.set_chosen(True)
+            row.set_chosen(True, self._preview_playing)
         return row
 
     def _start_worker(self, paths=None, directory=None):
