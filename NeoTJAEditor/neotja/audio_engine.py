@@ -174,6 +174,152 @@ def decode_stereo_ffmpeg(path: str, timeout_sec: float = 120.0):
     return pcm[: frames * 2].reshape(frames, 2).copy(), sr
 
 
+_FF_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def decode_segment_ffmpeg(path: str, start: float, length: float, timeout_sec: float = 30.0):
+    """曲の一部(start 秒から length 秒)だけを (frames, 2) float32 で読む。
+
+    NeoTJAPlayer の試聴を早く鳴らすためのもの(DEMOSTART から先だけ先に読み、
+    全体の読み込みは裏で続ける)。-ss を入力の前に置くので、頭から読まずに
+    その位置へ飛ぶ(ffmpeg は飛んだ先で余分な標本を捨てて、指定の時刻から
+    出す)。全体の長さ(秒)も stderr の Duration から拾う。
+
+    (pcm, sr, 全体の長さ) を返す。読めない・中身が無いときは None。"""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
+    cmd = [exe, "-hide_banner", "-nostats", "-nostdin",
+           "-ss", "%.6f" % max(0.0, float(start)), "-t", "%.6f" % max(0.0, float(length)),
+           "-i", path, "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "2", "-"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout_sec, **_no_window())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0 or not p.stdout:
+        return None
+    info = (p.stderr or b"").decode("utf-8", "replace")
+    m = _FF_AUDIO_STREAM_RE.search(info)
+    d = _FF_DURATION_RE.search(info)
+    if not m or not d:
+        return None
+    if m.group(2).strip() not in ("mono", "stereo"):
+        return None        # 3ch 以上は全体の読み込みと畳み方が違うので使わない
+    sr = int(m.group(1))
+    total = int(d.group(1)) * 3600 + int(d.group(2)) * 60 + float(d.group(3))
+    pcm = np.frombuffer(p.stdout, dtype=np.float32)
+    frames = pcm.size // 2
+    if sr <= 0 or frames <= 0 or total <= 0:
+        return None
+    return pcm[: frames * 2].reshape(frames, 2).copy(), sr, total
+
+
+class DecodeCache:
+    """読み終わった曲(助走を足す前の PCM と波形の材料)を少しだけ持っておく。
+
+    NeoTJAPlayer 用(PreviewDock.decode_cache に渡したときだけ使う。Editor は
+    使わない)。試聴・曲名表示の先読み・本編で同じ曲を何度も読み直さないため。
+    鍵は (道筋, 更新時刻, 大きさ) なので、ファイルが書き換わったら別物になる。
+    曲1つでおよそ 85MB(4分のステレオ)あるので、数と合計の上限で古いものから
+    捨てる。読み込みの係(別スレッド)からも触るので鍵を掛ける。"""
+
+    def __init__(self, max_entries=3, max_bytes=300 * 1024 * 1024):
+        import threading
+        from collections import OrderedDict
+        self.max_entries = int(max_entries)
+        self.max_bytes = int(max_bytes)
+        self._items = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def key(path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (os.path.normcase(os.path.abspath(path)), st.st_mtime_ns, st.st_size)
+
+    @staticmethod
+    def _size(data):
+        pcm, mips = data[0], data[4]
+        n = int(getattr(pcm, "nbytes", 0) or 0)
+        try:
+            for chain in mips.chains:
+                for level in chain:
+                    n += int(level.nbytes)
+        except Exception:  # noqa: BLE001
+            pass
+        return n
+
+    def get(self, path):
+        k = self.key(path)
+        if k is None:
+            return None
+        with self._lock:
+            hit = self._items.get(k)
+            if hit is None:
+                return None
+            self._items.move_to_end(k)
+            return hit[0]
+
+    def has(self, path):
+        return self.get(path) is not None
+
+    def put(self, path, data):
+        """data = (pcm, sr, peaks, duration, mips)。"""
+        k = self.key(path)
+        if k is None:
+            return
+        size = self._size(data)
+        if size > self.max_bytes:
+            return
+        with self._lock:
+            # 同じ道筋の古い版(書き換わる前)は捨てる。
+            for old in [o for o in self._items if o[0] == k[0] and o != k]:
+                del self._items[old]
+            self._items[k] = (data, size)
+            self._items.move_to_end(k)
+            while self._items and (len(self._items) > self.max_entries
+                                   or sum(v[1] for v in self._items.values()) > self.max_bytes):
+                self._items.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._items.clear()
+
+    def total_bytes(self):
+        with self._lock:
+            return sum(v[1] for v in self._items.values())
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
+
+
+class SegmentDecodeWorker(QThread):
+    """decode_segment_ffmpeg を裏で回す。decoded(pcm, sr, 全体の長さ)。"""
+
+    decoded = Signal(object, int, float)
+    failed = Signal()
+
+    def __init__(self, path, start, length, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.start_sec = float(start)
+        self.length = float(length)
+
+    def run(self):
+        got = decode_segment_ffmpeg(self.path, self.start_sec, self.length)
+        if got is None:
+            self.failed.emit()
+            return
+        self.decoded.emit(*got)
+
+
 def downsample_peaks(mono: np.ndarray, target_columns: int) -> list:
     if mono.size == 0 or target_columns <= 0:
         return []
@@ -509,12 +655,20 @@ class SongDecodeWorker(QThread):
     decoded = Signal(object, int, list, float, object)
     failed = Signal(str)
 
-    def __init__(self, path: str, target_columns: int = 2000, parent=None):
+    def __init__(self, path: str, target_columns: int = 2000, parent=None, cache=None):
         super().__init__(parent)
         self.path = path
         self.target_columns = target_columns
+        #: DecodeCache(Player だけ)。あれば読み直さずにそれを渡し、読んだら入れる。
+        self.cache = cache
 
     def run(self):
+        cache = self.cache
+        if cache is not None:
+            hit = cache.get(self.path)
+            if hit is not None:
+                self.decoded.emit(*hit)
+                return
         # まず ffmpeg 直叩きで一括デコードを試す(下の QAudioDecoder 経路の
         # 6倍速く、出てくる標本は同一)。ffmpeg が無い/読めない形式のときだけ
         # 従来どおり QAudioDecoder へ落ちる。
@@ -593,6 +747,8 @@ class SongDecodeWorker(QThread):
         mono = stereo.mean(axis=1)
         peaks = downsample_peaks(mono, self.target_columns)
         mips = WaveformMips.build(stereo, sr)
+        if self.cache is not None:
+            self.cache.put(self.path, (stereo, sr, peaks, duration, mips))
         self.decoded.emit(stereo, sr, peaks, duration, mips)
 
 

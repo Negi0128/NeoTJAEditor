@@ -372,6 +372,15 @@ class PlayerHost(QWidget):
             else:
                 self._stop_demo_video()
 
+    def release_audio_cache(self):
+        """Player を出るとき。持っている曲(読み終わった PCM)を手放す。"""
+        fn = getattr(self._core, "release_cache", None) if self._core is not None else None
+        if fn is not None:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+
     def stop_preview(self):
         """鳴っているものを全部止める(試聴・曲名表示の段取り・本編)。"""
         self._stop_demo_video()

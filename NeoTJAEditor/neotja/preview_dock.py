@@ -4445,7 +4445,7 @@ class PreviewDock(QDockWidget):
             return True
         self.cancel_predecode()
         self._pre = [wave_path, None]
-        worker = SongDecodeWorker(wave_path)
+        worker = SongDecodeWorker(wave_path, cache=self.decode_cache)
         worker.path = wave_path
         worker.decoded.connect(
             lambda pcm, sr, peaks, dur, mips, p=wave_path:
@@ -4502,6 +4502,34 @@ class PreviewDock(QDockWidget):
     _decode_audition = False
     #: ミキサーがいま持っている中身 ("audition" | "chart", 道筋)。
     _mixer_holds = None
+    #: 読み終わった曲を持っておく所(audio_engine.DecodeCache)。Player の
+    #: PreviewDock だけが入れる。None(Editor)なら今までどおり毎回読む。
+    decode_cache = None
+    #: 試聴の先読みした一部分を鳴らしている音源。全体が読めたら、位置を保った
+    #: まま中身を差し替える(start_audition_segment)。Player だけ。
+    _swap_keep_path = None
+
+    def start_audition_segment(self, wave_path, pcm, sr, total_sec, start_sec):
+        """Player の試聴: 全体の読み込み(load_wave_only)が終わる前に、先に
+        読んだ一部分(start_sec から)を鳴らせるようにする。
+
+        曲の長さぶんの無音の入れ物にその部分を置いてミキサーへ渡すので、位置・
+        長さ・折り返しの計算は全体のときと同じまま。全体が読めたら
+        _on_decoded が位置を保ったまま中身を差し替える(つなぎ目で止まらない)。
+        いまその音源を試聴として読んでいる最中でなければ何もしない。"""
+        if (not self._mixer_active or pcm is None or not sr
+                or self._decoding_path != wave_path or not self._decode_audition
+                or self._audition_wave_path != wave_path):
+            return False
+        import numpy as np
+        off = max(0, int(round(float(start_sec) * sr)))
+        n = max(int(round(float(total_sec) * sr)), off + len(pcm))
+        buf = np.zeros((n, 2), dtype=np.float32)
+        buf[off:off + len(pcm)] = pcm[:, :2]
+        self.audio.set_song_pcm(buf, sr)
+        self._mixer_holds = ("segment", wave_path)
+        self._swap_keep_path = wave_path
+        return True
 
     def _start_waveform_decode(self, wave_path, audition=False):
         self._decode_seq += 1
@@ -4528,8 +4556,9 @@ class PreviewDock(QDockWidget):
         # 走り終わるまでプロセス側の待機所で保持する。
         detach_worker(self._decode_worker)
         self._decode_worker = None
+        self._swap_keep_path = None
 
-        worker = SongDecodeWorker(wave_path)
+        worker = SongDecodeWorker(wave_path, cache=self.decode_cache)
         worker.path = wave_path
         worker.decoded.connect(
             lambda pcm, sr, peaks, dur, mips, p=wave_path, a=bool(audition), s=seq:
@@ -4579,7 +4608,14 @@ class PreviewDock(QDockWidget):
         # ミキサー経路: デコード済みステレオ PCM をミキサーへ渡す(ここで
         # durationChanged / LoadedMedia が出て再生ボタンが有効になる)。
         if self._mixer_active:
-            self.audio.set_song_pcm(self._with_lead(pcm, sr, path, audition=not chart), sr)
+            keep = not chart and self._swap_keep_path == path
+            self._swap_keep_path = None
+            if keep:
+                # 先に読んだ一部分を鳴らしている(Player の試聴)。止めずに
+                # 位置を保ったまま全体へ差し替える。
+                self.audio.set_song_pcm(pcm, sr, keep_position=True)
+            else:
+                self.audio.set_song_pcm(self._with_lead(pcm, sr, path, audition=not chart), sr)
             self._mixer_holds = ("chart" if chart else "audition", path)
             # 頭に助走を足したぶん、開いた直後の赤い線は**音源の頭**へ
             # 置き直す(そうしないと助走の先頭に立って、譜面が右の外)。

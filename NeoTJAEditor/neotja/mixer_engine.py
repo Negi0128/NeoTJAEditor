@@ -427,6 +427,17 @@ class MixerCore:
                 self.ended = False
                 self.voices = []
                 self._recompute_cursors()
+            elif op == "song_swap":
+                # 中身だけ差し替える(位置・鳴っている効果音はそのまま)。
+                # NeoTJAPlayer の試聴で、先に読んだ一部分から全体へ移るとき。
+                old_sr = self.song_sr
+                self.song = cmd[1]
+                self.song_sr = int(cmd[2])
+                if old_sr and old_sr != self.song_sr:
+                    self.read_pos = self.read_pos * self.song_sr / float(old_sr)
+                n = self.song.shape[0] if self.song is not None else 0
+                self.read_pos = float(max(0.0, min(self.read_pos, n)))
+                self._recompute_cursors()
 
     def _apply_seek(self, frame: float):
         n = self.song.shape[0] if self.song is not None else 0
@@ -1024,8 +1035,11 @@ class MixerAudioEngine(QObject):
         self.core.post(("seek", 0))
         self.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.LoadingMedia)
 
-    def set_song_pcm(self, pcm: np.ndarray, sr: int):
-        """デコード済みステレオ PCM をミキサーに渡す(preview_dock から)。"""
+    def set_song_pcm(self, pcm: np.ndarray, sr: int, keep_position: bool = False):
+        """デコード済みステレオ PCM をミキサーに渡す(preview_dock から)。
+
+        keep_position=True は位置を頭へ戻さずに中身だけ差し替える(Player の
+        試聴で、先に読んだ一部分から全体へ移るとき)。既定は今までどおり。"""
         if pcm is None or pcm.shape[0] == 0:
             self.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.InvalidMedia)
             return
@@ -1033,7 +1047,7 @@ class MixerAudioEngine(QObject):
         self._song_frames = pcm.shape[0]
         self._song_sr = int(sr)
         self._duration_ms = int(self._song_frames / float(sr) * 1000.0)
-        self.core.post(("song", pcm, int(sr)))
+        self.core.post(("song_swap" if keep_position else "song", pcm, int(sr)))
         self._loaded = True
         self.durationChanged.emit(self._duration_ms)
         self.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.LoadedMedia)

@@ -104,6 +104,9 @@ class PlayerCore:
 
     _chart_started = False
     _held = None
+    _segment_live = None
+    _segment_worker = None
+    _segment_token = 0
 
     def __init__(self, config_data):
         self.cfg = config_data
@@ -126,6 +129,11 @@ class PlayerCore:
         self._chart_started = False
         #: 途中メニューで止めたときに、まだ鳴らしていなかった予約。
         self._held = None
+        #: 試聴の先読み(DEMOSTART から SEGMENT_SEC 秒だけ)を鳴らしている音源。
+        #: 全体が読めたら None に戻る。
+        self._segment_live = None
+        self._segment_worker = None
+        self._segment_token = 0
         # 終わりまで来たかを見る番人。音源の読み込みが裏で進むので、
         # 「頭出し」もこのタイマーが引き受ける(長さが分かるまで待つ)。
         from PySide6.QtCore import QTimer
@@ -151,6 +159,10 @@ class PlayerCore:
             postroll_sec=5.0,
         )
         self.dock.hide()
+        # 読み終わった曲を少し持っておく(試聴・曲名表示の先読み・本編で
+        # 同じ曲を何度も読み直さない)。Player の PreviewDock だけ。
+        from neotja.audio_engine import DecodeCache
+        self.dock.decode_cache = DecodeCache()
         # Player は譜面を書き換えない。作譜ペイン(詳細モード)も読むだけ。
         # 編集の受け口(note_edit_cb・chart_op_cb・header_edit_cb・
         # demostart_cb・undo/redo)は最初から渡していないので、仮に何かが
@@ -316,10 +328,12 @@ class PlayerCore:
         return self.demo_ready() and self.chart_playing()
 
     def demo_ready(self):
-        return bool(getattr(self, "_demo_active", False) and self._loop
-                    and self._pending is None
-                    and self._ready == self._loop[1]
-                    and not self.dock.is_decoding())
+        if not (getattr(self, "_demo_active", False) and self._loop
+                and self._pending is None):
+            return False
+        if getattr(self, "_segment_live", None) == self._loop[1]:
+            return True        # 先読みした一部分を鳴らしている(全体は裏で読み中)
+        return self._ready == self._loop[1] and not self.dock.is_decoding()
 
     def demo_start(self):
         """音源・動画の尺で補正した折り返し位置。"""
@@ -461,6 +475,7 @@ class PlayerCore:
         return dur > 0 and self.chart_position() >= dur - 0.25
 
     def stop_audio(self):
+        self._drop_segment()
         self._pending = None
         self._held = None
         self._chart_started = False
@@ -482,6 +497,7 @@ class PlayerCore:
         残っているあいだに「読めた」と誤判定してしまう(DEMOSTART の頭出しが
         効かなかった原因)。読み終わりは dock.songReady が知らせてくれる。
         """
+        self._drop_segment()
         self._pending = (wave_path, float(at_sec), bool(loop))
         self._loop = (float(at_sec), wave_path) if loop else None
         if not self.dock.load_wave_only(wave_path):
@@ -491,9 +507,63 @@ class PlayerCore:
         if not self.dock.is_decoding() and self._ready == wave_path:
             # 既に読み終わっているもの(同じ曲を選び直した等)。
             self._fire_pending()
+            return
+        if loop and self.dock.is_decoding(wave_path):
+            self._start_segment(wave_path, float(at_sec))
+
+    #: 試聴を早く鳴らすために先に読むぶん(秒)。全体はふつう 1〜2 秒で読める
+    #: ので、それより十分長く。
+    SEGMENT_SEC = 10.0
+
+    def _start_segment(self, wave_path, at_sec):
+        """試聴: 全体の読み込みと並べて、DEMOSTART から SEGMENT_SEC 秒だけを
+        先に読む。読めたら全体を待たずに鳴らす(全体が読めたら位置を保って
+        差し替わる)。読み終わった曲を持っている(DecodeCache)ときは要らない。"""
+        cache = getattr(self.dock, "decode_cache", None)
+        if cache is not None and cache.has(wave_path):
+            return
+        from neotja.audio_engine import SegmentDecodeWorker
+        self._segment_token += 1
+        token = self._segment_token
+        worker = SegmentDecodeWorker(wave_path, at_sec, self.SEGMENT_SEC)
+        worker.decoded.connect(
+            lambda pcm, sr, total, w=wave_path, t=token, a=at_sec:
+            self._on_segment(w, t, a, pcm, sr, total))
+        self._segment_worker = worker
+        worker.start()
+
+    def _on_segment(self, wave_path, token, at_sec, pcm, sr, total):
+        """先読みが届いた。まだその曲の試聴を待っていれば鳴らし始める
+        (追い越された・止めた・全体が先に読めた、なら捨てる)。"""
+        if (token != self._segment_token or self._pending is None
+                or self._pending[0] != wave_path or not self._pending[2]
+                or not self.dock.is_decoding(wave_path)):
+            return
+        if float(at_sec) >= float(total) - 0.1:
+            return        # DEMOSTART が長さを越えている(頭から鳴らす。全体を待つ)
+        if not self.dock.start_audition_segment(wave_path, pcm, sr, total, at_sec):
+            return
+        self._segment_live = wave_path
+        self._fire_pending()
+
+    def _drop_segment(self):
+        self._segment_token += 1
+        self._segment_live = None
+        worker, self._segment_worker = self._segment_worker, None
+        if worker is not None:
+            from neotja.worker_util import detach_worker
+            detach_worker(worker)
+
+    def release_cache(self):
+        """持っている曲を手放す(Player を出たとき。メモリを返す)。"""
+        cache = getattr(self.dock, "decode_cache", None)
+        if cache is not None:
+            cache.clear()
 
     def _on_song_ready(self, path):
         self._ready = path
+        if self._segment_live == path:
+            self._segment_live = None      # 全体へ差し替わった
         if self._pending and self._pending[0] == path:
             self._fire_pending()
 

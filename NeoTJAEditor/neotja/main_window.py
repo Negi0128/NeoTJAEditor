@@ -990,6 +990,9 @@ class MainWindow(QMainWindow):
         page = getattr(self, "player_page", None)
         if page is not None:
             page.stop_preview()
+            release = getattr(page, "release_audio_cache", None)
+            if release is not None:
+                release()
             # Player の難易度設定で変えた連打秒速を Editor の欄へ戻す
             # (値そのものは同じ config_data を共有している)。
             spin = getattr(self, "roll_speed_spin", None)
