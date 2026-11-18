@@ -1,3 +1,16 @@
+## 2026-11-19 Player 不具合まとめ対応 第5弾（Claude）
+
+項目ごとにコミット・push 済み（789e321 / a407803 / b16594a / 6e8b2d9 / 9a2e389）。版上げ・ビルド・リリースはしていない。
+
+- A ジャンルの開け閉め: 左の列のシミュレーターの見出しを `CategoryHead`（QLabel#category のまま、右端に ▸/▾ を QPainter で）にし、押すとその下の項目を隠す/出す。畳んだ名前は `player_collapsed`（名前の一覧）。作り直し・名前の変更でも畳んだまま。NeoTJAPlayer の見出しは今までどおり。
+- B 一覧を替えたら試聴を止める: `LibraryView.list_switched`（show_section / open_dir / 登録フォルダの検索の結果が替わったとき。同じ一覧を押し直しただけでは出さない）→ `PlayerHost._on_list_switched` が試聴・背景動画・待っている試聴を止める。難易度選択から戻ったときは今までどおり止めない。
+- C 再生中の印: 選んだ行の右端に `PlayMark`（流している=水色の棒が揺れる / 止めた=丸の中の ⏸）。場所はどの行でも取っておく（選んでも並びがずれない）。印を押すと止める ⇔ DEMOSTART から流し直す（`preview_toggled`。難易度選択へは進まない）。行の本体の押下は今までどおり。選曲へ戻るときは `core.demo_active_for` を見て印を合わせる。
+- E 16:9: `wants_aspect_lock` は Player を出しているあいだずっと（詳細モードも＝判断）。保つ部分は `PlayerHost.aspect_widget()`＝Player 全体（上の段の有無で窓が変わらない）。Player に入ったとき・最大化/全画面から戻ったとき（戻った大きさが付いた次の resizeEvent、保険に 250ms 後）にも合わせる。Editor では何もしない。入るときに窓の高さが変わる（Editor へ戻っても元の大きさには戻さない）。
+- D 移り目の音: 原因は GUI が GIL を長く持ち、Python の音声コールバック（出力の遅れ約 22ms・10ms ごと）が間に合わないこと。手当て: Player のあいだ `sys.setswitchinterval(0.001)`（`core.audio_friendly_gil`、出るとき戻す）／クロスフェードは新しい画面も1枚の絵にして重ねた絵だけで塗る（1コマ約 17ms → 約 3.5ms）／試聴が同じ音源を読んでいる最中は本編の先読みを2本目として始めない／どんちゃんのコマを 4ms ずつ QPixmap に（`chara.CharaSprites._absorb_some`）。測った値（1920×1009・SHEESH・音量 0・コールバックの間隔）: フェード中の最大 18〜27ms → 14〜16ms（20ms 超え 1〜3 回 → 0 回）、曲名表示中 15〜16ms のまま。測り方の注意: `QTest.qWait` は GIL を持ったまま待つので、待ちにこれを使うと音声が大きく遅れて見える（QEventLoop で待つこと）。
+- 残り（他の担当のファイル）: 再生画面に入るとき `play_page.attach` の setParent が約 0.7 秒、最初の GL のコマが 0.4〜0.5 秒、再生直後に QOpenGLWidget の event（C++ 部分）で 90〜120ms GUI が止まる。どれも GIL を持ったまま。試聴を止めたあと／助走 3 秒の無音のうちなので聞こえないはずだが、助走の短い使い方をするなら要注意。
+- 試験: 新規 `test_player_audio_transition`。`test_player_sidebar_genres` / `test_player_library_preview` / `test_player_window_aspect` に足した。`test_player_host` の PlayerHostTests は通しで流すと3件目で code 127（変更前の版でも同じ。1件ずつなら通る）。
+- 画像（1920×1009・widget.grab）: scratchpad の `batch5/` に A_sidebar_collapsed / C_mark_c（流している）/ C_mark_cpause（止めた）/ C_mark_zoom。
+
 ## 2026-11-19 FPS/詳細モード数値（Claude）
 
 項目ごとにコミット・push 済み（432cde4・77db2bd / b0f395c / 2倍 d8b5ee5 / 太字・右上・曲名は下の追記のコミット）。版上げ・ビルド・リリースはしていない。
