@@ -3426,6 +3426,82 @@ class PreviewDock(QDockWidget):
     #: Player: 絵だけの表示でも fps を出す(set_view_fps)。既定 OFF。
     _view_fps = False
 
+    # ------------------------------------------------------------------
+    # 数字だけの表示(Player の詳細モード。Editor は使わない)
+    #: value_readout.ValueReadout。set_value_readout(True) で初めて作る。
+    _value_readout = None
+    _value_readout_timer = None
+    #: 位置を見に行く間合い(ms)。値が変わったときだけ塗り直す。
+    VALUE_READOUT_MS = 50
+
+    def set_value_readout(self, on: bool):
+        """ゲーム画面の右上(作譜モードの命令パネルの場所)に、BPM・HS・
+        見た目BPM を数字だけで出す。値は作譜モードの命令パネルと同じく、
+        カーソル(=再生位置)の所で効いている値。押せるものは無い。"""
+        on = bool(on)
+        rd = self._value_readout
+        if not on:
+            if self._value_readout_timer is not None:
+                self._value_readout_timer.stop()
+            if rd is not None:
+                rd.hide()
+            return
+        host = self.game_preview_window.scaled_host
+        if rd is None:
+            from neotja.value_readout import ValueReadout
+            rd = ValueReadout(host)
+            self._value_readout = rd
+            t = QTimer(self)
+            t.setInterval(self.VALUE_READOUT_MS)
+            t.timeout.connect(self._tick_value_readout)
+            self._value_readout_timer = t
+        rd.texts = ("-", "-", "-")          # 出した最初の値では光らせない
+        self._tick_value_readout()
+        rd.show()
+        rd.raise_()
+        if hasattr(host, "raise_overlays"):
+            host.raise_overlays()
+        self._value_readout_timer.start()
+
+    def value_readout(self):
+        return self._value_readout
+
+    def _value_readout_values(self):
+        """(BPM, HS)。_sync_command_panel と同じ時刻で引く。"""
+        ce = getattr(self, "chart_edit", None)
+        bpm = scroll = None
+        try:
+            offset = float(getattr(ce, "offset", 0.0) or 0.0) if ce is not None else 0.0
+            t = (ce.cursor_time() if ce is not None else 0.0) + offset
+        except Exception:  # noqa: BLE001
+            return None, None
+        try:
+            bpm = float(self.chart_preview.bpm_at(t))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            scroll = float(self.chart_preview.scroll_at(t))
+        except Exception:  # noqa: BLE001
+            pass
+        return bpm, scroll
+
+    def _tick_value_readout(self):
+        rd = self._value_readout
+        if rd is None:
+            return
+        from neotja import game_screen as _gs
+        host = self.game_preview_window.scaled_host
+        scale = host.scale() if hasattr(host, "scale") else 1.0
+        rd.set_ui_scale(scale)
+        lane_top = int((_gs.LANE_Y - 56) * scale)
+        y = max(6, lane_top - rd.height() - int(round(4 * scale)))
+        y = max(0, min(y, max(0, host.height() - rd.height())))
+        x = max(0, host.width() - rd.width() - int(round(10 * scale)))
+        if rd.pos().x() != x or rd.pos().y() != y:
+            rd.move(x, y)
+        bpm, scroll = self._value_readout_values()
+        rd.set_values(bpm, scroll)
+
     def set_view_fps(self, on: bool):
         """絵だけの表示(set_view_only)のあいだも実測 fps を左上に出す。
         Player の詳細モード・設定「FPS表示」用。Editor は呼ばない。"""

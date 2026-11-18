@@ -683,6 +683,7 @@ class PlayerHost(QWidget):
         self.play_mode = "detail"
         self.play_page.set_detail(True)
         self._apply_fps_overlay()
+        self._set_value_readout(True)
         if core is not None:
             try:
                 core.dock.set_speed_row_visible(True)
@@ -721,7 +722,18 @@ class PlayerHost(QWidget):
         self.play_mode = "normal"
         self.play_page.set_detail(False)
         self._apply_fps_overlay()
+        self._set_value_readout(False)
         self.play_page.setFocus(Qt.OtherFocusReason)
+
+    def _set_value_readout(self, on):
+        """詳細モードの右上の数字(BPM・HS・見た目BPM)。"""
+        fn = getattr(getattr(self._core, "dock", None), "set_value_readout", None)
+        if fn is None:
+            return
+        try:
+            fn(on)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_fps_overlay(self):
         """実測 fps の表示。詳細モードでは常に、通常プレイでは設定
@@ -831,6 +843,7 @@ class PlayerHost(QWidget):
             # 次に再生画面へ入るときは通常プレイから(_enter_play が
             # use_normal_play_mode と set_view_only を当て直す)。
             self.play_mode = "normal"
+            self._set_value_readout(False)
             core = self._core
             if core is not None:
                 try:
