@@ -1055,6 +1055,7 @@ class PlayerHost(QWidget):
                 if self.difficulty.path == path:
                     self.difficulty._load_art()
                     self.difficulty.update()
+                self.library.refresh_thumb(path)
         except Exception as exc:  # noqa: BLE001
             if self.show_record_errors:
                 from PySide6.QtWidgets import QMessageBox

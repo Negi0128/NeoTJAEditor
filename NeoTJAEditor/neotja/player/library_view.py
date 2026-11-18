@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from neotja.player import song_lists
+from neotja.player import song_lists, thumbs
 from neotja.start_screen import (
     COURSE_COLOR_KEY, ElidedText, GlassCard, wordmark_family,
 )
@@ -50,12 +50,18 @@ class InfoWorker(QThread):
     # 先頭はワーカー自身(古い走査の結果を受け手が捨てられるように)。
     listed = Signal(object, object, object)   # (worker, ジャンル, サブフォルダ) — フォルダのときだけ
     infos = Signal(object, object)            # (worker, [(path, info)])
+    #: 行の左のジャケット(infos のすぐあとに同じ曲の分を送る)。
+    thumbs = Signal(object, object)           # (worker, [(path, 鍵, QImage or None)])
 
-    def __init__(self, paths=None, directory=None, parent=None):
+    def __init__(self, paths=None, directory=None, parent=None,
+                 art_cfg=None, known=frozenset()):
         super().__init__(parent)
         self._paths = list(paths or [])
         self._dir = directory
         self._cancelled = False
+        #: 曲別の絵の設定の写し(thumbs.art_snapshot)。None ならジャケットは読まない。
+        self._art_cfg = art_cfg
+        self._known = known
 
     def cancel(self):
         self._cancelled = True
@@ -67,17 +73,23 @@ class InfoWorker(QThread):
             if self._cancelled:
                 return
             self.listed.emit(self, genres, dirs)
-        batch, last = [], time.monotonic()
+        batch, tb, last = [], [], time.monotonic()
         for p in paths:
             if self._cancelled:
                 return
             batch.append((p, song_lists.song_info(p)))
+            if self._art_cfg is not None:
+                tb.append((p,) + thumbs.thumb_for_song(self._art_cfg, p, self._known))
             now = time.monotonic()
             if len(batch) >= _BATCH or now - last >= _BATCH_SEC:
                 self.infos.emit(self, batch)
-                batch, last = [], now
+                if tb:
+                    self.thumbs.emit(self, tb)
+                batch, tb, last = [], [], now
         if batch and not self._cancelled:
             self.infos.emit(self, batch)
+            if tb:
+                self.thumbs.emit(self, tb)
 
 
 class SearchWorker(QThread):
@@ -85,33 +97,42 @@ class SearchWorker(QThread):
     ファイル名に query を含む曲を探す。"""
 
     found = Signal(object, object)   # (worker, [(path, info)])
+    thumbs = Signal(object, object)  # (worker, [(path, 鍵, QImage or None)])
     done = Signal(object)            # worker
 
-    def __init__(self, root, query, parent=None):
+    def __init__(self, root, query, parent=None, art_cfg=None, known=frozenset()):
         super().__init__(parent)
         self.root = root
         self.query = query
         self._cancelled = False
+        self._art_cfg = art_cfg
+        self._known = known
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        batch, last = [], time.monotonic()
+        batch, tb, last = [], [], time.monotonic()
         for p in song_lists.walk_tjas(self.root, lambda: self._cancelled):
             if self._cancelled:
                 return
             info = song_lists.song_info(p)
             if song_lists.matches(self.query, info, p):
                 batch.append((p, info))
+                if self._art_cfg is not None:
+                    tb.append((p,) + thumbs.thumb_for_song(self._art_cfg, p, self._known))
             now = time.monotonic()
             if batch and (len(batch) >= _BATCH or now - last >= _BATCH_SEC):
                 self.found.emit(self, batch)
-                batch, last = [], now
+                if tb:
+                    self.thumbs.emit(self, tb)
+                batch, tb, last = [], [], now
         if self._cancelled:
             return
         if batch:
             self.found.emit(self, batch)
+            if tb:
+                self.thumbs.emit(self, tb)
         self.done.emit(self)
 
 
@@ -150,6 +171,47 @@ def _chip_style(color_key):
                _rgba(_c(col, g["chip_border_alpha"]))))
 
 
+class SongThumb(QWidget):
+    """行の左のジャケット(角を丸めた正方形)。絵が無ければ空の枠だけ描く
+    (題名の位置をそろえるため、枠はいつも出す)。"""
+
+    RADIUS = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(thumbs.THUMB_PX, thumbs.THUMB_PX)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.pixmap = None
+
+    def set_pixmap(self, pm):
+        pm = pm if (pm is not None and not pm.isNull()) else None
+        if pm is self.pixmap:
+            return
+        self.pixmap = pm
+        self.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rad = self.RADIUS
+        if self.pixmap is not None:
+            path = QPainterPath()
+            path.addRoundedRect(r, rad, rad)
+            p.save()
+            p.setClipPath(path)
+            p.drawPixmap(r.toRect(), self.pixmap)
+            p.restore()
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
+        else:
+            p.setBrush(QColor(10, 20, 36, 150))
+            p.setPen(QPen(QColor(127, 227, 255, 70), 1.0))
+        p.drawRoundedRect(r, rad, rad)
+        p.end()
+
+
 class SongRow(GlassCard):
     """曲の1行。左の色帯はいちばん難しい難易度の色。"""
 
@@ -177,6 +239,8 @@ class SongRow(GlassCard):
         h = QHBoxLayout(self)
         h.setContentsMargins(22, 8, 12, 8)
         h.setSpacing(12)
+        self.thumb = SongThumb()
+        h.addWidget(self.thumb, 0, Qt.AlignVCenter)
         texts = QVBoxLayout()
         texts.setSpacing(2)
         key = "fg_dim" if self.missing else "fg_bright"
@@ -257,6 +321,10 @@ class SongRow(GlassCard):
         self._restyle()
         self.title.update()
         self.sub.update()
+
+    def set_thumb(self, pm):
+        """左のジャケット。None なら空の枠。"""
+        self.thumb.set_pixmap(pm)
 
     def set_missing_chip(self):
         chip = QLabel("ファイルなし")
@@ -1162,11 +1230,14 @@ class LibraryView(QWidget):
     def _start_worker(self, paths=None, directory=None):
         detach_worker(self._worker)
         self._worker = None
-        w = InfoWorker(paths=paths, directory=directory, parent=self)
+        w = InfoWorker(paths=paths, directory=directory, parent=self,
+                       art_cfg=thumbs.art_snapshot(self.cfg),
+                       known=thumbs.CACHE.keys())
         # 受け手は必ず self の結び付いたメソッドにする。ラムダへ繋ぐと受け手の
         # スレッドが分からず、ワーカーのスレッドでそのまま呼ばれて部品を作って
         # しまう(実際に行が欠けた)。メソッドなら GUI スレッドへ回される。
         w.infos.connect(self._on_infos)
+        w.thumbs.connect(self._on_thumbs)
         if directory is not None:
             w.listed.connect(self._on_listed)
         self._worker = w
@@ -1193,6 +1264,45 @@ class LibraryView(QWidget):
         lst = getattr(page, "list", None)
         if q and lst is not None and page is not self.page_folder:
             lst.apply_filter(q)
+
+    def _song_rows_by_key(self):
+        out = {}
+        for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
+            for row in lst.rows():
+                if isinstance(row, SongRow):
+                    out.setdefault(song_lists.path_key(row.path), []).append(row)
+        return out
+
+    def _on_thumbs(self, worker, items):
+        """ワーカーが読んだジャケットを行へ(QPixmap にするのはここ)。"""
+        if worker is not self._worker and worker is not getattr(self, "_search_worker", None):
+            return
+        rows = self._song_rows_by_key()
+        for path, key, image in items:
+            if key is None:
+                pm = None
+            elif image is not None:
+                pm = thumbs.CACHE.put(key, image)
+            else:
+                pm = thumbs.CACHE.get(key)
+                if pm is None:
+                    # 送る前は覚えていたが、そのあいだに捨てられた。読み直す。
+                    pm = self._load_thumb_now(path)
+            for row in rows.get(song_lists.path_key(path), ()):
+                row.set_thumb(pm)
+
+    def _load_thumb_now(self, path):
+        key, image = thumbs.thumb_for_song(self.cfg, path)
+        if key is None:
+            return None
+        return thumbs.CACHE.put(key, image) if image is not None else thumbs.CACHE.get(key)
+
+    def refresh_thumb(self, path):
+        """1曲の行のジャケットを今の設定で出し直す(背景・ジャケットを
+        指定したあと)。"""
+        pm = self._load_thumb_now(path)
+        for row in self._song_rows_by_key().get(song_lists.path_key(path), ()):
+            row.set_thumb(pm)
 
     def _current_search(self):
         page = self.pages.currentWidget()
@@ -1503,8 +1613,11 @@ class LibraryView(QWidget):
         self.search_list.clear()
         self.folder_stack.setCurrentWidget(self.search_list)
         self._search_names = {}
-        w = SearchWorker(self._folder_dir, q, parent=self)
+        w = SearchWorker(self._folder_dir, q, parent=self,
+                         art_cfg=thumbs.art_snapshot(self.cfg),
+                         known=thumbs.CACHE.keys())
         w.found.connect(self._on_search_found)
+        w.thumbs.connect(self._on_thumbs)
         self._search_worker = w
         w.start()
 
