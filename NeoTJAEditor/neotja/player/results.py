@@ -31,7 +31,7 @@ from neotja.player.difficulty import (BASE_H, BASE_W, BTN_RADIUS, FALLBACK_MARK,
 CROWN_FILE = "Result_Crown.png"
 CROWN_RECTS = {"silver": (0, 0, 101, 92), "gold": (0, 92, 101, 92),
                "rainbow": (0, 184, 101, 92)}
-CROWN_LABELS = {"silver": "クリア", "gold": "フルコンボ", "rainbow": "全良"}
+CROWN_LABELS = {"silver": "クリア", "gold": "フルコンボ", "rainbow": "ドンだフルコンボ"}
 
 _crown_cache = {}
 
