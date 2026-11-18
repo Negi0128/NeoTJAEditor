@@ -37,9 +37,33 @@ class PlayPage(QWidget):
         self._backdrop_timer = QTimer(self)
         self._backdrop_timer.setSingleShot(True)
         self._backdrop_timer.timeout.connect(self._refresh_menu_backdrop)
+        #: ゲーム画面を返す呼び出し(フェードの黒を画面自身に描いてもらう)。
+        self._screen_fn = None
 
-    def attach(self, gpw, native=False, key_cb=None):
-        """再生ウィンドウをこの画面の子にする(1回だけ)。操作は締める。"""
+    # ------------------------------------------------------------------
+    # フェードの黒(transitions.FadeStack が使う)。GL の窓の上にはふつうの
+    # ウィジェットを重ねられないので、ゲーム画面自身に黒を描いてもらう。
+    def _dim_screen(self):
+        fn = self._screen_fn
+        try:
+            s = fn() if fn is not None else None
+        except Exception:  # noqa: BLE001
+            s = None
+        return s if s is not None and hasattr(s, "set_fade_dim") else None
+
+    def supports_fade_dim(self):
+        return self.gpw is not None and self._dim_screen() is not None
+
+    def set_fade_dim(self, v):
+        s = self._dim_screen()
+        if s is not None:
+            s.set_fade_dim(v)
+
+    def attach(self, gpw, native=False, key_cb=None, screen_fn=None):
+        """再生ウィンドウをこの画面の子にする(1回だけ)。操作は締める。
+        screen_fn はゲーム画面を返す呼び出し(フェードの黒に使う)。"""
+        if screen_fn is not None:
+            self._screen_fn = screen_fn
         if self.gpw is not gpw:
             gpw.setParent(self, Qt.Widget)
             gpw.installEventFilter(self)

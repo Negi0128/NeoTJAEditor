@@ -3561,6 +3561,38 @@ class _GameScreenBase:
         self._static_layer = None
         self.update()
 
+    #: 画面の上に重ねる黒の濃さ(0..1)。Player の画面切り替えのフェード用
+    #: (GL の窓の上にはふつうのウィジェットを重ねられないので、画面自身が
+    #: 黒を描く)。既定 0 で何も描かない — Editor と録画は触らない(録画は
+    #: 別に作った CPU 版の画面を使うので、ここが 0 以外になることは無い)。
+    _fade_dim = 0.0
+
+    def set_fade_dim(self, v):
+        """重ねる黒の濃さを決めて塗り直す。"""
+        try:
+            v = max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            v = 0.0
+        if abs(v - self._fade_dim) < 1e-6:
+            return
+        self._fade_dim = v
+        self.update()
+
+    def fade_dim(self):
+        return self._fade_dim
+
+    def _draw_fade_dim(self, p):
+        a = self._fade_dim
+        if a <= 0.0:
+            return
+        p.save()
+        p.setClipping(False)
+        p.setOpacity(1.0)
+        h = max(self._logical_h, self._screen_height() + int(self.pane_band_height() or 0))
+        p.fillRect(QRectF(0, 0, self._logical_w, h),
+                   QColor(0, 0, 0, int(round(255 * a))))
+        p.restore()
+
     def paint_self(self):
         """自分の面へ1コマ描く(paintEvent / paintGL の中身)。
 
@@ -4361,6 +4393,9 @@ class _GameScreenBase:
             p.translate(x, y)
             pane.paint_pane(p)
             p.restore()
+
+        # --- 画面切り替えの黒(Player のフェード。既定 0 で何もしない) ---
+        self._draw_fade_dim(p)
 
     # ------------------------------------------------------------------
     # 歌詞(#LYRIC / 利用者の指定 2026-10-17: 通常モードの画面下に出す)

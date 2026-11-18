@@ -3,9 +3,11 @@
 - cross … いまの画面を1枚の絵に撮って上に重ね、新しい画面へ切り替えてから
   その絵を薄くしていく(クロスフェード)。
 - black … いまの画面の上で黒を濃くし、真っ黒になったところで切り替え、
-  黒を薄くしていく。新しい画面が GL の窓(native)だと、ふつうのウィジェットを
-  上に重ねても OS の窓の下に沈んで見えないので、そのときは真っ黒から
-  そのまま切り替える(黒からの出は無し)。
+  黒を薄くしていく。GL の窓(native)の上にはふつうのウィジェットを重ねても
+  OS の窓の下に沈んで見えないので、画面自身が黒を描ける相手
+  (supports_fade_dim / set_fade_dim を持つ再生画面)には、上に重ねる代わりに
+  その黒の濃さを動かす(入るときも出るときも)。描けない native の画面は
+  今までどおり真っ黒からそのまま切り替える。
 
 あとで結果画面などの切り替えにもそのまま使う。
 """
@@ -50,6 +52,8 @@ class FadeStack(QStackedWidget):
         self._target = None
         self._done_cb = None
         self._ms = 350
+        #: 黒を自分で描いてもらっている画面(フェードの間だけ)。
+        self._dim_widget = None
 
     def is_fading(self):
         return self._phase is not None
@@ -111,6 +115,13 @@ class FadeStack(QStackedWidget):
             self._start("out", 1.0, 0.0, self._ms)
         else:
             ov.pixmap = None
+            cur = self.currentWidget()
+            if cur is not None and cur is not widget and _dim_capable(cur):
+                # 再生画面から出る: 画面自身に黒を濃くしてもらう。
+                self._dim_widget = cur
+                _set_dim(cur, 0.0)
+                self._start("in", 0.0, 1.0, self._ms // 2)
+                return
             self._start("in", 0.0, 1.0, self._ms // 2)
         ov.opacity = self._anim.startValue()
         ov.show()
@@ -119,30 +130,62 @@ class FadeStack(QStackedWidget):
     def _start(self, phase, a, b, ms):
         self._phase = phase
         self._anim.stop()
+        # 値を入れ替えるだけで前の位置の値が流れてくる(終わった位置で
+        # 終点を替えると、その値が出る)。始める前の分は受けない。
+        self._anim.blockSignals(True)
         self._anim.setDuration(max(1, ms))
         self._anim.setStartValue(float(a))
         self._anim.setEndValue(float(b))
         self._anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._anim.blockSignals(False)
         self._anim.start()
 
     def _on_value(self, v):
+        w = self._dim_widget
+        if w is not None:
+            _set_dim(w, float(v))
+            return
         self._overlay.opacity = float(v)
         self._overlay.update()
 
     def _on_finished(self):
         if self._phase == "in":
             # 真っ黒。ここで切り替えて、黒を薄くする。
-            self.setCurrentWidget(self._target)
-            if getattr(self._target, "native_gl", False):
+            prev, self._dim_widget = self._dim_widget, None
+            target = self._target
+            ms = self._ms - self._ms // 2
+            if _dim_capable(target):
+                # 先に真っ黒にしてから出す(1コマも素の絵を見せない)。
+                _set_dim(target, 1.0)
+                self.setCurrentWidget(target)
+                self._overlay.hide()
+                if prev is not None and prev is not target:
+                    _set_dim(prev, 0.0)
+                self._dim_widget = target
+                self._start("out", 1.0, 0.0, ms)
+                return
+            self.setCurrentWidget(target)
+            if prev is not None:
+                _set_dim(prev, 0.0)
+            if getattr(target, "native_gl", False):
                 self._end()         # GL の窓の上には重ねられない
                 return
+            self._overlay.opacity = 1.0
+            self._overlay.show()
             self._overlay.raise_()
-            self._start("out", 1.0, 0.0, self._ms - self._ms // 2)
+            self._overlay.update()
+            self._start("out", 1.0, 0.0, ms)
             return
         self._end()
 
+    def _clear_dim(self):
+        w, self._dim_widget = self._dim_widget, None
+        if w is not None:
+            _set_dim(w, 0.0)
+
     def _end(self):
         self._phase = None
+        self._clear_dim()
         self._overlay.hide()
         self._overlay.pixmap = None
         cb, self._done_cb = self._done_cb, None
@@ -157,12 +200,31 @@ class FadeStack(QStackedWidget):
         if self._target is not None:
             self.setCurrentWidget(self._target)
         self._phase = None
+        self._clear_dim()
         self._overlay.hide()
         self._overlay.pixmap = None
         self._done_cb = None
 
     def cancel(self):
         self._finish_now()
+
+
+def _dim_capable(widget):
+    """画面自身が黒を描けるか(再生画面)。"""
+    fn = getattr(widget, "supports_fade_dim", None)
+    try:
+        return bool(fn()) if fn is not None else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _set_dim(widget, v):
+    fn = getattr(widget, "set_fade_dim", None)
+    if fn is not None:
+        try:
+            fn(v)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _resize_event(widget):

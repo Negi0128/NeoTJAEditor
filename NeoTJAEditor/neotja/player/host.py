@@ -534,7 +534,9 @@ class PlayerHost(QWidget):
 
     def _enter_play(self, path, course):
         """準備ができた。黒を挟んで再生画面へ移り、ふつうの頭から流す
-        (助走・OFFSET は Editor のプレビューと同じ決まり。DEMOSTART ではない)。"""
+        (助走・OFFSET は Editor のプレビューと同じ決まり。DEMOSTART ではない)。
+        黒は再生画面の上で薄くしていき(GL の窓でも、画面自身が黒を描く)、
+        **明け切ってから**曲を流す(利用者の指定)。"""
         self._seq = None
         self._stop_demo_video()
         core = self._core
@@ -554,7 +556,8 @@ class PlayerHost(QWidget):
         self.play_mode = "normal"
         self.play_page.menu.set_detail_mode(False)
         self.play_page.hide_menu()
-        self.play_page.attach(dock.game_preview_window, native)
+        self.play_page.attach(dock.game_preview_window, native,
+                              screen_fn=lambda: getattr(dock, "game_screen", None))
         self._play_ctx = (path, course)
         self._apply_fps_overlay()
 
