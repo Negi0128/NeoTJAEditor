@@ -192,4 +192,130 @@ class FreeRunTests(unittest.TestCase):
             QTest.qWait(50)
 
 
+class DriftTests(unittest.TestCase):
+    @real_qt_test
+    def test_small_drift_is_nudged_by_rate_not_seek(self):
+        """動画が音源より 45ms 先: シークせず、再生速度を少し落として寄せる。"""
+        import time as _t
+        from neotja.player.demo_video import DemoVideo
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        class Core:
+            pos = 10.0
+            def demo_ready(self): return True
+            def demo_playing(self): return True
+            def demo_position(self): return self.pos
+            def set_demo_video_duration(self, d): pass
+
+        class Player:
+            def __init__(self):
+                self.pos, self.rate, self.seeks = 10000, 1.0, []
+                self.state = QMediaPlayer.PlayingState
+            def position(self): return self.pos
+            def setPosition(self, ms): self.seeks.append(ms); self.pos = ms
+            def setPlaybackRate(self, r): self.rate = r
+            def playbackState(self): return self.state
+            def play(self): self.state = QMediaPlayer.PlayingState
+            def pause(self): self.state = QMediaPlayer.PausedState
+
+        class Frame:
+            def __init__(self, sec): self.us = int(sec * 1e6)
+            def isValid(self): return True
+            def startTime(self): return self.us
+            def toImage(self):
+                from PySide6.QtGui import QImage
+                return QImage()
+
+        c = Core()
+        v = DemoVideo(c, lambda image: None, lambda: None)
+        p = Player()
+        v.player = p
+        v._loaded = True
+        v._sync()                                  # 始め: 1回だけシーク
+        self.assertEqual(p.seeks, [10000])
+        v._settle_until = 0.0
+        for _ in range(20):                        # 届く絵が 45ms 先
+            v._frame(v._generation, Frame(c.pos + 0.045))
+        self.assertAlmostEqual(v.drift, 0.045, places=2)
+        v._sync()
+        self.assertEqual(p.seeks, [10000])         # 小さなずれではシークしない
+        self.assertLess(p.rate, 1.0)               # 先なので少し遅く
+        self.assertGreaterEqual(p.rate, 1.0 - DemoVideo.MAX_NUDGE)
+        for _ in range(40):                        # 後ろへずれたら少し速く
+            v._frame(v._generation, Frame(c.pos - 0.06))
+        v._sync()
+        self.assertGreater(p.rate, 1.0)
+        self.assertLessEqual(p.rate, 1.0 + DemoVideo.MAX_NUDGE + 1e-9)
+        for _ in range(60):                        # 合ったら 1 倍へ
+            v._frame(v._generation, Frame(c.pos + 0.001))
+        v._sync()
+        self.assertEqual(p.rate, 1.0)
+        for _ in range(60):                        # 大きなずれはシーク
+            v._frame(v._generation, Frame(c.pos + 0.9))
+        v._sync()
+        self.assertEqual(len(p.seeks), 2)
+        self.assertIsNone(v.drift)
+        # シーク直後(追いつくまでの絵)は測らない。
+        v._frame(v._generation, Frame(c.pos - 0.3))
+        self.assertIsNone(v.drift)
+        v.player = None
+        v.deleteLater()
+
+    @real_qt_test
+    def test_real_h264_follows_clock_within_a_frame(self):
+        """本物の H264(キーフレーム間隔 250)を、DEMOSTART 7.3 秒からの時計に
+        追従させる。3 秒後からのずれの平均が 20ms 未満(以前は 40ms 前後で
+        直らなかった)。"""
+        import statistics
+        import subprocess
+        import time as _t
+        from PySide6.QtTest import QTest
+        from neotja.player.demo_video import DemoVideo
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001
+            self.skipTest('ffmpeg が無い')
+        with tempfile.TemporaryDirectory() as d:
+            movie = os.path.join(d, 'bg.mp4')
+            r = subprocess.run([ffmpeg, '-y', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                                'testsrc2=size=960x540:rate=30:duration=20',
+                                '-f', 'lavfi', '-i', 'sine=frequency=440:duration=20',
+                                '-pix_fmt', 'yuv420p', '-g', '250', '-shortest', movie],
+                               capture_output=True)
+            if r.returncode != 0 or not os.path.exists(movie):
+                self.skipTest('動画を作れない')
+
+            class Clock:
+                start = None
+                def demo_ready(self): return True
+                def demo_playing(self): return self.start is not None
+                def demo_position(self):
+                    return 7.3 + (_t.monotonic() - self.start) if self.start else 7.3
+                def set_demo_video_duration(self, dd): pass
+                def restart_demo(self): pass
+
+            clock = Clock()
+            errs = []
+            v = DemoVideo(clock, lambda image: None, lambda: None)
+            orig = v._measure
+
+            def measure(frame):
+                if clock.start is not None and _t.monotonic() - clock.start > 3.0:
+                    errs.append(frame.startTime() / 1e6 - clock.demo_position())
+                orig(frame)
+            v._measure = measure
+            v.start(movie)
+            clock.start = _t.monotonic()
+            end = _t.monotonic() + 6.0
+            while _t.monotonic() < end:
+                QTest.qWait(5)
+            v.stop()
+            v.deleteLater()
+            QTest.qWait(50)
+            self.assertGreater(len(errs), 40)
+            mean = statistics.mean(errs)
+            self.assertLess(abs(mean), 0.02, 'mean drift %.1fms' % (mean * 1000))
+
+
 if __name__=='__main__': unittest.main()
