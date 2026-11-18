@@ -823,6 +823,9 @@ class LibraryView(QWidget):
     """選曲。左の列と右の中身。"""
 
     song_chosen = Signal(str)
+    #: 曲の行を1回押した(選んだだけ。試聴を始める合図)。もう一度押すと
+    #: song_chosen(難易度選択へ)。
+    song_selected = Signal(str)
     #: 操作音の合図("pi")。鳴らすのは PlayerHost(ui_sound)。
     sound_requested = Signal(str)
 
@@ -1057,6 +1060,33 @@ class LibraryView(QWidget):
 
     # ------------------------------------------------------------------
     # 選ぶ
+    #: 選んだ直後の2回目を無視する間合い(秒)。ダブルクリックや連打で、
+    #: 試聴を聞く前に難易度選択へ飛ばないように。
+    SELECT_DEBOUNCE_SEC = 0.15
+    _last_select = 0.0
+
+    def click_song(self, path):
+        """曲の行を押した(Enter も同じ)。選んでいない曲なら選ぶだけ
+        (song_selected。試聴が始まる)。選んでいる曲をもう一度押したら
+        難易度選択へ(choose)。"""
+        import time
+        if not path or not os.path.isfile(path):
+            return
+        now = time.monotonic()
+        same = bool(self._chosen) and song_lists.path_key(path) == song_lists.path_key(self._chosen)
+        if same:
+            if now - self._last_select < self.SELECT_DEBOUNCE_SEC:
+                return
+            self.choose(path)
+            return
+        self._chosen = path
+        self._last_select = now
+        self._mark_chosen()
+        self.song_selected.emit(path)
+
+    def selected_path(self):
+        return self._chosen
+
     def choose(self, path):
         """曲を選んだ(難易度選択へ)。選んだだけでは「最近開いた楽曲」に
         入れない — 見て回るだけで一覧が埋まってしまうため。入れるのは
@@ -1107,7 +1137,7 @@ class LibraryView(QWidget):
     def _song_row(self, path, title, **kw):
         row = SongRow(path, title, **kw)
         row.chosen.connect(self._pi)
-        row.chosen.connect(self.choose)
+        row.chosen.connect(self.click_song)
         row.save_toggled.connect(self._pi)
         row.save_toggled.connect(self._on_save_toggled)
         row.remove_requested.connect(self.remove_saved)

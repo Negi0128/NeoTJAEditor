@@ -91,10 +91,18 @@ class ReopenStartsAtDemoStartTests(unittest.TestCase):
                 self.assertTrue(_until(core.chart_playing))
                 _wait(1200)
                 self.assertGreater(core.chart_position(), 10.5)
+                # 「戻る」では止めない(選曲で続きを流す)。同じ曲を選び直すと続きのまま。
                 host.difficulty.btn_back.click()
                 _wait(200)
+                self.assertTrue(core.chart_playing())
+                p_back = core.chart_position()
+                host.library.choose(a)
+                _wait(100)
+                self.assertGreaterEqual(core.chart_position(), p_back)
+                host.stop_preview()
+                _wait(100)
                 self.assertFalse(core.chart_playing())
-                # 1) そのまま開き直す → DEMOSTART から(止めた所からではない)。
+                # 1) 止めたあとで開き直す → DEMOSTART から(止めた所からではない)。
                 host.library.choose(a)
                 self.assertTrue(_until(core.chart_playing))
                 _wait(150)     # シークは音声スレッドが次の回で反映する

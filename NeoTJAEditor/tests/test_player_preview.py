@@ -335,8 +335,7 @@ class HostPreviewTests(unittest.TestCase):
             self.assertNotIn(('stop',), core.log)
             self.assertIs(host.body.currentWidget(), host.intro)
             host.stop_preview()
-            for click, name in ((host.difficulty.btn_record, 'record'),
-                                (host.difficulty.btn_back, 'back')):
+            for click, name in ((host.difficulty.btn_record, 'record'),):
                 host.show_difficulty(a)
                 core.log.clear()
                 got = []
@@ -346,6 +345,12 @@ class HostPreviewTests(unittest.TestCase):
                 self.assertEqual(core.log[0], ('stop',), name)
                 host.play_requested.disconnect()
                 host.record_requested.disconnect()
+            # 「戻る」は試聴を止めない(選曲で続きを流す。test_player_library_preview)。
+            host.show_difficulty(a)
+            core.log.clear()
+            host.difficulty.btn_back.click()
+            self.assertNotIn(('stop',), core.log)
+            self.assertIs(host.body.currentWidget(), host.library)
             host.show_difficulty(a)
             core.log.clear()
             host.shutdown()

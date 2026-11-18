@@ -43,6 +43,8 @@ class PlayerHost(QWidget):
 
     #: 譜面の終わりを見張る間合い(ms)。
     FINISH_POLL_MS = 100
+    #: 選曲で行を選んでから試聴を始めるまでの間(ms)。続けて押したら最後の曲だけ。
+    SELECT_PREVIEW_DELAY_MS = 150
 
     def __init__(self, config_data, save_cb, parent=None, audio_provider=None,
                  editor_audio_cb=None):
@@ -101,6 +103,14 @@ class PlayerHost(QWidget):
         v.addWidget(self.body, 1)
         self.library = LibraryView(config_data, save_cb)
         self.library.song_chosen.connect(self._on_song_chosen)
+        # 1回目の押下は選ぶだけで、その曲の DEMOSTART から試聴する(少し待って
+        # から。連打で何曲も読みにいかない)。
+        self.library.song_selected.connect(self._on_song_selected)
+        self._select_timer = QTimer(self)
+        self._select_timer.setSingleShot(True)
+        self._select_timer.setInterval(self.SELECT_PREVIEW_DELAY_MS)
+        self._select_timer.timeout.connect(self._start_selected_preview)
+        self._select_path = str()
         self.library.sound_requested.connect(self.sounds.play)
         self.body.addWidget(self.library)
         self.difficulty = DifficultyPage(config_data, save_cb)
@@ -165,6 +175,17 @@ class PlayerHost(QWidget):
         # 押した「Player を起動」が消えて、フォーカスが「戻る」へ流れ着く
         # のを避ける(Enter 一つでランチャーへ戻ってしまう)。
         self.library.pages.currentWidget().setFocus()
+        # 試聴の係(音声エンジン一式)は、選曲が出てから裏で用意しておく
+        # (起動時には作らない。最初の1曲を押したときに待たせないため)。
+        QTimer.singleShot(0, self._warm_core)
+
+    def _warm_core(self):
+        if self._shutting_down or not self.isVisible() or self._core is not None:
+            return
+        try:
+            self._ensure_core()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # 音量(Editor と同じ master_volume / preview_volume / sfx_volume)
@@ -229,10 +250,27 @@ class PlayerHost(QWidget):
         else:
             self.volume_popover.close_popover()
 
+    def _on_song_selected(self, path):
+        """選曲で曲を1回押した。少し待ってから、その曲の DEMOSTART から試聴。"""
+        self._select_path = path
+        self._select_timer.start()
+
+    def _start_selected_preview(self):
+        path, self._select_path = self._select_path, str()
+        if (not path or self._shutting_down or not self.isVisible()
+                or self.body.currentWidget() is not self.library
+                or self.library.selected_path() != path):
+            return
+        # 同じ曲がもう流れていればそのまま(違う曲なら DEMOSTART から)。
+        self.start_preview(path, restart=False)
+
     def _on_song_chosen(self, path):
+        # 選んでいた曲をもう一度押した: 試聴は止めずに難易度選択へ。
+        self._select_timer.stop()
+        self._select_path = str()
         self.current_song = path
         self.song_chosen.emit(path)
-        self.show_difficulty(path)
+        self.show_difficulty(path, restart=False)
 
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""
@@ -247,9 +285,10 @@ class PlayerHost(QWidget):
             self.body.cancel()
             self.body.setCurrentWidget(page)
 
-    def show_difficulty(self, path, course=None, fade=None):
+    def show_difficulty(self, path, course=None, fade=None, restart=True):
         """難易度選択へ。course を渡すとそのコースを選んだ状態にする
-        (演奏から戻ったとき)。fade を渡すとフェードしてから試聴を始める。"""
+        (演奏から戻ったとき)。fade を渡すとフェードしてから試聴を始める。
+        restart=False は選曲から: 同じ曲の試聴が流れていれば続ける。"""
         self._abort_sequence()
         self.difficulty.close_settings()
         self.difficulty.set_song(path)
@@ -257,7 +296,7 @@ class PlayerHost(QWidget):
             self._select_course(course)
 
         def after():
-            self.start_preview(path)
+            self.start_preview(path, restart=restart)
             self.difficulty.setFocus()
         if fade:
             self._set_page(self.difficulty, fade=fade, done=after)
@@ -278,8 +317,12 @@ class PlayerHost(QWidget):
 
     def show_library(self):
         """難易度選択の「戻る」。選曲は作り直さないので、開いていた
-        フォルダ・検索・並び・選んだ行はそのまま。"""
-        self.stop_preview()
+        フォルダ・検索・並び・選んだ行はそのまま。**試聴は止めない**(選曲で
+        流していた続き。同じ曲をもう一度押すと、そのまま難易度選択へ)。
+        背景動画は選曲に出す所が無いので止める。"""
+        self._stop_demo_video()
+        self._abort_sequence()
+        self._end_play()
         self.difficulty.close_settings()
         self.library.refresh_recent()
         self._set_page(self.library)
@@ -383,6 +426,8 @@ class PlayerHost(QWidget):
 
     def stop_preview(self):
         """鳴っているものを全部止める(試聴・曲名表示の段取り・本編)。"""
+        self._select_timer.stop()
+        self._select_path = str()
         self._stop_demo_video()
         self._abort_sequence()
         self._end_play()

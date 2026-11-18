@@ -215,6 +215,10 @@ class HostFlowTests(unittest.TestCase):
             host.on_shown()
             host.library.show_section('saved')
             host.library.page_saved.search.setText('テスト')
+            # 1回目は選ぶだけ(試聴)、もう一度押すと難易度選択へ。
+            host.library.saved_list.rows()[0].chosen.emit(path)
+            self.assertIs(host.body.currentWidget(), host.library)
+            host.library._last_select = 0.0
             host.library.saved_list.rows()[0].chosen.emit(path)
             self.assertIs(host.body.currentWidget(), host.difficulty)
             self.assertFalse(host.top_bar.isVisible())
