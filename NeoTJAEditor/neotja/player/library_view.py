@@ -273,6 +273,19 @@ class SongRow(GlassCard):
         self._accent = bool(on)
         self.update()
 
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self._accent and not self.hasFocus():
+            # 選んでいる(試聴している)行。フォーカスが外れても分かるように
+            # 縁を水色で描く(フォーカスのときは GlassCard がアクセント色で描く)。
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(QColor(127, 227, 255, 200), 1.5))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+                              self._radius, self._radius)
+            p.end()
+
     def set_saved(self, on):
         self._saved = bool(on)
         self._sync_star()
