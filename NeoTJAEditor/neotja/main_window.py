@@ -987,6 +987,11 @@ class MainWindow(QMainWindow):
         page = getattr(self, "player_page", None)
         if page is not None:
             page.stop_preview()
+            # Player の難易度設定で変えた連打秒速を Editor の欄へ戻す
+            # (値そのものは同じ config_data を共有している)。
+            spin = getattr(self, "roll_speed_spin", None)
+            if spin is not None:
+                spin.setValue(int(self.config_data.get("roll_speed", 45)))
         self.menuBar().show()
         icon = getattr(self, "_editor_window_icon", None)
         if icon is not None:

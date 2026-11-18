@@ -22,7 +22,7 @@ FOT-大江戸勘亭流 Std E(System の Kanteiryu.otf)。★・ボタンは細�
 import os
 
 from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QPropertyAnimation,
-                            QRect, QRectF, QSize, Qt, Signal)
+                            QRect, QRectF, QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QLinearGradient, QPainter, QPainterPath, QPen,
                            QPixmap, QPolygonF)
@@ -575,6 +575,129 @@ class ToggleSwitch(_GlassButton):
         p.end()
 
 
+class Stepper(_GlassButton):
+    """数を1つずつ増減する小さな板(ToggleSwitch と同じ作り)。
+    左の「−」・右の「＋」を押す(押し続けると連続)、矢印キー・ホイールでも動く。"""
+
+    valueChanged = Signal(int)
+
+    def __init__(self, lo, hi, suffix="", parent=None):
+        super().__init__(parent)
+        self.lo, self.hi = int(lo), int(hi)
+        self.suffix = suffix
+        self._value = self.lo
+        self._press = 0          # 押している側(-1 / +1)
+        self._repeat = QTimer(self)
+        self._repeat.timeout.connect(self._on_repeat)
+
+    def value(self):
+        return self._value
+
+    def setValue(self, v, emit=False):
+        try:
+            v = int(round(float(v)))
+        except (TypeError, ValueError):
+            v = self.lo
+        v = max(self.lo, min(self.hi, v))
+        if v == self._value:
+            return
+        self._value = v
+        self.update()
+        if emit:
+            self.valueChanged.emit(v)
+
+    def step(self, d):
+        self.setValue(self._value + d, emit=True)
+
+    def sizeHint(self):
+        g = GLOW * self.scale
+        return QSize(int(176 * self.scale + 2 * g), int(36 * self.scale + 2 * g))
+
+    def _side(self, x):
+        r = self.inner()
+        zone = r.height() * 1.15
+        if x <= r.left() + zone:
+            return -1
+        if x >= r.right() - zone:
+            return 1
+        return 0
+
+    def mousePressEvent(self, ev):
+        if ev.button() != Qt.LeftButton:
+            return super().mousePressEvent(ev)
+        side = self._side(ev.position().x())
+        self.setFocus(Qt.MouseFocusReason)
+        if side:
+            self._press = side
+            self.step(side)
+            self._repeat.start(380)
+            self.update()
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        self._press = 0
+        self._repeat.stop()
+        self.update()
+        ev.accept()
+
+    def _on_repeat(self):
+        if not self._press:
+            self._repeat.stop()
+            return
+        self._repeat.setInterval(55)
+        self.step(self._press)
+
+    def keyPressEvent(self, ev):
+        k = ev.key()
+        if k in (Qt.Key_Left, Qt.Key_Down, Qt.Key_Minus):
+            self.step(-1)
+        elif k in (Qt.Key_Right, Qt.Key_Up, Qt.Key_Plus):
+            self.step(1)
+        else:
+            return super().keyPressEvent(ev)
+        ev.accept()
+
+    def wheelEvent(self, ev):
+        d = ev.angleDelta().y()
+        if d:
+            self.step(1 if d > 0 else -1)
+        ev.accept()
+
+    def paintEvent(self, ev):
+        s = self.scale
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.inner())
+        lit = self.lit() or self.hasFocus()
+        p.setPen(QPen(QColor(255, 255, 255, 140 if lit else 100), 1.3 * s))
+        p.setBrush(QColor(10, 20, 36, 150))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        zone = r.height() * 1.15
+        pen = QPen(QColor(255, 255, 255), 2.2 * s, Qt.SolidLine, Qt.RoundCap)
+        for side in (-1, 1):
+            cx = (r.left() + zone / 2) if side < 0 else (r.right() - zone / 2)
+            c = QPointF(cx, r.center().y())
+            at_end = self._value <= self.lo if side < 0 else self._value >= self.hi
+            if self._press == side:
+                p.setPen(Qt.NoPen)
+                on_fill = QColor(SELECT_COLOR)
+                on_fill.setAlpha(110)
+                p.setBrush(on_fill)
+                p.drawEllipse(c, r.height() / 2 - 3 * s, r.height() / 2 - 3 * s)
+            pen.setColor(QColor(255, 255, 255, 80 if at_end else 235))
+            p.setPen(pen)
+            k = 6 * s
+            p.drawLine(QPointF(c.x() - k, c.y()), QPointF(c.x() + k, c.y()))
+            if side > 0:
+                p.drawLine(QPointF(c.x(), c.y() - k), QPointF(c.x(), c.y() + k))
+        p.setFont(thin_font(16 * s, QFont.Bold))
+        p.setPen(QColor(255, 255, 255, 235))
+        text = "%d%s" % (self._value, (" " + self.suffix) if self.suffix else "")
+        p.drawText(QRectF(r.left() + zone, r.top(), r.width() - 2 * zone, r.height()),
+                   Qt.AlignCenter, text)
+        p.end()
+
+
 class SettingsAction(_GlassButton):
     """設定パネル内の曲別素材への入口。"""
 
@@ -601,7 +724,13 @@ class SettingsPanel(QFrame):
 
     closed = Signal()
     changed = Signal(str, bool)   # (設定キー, 値)
+    #: 数の設定が変わった (設定キー, 値)。
+    number_changed = Signal(str, int)
     art_requested = Signal()
+
+    #: 数の設定 (キー, 名前, 下限, 上限, 既定, 単位)。連打秒速は Editor の
+    #: 「連打秒速」(roll_speed)と同じ値を共有する。次に譜面を読むときに効く。
+    NUMBERS = (("roll_speed", "連打秒速", 1, 100, 45, "打/s"),)
 
     ROWS = (("player_show_jacket", "ジャケット"),
             ("player_show_bg", "背景"),
@@ -650,6 +779,19 @@ class SettingsPanel(QFrame):
             self.grid.addWidget(sw, i, 1, Qt.AlignRight | Qt.AlignVCenter)
             self.labels.append(lbl)
             self.switches[key] = sw
+        self.steppers = {}
+        self._number_defaults = {}
+        row = len(self.ROWS) + 1
+        for i, (key, text, lo, hi, default, unit) in enumerate(self.NUMBERS, start=row):
+            lbl = QLabel(text)
+            lbl.setObjectName("setLabel")
+            st = Stepper(lo, hi, unit)
+            st.valueChanged.connect(lambda v, k=key: self.number_changed.emit(k, v))
+            self.grid.addWidget(lbl, i, 0)
+            self.grid.addWidget(st, i, 1, Qt.AlignRight | Qt.AlignVCenter)
+            self.labels.append(lbl)
+            self.steppers[key] = st
+            self._number_defaults[key] = default
 
     def set_values(self, cfg):
         for key, sw in self.switches.items():
@@ -657,6 +799,8 @@ class SettingsPanel(QFrame):
             sw.setChecked(bool(cfg.get(key, key not in self.DEFAULT_OFF)))
             sw.blockSignals(False)
             sw.update()
+        for key, st in self.steppers.items():
+            st.setValue(cfg.get(key, self._number_defaults[key]))
 
     def apply_scale(self, s):
         self.scale = s
@@ -673,7 +817,7 @@ class SettingsPanel(QFrame):
         self.btn_art.scale = s
         self.btn_art.setFixedHeight(int(64 * s))
         self.btn_art.update()
-        for sw in self.switches.values():
+        for sw in list(self.switches.values()) + list(self.steppers.values()):
             sw.scale = s
             sw.setFixedSize(sw.sizeHint())
 
@@ -758,6 +902,7 @@ class DifficultyPage(QWidget):
         self.settings.closed.connect(self.close_settings)
         self.settings.changed.connect(lambda *_: self.sound_requested.emit("pi"))
         self.settings.changed.connect(self._on_setting)
+        self.settings.number_changed.connect(self._on_number_setting)
         self.settings.art_requested.connect(lambda: self.sound_requested.emit("pi"))
         self.settings.art_requested.connect(
             lambda: self.current_course() and self.art_requested.emit(self.path, self.current_course()))
@@ -766,6 +911,10 @@ class DifficultyPage(QWidget):
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.finished.connect(self._on_anim_done)
         self._closing = False
+        self._number_save = QTimer(self)
+        self._number_save.setSingleShot(True)
+        self._number_save.setInterval(400)
+        self._number_save.timeout.connect(self._flush_number_save)
 
         self.setStyleSheet(self._qss(1.0))
 
@@ -925,6 +1074,18 @@ class DifficultyPage(QWidget):
         except Exception:  # noqa: BLE001
             pass
         self.update()
+
+    def _on_number_setting(self, key, value):
+        """数の設定(連打秒速)。保存だけして、効くのは次に譜面を読むとき。
+        押し続けて連続で変わるあいだは、保存をまとめて1回にする。"""
+        self.cfg[key] = int(value)
+        self._number_save.start()
+
+    def _flush_number_save(self):
+        try:
+            self._save_cb()
+        except Exception:  # noqa: BLE001
+            pass
 
     def show_jacket(self):
         return bool(self.cfg.get("player_show_jacket", True))

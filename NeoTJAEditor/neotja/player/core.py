@@ -30,6 +30,8 @@ PLAYER_KEYS = (
     "record_output_dir", "record_last_dir",
     "player_folders", "player_last_file", "player_select_bgm",
     "player_show_fps",
+    # 連打秒速(Editor と共有。Player の難易度設定からも変えられる)。
+    "roll_speed",
     "player_select_bgm_volume", "gpu_render", "gpu_vsync",
     # 演奏モード(実験的機能)。Player の環境設定で入れても書き戻せるように。
     "player_play_mode",
