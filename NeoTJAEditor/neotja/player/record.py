@@ -132,7 +132,7 @@ def build_art_dialog(core, path, cfg, parent, dialog_cls=None):
                          out_dir=os.path.dirname(path), song_path=pd.wave_path() or "",
                          canvas_wh=(1280, 720), art_track=art_track, chart_path=path,
                          file_title=parse_preview_headers(content).get("title", ""),
-                         allow_defaults=False)
+                         allow_defaults=False, context="player")
     except Exception:
         widget.close()
         widget.deleteLater()

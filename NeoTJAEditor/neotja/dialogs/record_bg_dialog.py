@@ -142,10 +142,18 @@ class RecordBackgroundDialog(QDialog):
 
     MAX_VIEW_W = 1920
 
+    #: どこから開いたか。"record"(既定: Editor の録画・まとめ録画)/
+    #: "player"(Player の難易度設定「背景・ジャケットを指定」)。
+    CONTEXTS = ("record", "player")
+
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
                  song_path="", canvas_wh=None, art_track=None, art_note="",
-                 chart_path="", file_title="", allow_defaults=True):
+                 chart_path="", file_title="", allow_defaults=True,
+                 context="record"):
         super().__init__(parent)
+        #: Player から開いたときは、録画でしか使わない欄(フェード・この画面を
+        #: PNG で保存)を出さない。隠した欄の値は触らず、そのまま返す。
+        self._context = context if context in self.CONTEXTS else "record"
         #: 基本ジャケット → 歌詞に合わせた切り替えの区切り、を作る呼び出し
         #: (録画の窓が渡す)。見本の1コマを「見ている時刻の絵」にするため。
         #: まとめ録画からは渡らない(切り替えない)。
@@ -264,6 +272,7 @@ class RecordBackgroundDialog(QDialog):
         art_lay.setSpacing(12)
         settings_lay.addWidget(art_group)
         fade_group = QGroupBox("フェード")
+        self.fade_group = fade_group
         fade_form = QFormLayout(fade_group)
         fade_form.setHorizontalSpacing(14)
         fade_form.setVerticalSpacing(12)
@@ -541,6 +550,10 @@ class RecordBackgroundDialog(QDialog):
         # 待たない — record_bg_check._FrameLoader)。窓が消えれば Qt が
         # このつなぎを外す。
         frame_loader().ready.connect(self._frame_ready)
+        if self._context == "player":
+            # 録画でしか効かないもの。値はそのまま background() で返る。
+            self.fade_group.hide()
+            self.btn_png.hide()
         self._sync_enabled()
         self._schedule()
 

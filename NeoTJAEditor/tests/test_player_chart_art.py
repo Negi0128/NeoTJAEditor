@@ -88,5 +88,42 @@ class ArtEntryTests(unittest.TestCase):
             editor.close();editor.deleteLater()
             host.shutdown();host.close();host.deleteLater()
 
+    @real_qt_test
+    def test_player_art_dialog_hides_recording_only_items(self):
+        from neotja.chart_art import record_background, set_record_background
+        from neotja.dialogs.record_bg_dialog import RecordBackgroundDialog
+        from neotja.player.record import build_art_dialog
+        from neotja.recorder import RecordBackground
+        with tempfile.TemporaryDirectory() as folder:
+            host, path, core = self._host(folder)
+            saved = RecordBackground('', offset=0.75, art='', dim=0.25, lane=0.6,
+                                     fade_in=2.5, fade_out=1.5, fade_target='bg',
+                                     art_pct=33.0, art_x=12, art_y=-8)
+            set_record_background(host.cfg, path, saved)
+            dlg = build_art_dialog(core, path, host.cfg, host)
+            dlg.show();_wait(100)
+            # 録画でしか効かない: フェードと「この画面をPNGで保存」は出さない。
+            self.assertFalse(dlg.fade_group.isVisible())
+            self.assertFalse(dlg.btn_png.isVisible())
+            # 背景の指定(ファイル・YouTube)・開始位置・暗さなどは残す。
+            for w in (dlg.ed_path, dlg.btn_yt, dlg.sp_offset, dlg.sp_dim, dlg.sp_lane,
+                      dlg.ed_art, dlg.sp_art_pct):
+                self.assertTrue(w.isVisible())
+            # 隠した値も含めて、そのまま返る(OK で保存しても変わらない)。
+            got = dlg.background()
+            before = record_background(host.cfg, path)
+            for key in ('offset', 'dim', 'lane', 'fade_in', 'fade_out', 'fade_target',
+                        'art_pct', 'art_x', 'art_y'):
+                self.assertEqual(getattr(got, key), getattr(before, key), key)
+            dlg.reject();dlg.deleteLater()
+            # 録画(既定)からは今までどおり全部出す。
+            rec = RecordBackgroundDialog(host, lambda: None, 10.0, RecordBackground())
+            rec.show();_wait(50)
+            self.assertTrue(rec.fade_group.isVisible())
+            self.assertTrue(rec.btn_png.isVisible())
+            rec._closed = True
+            rec.reject();rec.deleteLater()
+            host.shutdown();host.close();host.deleteLater()
+
 if __name__=='__main__':
     unittest.main()
