@@ -205,6 +205,10 @@ def _estimate_text(seconds):
 
 
 class RecordDialog(QDialog):
+    #: 書き出しを始めた(確認を通って準備に入った)。Player が「最近開いた
+    #: 楽曲」へ入れるのに使う。Editor は使わない。
+    recording_started = Signal()
+
     """書き出す範囲と画質を決めて動画を作る。
 
     描画に使うウィジェットは、いま見えているプレビューとは別に画面外へ用意する
@@ -986,6 +990,7 @@ class RecordDialog(QDialog):
         # 見積もりの捨て描きが残っていたら止める。同じウィジェットを本番の描画と
         # 取り合ってしまい、offline モードの入り切りもぶつかる。
         self._cancel_measure()
+        self.recording_started.emit()
 
         cfg = self._mw.config_data
         q = self.cb_quality.currentData()

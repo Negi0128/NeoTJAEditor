@@ -967,7 +967,9 @@ class LibraryView(QWidget):
             self.pages.setCurrentWidget(self.page_open)
         elif kind == "recent":
             self._check_nav(self.nav_recent)
+            self._recent_stale = False
             self._fill_recent()
+            self._mark_chosen()
             self.pages.setCurrentWidget(self.page_recent)
         elif kind == "saved":
             self._check_nav(self.nav_saved)
@@ -984,16 +986,42 @@ class LibraryView(QWidget):
     # ------------------------------------------------------------------
     # 選ぶ
     def choose(self, path):
+        """曲を選んだ(難易度選択へ)。選んだだけでは「最近開いた楽曲」に
+        入れない — 見て回るだけで一覧が埋まってしまうため。入れるのは
+        実際に演奏・録画を始めたとき(note_played)。"""
         if not path or not os.path.isfile(path):
             return
         self._chosen = path
-        song_lists.add_recent(self.cfg, path)
-        self._save()
+        self._mark_chosen()
+        self.song_chosen.emit(path)
+
+    def _mark_chosen(self):
+        key = song_lists.path_key(self._chosen) if self._chosen else None
         for lst in (self.recent_list, self.saved_list, self.folder_list, self.search_list):
             for r in lst.rows():
                 if isinstance(r, SongRow):
-                    r.set_chosen(song_lists.path_key(r.path) == song_lists.path_key(path))
-        self.song_chosen.emit(path)
+                    r.set_chosen(key is not None and song_lists.path_key(r.path) == key)
+
+    def note_played(self, path):
+        """演奏・録画を始めた曲を「最近開いた楽曲」の先頭へ入れて保存する。"""
+        if not path:
+            return
+        song_lists.add_recent(self.cfg, path)
+        self._save()
+        self._recent_stale = True
+
+    #: 最近開いた楽曲が、出している一覧より新しくなっているか。
+    _recent_stale = False
+
+    def refresh_recent(self):
+        """選曲へ戻ったとき。最近開いた楽曲を出していれば作り直す
+        (選んだ行の印・検索の文字はそのまま)。"""
+        if not self._recent_stale:
+            return
+        if self.pages.currentWidget() is self.page_recent:
+            self._recent_stale = False
+            self._fill_recent()
+            self._mark_chosen()
 
     def open_file(self):
         start = os.path.dirname(self._chosen) if self._chosen else ""

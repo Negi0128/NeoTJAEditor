@@ -194,6 +194,7 @@ class PlayerHost(QWidget):
         フォルダ・検索・並び・選んだ行はそのまま。"""
         self.stop_preview()
         self.difficulty.close_settings()
+        self.library.refresh_recent()
         self._set_page(self.library)
 
     def shutdown(self):
@@ -294,6 +295,8 @@ class PlayerHost(QWidget):
             self._core.stop_audio()
 
     def _on_play(self, path, course):
+        # 最近開いた楽曲へ入れるのは、演奏・録画を始めたときだけ。
+        self.library.note_played(path)
         self.play_requested.emit(path, course)
         self.start_intro(path, course)
 
@@ -448,7 +451,8 @@ class PlayerHost(QWidget):
                 except Exception:  # noqa: BLE001
                     pass
             # 選曲は作り直さないので、開いていたフォルダ・検索・選んだ行は
-            # そのまま残っている。
+            # そのまま残っている(最近開いた楽曲だけは演奏した曲を足す)。
+            self.library.refresh_recent()
             self._set_page(self.library, fade="black", done=focus_library)
 
     def switch_to_detail(self):
@@ -590,6 +594,7 @@ class PlayerHost(QWidget):
                 self.library.pages.currentWidget().setFocus()
             except Exception:  # noqa: BLE001
                 pass
+        self.library.refresh_recent()
         self._set_page(self.library, fade="black", done=focus_library)
 
     def _end_play(self):
@@ -718,6 +723,10 @@ class PlayerHost(QWidget):
                 QMessageBox.warning(self, "動画を書き出す", why)
             return
         owner._record_dialog = dlg
+        started = getattr(dlg, "recording_started", None)
+        if started is not None:
+            # 録画を始めた曲も「最近開いた楽曲」へ(窓を開いただけでは入れない)。
+            started.connect(lambda p=path: self.library.note_played(p))
         dlg.finished.connect(lambda *_a, d=dlg, p=path: self._on_record_closed(d, p))
         dlg.show()
 

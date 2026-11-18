@@ -283,12 +283,15 @@ class PlayerHostTests(unittest.TestCase):
             win._refresh_title()
             self.assertEqual(win.windowTitle(), 'NeoTJAPlayer')
 
-            # 曲を選ぶと song_chosen が出て、最近開いた楽曲に入る(設定は一時ファイル)。
+            # 曲を選ぶと song_chosen が出る。選んだだけでは最近開いた楽曲に
+            # 入れない(演奏・録画を始めたときに入る。test_player_recent.py)。
             got = []
             win.player_page.song_chosen.connect(got.append)
             song = _tja(root / 'songs' / 's.tja', '選曲の確認')
             win.player_page.library.choose(song)
             self.assertEqual(got, [song])
+            self.assertEqual(win.config_data.get('player_recent') or [], [])
+            win.player_page.library.note_played(song)
             self.assertEqual(win.config_data['player_recent'][0]['path'], os.path.normpath(song))
 
             # 保存済みから外しても元ファイルは消えない(画面の操作から)。
