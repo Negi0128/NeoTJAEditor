@@ -56,6 +56,9 @@ class ValueReadout(QWidget):
     TITLE_PX = 12
     VALUE_PX = 14
     BASE_H = PAD_TOP + TITLE_H + TITLE_GAP + FIELD_H + PAD_BOTTOM
+    #: 上の寸法(命令パネルと同じ原寸)に掛ける倍率。枠・欄・字・余白・間を
+    #: まとめて2倍にする(利用者の指定 2026-11-19「今の二倍大きく、文字も併せて」)。
+    ZOOM = 2.0
 
     #: 変わったときに縁が光っている長さ(ms)。だんだん元の色へ戻す。
     FLASH_MS = 700
@@ -121,17 +124,18 @@ class ValueReadout(QWidget):
         self._apply_size()
 
     def _apply_size(self):
-        s = self._scale
+        s = self._scale * self.ZOOM
         w, h = max(1, round(self._base_w * s)), max(1, round(self.BASE_H * s))
         if (self.width(), self.height()) != (w, h):
             self.resize(w, h)
 
     def base_size(self):
-        return (self._base_w, self.BASE_H)
+        """倍率1(画面の縮小なし)のときの大きさ(ZOOM 込み)。"""
+        return (self._base_w * self.ZOOM, self.BASE_H * self.ZOOM)
 
     def box_rects(self):
         """枠の場所(いまの倍率・このウィジェットの座標)。試験と描画で使う。"""
-        s = self._scale
+        s = self._scale * self.ZOOM
         return [QRectF(x * s, 0, bw * s, self.BASE_H * s) for x, bw, _ in self._layout]
 
     def set_ui_scale(self, s):
@@ -207,7 +211,7 @@ class ValueReadout(QWidget):
 
     # ------------------------------------------------------------------
     def paintEvent(self, ev):
-        s = self._scale
+        s = self._scale * self.ZOOM
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         title_f, value_f = self._fonts(s)

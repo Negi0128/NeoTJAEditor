@@ -58,7 +58,8 @@ class DockViewFpsTests(unittest.TestCase):
             dock.set_view_fps(True)
             self.assertFalse(dock.fps_label.isHidden())
             s = dock._lane_scale
-            self.assertEqual(dock.fps_label.pos().x(), px(dock.LANE_OVERLAY_X0, s))
+            self.assertEqual(dock.fps_label.pos().x(),
+                             round(dock.VIEW_FPS_MARGIN[0] * dock.view_fps_ratio()))
             # 詳細モード(下の段つき)へ移っても残る。ほかのボタンは隠れたまま。
             gpw.set_view_only(True, with_bottom=True)
             self.assertFalse(dock.fps_label.isHidden())
@@ -123,8 +124,9 @@ class DockViewFpsScaleTests(unittest.TestCase):
                     # 箱と余白は1px の丸めだけ。
                     self.assertLessEqual(abs(lh - dock.VIEW_FPS_BOX[1] * k), 0.51)
                     self.assertLessEqual(abs(lx - dock.VIEW_FPS_MARGIN[0] * k), 0.51)
-                # 小さい画面で 7px に張り付かない(以前の下限)。
-                self.assertLess(rows[0][1], 7.0)
+                # 小さい画面では原寸(24px)より小さく、比どおりに縮む。
+                self.assertAlmostEqual(rows[0][1], 24.0 * rows[0][0] / 1280.0, places=3)
+                self.assertEqual(dock.VIEW_FPS_FONT_PX, 24.0)          # 2倍(利用者の指定)
             # 外すと Editor と同じ作り(字の大きさを QSS に書かない)へ戻る。
             dock.set_view_fps(False)
             dock._scale_lane_overlays(1.0)

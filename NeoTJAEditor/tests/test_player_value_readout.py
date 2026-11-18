@@ -79,6 +79,9 @@ class ReadoutWidgetTests(unittest.TestCase):
         rd = ValueReadout()
         rd.set_values(195.0, 1.0, '4/4')
         boxes = rd.box_rects()
+        # 命令パネルの原寸の2倍(利用者の指定 2026-11-19)。
+        self.assertEqual(rd.height(), rd.BASE_H * 2)
+        self.assertEqual(rd.base_size()[1], rd.BASE_H * 2)
         self.assertEqual(len(boxes), 4)
         for a, b in zip(boxes, boxes[1:]):
             self.assertGreater(b.left(), a.right())           # 離して並べる

@@ -3563,9 +3563,10 @@ class PreviewDock(QDockWidget):
     #: 箱(幅・高さ)・字・左上の余白(px)。画面の幅に比例させる
     #: (利用者の指定 2026-11-19「FPSの表記の文字の大きさの比率を固定」)。
     VIEW_FPS_BASE_W = 1280.0
-    VIEW_FPS_BOX = (74.0, 26.0)
-    VIEW_FPS_FONT_PX = 12.0
-    VIEW_FPS_MARGIN = (8.0, 6.0)
+    #: 2倍にした(利用者の指定 2026-11-19「FPSも2倍でよい」)。
+    VIEW_FPS_BOX = (148.0, 52.0)
+    VIEW_FPS_FONT_PX = 24.0
+    VIEW_FPS_MARGIN = (16.0, 12.0)
 
     def view_fps_ratio(self):
         """いまの画面の幅 / VIEW_FPS_BASE_W(fps 表示の倍率)。"""
