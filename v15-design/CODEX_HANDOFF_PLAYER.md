@@ -1,3 +1,21 @@
+## 2026-11-18 Player 不具合まとめ対応 第1弾（Claude）
+
+項目ごとにコミット・push 済み。版上げ・ビルド・リリースはしていない。
+
+- 1 試聴に風船の破裂音が混ざる: 試聴中（`set_audition`）は `_on_position_changed` がレーンを走らせない（`playing=False`）。ゲーム画面の波形と作譜ペインも動かさない。
+- 2 開き直すと試聴が途中から: 新しいセッションでは再現できなかった。見つけた原因は、`load_wave_only` が道筋だけ見て読み直しを省いていたこと。本編を読んだあとの助走つき PCM や、別の曲の本編を、試聴にそのまま使っていた。ミキサーが持つ中身（`_mixer_holds`）で判断するよう直した。あわせて、読み込み失敗や先読みの取り消しで `_decoding_path` が残る問題、追い越された読み込みの結果を受け取る問題も直した。`start_preview(path, restart=True)` は必ず DEMOSTART から始める。`restart=False` と `PlayerCore.continue_demo` は試聴を続ける口で、次の弾の選曲で試聴する件に使う。
+- 4 結果画面が一瞬崩れる: `FadeStack` が切り替えや絵を撮る前に、大きさと配置を確定させる（`presize`）。試験では崩れを再現できなかった（GL 環境だけで起きる可能性あり）。
+- 9 最近開いた楽曲: 選んだだけでは足さない。Play と、録画を実際に始めたとき（`RecordDialog.recording_started`。Editor では使わない）に足す。選曲へ戻ったら一覧を作り直す。
+- 11 最近開いた楽曲の道具の段に「履歴を消す」を追加。確認の窓は `ConfirmDialog`（`CategoryDialog` と同じ見た目）で、`open()` を使うので閉じるのを待たない。
+- 12 TJA を引きずっているあいだ（選曲画面のときだけ）は「TJAを開く」を出し、板の縁を光らせる。離れたら元の画面へ戻す。落としたときの動きは今までどおり。
+- 14 FPS 表示: 詳細モードでは常に出す。通常プレイでは難易度設定の「FPS表示」（`player_show_fps`、既定 OFF）で切り替える。左上に緑の太字で出す（`PreviewDock.set_view_fps` / `GamePreviewWindow.set_view_extra`。Editor は使わない）。
+- 15 難易度設定に「連打秒速」を追加（1〜100 打/s の増減ボタン）。Editor と同じ `roll_speed` を使い、次に譜面を読むときから効く。Player を出ると Editor の欄にも同じ値が入る。`PLAYER_KEYS` に `roll_speed` と `player_show_fps` を追加。
+- 17 曲名表示: 難易度選択の背景動画を止めずに引き継ぐ（`DemoVideo.set_targets`）。5 秒目に試聴が止まったら、動画は無音のまま自分の時計でループする（`free_run`）。本編へ入るときに止める。
+- 19 結果画面: 背景が動画なら、無音・ループで流す（`start(..., free=True)`）。「もう一度」では曲名表示へ引き継ぎ、選曲へ戻るときに止めて手放す。
+- 22 Player から開く「背景・ジャケットを指定」では、フェードと「この画面をPNGで保存」を隠す（`RecordBackgroundDialog(context="player")`。既定は `"record"`）。隠した値はそのまま返す。開始位置・暗さ・レーンの濃さ・ジャケットの配置は、今の Player の画面には効かない。ただし同じ曲を Editor で録画するときに使う曲別の値で、窓の見本にも出るので残した。
+- 試験（新規）: `test_player_audition`、`test_player_transitions`、`test_player_recent`、`test_player_fps`、`test_player_roll_speed`。既存の player 系の試験も対象のものを確認した。実設定（settings.json）は変更なし。
+- 残り: 2 の元の症状は、実機で同じ手順を試して確かめてほしい。`test_player_host` が終了時などにまれに code 127 で落ちる（再実行すると通る。以前からある shiboken の落ち方と思われる）。
+
 ## 2026-11-18 GPU途中メニュー修正完了
 
 - native GL停止画像とQt詳細ペインを合成し、メニュー背面の下段が黒く消える問題を修正。
