@@ -149,7 +149,7 @@ class RecordBackgroundDialog(QDialog):
     def __init__(self, parent, make_widget, duration, bg, out_dir="",
                  song_path="", canvas_wh=None, art_track=None, art_note="",
                  chart_path="", file_title="", allow_defaults=True,
-                 context="record"):
+                 context="record", jacket_hidden=False):
         super().__init__(parent)
         #: Player から開いたときは、録画でしか使わない欄(フェード・この画面を
         #: PNG で保存)を出さない。隠した欄の値は触らず、そのまま返す。
@@ -435,6 +435,14 @@ class RecordBackgroundDialog(QDialog):
         art_lay.addWidget(self.ed_art)
         art_row.addWidget(btn_art)
         art_row.addWidget(btn_art_none)
+        #: Player から開いたときだけ: 道は残したまま、ジャケットを出さない。
+        self.chk_art_hidden = QCheckBox("表示しない")
+        self.chk_art_hidden.setChecked(bool(jacket_hidden))
+        self.chk_art_hidden.toggled.connect(self._schedule)
+        art_row.addSpacing(10)
+        art_row.addWidget(self.chk_art_hidden)
+        if self._context != "player":
+            self.chk_art_hidden.hide()
         art_row.addStretch(1)
         art_lay.addLayout(art_row)
 
@@ -638,6 +646,10 @@ class RecordBackgroundDialog(QDialog):
         settings_mod.save_settings(cfg)
         self._sync_default_buttons()
         self.lbl_def.setText("既定を消しました。")
+
+    def jacket_hidden(self):
+        """「表示しない」に印があるか(Player から開いたときだけ意味がある)。"""
+        return self._context == "player" and self.chk_art_hidden.isChecked()
 
     def background(self):
         """いま欄に入っている背景。path が空なら「背景なし」。"""
@@ -847,6 +859,10 @@ class RecordBackgroundDialog(QDialog):
         wait=False(見本)は背景の動画のコマを待たない。まだ取れていなければ
         (PENDING, "") を返す。"""
         bg = self.background()
+        if self.jacket_hidden():
+            # 見本も「表示しない」に合わせる(返す値の道はそのまま)。
+            bg.art = ""
+            bg.art_track = None
         # 背景が空なら「いつもの見た目(+あればジャケット)」の経路。
         # ジャケットが無くても、画面があればサムネは描ける(_sync_enabled)。
         plain = not bg and (recorder.wants_art_only(bg)

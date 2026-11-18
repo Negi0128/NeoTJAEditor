@@ -58,7 +58,7 @@ def chart_art(cfg, path):
     (暫定方針: 表示設定はまず再生時の表示に適用する)。"""
     def get(kind):
         try:
-            p = song_lists.existing_art(cfg, path, kind)
+            p = song_lists.existing_art(cfg, path, kind, respect_hidden=False)
         except Exception:  # noqa: BLE001
             p = ""
         return p if p and os.path.exists(p) else ""
@@ -104,6 +104,7 @@ def build_art_dialog(core, path, cfg, parent, dialog_cls=None):
     content = read_text(path)
     preview = core.build_preview(content)
     offset = float(pd.spin_offset.value())
+    from neotja.chart_art import jacket_hidden
     bg = record_background(cfg, path, recorder.bg_with_defaults(
         recorder.RecordBackground(), cfg.get("rec_bg_default")))
     ctx = RecordContext(cfg, path, pd, bg.art, parent)
@@ -132,7 +133,8 @@ def build_art_dialog(core, path, cfg, parent, dialog_cls=None):
                          out_dir=os.path.dirname(path), song_path=pd.wave_path() or "",
                          canvas_wh=(1280, 720), art_track=art_track, chart_path=path,
                          file_title=parse_preview_headers(content).get("title", ""),
-                         allow_defaults=False, context="player")
+                         allow_defaults=False, context="player",
+                         jacket_hidden=jacket_hidden(cfg, path))
     except Exception:
         widget.close()
         widget.deleteLater()

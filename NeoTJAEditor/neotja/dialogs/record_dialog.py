@@ -562,7 +562,17 @@ class RecordDialog(QDialog):
         覚えている設定(self._bg)はそのまま残る。"""
         if self._layout == "multi":
             return recorder.RecordBackground()
-        return self._bg_now()
+        bg = self._bg_now()
+        if self._chart_path and bg.art:
+            # Player で「ジャケットを表示しない」にした曲は、録画にも入れない
+            # (道は覚えたまま。覚えている設定 self._bg は変えない)。
+            from neotja.chart_art import jacket_hidden
+            if jacket_hidden(self._mw.config_data, self._chart_path):
+                import copy
+                bg = copy.copy(bg)
+                bg.art = ""
+                bg.art_track = []
+        return bg
 
     def _art_track(self, base):
         """録るコースの歌詞から、ジャケットの区切り(音源の秒)を作る。

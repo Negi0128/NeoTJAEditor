@@ -63,7 +63,34 @@ def chart_art(cfg, path):
     return out
 
 
-def existing_art(cfg, path, kind):
+def jacket_hidden(cfg, path):
+    """ジャケットを指定したまま「表示しない」にしている曲か(Player の
+    「背景・ジャケットを指定」で決める。道はそのまま残す)。"""
+    return bool(_entry(cfg, path).get("jacket_hidden"))
+
+
+def set_jacket_hidden(cfg, path, hidden):
+    """曲別に「ジャケットを表示しない」を覚える。保存は呼び手が行う。"""
+    hidden = bool(hidden)
+    if hidden == jacket_hidden(cfg, path):
+        return
+    raw = cfg.get("player_chart_art")
+    raw = dict(raw) if isinstance(raw, dict) else {}
+    entry = dict(_entry(cfg, path))
+    if hidden:
+        entry["jacket_hidden"] = True
+    else:
+        entry.pop("jacket_hidden", None)
+    entry["path"] = os.path.normpath(os.path.abspath(path))
+    raw[path_key(path)] = entry
+    cfg["player_chart_art"] = raw
+
+
+def existing_art(cfg, path, kind, respect_hidden=True):
+    """表示に使う絵の道(ファイルが無ければ "")。ジャケットを「表示しない」に
+    している曲では、ジャケットは "" を返す(respect_hidden=False で道そのもの)。"""
+    if kind == "jacket" and respect_hidden and jacket_hidden(cfg, path):
+        return ""
     value = chart_art(cfg, path).get(kind, "")
     return value if value and os.path.isfile(value) else ""
 

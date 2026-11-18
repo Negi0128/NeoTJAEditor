@@ -1044,6 +1044,10 @@ class PlayerHost(QWidget):
                 bg = dlg.background()
                 # sidecarのbaseだけ更新し、歌詞ごとの絵や未保存編集を保持。
                 set_record_background(self.cfg, path, bg)
+                hidden = getattr(dlg, "jacket_hidden", None)
+                if hidden is not None:
+                    from neotja.chart_art import set_jacket_hidden
+                    set_jacket_hidden(self.cfg, path, hidden())
                 editor = matching_editor(self.window(), path)
                 if editor is not None:
                     editor.set_jacket_base(bg.art)
