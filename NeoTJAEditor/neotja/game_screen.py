@@ -2286,6 +2286,17 @@ class _GameScreenBase:
 
 
 
+    #: 曲名の大きさに掛ける倍率。既定 1.0(Editor・録画は触らない)。Player の
+    #: 再生画面だけ大きくする(PreviewDock.set_view_only → set_title_scale)。
+    _title_scale = 1.0
+
+    def set_title_scale(self, s):
+        s = float(s or 1.0)
+        if abs(s - self._title_scale) < 1e-6:
+            return
+        self._title_scale = s
+        self.update()
+
     def _draw_title(self, p):
         """曲名を画面の右上に右詰めで描く。ジャンルは出さない。
 
@@ -2303,6 +2314,8 @@ class _GameScreenBase:
         else:
             x, y, w, h = TITLE_RECT
             size = TITLE_SIZE
+        if self._title_scale != 1.0:
+            size = max(1, int(round(size * self._title_scale)))
         base_size = size            # 縮める前の大きさ(縁取りの割り出しに使う)
         f = QFont(self._title_family) if self._title_family else QFont()
         f.setPixelSize(size)

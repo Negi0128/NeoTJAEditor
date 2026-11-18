@@ -139,8 +139,14 @@ class DockReadoutTests(unittest.TestCase):
                 if dock.command_panel is not None:
                     self.assertFalse(dock.command_panel.isVisible())
                 host = gpw.scaled_host
-                self.assertGreater(rd.x(), host.width() // 2)
-                self.assertLess(rd.y() + rd.height(), host.height() // 2)
+                # 右上の隅へ寄せる(余白は倍率ぶん)。
+                m = int(round(dock.VALUE_READOUT_MARGIN * host.scale()))
+                self.assertEqual(rd.x() + rd.width(), host.width() - m)
+                self.assertEqual(rd.y(), m)
+                # Player の再生画面では曲名を 1.1 倍に。外すと元へ。
+                screen = host.content()
+                self.assertAlmostEqual(screen._title_scale, dock.game_preview_window.VIEW_TITLE_SCALE)
+                self.assertAlmostEqual(screen._title_scale, 1.1)
                 # カーソルを3小節目(BPM 180・HS 1.5・3/4)へ。
                 ce = dock.chart_edit
                 for _ in range(80):
@@ -152,6 +158,8 @@ class DockReadoutTests(unittest.TestCase):
                 self.assertGreater(rd.flash_level(1), 0.0)
                 self.assertGreater(rd.flash_level(), 0.0)
                 dock.set_value_readout(False)
+                gpw.set_view_only(False)
+                self.assertEqual(screen._title_scale, 1.0)
                 self.assertFalse(rd.isVisible())
                 self.assertFalse(dock._value_readout_timer.isActive())
             finally:

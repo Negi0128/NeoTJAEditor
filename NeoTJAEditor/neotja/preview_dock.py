@@ -875,6 +875,11 @@ class GamePreviewWindow(QWidget):
         Esc を食うと置いた側のメニューが開かなくなるため。"""
         self._view_only = bool(on)
         self._view_bottom = bool(on and with_bottom)
+        # Player の再生画面では曲名を少し大きく(利用者の指定 2026-11-19
+        # 「タイトルも1.1倍くらい大きく」)。外したら元へ。
+        fn = getattr(self.scaled_host.content(), "set_title_scale", None)
+        if fn is not None:
+            fn(self.VIEW_TITLE_SCALE if on else 1.0)
         if on:
             self.set_overlay_visible(False)
             self._bottom_widget.setVisible(self._view_bottom)
@@ -884,6 +889,9 @@ class GamePreviewWindow(QWidget):
             self.set_overlay_visible(True)
         self._sync_own_shortcuts()
         self._refit()
+
+    #: 絵だけの表示(set_view_only)のときの曲名の倍率。
+    VIEW_TITLE_SCALE = 1.1
 
     #: 絵だけの表示(set_view_only)でも出しておく小物(Player の fps 表示)。
     #: 既定は無し(Editor は使わない)。
@@ -3448,6 +3456,8 @@ class PreviewDock(QDockWidget):
     _value_readout_timer = None
     #: 位置を見に行く間合い(ms)。値が変わったときだけ塗り直す。
     VALUE_READOUT_MS = 50
+    #: 右上の隅からの余白(原寸 px)。
+    VALUE_READOUT_MARGIN = 8
 
     def set_value_readout(self, on: bool):
         """ゲーム画面の右上(作譜モードの命令パネルの場所)に、BPM・拍子・
@@ -3512,17 +3522,16 @@ class PreviewDock(QDockWidget):
         rd = self._value_readout
         if rd is None:
             return
-        from neotja import game_screen as _gs
         host = self.game_preview_window.scaled_host
         scale = host.scale() if hasattr(host, "scale") else 1.0
         rd.set_ui_scale(scale)
         # 値で枠の幅が変わることがあるので、先に入れてから置く。
         bpm, scroll, measure = self._value_readout_values()
         rd.set_values(bpm, scroll, measure)
-        lane_top = int((_gs.LANE_Y - 56) * scale)
-        y = max(6, lane_top - rd.height() - int(round(4 * scale)))
-        y = max(0, min(y, max(0, host.height() - rd.height())))
-        x = max(0, host.width() - rd.width() - int(round(10 * scale)))
+        # 右上の隅へ寄せる(利用者の指定 2026-11-19「右上に寄せて」)。
+        m = int(round(self.VALUE_READOUT_MARGIN * scale))
+        y = max(0, min(m, host.height() - rd.height()))
+        x = max(0, host.width() - rd.width() - m)
         if rd.pos().x() != x or rd.pos().y() != y:
             rd.move(x, y)
 
@@ -3540,7 +3549,8 @@ class PreviewDock(QDockWidget):
             lbl.setFont(f)
             self._view_fps_css = (
                 "color: #7ddc7d; background: %s; border: none; border-radius: 3px;"
-                " font-weight: bold;" % theme.THEMES["dark"]["toolbar_btn"])
+                " font-family: \"%s\"; font-weight: bold;"
+                % (theme.THEMES["dark"]["toolbar_btn"], self.VIEW_FPS_FAMILY))
             self._view_fps_pt = None
             lbl.setStyleSheet(self._view_fps_css)
         elif not on and self._view_fps:
@@ -3563,10 +3573,30 @@ class PreviewDock(QDockWidget):
     #: 箱(幅・高さ)・字・左上の余白(px)。画面の幅に比例させる
     #: (利用者の指定 2026-11-19「FPSの表記の文字の大きさの比率を固定」)。
     VIEW_FPS_BASE_W = 1280.0
-    #: 2倍にした(利用者の指定 2026-11-19「FPSも2倍でよい」)。
-    VIEW_FPS_BOX = (148.0, 52.0)
+    #: 字は2倍にした(利用者の指定 2026-11-19「FPSも2倍でよい」)。箱は字に
+    #: 合わせて詰める(同日「文字の大きさそのままで枠を小さく」): 見本の字
+    #: VIEW_FPS_SAMPLE の幅・字の高さに、余白 VIEW_FPS_PAD を足しただけ。
     VIEW_FPS_FONT_PX = 24.0
+    #: 太字がはっきり出る書体(Yu Gothic UI の Bold は細く見えて「太字に」と
+    #: 言われた 2026-11-19)。無ければ Qt が次の書体へ落とす。
+    VIEW_FPS_FAMILY = "Meiryo UI"
+    VIEW_FPS_SAMPLE = "0000 fps"
+    VIEW_FPS_PAD = (6.0, 1.0)
     VIEW_FPS_MARGIN = (16.0, 12.0)
+    _view_fps_box = None
+
+    def view_fps_base_box(self):
+        """画面の幅が VIEW_FPS_BASE_W のときの箱の大きさ(太字の字で測る)。"""
+        if self._view_fps_box is None:
+            from PySide6.QtGui import QFont, QFontMetricsF
+            f = QFont(self.VIEW_FPS_FAMILY)
+            f.setPixelSize(int(self.VIEW_FPS_FONT_PX))
+            f.setBold(True)
+            fm = QFontMetricsF(f)
+            px_, py_ = self.VIEW_FPS_PAD
+            self._view_fps_box = (fm.horizontalAdvance(self.VIEW_FPS_SAMPLE) + 2 * px_,
+                                  fm.height() + 2 * py_)
+        return self._view_fps_box
 
     def view_fps_ratio(self):
         """いまの画面の幅 / VIEW_FPS_BASE_W(fps 表示の倍率)。"""
@@ -3582,7 +3612,7 @@ class PreviewDock(QDockWidget):
             return
         lbl = self.fps_label
         k = self.view_fps_ratio()
-        bw, bh = self.VIEW_FPS_BOX
+        bw, bh = self.view_fps_base_box()
         mx, my = self.VIEW_FPS_MARGIN
         size = (max(1, round(bw * k)), max(1, round(bh * k)))
         if (lbl.width(), lbl.height()) != size:

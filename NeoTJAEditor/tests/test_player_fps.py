@@ -122,7 +122,7 @@ class DockViewFpsScaleTests(unittest.TestCase):
                     self.assertAlmostEqual(font_px / hw, dock.VIEW_FPS_FONT_PX / base,
                                            places=5)
                     # 箱と余白は1px の丸めだけ。
-                    self.assertLessEqual(abs(lh - dock.VIEW_FPS_BOX[1] * k), 0.51)
+                    self.assertLessEqual(abs(lh - dock.view_fps_base_box()[1] * k), 0.51)
                     self.assertLessEqual(abs(lx - dock.VIEW_FPS_MARGIN[0] * k), 0.51)
                 # 小さい画面では原寸(24px)より小さく、比どおりに縮む。
                 self.assertAlmostEqual(rows[0][1], 24.0 * rows[0][0] / 1280.0, places=3)
