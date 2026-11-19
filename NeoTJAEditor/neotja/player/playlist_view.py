@@ -313,6 +313,165 @@ class AddModeBar(QWidget):
         self.title.update()
 
 
+#: 「連続再生」の板の見た目(平ら・暗い半透明・細い薄シアンの縁・ほぼ四角・太い Yu Gothic UI)。
+PLAY_PANEL_QSS = """
+QFrame#playPanel { background-color: rgba(12, 22, 36, 240); border: 1px solid rgba(139, 217, 238, 170);
+                   border-radius: 3px; }
+#playPanel QWidget { color: #e5edf7; font-family: "Yu Gothic UI"; font-size: 14px; font-weight: bold;
+                     background: transparent; }
+#playPanel QLabel#ppHead { font-size: 17px; color: #ffffff; }
+#playPanel QLabel#ppField { color: #b9d9ed; font-size: 13px; }
+#playPanel QSpinBox { background: #0c1521; border: 1px solid #3b536d; border-radius: 2px;
+                      padding: 4px 6px; min-height: 22px; font-size: 15px; }
+#playPanel QSpinBox:focus { border-color: #8bcfe5; }
+#playPanel QSpinBox:disabled { color: #687789; border-color: #29394b; }
+#playPanel QPushButton { background-color: rgba(16, 28, 44, 190); border: 1px solid rgba(139, 217, 238, 120);
+                         border-radius: 3px; padding: 7px 16px; }
+#playPanel QPushButton:hover { background-color: rgba(35, 61, 84, 215); border-color: #8ad9ee; }
+#playPanel QPushButton:checked { background-color: rgba(52, 120, 160, 200); border-color: #8ad9ee; color: #ffffff; }
+#playPanel QPushButton#ppStart { font-size: 16px; padding: 9px 16px; border-color: #8ad9ee;
+                                 background-color: rgba(35, 65, 90, 220); }
+"""
+
+
+class PlaylistPlayPanel(QWidget):
+    """「連続再生」を押すと出る小さな板(窓ではなく選曲の中に重ねる)。
+    範囲(何曲目から何曲目まで)・手動/自動・自動の待ち時間・「開始」。"""
+
+    #: 開始 {"start": 0 から, "end": 0 から(含む), "auto": bool, "wait": 秒}。
+    started = Signal(object)
+    closed = Signal()
+
+    def __init__(self, count, auto=False, wait=10, wait_range=(3, 60), parent=None):
+        from PySide6.QtWidgets import QFrame, QSpinBox
+        super().__init__(parent)
+        self.setObjectName("playPanelScrim")
+        # 板の外を押したら閉じる(後ろは押させない)。
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.frame = QFrame(self)
+        self.frame.setObjectName("playPanel")
+        self.frame.setStyleSheet(PLAY_PANEL_QSS)
+        v = QVBoxLayout(self.frame)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(10)
+        head = QLabel("連続再生")
+        head.setObjectName("ppHead")
+        v.addWidget(head)
+
+        n = max(1, int(count))
+        v.addWidget(self._field("範囲"))
+        rh = QHBoxLayout()
+        rh.setSpacing(8)
+        self.sp_from = QSpinBox()
+        self.sp_to = QSpinBox()
+        for sp in (self.sp_from, self.sp_to):
+            sp.setRange(1, n)
+            sp.setFixedWidth(84)
+            sp.setAlignment(Qt.AlignRight)
+        self.sp_from.setValue(1)
+        self.sp_to.setValue(n)
+        self.sp_from.valueChanged.connect(lambda x: self.sp_to.setValue(max(x, self.sp_to.value())))
+        self.sp_to.valueChanged.connect(lambda x: self.sp_from.setValue(min(x, self.sp_from.value())))
+        rh.addWidget(self.sp_from)
+        rh.addWidget(QLabel("〜"))
+        rh.addWidget(self.sp_to)
+        rh.addStretch(1)
+        v.addLayout(rh)
+
+        v.addWidget(self._field("再生"))
+        mh = QHBoxLayout()
+        mh.setSpacing(0)
+        self.btn_manual = QPushButton("手動")
+        self.btn_auto = QPushButton("自動")
+        for b in (self.btn_manual, self.btn_auto):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(78)
+            mh.addWidget(b)
+        self.btn_manual.clicked.connect(lambda: self.set_auto(False))
+        self.btn_auto.clicked.connect(lambda: self.set_auto(True))
+        mh.addSpacing(16)
+        self.sp_wait = QSpinBox()
+        lo, hi = wait_range
+        self.sp_wait.setRange(int(lo), int(hi))
+        try:
+            self.sp_wait.setValue(int(wait))
+        except (TypeError, ValueError):
+            self.sp_wait.setValue(10)
+        self.sp_wait.setFixedWidth(72)
+        self.sp_wait.setAlignment(Qt.AlignRight)
+        mh.addWidget(self.sp_wait)
+        self.lbl_sec = QLabel("秒")
+        mh.addSpacing(6)
+        mh.addWidget(self.lbl_sec)
+        mh.addStretch(1)
+        v.addLayout(mh)
+
+        v.addSpacing(6)
+        self.btn_start = QPushButton("▶  開始")
+        self.btn_start.setObjectName("ppStart")
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.clicked.connect(self.start)
+        v.addWidget(self.btn_start)
+        self.frame.setFixedWidth(330)
+        self.frame.adjustSize()
+        self.set_auto(auto)
+
+    @staticmethod
+    def _field(text):
+        lbl = QLabel(text)
+        lbl.setObjectName("ppField")
+        return lbl
+
+    def set_auto(self, on):
+        self.auto = bool(on)
+        self.btn_manual.setChecked(not self.auto)
+        self.btn_auto.setChecked(self.auto)
+        self.sp_wait.setEnabled(self.auto)
+        self.lbl_sec.setEnabled(self.auto)
+
+    def options(self):
+        return {"start": self.sp_from.value() - 1, "end": self.sp_to.value() - 1,
+                "auto": self.auto, "wait": self.sp_wait.value()}
+
+    def start(self):
+        self.started.emit(self.options())
+        self.close_panel()
+
+    def open_at(self, anchor):
+        """anchor(ボタン)の下に、右をそろえて出す。親いっぱいに広がって外の押下を受ける。"""
+        par = self.parentWidget()
+        self.setGeometry(par.rect())
+        self.frame.adjustSize()
+        br = anchor.mapTo(par, anchor.rect().bottomRight())
+        x = max(8, min(br.x() - self.frame.width(), par.width() - self.frame.width() - 8))
+        self.frame.move(int(x), int(br.y() + 8))
+        self.show()
+        self.raise_()
+        self.btn_start.setFocus()
+
+    def close_panel(self):
+        if self.isVisible():
+            self.hide()
+            self.closed.emit()
+
+    def mousePressEvent(self, ev):
+        if not self.frame.geometry().contains(ev.position().toPoint()):
+            self.close_panel()
+        ev.accept()
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self.close_panel()
+            ev.accept()
+            return
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.start()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+
 # ----------------------------------------------------------------------
 #: 作成/編集の窓の見た目(録画の背景の窓 RecordBackgroundDialog と同じ色・形)。
 DIALOG_QSS = """

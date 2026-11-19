@@ -1,3 +1,14 @@
+## 2026-11-19 プレイリスト 第4段（Claude）＋ 終了時の落ち（0xC0000409）
+
+版上げ・ビルド・リリースはしていない。録画（プレイリスト全体＋曲ごと）はまだ。
+
+- 終了時の落ち（コミット 96f3329）: `test_player_host` の `test_enter_and_leave_player` が単独でも毎回 code 127（= 0xC0000409。試験は全部 ok のあと、終了処理で落ちていた）。原因: 窓を出してすぐ閉じると、最初の描画で予約した `_warm_preview_skin`（0ms タイマー）が**閉じたあと**に走り、`GameScreen._load_skin` がどんちゃんの連番の先読み（`chara._PreloadWorker`、QThread）を始める。誰も止めないまま終了処理に入り "QThread: Destroyed while thread is still running" で abort（メッセージは出ない）。試験の待ち（QTest.qWait は GIL を持ったまま）でワーカーがほとんど進まないので試験で出やすいが、アプリでもすぐ閉じる・スキンを読み直して CharaAnimator を作り直すと起こりうる。間合いしだいなので二分探索では出たり出なかったり（561f4f8 / 789e321 / a407803 / 6e8b2d9 / 9a2e389 で落ち、b16594a / d8b5ee5 で通った）。直し: `chara._RUNNING` で走っているワーカーを終わるまで持ち（持ち主が捨てられても）、`atexit` で cancel→wait。閉じた窓では `_warm_preview_skin` をしない。試験 `test_chara_preload_lifetime`（取り残されたワーカー・すぐ閉じた窓を別プロセスで2回）。`test_player_host` は通しで 14 件通るようになった。
+- 「▶ 連続再生」は板 `playlist_view.PlaylistPlayPanel`（窓ではなく選曲の上に重ねる子。外を押す・Esc で閉じる、Enter で開始）: 「範囲」N〜M（行の番号。既定 1〜最後。前後が逆にならない）・「再生」手動/自動・自動の待ち秒（3〜60、既定 10）・「▶ 開始」。手動/自動と秒は設定 `player_playlist_auto` / `player_playlist_wait` に残す。`playlist_play_requested(pid, {start, end, auto, wait})`（0 から・end を含む）→ `PlayerHost.start_playlist(pid, start, end, auto, wait)`。範囲の中の見つからない曲は飛ばす（M にも数えない）。
+- 自動（完全オート）: 曲名表示にコースのカードを出さない（保存したコース。無ければ default_course）。曲名表示が出し切ってから `IntroPage.start_countdown(秒)`。「再生する」の右端に残り秒と減っていく水色の輪（`_make_countdown_button`）。0 で自分で「再生する」（ドン）、押せばすぐ、やめるで取り消し。結果画面なし・最後でプレイリストの画面へは手動と同じ。時計は `IntroPage.clock`（試験で差し替え）。
+- コースのカード: 4枚以上は2段（3＋2）、板の幅 560・カードの倍率の上限 0.75、★は `CourseCard.LEVEL_PX = 30`（難易度選択は 20 のまま）。1920×1009 で★ 約 24px（前は約 8px）。
+- 試験: `test_player_playlist_play` に足して 9 件（板の範囲・設定に残す・範囲の再生・自動の数え・すぐ・やめる・次の曲もまた待つ・2段と★の大きさ）。`test_player_intro` / `test_player_pause` / `test_player_playlists` / `test_player_host`（14件）/ `test_player_difficulty` / `test_player_audio_transition` 通過。実設定は変更なし。
+- 画像（1920×1009・widget.grab）: scratchpad の `playlist4/` に pl4_start_panel / pl4_auto_countdown（残り 8 秒）/ pl4_manual_5courses。
+
 ## 2026-11-19 プレイリスト 第3段（Claude）
 
 連続再生の曲名表示（手動だけ）。範囲指定・自動・録画はまだ（第4段）。版上げ・ビルド・リリースはしていない。

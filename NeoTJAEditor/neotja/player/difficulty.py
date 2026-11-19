@@ -187,6 +187,8 @@ class CourseCard(QWidget):
     """難易度の1枚。"""
 
     clicked = Signal(str)   # 何番目の枠か(SLOTS の名前)
+    #: ★レベルの字の大きさ(倍率 1 のとき)。小さく並べる所(曲名表示の右の板)は大きめに。
+    LEVEL_PX = 20
 
     def __init__(self, slot, parent=None):
         super().__init__(parent)
@@ -269,10 +271,10 @@ class CourseCard(QWidget):
         draw_outlined(p, name, f, x, base, 5 * s)
 
         # ★レベル(細い書体・名前より小さく)
-        lf = thin_font(20 * s, QFont.DemiBold)
+        lf = thin_font(self.LEVEL_PX * s, QFont.DemiBold)
         p.setFont(lf)
         p.setPen(QColor(235, 242, 250))
-        p.drawText(QRectF(r.left(), base + 5 * s, r.width(), 28 * s),
+        p.drawText(QRectF(r.left(), base + 5 * s, r.width(), max(28, self.LEVEL_PX * 1.4) * s),
                    Qt.AlignHCenter | Qt.AlignTop, self.level_text())
         p.end()
 

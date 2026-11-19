@@ -1292,8 +1292,9 @@ class LibraryView(QWidget):
     list_switched = Signal()
     #: 選んでいる行の右の印を押した (曲, 流すか)。
     preview_toggled = Signal(str, bool)
-    #: 開いているプレイリストの「連続再生」(プレイリストの id)。
-    playlist_play_requested = Signal(str)
+    #: 開いているプレイリストの「連続再生」の「開始」(プレイリストの id,
+    #: {"start", "end", "auto", "wait"})。
+    playlist_play_requested = Signal(str, object)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -1466,8 +1467,10 @@ class LibraryView(QWidget):
         self.btn_play_all = QPushButton("▶  連続再生")
         self.btn_play_all.setObjectName("flat")
         self.btn_play_all.setCursor(Qt.PointingHandCursor)
-        self.btn_play_all.clicked.connect(
-            lambda _=False: self.playlist_play_requested.emit(self._playlist_id))
+        self.btn_play_all.clicked.connect(self._pi)
+        self.btn_play_all.clicked.connect(lambda _=False: self.open_play_panel())
+        #: 「連続再生」の板(押したときに作る)。
+        self.play_panel = None
         self.page_playlist.tools.addWidget(self.btn_play_all)
         self.page_playlist.v.addSpacing(16)
         self.playlist_song_list = PlaylistRowList()
@@ -2048,6 +2051,37 @@ class LibraryView(QWidget):
             except RuntimeError:
                 pass             # もう閉じた
         QTimer.singleShot(0, restore)
+
+    #: 自動の待ち時間(秒)の既定と幅(PlayerHost と同じ)。
+    PLAYLIST_WAIT_DEFAULT = 10
+    PLAYLIST_WAIT_RANGE = (3, 60)
+
+    def open_play_panel(self):
+        """「連続再生」: 範囲・手動/自動・待ち時間の板を出す。"""
+        from neotja.player.playlist_view import PlaylistPlayPanel
+        pl = self._current_playlist()
+        if pl is None or not pl["items"]:
+            return None
+        if self.play_panel is not None:
+            self.play_panel.setParent(None)
+            self.play_panel.deleteLater()
+        panel = PlaylistPlayPanel(
+            len(pl["items"]), auto=bool(self.cfg.get("player_playlist_auto", False)),
+            wait=self.cfg.get("player_playlist_wait", self.PLAYLIST_WAIT_DEFAULT),
+            wait_range=self.PLAYLIST_WAIT_RANGE, parent=self)
+        pid = pl["id"]
+        panel.started.connect(lambda opts: self._on_play_panel_start(pid, opts))
+        panel.closed.connect(self._pi)
+        self.play_panel = panel
+        panel.open_at(self.btn_play_all)
+        return panel
+
+    def _on_play_panel_start(self, pid, opts):
+        # 手動/自動と待ち時間は次も同じに(設定に残す)。
+        self.cfg["player_playlist_auto"] = bool(opts.get("auto"))
+        self.cfg["player_playlist_wait"] = int(opts.get("wait") or self.PLAYLIST_WAIT_DEFAULT)
+        self._save()
+        self.playlist_play_requested.emit(pid, dict(opts))
 
     def _current_playlist(self):
         return self.playlist_store().get(self._playlist_id) if self._playlist_id else None

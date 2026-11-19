@@ -148,7 +148,8 @@ class PlayerHost(QWidget):
         self.intro.play_requested.connect(self._playlist_play)
         self.intro.quit_requested.connect(self.end_playlist)
         self.intro.course_changed.connect(self._playlist_course_changed)
-        self.library.playlist_play_requested.connect(self.start_playlist)
+        self.library.playlist_play_requested.connect(
+            lambda pid, opts: self.start_playlist(pid, **(opts or {})))
         #: 連続再生のいま(None なら普段)。{"pid", "items": [{path, course}], "index"}。
         self._pl_session = None
         self.play_page = PlayPage()
@@ -1060,21 +1061,36 @@ class PlayerHost(QWidget):
     def playlist_session(self):
         return self._pl_session
 
-    def start_playlist(self, pid, start=0):
-        """プレイリストを start 番目から順に。見つからない曲は飛ばす。始めたら True。"""
+    #: 自動のときの待ち(秒)の既定と幅。
+    PLAYLIST_WAIT_DEFAULT = 10
+    PLAYLIST_WAIT_RANGE = (3, 60)
+
+    def start_playlist(self, pid, start=0, end=None, auto=False, wait=None):
+        """プレイリストの start 番目から end 番目まで(0 から数える、end を含む。
+        None なら最後まで)を順に。見つからない曲は飛ばす。auto は完全オート
+        (曲名表示で wait 秒待って自分で進む)。始めたら True。"""
         store = self.library.playlist_store()
         pl = store.get(pid)
         if pl is None:
             return False
-        items = [dict(i) for i in pl["items"][max(0, int(start)):]
+        stop = len(pl["items"]) if end is None else max(0, int(end)) + 1
+        items = [dict(i) for i in pl["items"][max(0, int(start)):stop]
                  if os.path.isfile(i.get("path") or "")]
         if not items:
             return False
+        if wait is None:
+            wait = self.cfg.get("player_playlist_wait", self.PLAYLIST_WAIT_DEFAULT)
+        lo, hi = self.PLAYLIST_WAIT_RANGE
+        try:
+            wait = max(lo, min(hi, int(wait)))
+        except (TypeError, ValueError):
+            wait = self.PLAYLIST_WAIT_DEFAULT
         self._select_timer.stop()
         self._select_path = str()
         self._abort_sequence()
         self._end_play()
-        self._pl_session = {"pid": pid, "items": items, "index": 0}
+        self._pl_session = {"pid": pid, "items": items, "index": 0,
+                            "auto": bool(auto), "wait": wait}
         self.play_page.menu.set_playlist_mode(True)
         self._playlist_intro(0, fade="cross")
         return True
@@ -1106,7 +1122,7 @@ class PlayerHost(QWidget):
         sess["course"] = course
         self.intro.set_song(path, course, levels.get(course))
         self.intro.set_course(course, levels.get(course))
-        self.intro.set_playlist(index + 1, len(items), courses)
+        self.intro.set_playlist(index + 1, len(items), courses, auto=sess.get("auto", False))
         core = self._ensure_core()
         self.apply_audio_settings()
         try:
@@ -1133,8 +1149,13 @@ class PlayerHost(QWidget):
             core.predecode(path)
         except Exception:  # noqa: BLE001
             pass
-        self._set_page(self.intro, fade=fade,
-                       done=lambda: self.intro.setFocus(Qt.OtherFocusReason))
+        def shown():
+            self.intro.setFocus(Qt.OtherFocusReason)
+            # 自動: 出し切ってから数え始める(待ち時間は見えている長さ)。
+            cur = self._pl_session
+            if cur is sess and cur.get("auto") and cur["index"] == index:
+                self.intro.start_countdown(cur["wait"])
+        self._set_page(self.intro, fade=fade, done=shown)
         self.intro.setFocus()
 
     def _playlist_course_changed(self, course):

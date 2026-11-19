@@ -119,7 +119,9 @@ class IntroSequence(QObject):
 
 
 #: プレイリストの連続再生の右の板(倍率 1 のときの寸法)。
-PL_PANEL_W = 520
+PL_PANEL_W = 560
+#: コースのカードの倍率の上限(難易度選択のカードに対して)。
+PL_CARD_SCALE = 0.75
 PL_MARGIN = 80
 PL_PAD = 32
 PL_COUNTER_H = 64
@@ -138,6 +140,44 @@ QPushButton:hover { background-color: rgba(35, 61, 84, 215); border-color: #8ad9
 QPushButton:pressed { background-color: rgba(10, 20, 34, 230); }
 QPushButton:focus { border-color: #7fe3ff; }
 """
+
+
+def _make_countdown_button(text, parent):
+    """「再生する」。自動のときは右の端に、残りの秒と減っていく輪を描く。"""
+    from PySide6.QtWidgets import QPushButton
+
+    class _Btn(QPushButton):
+        def __init__(self):
+            super().__init__(text, parent)
+            #: 残りの割合(1→0)と秒。None なら描かない。
+            self.ratio = None
+            self.secs = 0
+
+        def set_countdown(self, ratio, secs):
+            self.ratio = ratio
+            self.secs = secs
+            self.update()
+
+        def paintEvent(self, ev):
+            super().paintEvent(ev)
+            if self.ratio is None:
+                return
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            h = self.height()
+            d = h * 0.62
+            r = QRectF(self.width() - h * 0.19 - d, (h - d) / 2, d, d)
+            pen_w = max(2.0, d * 0.08)
+            p.setPen(QPen(QColor(255, 255, 255, 50), pen_w))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(r)
+            p.setPen(QPen(QColor(127, 227, 255), pen_w, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(r, 90 * 16, int(360 * 16 * max(0.0, min(1.0, self.ratio))))
+            p.setFont(thin_font(d * 0.44, QFont.Bold))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(r, Qt.AlignCenter, str(int(self.secs)))
+            p.end()
+    return _Btn()
 
 
 class IntroPage(QWidget):
@@ -174,19 +214,30 @@ class IntroPage(QWidget):
         self._pl_panel = QRectF()
         self.btn_play = None
         self.btn_quit = None
+        self.pl_auto = False
+        #: 自動(完全オート)の待ち。(始めた時刻, 秒) または None。
+        self._countdown = None
+        self._cd_timer = QTimer(self)
+        self._cd_timer.setInterval(50)
+        self._cd_timer.timeout.connect(self._tick_countdown)
+        #: 時計(試験で差し替える)。
+        self.clock = time.monotonic
 
     # ------------------------------------------------------------------
     # プレイリスト
-    def set_playlist(self, index, total, courses):
-        """連続再生の曲名表示にする。index は 1 から。courses は song_info の並び。"""
+    def set_playlist(self, index, total, courses, auto=False):
+        """連続再生の曲名表示にする。index は 1 から。courses は song_info の並び。
+        auto(完全オート)ではコースのカードを出さない(変えない)。"""
         from PySide6.QtWidgets import QPushButton
         from neotja.player.difficulty import CourseCard
+        self.stop_countdown()
         self.playlist = (int(index), int(total))
+        self.pl_auto = bool(auto)
         order = ("Easy", "Normal", "Hard", "Oni", "Edit")
         levels = dict(courses or [])
-        self.pl_courses = [(k, levels[k]) for k in order if k in levels]
+        self.pl_courses = [] if auto else [(k, levels[k]) for k in order if k in levels]
         if self.btn_play is None:
-            self.btn_play = QPushButton("再生する", self)
+            self.btn_play = _make_countdown_button("再生する", self)
             self.btn_play.setCursor(Qt.PointingHandCursor)
             self.btn_play.setFocusPolicy(Qt.NoFocus)
             self.btn_play.clicked.connect(self.request_play)
@@ -200,6 +251,7 @@ class IntroPage(QWidget):
         self._pl_cards = {}
         for k, lv in self.pl_courses:
             c = CourseCard(k, self)
+            c.LEVEL_PX = 30          # 小さく並べるので★を大きめに
             c.set_state(k, True, lv, k == self.course)
             c.setFocusPolicy(Qt.NoFocus)
             c.clicked.connect(self.pick_course)
@@ -212,6 +264,7 @@ class IntroPage(QWidget):
 
     def clear_playlist(self):
         """普段の曲名表示へ戻す(板を隠す)。"""
+        self.stop_countdown()
         self.playlist = None
         for c in self._pl_cards.values():
             c.setParent(None)
@@ -251,14 +304,51 @@ class IntroPage(QWidget):
     def request_play(self):
         if self.playlist is None:
             return
+        self.stop_countdown()
         self.sound_requested.emit("don")
         self.play_requested.emit()
 
     def request_quit(self):
         if self.playlist is None:
             return
+        self.stop_countdown()
         self.sound_requested.emit("pi")
         self.quit_requested.emit()
+
+    # --- 自動の待ち ---------------------------------------------------------
+    def start_countdown(self, secs):
+        """secs 秒たったら自分で「再生する」。「再生する」ならすぐ、やめるで取り消し。"""
+        if self.playlist is None or self.btn_play is None:
+            return
+        self._countdown = (self.clock(), max(0.0, float(secs)))
+        self._tick_countdown()
+        if self._countdown is not None:
+            self._cd_timer.start()
+
+    def stop_countdown(self):
+        self._countdown = None
+        self._cd_timer.stop()
+        if self.btn_play is not None:
+            self.btn_play.set_countdown(None, 0)
+
+    def countdown_left(self):
+        """残りの秒。待っていなければ None。"""
+        if self._countdown is None:
+            return None
+        t0, total = self._countdown
+        return max(0.0, total - (self.clock() - t0))
+
+    def _tick_countdown(self):
+        import math
+        left = self.countdown_left()
+        if left is None:
+            self._cd_timer.stop()
+            return
+        total = self._countdown[1]
+        if left <= 0.0:
+            self.request_play()
+            return
+        self.btn_play.set_countdown(left / total if total > 0 else 0.0, math.ceil(left))
 
     def _left_width(self):
         """曲名などを並べる幅(プレイリストのときは右の板を除いた左側)。"""
@@ -276,21 +366,29 @@ class IntroPage(QWidget):
         s = self._s()
         pw = PL_PANEL_W * s
         inner = pw - 2 * PL_PAD * s
-        n = max(1, len(self._pl_cards))
-        cs = min(0.62 * s, inner / (n * 236.0))
+        n = len(self._pl_cards)
+        # 4枚以上は2段に(1段に並べると★が読めないほど小さくなる)。
+        per_row = n if n <= 3 else (n + 1) // 2
+        rows = 0 if n == 0 else (1 if n <= 3 else 2)
+        cs = min(PL_CARD_SCALE * s, inner / (max(1, per_row) * 236.0))
         cw, ch = 236 * cs, 232 * cs
-        ph = (PL_PAD * 2 + PL_COUNTER_H + PL_GAP * 3 + PL_PLAY_H + PL_QUIT_H) * s + ch
+        cards_h = rows * ch + (PL_GAP * s if rows else 0)
+        ph = (PL_PAD * 2 + PL_COUNTER_H + PL_GAP * 2 + PL_PLAY_H + PL_QUIT_H) * s + cards_h
         x = self.width() - PL_MARGIN * s * 0.6 - pw
         y = (self.height() - ph) / 2.0
         self._pl_panel = QRectF(x, y, pw, ph)
         cy = y + (PL_PAD + PL_COUNTER_H + PL_GAP) * s
-        cx = x + (pw - cw * n) / 2.0
-        for k, _lv in self.pl_courses:
-            c = self._pl_cards[k]
-            c.scale = cs
-            c.setGeometry(int(cx), int(cy), int(cw), int(ch))
-            cx += cw
-        by = cy + ch + PL_GAP * s
+        keys = [k for k, _lv in self.pl_courses]
+        for r in range(rows):
+            row = keys[r * per_row:(r + 1) * per_row]
+            cx = x + (pw - cw * len(row)) / 2.0
+            for k in row:
+                c = self._pl_cards[k]
+                c.scale = cs
+                c.setGeometry(int(cx), int(cy), int(cw), int(ch))
+                cx += cw
+            cy += ch
+        by = cy + (PL_GAP * s if rows else 0)
         bx, bw = x + PL_PAD * s, inner
         self.btn_play.setGeometry(int(bx), int(by), int(bw), int(PL_PLAY_H * s))
         self.btn_play.setStyleSheet(PL_BUTTON_QSS % {

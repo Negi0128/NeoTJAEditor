@@ -262,6 +262,12 @@ class HostSessionTests(unittest.TestCase):
             lib = host.library
             self.assertTrue(lib.btn_play_all.isEnabled())
             lib.btn_play_all.click()
+            # 板(範囲・手動/自動)が出る。既定は 1〜最後・手動。
+            panel = lib.play_panel
+            self.assertTrue(panel.isVisible())
+            self.assertEqual(panel.options(), {'start': 0, 'end': 2, 'auto': False, 'wait': 10})
+            panel.btn_start.click()
+            self.assertFalse(panel.isVisible())
             core = self.FakeCore.instances[-1]
             _wait(700)
             self.assertIs(host.body.currentWidget(), host.intro)
@@ -354,6 +360,152 @@ class HostSessionTests(unittest.TestCase):
             self.assertFalse(host.library.btn_play_all.isEnabled())
             host.shutdown()
             host.deleteLater()
+
+
+class Step4Tests(unittest.TestCase):
+    """範囲・自動(待ってから自分で進む)。"""
+
+    setUp = HostSessionTests.setUp
+    tearDown = HostSessionTests.tearDown
+    _host = HostSessionTests._host
+
+    @real_qt_test
+    def test_panel_saves_mode_and_range(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            lib = host.library
+            started = []
+            host.start_playlist = lambda pid, **kw: started.append((pid, kw)) or True
+            panel = lib.open_play_panel()
+            self.assertEqual(panel.sp_to.maximum(), 3)
+            self.assertFalse(panel.sp_wait.isEnabled())
+            panel.sp_from.setValue(2)
+            panel.sp_to.setValue(1)                    # 前より前にはならない
+            self.assertEqual((panel.sp_from.value(), panel.sp_to.value()), (1, 1))
+            panel.sp_to.setValue(3)
+            panel.sp_from.setValue(2)
+            panel.btn_auto.click()
+            self.assertTrue(panel.sp_wait.isEnabled())
+            panel.sp_wait.setValue(99)                 # 幅の中へ
+            self.assertEqual(panel.sp_wait.value(), 60)
+            panel.sp_wait.setValue(5)
+            panel.btn_start.click()
+            self.assertEqual(started, [(self.pid, {'start': 1, 'end': 2, 'auto': True, 'wait': 5})])
+            self.assertTrue(lib.cfg['player_playlist_auto'])
+            self.assertEqual(lib.cfg['player_playlist_wait'], 5)
+            # 次に開くと前の選び方のまま。外を押すと閉じる。
+            panel = lib.open_play_panel()
+            self.assertTrue(panel.auto)
+            self.assertEqual(panel.sp_wait.value(), 5)
+            panel.close_panel()
+            self.assertFalse(panel.isVisible())
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
+    def test_range(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            # 3番目だけ(2番目は見つからない曲)。
+            self.assertTrue(host.start_playlist(self.pid, start=2, end=2))
+            _wait(700)
+            self.assertEqual(host.intro.playlist, (1, 1))
+            self.assertEqual(host.intro.title, 'b')
+            host.end_playlist()
+            _wait(700)
+            # 見つからない曲だけの範囲は始めない。
+            self.assertFalse(host.start_playlist(self.pid, start=1, end=1))
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
+    def test_auto_counts_down_and_advances(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            core = None
+            now = [1000.0]
+            host.intro.clock = lambda: now[0]
+            self.assertTrue(host.start_playlist(self.pid, auto=True, wait=10))
+            core = self.FakeCore.instances[-1]
+            _wait(700)
+            intro = host.intro
+            self.assertEqual(intro.playlist, (1, 2))
+            self.assertEqual(intro._pl_cards, {})                 # 自動ではコースを変えない
+            self.assertAlmostEqual(intro.countdown_left(), 10.0)
+            self.assertEqual(intro.btn_play.secs, 10)
+            now[0] += 4.2
+            _wait(120)
+            self.assertEqual(intro.btn_play.secs, 6)
+            self.assertIsNone(host._seq)
+            now[0] += 6.0
+            _wait(120)
+            self.assertIsNotNone(host._seq)                       # 自分で「再生する」
+            self.assertIsNone(intro.countdown_left())
+            host._seq._t0 -= 2.0
+            host._seq.tick()
+            _wait(800)
+            self.assertIs(host.body.currentWidget(), host.play_page)
+            self.assertIn(('load', 'a.tja', 'Oni'), core.log)
+            core.finished = True
+            _wait(900)
+            core.finished = False
+            self.assertEqual(intro.playlist, (2, 2))
+            self.assertAlmostEqual(intro.countdown_left(), 10.0)  # 次の曲もまた待つ
+            # 「再生する」ならすぐ。
+            intro.btn_play.click()
+            self.assertIsNotNone(host._seq)
+            self.assertIsNone(intro.countdown_left())
+            host._seq._t0 -= 2.0
+            host._seq.tick()
+            _wait(800)
+            core.finished = True
+            _wait(900)
+            self.assertIsNone(host.playlist_session())            # 最後 → プレイリストへ
+            self.assertIs(host.library.pages.currentWidget(), host.library.page_playlist)
+            # やめるで待ちも止まる。
+            core.finished = False
+            host.start_playlist(self.pid, auto=True, wait=3)
+            _wait(700)
+            self.assertIsNotNone(intro.countdown_left())
+            intro.btn_quit.click()
+            self.assertIsNone(intro.countdown_left())
+            now[0] += 10
+            _wait(150)
+            self.assertIsNone(host._seq)
+            _wait(700)
+            self.assertIsNone(host.playlist_session())
+            host.shutdown()
+            host.deleteLater()
+
+
+class CardRowsTests(unittest.TestCase):
+    @real_qt_test
+    def test_five_courses_two_rows_readable(self):
+        from neotja.player.intro import IntroPage
+        with tempfile.TemporaryDirectory() as d:
+            a = _chart(Path(d) / 'a', 'a')
+            page = IntroPage({'master_volume': 0.0})
+            page.resize(1920, 1009)
+            page.show()
+            page.set_song(a, 'Oni', 9)
+            five = [('Edit', 10), ('Oni', 9), ('Hard', 7), ('Normal', 5), ('Easy', 3)]
+            page.set_playlist(1, 3, five)
+            cards = [page._pl_cards[k] for k in ('Easy', 'Normal', 'Hard', 'Oni', 'Edit')]
+            tops = sorted({c.geometry().top() for c in cards})
+            self.assertEqual(len(tops), 2)                         # 2段
+            self.assertEqual([c.geometry().top() for c in cards[:3]], [tops[0]] * 3)
+            # ★の字が 20px 以上(1段に5枚だった前は約 8px)。
+            self.assertGreaterEqual(cards[0].LEVEL_PX * cards[0].scale, 20.0)
+            # 板は窓に収まり、ボタンはカードの下。
+            panel = page._pl_panel
+            self.assertGreaterEqual(panel.top(), 0)
+            self.assertLessEqual(panel.bottom(), page.height())
+            self.assertGreater(page.btn_play.geometry().top(), cards[-1].geometry().bottom())
+            # 3つまでは1段。
+            page.set_playlist(1, 3, five[:3])
+            self.assertEqual(len({c.geometry().top() for c in page._pl_cards.values()}), 1)
+            page.close()
+            page.deleteLater()
 
 
 if __name__ == '__main__':
