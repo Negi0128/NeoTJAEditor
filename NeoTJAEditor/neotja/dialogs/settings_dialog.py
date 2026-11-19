@@ -2,12 +2,13 @@ import copy
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QFontDatabase, QGuiApplication
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractButton, QAbstractSpinBox, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from neotja import nameplate_profiles as np_mod
@@ -31,6 +32,141 @@ class _NoWheel(QObject):
             event.ignore()
             return True
         return False
+
+
+class _Hint(QLabel):
+    """項目の補足説明。画面には出さず、直前の行の ⓘ(と行そのもの)の
+    ツールチップへ移す(_Form.addRow / _Page.addWidget が受け取ったとき)。
+    live=True のもの(ネームプレートの「素材が無い」の知らせ)はその場に出す。"""
+    live = False
+
+
+class _InfoDot(QWidget):
+    """説明のある行に付ける小さな i の丸。乗せると説明が出る。"""
+
+    def __init__(self, tip, parent=None):
+        super().__init__(parent)
+        self.setToolTip(tip)
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.WhatsThisCursor)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        col = QColor(_small_text())
+        if not self.isEnabled():
+            col.setAlpha(110)
+        p.setPen(QPen(col, 1.2))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QRectF(1.5, 1.5, 13, 13))
+        f = QFont(self.font())
+        f.setPixelSize(10)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRectF(0, 0, 16, 16), Qt.AlignCenter, "i")
+        p.end()
+
+
+def _small_text():
+    return "#93a3bf" if theme_mod.is_dark_theme() else "#4a5568"
+
+
+def _attach_tip(widgets, tip):
+    for w in widgets:
+        if w is None:
+            continue
+        old = w.toolTip()
+        w.setToolTip(old + LF + LF + tip if old else tip)
+
+
+class _Form(QFormLayout):
+    """枠の中のフォーム。_Hint を受け取ったら行を足さず、直前の行に ⓘ を
+    付けて説明をツールチップへ移す(1画面に収めるため)。"""
+
+    def addRow(self, *args):
+        if (len(args) == 1 and isinstance(args[0], _Hint) and not args[0].live
+                and self.rowCount() > 0):
+            self._fold(args[0])
+            return
+        return super().addRow(*args)
+
+    def _fold(self, hint):
+        tip = hint.text()
+        host = self.parentWidget()
+        # 消さずに隠して持っておく(setEnabled をつないでいる説明がある)。
+        hint.setParent(host)
+        hint.hide()
+        hint.setProperty("folded", True)
+        row = self.rowCount() - 1
+        # 同じ行に説明が2つ続くときは、ⓘ を増やさず1つにまとめる。
+        for role in (QFormLayout.SpanningRole, QFormLayout.LabelRole):
+            it = self.itemAt(row, role)
+            box = it.widget() if it is not None else None
+            dots = box.findChildren(_InfoDot) if box is not None else []
+            if dots:
+                _attach_tip([dots[0]], tip)
+                for w in box.findChildren(QWidget):
+                    if not isinstance(w, _InfoDot) and w.parentWidget() is box:
+                        _attach_tip([w], tip)
+                return
+        span = self.itemAt(row, QFormLayout.SpanningRole)
+        lab = self.itemAt(row, QFormLayout.LabelRole)
+        fld = self.itemAt(row, QFormLayout.FieldRole)
+        dot = _InfoDot(tip)
+        if span is not None and span.widget() is not None:
+            w = span.widget()
+            _attach_tip([w], tip)
+            self.takeRow(row)
+            box = QWidget()
+            box.setObjectName("tipRow")
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            h.addWidget(w)
+            h.addWidget(dot, 0, Qt.AlignVCenter)
+            if not isinstance(w, (QPushButton, QLineEdit)):
+                h.addStretch(1)
+            w.setVisible(True)
+            super().addRow(box)
+        elif lab is not None and lab.widget() is not None:
+            lw = lab.widget()
+            fw = fld.widget() if fld is not None else None
+            _attach_tip([lw, fw], tip)
+            self.takeRow(row)
+            box = QWidget()
+            box.setObjectName("tipRow")
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            h.addWidget(lw)
+            h.addWidget(dot, 0, Qt.AlignVCenter)
+            h.addStretch(1)
+            lw.setVisible(True)
+            # 親のチェックで灰色になる行は ⓘ も一緒に。
+            dot.setEnabled(lw.isEnabled())
+            if fw is not None:
+                super().addRow(box, fw)
+                fw.setVisible(True)
+            else:
+                super().addRow(box)
+        elif fld is not None and fld.widget() is not None:
+            _attach_tip([fld.widget()], tip)
+
+
+class _Page(QVBoxLayout):
+    """ページの中身。ページ全体の説明(_Hint)はページの見出しの ⓘ へ。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.page_tips = []
+
+    def addWidget(self, w, *args):
+        if isinstance(w, _Hint) and not w.live:
+            self.page_tips.append(w.text())
+            w.setParent(self.parentWidget())
+            w.hide()
+            return
+        return super().addWidget(w, *args)
 
 
 class SettingsDialog(QDialog):
@@ -74,31 +210,69 @@ class SettingsDialog(QDialog):
         # 「保存して適用」ボタンが押せなかった。利用可能な画面高の 88% を上限にし、
         # 中身は下の QScrollArea でスクロールさせる(ボタンは常に見える)。
         avail = QGuiApplication.primaryScreen().availableGeometry()
-        self.resize(min(640, max(480, avail.width() - 80)),
-                    min(760, max(420, int(avail.height() * 0.88))))
+        self.resize(min(860, max(520, avail.width() - 80)),
+                    min(700, max(420, int(avail.height() * 0.88))))
+        self.setObjectName("settingsDialog")
 
+        # 左に検索と項目の一覧、右にその項目のページ(利用者の選択 2026-11-19:
+        # 以前のタブは7枚で、探すのに順に開く必要があった)。ページは1画面に
+        # 収まる大きさに分け、収まらないときだけページの中でスクロールする。
         layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-        layout.addWidget(tabs, 1)
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        layout.addLayout(body, 1)
+        side = QVBoxLayout()
+        side.setContentsMargins(0, 0, 12, 0)
+        side.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setObjectName("settingsSearch")
+        self.search.setPlaceholderText("検索")
+        self.search.setClearButtonEnabled(True)
+        side.addWidget(self.search)
+        self.nav = QListWidget()
+        self.nav.setObjectName("settingsNav")
+        self.nav.setFixedWidth(160)
+        side.addWidget(self.nav, 1)
+        body.addLayout(side)
+        rule = QWidget()
+        rule.setObjectName("settingsRule")
+        rule.setFixedWidth(1)
+        body.addWidget(rule)
+        self.stack = QStackedWidget()
+        body.addWidget(self.stack, 1)
 
-        tabs.addTab(self._scrollable(self._build_run_tab()), "シミュレータ起動")
-        tabs.addTab(self._scrollable(self._build_shortcuts_tab()), "ショートカット")
-        tabs.addTab(self._scrollable(self._build_editor_tab()), "エディタ・ツール")
-        tabs.addTab(self._scrollable(self._build_audio_tab()), "音声")
-        tabs.addTab(self._scrollable(self._build_display_tab()), "表示")
-        tabs.addTab(self._scrollable(self._build_nameplate_tab()), "ネームプレート")
-        # 「開発者用」と「実験的機能」は1枚にまとめてある。タブが8枚あると
-        # 右端が見切れて、最後のタブに手が届かなかった(利用者の報告
-        # 2026-10-03)。どちらも「作る側だけが触るもの」で中身も近い。
-        tabs.addTab(self._scrollable(self._build_dev_experimental_tab()),
-                    "開発・実験的機能")
-        # タブが1枚でも入りきらないと、右端が隠れて「▶」を押さないと辿り
-        # 着けない。画面に余裕があるぶんだけ横を広げて、全部のタブを
-        # 出しておく(文字の大きさや表示スケールで要る幅は変わるので、
-        # 決め打ちにせず聞く)。
-        need = tabs.tabBar().sizeHint().width() + 24
-        if need > self.width():
-            self.resize(min(need, max(480, avail.width() - 80)), self.height())
+        self.pages = []          # (名前, スクロール, 中身)
+        for name, build in (
+                ("シミュレータ起動", self._build_run_tab),
+                ("ショートカット", self._build_shortcuts_tab),
+                ("エディタ", self._build_editor_tab),
+                ("音声", self._build_audio_tab),
+                ("表示", self._build_display_tab),
+                ("ネームプレート", self._build_nameplate_tab),
+                ("Player", self._build_player_page),
+                # 「開発者用」と「実験的機能」は1枚にまとめてある(中身が近い)。
+                ("開発・実験的機能", self._build_dev_experimental_tab)):
+            self._add_page(name, build())
+        # エディタは枠が多く1画面に収まらないので、後半を「書き出し・素材」へ。
+        self._split_page("エディタ", "書き出し・素材",
+                         ("動画書き出し", "素材(System フォルダ)", "Discord", "その他"))
+        # ネームプレートも同じく2枚に。「見本」は開いている方のページへ移す
+        # (どちらで数値を変えても出来上がりが見える)。
+        self._split_page("ネームプレート", "プレートの名前・段位", ("名前", "段位", "素材"))
+        self._np_sample = next(b for b in self.findChildren(QGroupBox) if b.title() == "見本")
+        self.nav.currentRowChanged.connect(self._carry_np_sample)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.setCurrentRow(0)
+        self.search.textChanged.connect(self._filter)
+        self.search.returnPressed.connect(self._jump_first)
+        self.setStyleSheet(self._qss())
+        # どのページも横にはみ出さない幅を下限にする(長いチェックの文など)。
+        self.stack.ensurePolished()
+        need = max(inner.minimumSizeHint().width() for _n, _a, inner in self.pages)
+        need += self.nav.width() + 12 + 1 + 24 + layout.contentsMargins().left() * 2
+        self.setMinimumWidth(min(need, max(620, avail.width() - 40)))
+        if self.width() < self.minimumWidth():
+            self.resize(self.minimumWidth(), self.height())
 
         # 数値入力と選択肢は、ホイールで値が変わらないようにする。
         # 全タブを作り終えてからまとめて掛ける(作る順に依存しない)。
@@ -131,6 +305,207 @@ class SettingsDialog(QDialog):
     # レイアウト用の小道具
     # ------------------------------------------------------------------
 
+    def _add_page(self, name, inner, at=None):
+        lay = inner.layout()
+        tips = list(getattr(lay, "page_tips", []) or [])
+        # ページの見出し(名前)。ページ全体の説明はその ⓘ へ。
+        head = QWidget()
+        head.setObjectName("pageHead")
+        h = QHBoxLayout(head)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        title = QLabel(name)
+        title.setObjectName("pageTitle")
+        h.addWidget(title)
+        if tips:
+            h.addWidget(_InfoDot((LF + LF).join(tips)), 0, Qt.AlignVCenter)
+        h.addStretch(1)
+        lay.insertWidget(0, head)
+        inner.setObjectName("settingsPage")
+        area = self._scrollable(inner)
+        area.setObjectName("settingsPageArea")
+        area.viewport().setObjectName("settingsPageView")
+        item = QListWidgetItem(name)
+        item.setSizeHint(QSize(150, 34))
+        if tips:
+            item.setToolTip((LF + LF).join(tips))
+        if at is None:
+            self.stack.addWidget(area)
+            self.nav.addItem(item)
+            self.pages.append((name, area, inner))
+        else:
+            self.stack.insertWidget(at, area)
+            self.nav.insertItem(at, item)
+            self.pages.insert(at, (name, area, inner))
+
+    def _split_page(self, src_name, new_name, titles):
+        """src のページの枠(見出しが titles のもの)を新しいページへ移す。
+        枠の中の部品はそのまま(_save が読む self.* は変わらない)。"""
+        idx = [n for n, _a, _w in self.pages].index(src_name)
+        src = self.pages[idx][2]
+        w, outer = self._tab_body()
+        boxes = {b.title(): b for b in src.findChildren(QGroupBox) if b.parentWidget() is src}
+        for t in titles:
+            box = boxes.get(t)
+            if box is not None:
+                src.layout().removeWidget(box)
+                outer.addWidget(box)
+        outer.addStretch()
+        self._add_page(new_name, w, at=idx + 1)
+
+    def _carry_np_sample(self, row):
+        if not (0 <= row < len(self.pages)):
+            return
+        name, _area, inner = self.pages[row]
+        if name not in ("ネームプレート", "プレートの名前・段位"):
+            return
+        box = self._np_sample
+        if box.parentWidget() is inner:
+            return
+        old = box.parentWidget()
+        if old is not None and old.layout() is not None:
+            old.layout().removeWidget(box)
+        # 見出しの次(ネームプレートの選択の下 / 名前・段位なら一番上)。
+        at = 2 if name == "ネームプレート" else 1
+        inner.layout().insertWidget(at, box)
+        box.show()
+
+    # ------------------------------------------------------------------
+    # 検索: 項目の名前・枠の見出し・説明(ツールチップ)で一覧をしぼり、
+    # Enter で最初に当たった欄へ移る。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _texts(w):
+        out = [w.toolTip()]
+        if isinstance(w, QGroupBox):
+            out.append(w.title())
+        elif isinstance(w, (QLabel, QAbstractButton)):
+            out.append(w.text())
+        return " ".join(t for t in out if t)
+
+    def _matches(self, inner, q):
+        """ページの中で q を含む部品(見出し・ラベル・チェック・ボタン)を上から。"""
+        q = q.casefold()
+        hits = []
+        for w in inner.findChildren(QWidget):
+            if isinstance(w, _Hint) and not w.live:
+                continue
+            if not w.isVisibleTo(inner) and not isinstance(w, _InfoDot):
+                continue
+            if q in self._texts(w).casefold():
+                hits.append(w)
+        hits.sort(key=lambda w: w.mapTo(inner, w.rect().topLeft()).y())
+        return hits
+
+    def _filter(self, text):
+        q = text.strip()
+        first = None
+        for i, (name, _area, inner) in enumerate(self.pages):
+            ok = (not q) or (q.casefold() in name.casefold()) or bool(self._matches(inner, q))
+            self.nav.item(i).setHidden(not ok)
+            if ok and first is None:
+                first = i
+        cur = self.nav.currentRow()
+        if first is not None and (cur < 0 or self.nav.item(cur).isHidden()):
+            self.nav.setCurrentRow(first)
+
+    def _focus_target(self, w, inner):
+        """当たった部品から、移る先(入力欄)を決める。ラベルならその行の欄。"""
+        if isinstance(w, _InfoDot):
+            w = w.parentWidget() or w
+        for form in inner.findChildren(QFormLayout):
+            for r in range(form.rowCount()):
+                lab = form.itemAt(r, QFormLayout.LabelRole)
+                fld = form.itemAt(r, QFormLayout.FieldRole)
+                lw = lab.widget() if lab is not None else None
+                if lw is not None and (lw is w or lw.isAncestorOf(w)) and fld is not None:
+                    return fld.widget() or w
+        return w
+
+    def _jump_first(self):
+        q = self.search.text().strip()
+        if not q:
+            return
+        for i, (name, area, inner) in enumerate(self.pages):
+            hits = self._matches(inner, q)
+            if not hits:
+                continue
+            self.nav.setCurrentRow(i)
+            target = self._focus_target(hits[0], inner)
+            area.ensureWidgetVisible(target, 0, 40)
+            if target.focusPolicy() != Qt.NoFocus:
+                target.setFocus(Qt.OtherFocusReason)
+            return
+
+    # ------------------------------------------------------------------
+    # 見た目(選曲の表・Player の板と同じ: 小さな字 #93a3bf、細い区切り線、
+    # 平らなボタン、角はほぼ四角)。明るいテーマでは同じ形で明るい色。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _qss():
+        dark = theme_mod.is_dark_theme()
+        c = theme_mod.COLORS
+        small = _small_text()
+        accent = c.get("accent", "#4f9cf9")
+        if dark:
+            bg, fg, line = "#0f1a2c", "#e5edf7", "rgba(255,255,255,26)"
+            field, edge = "rgba(16,28,44,200)", "rgba(139,217,238,110)"
+            btn, btn_edge, btn_hover = "rgba(16,28,44,170)", "rgba(139,217,238,150)", "rgba(35,61,84,200)"
+            sel = "rgba(127,227,255,40)"
+        else:
+            bg, fg, line = "#f6f8fb", "#1f2733", "rgba(0,0,0,26)"
+            field, edge = "#ffffff", "rgba(40,90,120,110)"
+            btn, btn_edge, btn_hover = "#ffffff", "rgba(40,90,120,140)", "#eef4f8"
+            sel = "rgba(13,110,253,30)"
+        return f"""
+        QDialog#settingsDialog {{ background-color: {bg}; }}
+        QDialog#settingsDialog QWidget {{ font-family: "Yu Gothic UI"; background: transparent; }}
+        QDialog#settingsDialog QComboBox QAbstractItemView {{ background-color: {bg}; color: {fg};
+                     border: 1px solid {edge}; selection-background-color: {sel}; }}
+        QScrollArea#settingsPageArea, QWidget#settingsPageView, QWidget#settingsPage
+            {{ background: transparent; border: none; }}
+        QStackedWidget, QWidget#pageHead, QWidget#tipRow {{ background: transparent; }}
+        QWidget#settingsRule {{ background-color: {line}; }}
+        QLabel#pageTitle {{ color: {fg}; font-size: 17px; font-weight: bold; }}
+        QListWidget#settingsNav {{ background: transparent; border: none; outline: 0;
+                                   font-size: 13px; font-weight: bold; color: {fg}; }}
+        QListWidget#settingsNav::item {{ padding: 0 10px; border-radius: 3px; }}
+        QListWidget#settingsNav::item:hover {{ background-color: {btn_hover}; }}
+        QListWidget#settingsNav::item:selected {{ background-color: {sel}; color: {fg};
+                                                  border: 1px solid {edge}; }}
+        QDialog#settingsDialog QGroupBox {{ background: transparent; border: none; border-top: 1px solid {line};
+                     margin-top: 18px; padding-top: 6px; font-weight: bold; color: {fg}; }}
+        QDialog#settingsDialog QGroupBox::title {{ subcontrol-origin: margin; left: 0;
+                     top: 2px; padding: 0; color: {small}; font-size: 12px; }}
+        QDialog#settingsDialog QLabel {{ color: {fg}; background: transparent; }}
+        QDialog#settingsDialog QLineEdit, QDialog#settingsDialog QSpinBox,
+        QDialog#settingsDialog QDoubleSpinBox, QDialog#settingsDialog QComboBox
+            {{ background-color: {field}; border: 1px solid {edge}; border-radius: 3px;
+               padding: 3px 6px; color: {fg}; }}
+        QDialog#settingsDialog QLineEdit:focus, QDialog#settingsDialog QSpinBox:focus,
+        QDialog#settingsDialog QDoubleSpinBox:focus, QDialog#settingsDialog QComboBox:focus
+            {{ border: 2px solid {accent}; }}
+        QDialog#settingsDialog QLineEdit:disabled, QDialog#settingsDialog QSpinBox:disabled,
+        QDialog#settingsDialog QDoubleSpinBox:disabled {{ color: {small}; border-color: {line}; }}
+        QDialog#settingsDialog QCheckBox {{ color: {fg}; spacing: 8px; background: transparent; }}
+        QDialog#settingsDialog QCheckBox:disabled {{ color: {small}; }}
+        QDialog#settingsDialog QCheckBox::indicator {{ width: 14px; height: 14px; border-radius: 3px;
+                     border: 1px solid {small}; background: transparent; }}
+        QDialog#settingsDialog QCheckBox::indicator:checked {{ background-color: {accent};
+                     border: 1px solid {accent}; image: none; }}
+        QDialog#settingsDialog QCheckBox::indicator:focus {{ border: 2px solid {accent}; }}
+        QDialog#settingsDialog QPushButton {{ background-color: {btn}; border: 1px solid {btn_edge};
+                     border-radius: 3px; padding: 6px 14px; font-weight: bold; color: {fg}; }}
+        QDialog#settingsDialog QPushButton:hover {{ background-color: {btn_hover}; }}
+        QDialog#settingsDialog QPushButton:focus {{ border: 2px solid {accent}; }}
+        QDialog#settingsDialog QPushButton:disabled {{ color: {small}; border-color: {line}; }}
+        QDialog#settingsDialog QPushButton#accentButton {{ background-color: {sel};
+                     border: 1px solid {accent}; }}
+        QDialog#settingsDialog QPushButton#dangerButton {{ border: 1px solid rgba(236,80,80,170);
+                     color: #ec7a7a; }}
+        QLineEdit#settingsSearch {{ padding: 5px 8px; }}
+        """
+
     @staticmethod
     def _scrollable(inner: QWidget) -> QScrollArea:
         """タブの中身をスクロール可能にする。項目が増えてもダイアログが縦に
@@ -147,9 +522,9 @@ class SettingsDialog(QDialog):
         いるので、下端に伸縮を足して枠が間延びしないようにする(返す側で
         addStretch すること)。"""
         w = QWidget()
-        outer = QVBoxLayout(w)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
+        outer = _Page(w)
+        outer.setContentsMargins(16, 4, 12, 12)
+        outer.setSpacing(6)
         return w, outer
 
     @staticmethod
@@ -158,7 +533,7 @@ class SettingsDialog(QDialog):
         枠でくくることで、以前のように何十行も同じ調子で縦に並ぶのを避ける。
         フォームにしてあるのでラベルの左端と入力欄の左端が枠ごとに揃う。"""
         box = QGroupBox(title)
-        form = QFormLayout(box)
+        form = _Form(box)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
         # ラベルが長くても勝手に上下2段へ折り返させない(段差ができて逆に読み
@@ -174,10 +549,9 @@ class SettingsDialog(QDialog):
         グレー文字にし、折り返しを有効にする。以前は説明も普通のラベルだった
         ので、どれが設定でどれが説明なのか一目で分からず、長い説明はそのまま
         横に伸びてタブが横スクロールしていた。"""
-        lbl = QLabel(text)
+        lbl = _Hint(text)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet(
-            "color: %s; font-size: 11px;" % theme_mod.COLORS.get("fg_dim", "#6c757d"))
+        lbl.setStyleSheet("color: %s; font-size: 11px;" % _small_text())
         return lbl
 
     def _path_row(self, edit: QLineEdit, on_browse, with_clear: bool = True) -> QWidget:
@@ -557,25 +931,6 @@ class SettingsDialog(QDialog):
             "正の値 = 音がそのミリ秒だけ遅れて耳に届くとみなす、という意味です。譜面が"
             "見た目より遅れて聞こえるなら値を増やしてください。"))
 
-        form = self._group(outer, "選曲画面のBGM")
-        self.select_bgm_check = QCheckBox("譜面を開いていないあいだ BGM を流す")
-        self.select_bgm_check.setChecked(bool(cfg.get("player_select_bgm", True)))
-        form.addRow(self.select_bgm_check)
-        self.select_bgm_vol = QSpinBox()
-        self.select_bgm_vol.setRange(0, 100)
-        self.select_bgm_vol.setSuffix(" %")
-        self.select_bgm_vol.setValue(
-            int(round(float(cfg.get("player_select_bgm_volume", 0.6) or 0.0) * 100)))
-        vol_label = QLabel("音量")
-        form.addRow(vol_label, self.select_bgm_vol)
-        self._bind_enabled(self.select_bgm_check, vol_label, self.select_bgm_vol)
-        form.addRow(self._hint(
-            "NeoTJAPlayer で譜面を開く前の画面に流れる曲の音量です。"
-            "曲の音量に対する比率で、100% なら譜面と同じ音量になります。"))
-        # 旧 NeoTJAPlayer 専用の設定で、v15.4.0 で Player を外してからは何にも
-        # 効かない。値は新しい Player で使うかもしれないので消さずに残し、枠ごと
-        # 隠す(利用者の承認 2026-11-16)。
-        form.parentWidget().hide()
 
         outer.addStretch()
         return w
@@ -674,12 +1029,13 @@ class SettingsDialog(QDialog):
         form = self._group(outer, "見本")
         self.np_preview = QLabel()
         self.np_preview.setAlignment(Qt.AlignCenter)
-        self.np_preview.setMinimumHeight(120)
+        self.np_preview.setMinimumHeight(100)
         self.np_preview.setStyleSheet(
             "background: #3a3a3a; border: 1px solid rgba(255,255,255,30);"
             " border-radius: 3px;")
         form.addRow(self.np_preview)
         self.np_nosheet_hint = self._hint("")
+        self.np_nosheet_hint.live = True       # 状態の知らせなので、その場に出す
         self.np_nosheet_hint.setStyleSheet("color: #e0a33a; font-size: 11px;")
         self.np_nosheet_hint.hide()
         form.addRow(self.np_nosheet_hint)
@@ -1007,6 +1363,41 @@ class SettingsDialog(QDialog):
                 self.np_name_dx, self.np_name_dy, self.np_name_size,
                 self.np_dan_dx, self.np_dan_dy, self.np_dan_size)
 
+    def _build_player_page(self):
+        """Player(選曲〜結果の画面)だけに効く項目を1か所に。"""
+        w, outer = self._tab_body()
+        cfg = self.main_window.config_data
+        form = self._group(outer, "演奏")
+        self.player_play_mode_check = QCheckBox("演奏モード（実験的）")
+        self.player_play_mode_check.setChecked(bool(cfg.get("player_play_mode", False)))
+        form.addRow(self.player_play_mode_check)
+        form.addRow(self._hint(
+            "コースを選んだあとに「再生／演奏」を選ぶ画面を出します。演奏を選ぶと、"
+            "D F J K（左縁・左面・右面・右縁）で自分で叩いて判定・スコア・魂ゲージが"
+            "動きます。曲の終わりの演出やリザルトはまだありません。"))
+        form = self._group(outer, "選曲画面のBGM")
+        self.select_bgm_check = QCheckBox("譜面を開いていないあいだ BGM を流す")
+        self.select_bgm_check.setChecked(bool(cfg.get("player_select_bgm", True)))
+        form.addRow(self.select_bgm_check)
+        self.select_bgm_vol = QSpinBox()
+        self.select_bgm_vol.setRange(0, 100)
+        self.select_bgm_vol.setSuffix(" %")
+        self.select_bgm_vol.setValue(
+            int(round(float(cfg.get("player_select_bgm_volume", 0.6) or 0.0) * 100)))
+        vol_label = QLabel("音量")
+        form.addRow(vol_label, self.select_bgm_vol)
+        self._bind_enabled(self.select_bgm_check, vol_label, self.select_bgm_vol)
+        form.addRow(self._hint(
+            "NeoTJAPlayer で譜面を開く前の画面に流れる曲の音量です。"
+            "曲の音量に対する比率で、100% なら譜面と同じ音量になります。"))
+        # 旧 NeoTJAPlayer 専用の設定で、v15.4.0 で Player を外してからは何にも
+        # 効かない。値は新しい Player で使うかもしれないので消さずに残し、枠ごと
+        # 隠す(利用者の承認 2026-11-16)。
+        form.parentWidget().hide()
+
+        outer.addStretch()
+        return w
+
     def _build_dev_experimental_tab(self):
         """実験的機能と開発者用を1枚に積む。
 
@@ -1152,13 +1543,6 @@ class SettingsDialog(QDialog):
             "アレンジで足した音符—が薄く出るので、どこを埋めたのかが"
             "見えます。おにとうらの両方がある譜面でだけ出ます。"))
 
-        self.player_play_mode_check = QCheckBox("演奏モード（実験的）")
-        self.player_play_mode_check.setChecked(bool(cfg.get("player_play_mode", False)))
-        form2.addRow(self.player_play_mode_check)
-        form2.addRow(self._hint(
-            "コースを選んだあとに「再生／演奏」を選ぶ画面を出します。演奏を選ぶと、"
-            "D F J K（左縁・左面・右面・右縁）で自分で叩いて判定・スコア・魂ゲージが"
-            "動きます。曲の終わりの演出やリザルトはまだありません。"))
 
         outer.addStretch()
         return w
