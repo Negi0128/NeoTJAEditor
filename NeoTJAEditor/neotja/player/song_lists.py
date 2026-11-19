@@ -450,10 +450,12 @@ def sort_level(info):
 
 
 #: 並べ方。最近順は「最近開いた楽曲」だけ。
-SORT_MODES = ("recent", "name", "level", "bpm")
-SORT_LABELS = {"recent": "最近順", "name": "フォルダ名順", "level": "難易度順", "bpm": "BPM順"}
+SORT_MODES = ("recent", "title", "name", "level", "bpm")
+SORT_LABELS = {"recent": "最近順", "title": "曲名順", "name": "フォルダ名順",
+               "level": "難易度順", "bpm": "BPM順"}
 #: それぞれの並べ方の素直な向き(True = 大きい/新しい順)。
-SORT_NATURAL_DESC = {"recent": True, "name": False, "level": True, "bpm": False}
+SORT_NATURAL_DESC = {"recent": True, "title": False, "name": False, "level": True,
+                     "bpm": False}
 
 
 def sort_state(cfg, recent_view=False):
@@ -511,6 +513,9 @@ def sort_songs(items, mode, reverse=False):
                                  _name_key(t[0], t[1])))
         rest.sort(key=lambda t: _name_key(t[0], t[1]))
         return have + rest
+    if mode == "title":
+        return sorted(items, key=lambda t: (natural_key((t[1] or {}).get("title", "")),
+                                            _name_key(t[0], t[1])), reverse=desc)
     return sorted(items, key=lambda t: _name_key(t[0], t[1]), reverse=desc)
 
 

@@ -15,7 +15,8 @@ import time
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
+                           QPainterPath, QPen)
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout,
@@ -34,8 +35,8 @@ from neotja.theme import COLORS, glass_colors
 from neotja.theme import with_alpha as _c, rgba as _rgba
 from neotja.worker_util import detach_worker
 
-#: 1行の高さ。
-ROW_HEIGHT = 64
+#: 曲の表の1行の高さ。
+ROW_HEIGHT = 40
 #: 左の列の幅。
 SIDEBAR_WIDTH = 264
 #: ワーカーがまとめて送る件数・間隔(library.py と同じ考え方)。
@@ -189,13 +190,16 @@ class SongThumb(QWidget):
     """行の左のジャケット(角を丸めた正方形)。絵が無ければ空の枠だけ描く
     (題名の位置をそろえるため、枠はいつも出す)。"""
 
-    RADIUS = 6
+    RADIUS = 4
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, size=None, tint=None):
         super().__init__(parent)
-        self.setFixedSize(thumbs.THUMB_PX, thumbs.THUMB_PX)
+        side = int(size or thumbs.THUMB_PX)
+        self.setFixedSize(side, side)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.pixmap = None
+        #: 絵が無いときにうっすら塗るジャンルの色(box.def)。無ければ今までの暗い枠。
+        self.tint = QColor(tint) if tint else None
 
     def set_pixmap(self, pm):
         pm = pm if (pm is not None and not pm.isNull()) else None
@@ -220,7 +224,7 @@ class SongThumb(QWidget):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
         else:
-            p.setBrush(QColor(10, 20, 36, 150))
+            p.setBrush(_c(self.tint, 0.18) if self.tint is not None else QColor(10, 20, 36, 150))
             p.setPen(QPen(QColor(127, 227, 255, 70), 1.0))
         p.drawRoundedRect(r, rad, rad)
         p.end()
@@ -316,8 +320,183 @@ class PlayMark(QWidget):
         p.end()
 
 
-class SongRow(GlassCard):
-    """曲の1行。左の色帯はいちばん難しい難易度の色。"""
+#: 曲の表の列の幅(px)。曲名だけが伸びる。行と見出しで同じ数字を使う。
+COLW = {"num": 34, "thumb": 32, "folder": 300, "course": 156, "date": 84,
+        "action": 64, "star": 30, "mark": 30}
+#: 行の左右の余白と列のあいだ。
+ROW_MARGINS = (10, 0, 6, 0)
+ROW_SPACING = 14
+#: 表の幅の上限(広い窓で列が離れすぎないように)。
+TABLE_MAX_W = 1400
+#: 選んでいる行の左の縁・押した合図の色(Player のシアン)。
+CYAN = QColor(127, 227, 255)
+
+_GENRE_COLOR = {}
+
+
+def genre_color(path):
+    """曲の入っているジャンル(近い box.def)の色。無ければ None。"""
+    d = os.path.dirname(os.path.normpath(path or ""))
+    seen = []
+    for _ in range(5):
+        if not d:
+            break
+        key = song_lists.path_key(d)
+        if key in _GENRE_COLOR:
+            col = _GENRE_COLOR[key]
+            break
+        seen.append(key)
+        box = song_lists.parse_box_def(d) if os.path.isdir(d) else None
+        if box is not None:
+            col = box.get("color") or None
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            col = None
+            break
+        d = parent
+    else:
+        col = None
+    for k in seen:
+        _GENRE_COLOR[k] = col
+    return col
+
+
+_DISPLAY_NAME = {}
+
+
+def _display_name(d):
+    key = song_lists.path_key(d)
+    if key not in _DISPLAY_NAME:
+        try:
+            _DISPLAY_NAME[key] = song_lists.display_name(d)
+        except Exception:  # noqa: BLE001
+            _DISPLAY_NAME[key] = os.path.basename(d)
+    return _DISPLAY_NAME[key]
+
+
+def folder_text(path):
+    """フォルダの欄: 曲の置き場所の親を2段(ジャンルは box.def の題で)。曲の
+    フォルダが曲と同じ名前ならそれは省く(同じ言葉が2回並ぶだけなので)。"""
+    folder = os.path.dirname(os.path.normpath(path))
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if song_lists.normalize(os.path.basename(folder)) == song_lists.normalize(stem):
+        folder = os.path.dirname(folder)
+    dirs = []
+    d = folder
+    for _ in range(2):
+        if not d or os.path.dirname(d) == d:
+            break
+        dirs.insert(0, d)
+        d = os.path.dirname(d)
+    return "  ›  ".join(_display_name(x) for x in dirs)
+
+
+class _TextCell(QWidget):
+    """1行の字(長ければ省略)。曲名の欄は副題を同じ行に淡い色で続ける。"""
+
+    def __init__(self, text, px, bold=False, color=None, sub="", sub_px=12,
+                 elide=Qt.ElideRight, align=Qt.AlignLeft, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self.sub = sub
+        self.px, self.bold, self.sub_px = px, bold, sub_px
+        self.color = color
+        self.elide = elide
+        self.align = align
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def text(self):
+        return self._text
+
+    def set_text(self, text, sub=None):
+        self._text = text
+        if sub is not None:
+            self.sub = sub
+        self.update()
+
+    def refresh(self):
+        self.update()
+
+    def _font(self, px, bold):
+        f = QFont(self.font())
+        f.setPixelSize(px)
+        f.setBold(bold)
+        return f
+
+    def paintEvent(self, ev):
+        from PySide6.QtGui import QFontMetrics
+        p = QPainter(self)
+        r = self.rect()
+        f = self._font(self.px, self.bold)
+        fm = QFontMetrics(f)
+        col = self.color() if callable(self.color) else (self.color or COLORS["fg_bright"])
+        text = fm.elidedText(self._text, self.elide, max(10, r.width()))
+        p.setFont(f)
+        p.setPen(QColor(col))
+        flags = self.align | Qt.AlignVCenter
+        p.drawText(r, flags, text)
+        if self.sub and text == self._text and self.align == Qt.AlignLeft:
+            used = fm.horizontalAdvance(text) + 12
+            left = r.width() - used
+            if left > 30:
+                sf = self._font(self.sub_px, False)
+                sm = QFontMetrics(sf)
+                p.setFont(sf)
+                p.setPen(QColor(secondary_color()))
+                p.drawText(r.adjusted(used, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter,
+                           sm.elidedText(self.sub, Qt.ElideRight, left))
+        p.end()
+
+
+class CourseCell(QWidget):
+    """難易度の欄: コースのマーク(小さく)・名前・★。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(COLW["course"])
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.icon = CourseMarkIcon(None, px=24)
+        h.addWidget(self.icon, 0, Qt.AlignVCenter)
+        self.label = QLabel("")
+        self.label.setObjectName("courseText")
+        h.addWidget(self.label, 1)
+        self.course = None
+        self.level = None
+
+    def set_course(self, course, level):
+        self.course, self.level = course, level
+        self.icon.set_course(course)
+        self.icon.setVisible(bool(course))
+        if not course:
+            self.label.setText("")
+            return
+        name = song_lists.COURSE_LABELS.get(course, course)
+        self.label.setText(name if level is None else "%s  ★%d" % (name, level))
+        self.label.setProperty("missing", False)
+
+    def set_missing(self):
+        self.course, self.level = None, None
+        self.icon.hide()
+        self.label.setText("ファイルなし")
+        self.label.setProperty("missing", True)
+        self.label.style().unpolish(self.label)
+        self.label.style().polish(self.label)
+
+
+def list_columns(num=False, date=False, action=False):
+    """表の列の組み合わせ(行と見出しで同じものを使う)。"""
+    return {"num": bool(num), "date": bool(date), "action": bool(action)}
+
+
+class SongRow(QWidget):
+    """曲の1行(表の1行。40px・角なし・下に細い線)。
+
+    列: [#] [ジャケット 32px] [曲名(副題)] [フォルダ] [難易度] [日付] [外す/再指定]
+    [☆] [▶]。選んでいる行は一段明るく、左の縁がシアン。"""
 
     chosen = Signal(str)
     #: 右端の印(試聴を止める・流し直す)を押した。
@@ -328,128 +507,119 @@ class SongRow(GlassCard):
     #: 右クリック (曲, 画面の位置)。
     menu_requested = Signal(str, object)
 
-    #: 追加したときに縁を光らせる長さ(ms)。
+    #: 追加したときに光らせる長さ(ms)。
     FLASH_MS = 650
     _flash = False
 
     def __init__(self, path, title, *, saved=None, removable=False,
-                 date_text="", show_path=False, path_text=None, parent=None):
-        super().__init__(radius=10, hoverable=True, parent=parent)
+                 date_text="", show_path=False, path_text=None, cols=None, parent=None):
+        super().__init__(parent)
         self.path = path
         self.missing = not os.path.isfile(path)
         self.info = {"title": title, "subtitle": "", "courses": [], "bpm": None}
         self.order = 0
         self._saved = saved
+        self._accent = False
+        self._hover = False
+        self.cols = dict(cols or list_columns())
         self.setObjectName("songRow")
         self.setFixedHeight(ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setAttribute(Qt.WA_Hover, True)
         self.setToolTip(path)
         if not self.missing:
             self.setFocusPolicy(Qt.StrongFocus)
             self.setCursor(Qt.PointingHandCursor)
 
         h = QHBoxLayout(self)
-        h.setContentsMargins(22, 8, 12, 8)
-        h.setSpacing(12)
-        self.thumb = SongThumb()
+        h.setContentsMargins(*ROW_MARGINS)
+        h.setSpacing(ROW_SPACING)
+        if self.cols["num"]:
+            self.num = QLabel("")
+            self.num.setObjectName("rowNum")
+            self.num.setFixedWidth(COLW["num"])
+            self.num.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            h.addWidget(self.num)
+        self.thumb = SongThumb(size=COLW["thumb"], tint=genre_color(path))
         h.addWidget(self.thumb, 0, Qt.AlignVCenter)
-        texts = QVBoxLayout()
-        texts.setSpacing(2)
-        key = "fg_dim" if self.missing else "fg_bright"
-        self.title = ElidedText(title, key, 16, bold=True)
-        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        texts.addWidget(self.title)
-        if path_text is not None:
-            show_path = True
-        else:
-            path_text = _short_dir(path) if show_path else ""
-        self.sub = ElidedText(path_text, "fg_dim", 12, elide=show_path)
-        self.sub.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._show_path = show_path
-        texts.addWidget(self.sub)
-        # 2段目が空なら隠して、曲名を縦の真ん中に置く。
-        self.sub.setVisible(bool(self.sub.text()))
-        h.addLayout(texts, 1)
-
-        self.chip_box = QHBoxLayout()
-        self.chip_box.setSpacing(6)
-        h.addLayout(self.chip_box)
+        self.title = _TextCell(title, 15, bold=True,
+                               color=(lambda: COLORS["fg_dim"]) if self.missing
+                               else (lambda: COLORS["fg_bright"]))
+        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        h.addWidget(self.title, 1)
+        if path_text is None:
+            path_text = folder_text(path)
+        self.sub = _TextCell(path_text, 13, color=secondary_color, elide=Qt.ElideMiddle)
+        self.sub.setFixedWidth(COLW["folder"])
+        h.addWidget(self.sub)
+        self.course_cell = CourseCell()
+        h.addWidget(self.course_cell)
         self.chips = []
-        self.bpm = QLabel("")
-        self.bpm.setObjectName("bpm")
-        self.bpm.setMinimumWidth(70)
-        self.bpm.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.bpm.setVisible(False)
-        h.addWidget(self.bpm)
-
-        if date_text:
+        if self.cols["date"]:
             self.date = QLabel(date_text)
-            self.date.setObjectName("dim12")
-            self.date.setMinimumWidth(64)
+            self.date.setObjectName("rowDate")
+            self.date.setFixedWidth(COLW["date"])
             self.date.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             h.addWidget(self.date)
-
-        if self.missing:
-            self.btn_relink = QPushButton("再指定")
-            self.btn_relink.setObjectName("small")
-            self.btn_relink.clicked.connect(lambda: self.relink_requested.emit(self.path))
-            h.addWidget(self.btn_relink)
+        if self.cols["action"]:
+            slot = QWidget()
+            slot.setFixedWidth(COLW["action"])
+            sh = QHBoxLayout(slot)
+            sh.setContentsMargins(0, 0, 0, 0)
+            if self.missing:
+                self.btn_relink = QPushButton("再指定")
+                self.btn_relink.setObjectName("small")
+                self.btn_relink.clicked.connect(lambda: self.relink_requested.emit(self.path))
+                sh.addWidget(self.btn_relink)
+            if removable:
+                self.btn_remove = QPushButton("外す")
+                self.btn_remove.setObjectName("small")
+                self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.path))
+                sh.addWidget(self.btn_remove)
+            h.addWidget(slot)
+        star_slot = QWidget()
+        star_slot.setFixedWidth(COLW["star"])
+        st = QHBoxLayout(star_slot)
+        st.setContentsMargins(0, 0, 0, 0)
         if saved is not None and not self.missing:
             self.btn_star = QPushButton()
             self.btn_star.setObjectName("star")
-            self.btn_star.setFixedSize(36, 32)
+            self.btn_star.setFixedSize(COLW["star"], 30)
             self.btn_star.setCursor(Qt.PointingHandCursor)
             self.btn_star.clicked.connect(self._toggle_saved)
-            h.addWidget(self.btn_star)
+            st.addWidget(self.btn_star)
             self._sync_star()
-        if removable:
-            self.btn_remove = QPushButton("外す")
-            self.btn_remove.setObjectName("small")
-            self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.path))
-            h.addWidget(self.btn_remove)
-        # 試聴の印(選んでいる行だけ描く。場所はいつも取っておき、選んでも
-        # 並びがずれないように)。
+        h.addWidget(star_slot)
+        # 試聴の印(選んでいる行だけ描く。場所はいつも取っておく)。
         self.mark = PlayMark()
+        self.mark.setFixedSize(COLW["mark"], COLW["mark"])
         self.mark.clicked.connect(lambda: self.mark_clicked.emit(self.path))
         h.addWidget(self.mark, 0, Qt.AlignVCenter)
-        self._restyle()
+        self._show_course()
 
     # ------------------------------------------------------------------
+    def _show_course(self):
+        """難易度の欄: いちばん難しいコース(プレイリストの行は保存したコース)。"""
+        if self.missing:
+            return
+        courses = self.info.get("courses") or []
+        if courses:
+            self.course_cell.set_course(courses[0][0], courses[0][1])
+        else:
+            self.course_cell.set_course(None, None)
+
     def set_info(self, info):
         self.info = info
-        self.title._text = info["title"]
-        if not self._show_path:
-            self.sub._text = info.get("subtitle", "")
-            self.sub.setVisible(bool(self.sub._text))
-        for chip in self.chips:
-            chip.deleteLater()
-        self.chips = []
-        for name, level in info.get("courses", []):
-            label = song_lists.COURSE_LABELS.get(name, name)
-            chip = QLabel(label if level is None else "%s %d" % (label, level))
-            chip.setProperty("course", name)
-            chip.setFixedHeight(22)
-            self.chip_box.addWidget(chip)
-            self.chips.append(chip)
-        bpm = info.get("bpm")
-        self.bpm.setText("BPM %s" % ("%g" % bpm) if bpm else "")
-        # 並び替えには使うが表示はしない(利用者の指定 2026-11-16)。
-        self.bpm.setVisible(False)
-        self._restyle()
-        self.title.update()
-        self.sub.update()
+        self.title.set_text(info["title"], info.get("subtitle", ""))
+        self._show_course()
 
     def set_thumb(self, pm):
-        """左のジャケット。None なら空の枠。"""
+        """左のジャケット。None ならジャンルの色をうっすら塗った枠。"""
         self.thumb.set_pixmap(pm)
 
     def set_missing_chip(self):
-        chip = QLabel("ファイルなし")
-        chip.setProperty("course", "")
-        chip.setFixedHeight(22)
-        self.chip_box.addWidget(chip)
-        self.chips.append(chip)
-        self._restyle()
+        self.course_cell.set_missing()
+        self.chips = [self.course_cell.label]
 
     def matches(self, q):
         return song_lists.matches(q, self.info, self.path)
@@ -460,7 +630,7 @@ class SongRow(GlassCard):
         self.update()
 
     def flash(self):
-        """追加した合図に、縁をしばらく光らせる。"""
+        """追加した合図に、しばらく光らせる。"""
         self._flash = True
         self.update()
 
@@ -472,31 +642,46 @@ class SongRow(GlassCard):
                 pass
         QTimer.singleShot(self.FLASH_MS, off)
 
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def focusInEvent(self, ev):
+        self.update()
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev):
+        self.update()
+        super().focusOutEvent(ev)
+
     def contextMenuEvent(self, ev):
         self.menu_requested.emit(self.path, ev.globalPos())
         ev.accept()
 
     def paintEvent(self, ev):
-        super().paintEvent(ev)
+        p = QPainter(self)
+        r = self.rect()
         if self._flash:
-            p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.setPen(QPen(QColor(COLORS["accent"]), 2.5))
-            p.setBrush(_c(COLORS["accent"], 0.14))
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(1.25, 1.25, -1.25, -1.25),
-                              self._radius, self._radius)
-            p.end()
-            return
-        if self._accent and not self.hasFocus():
-            # 選んでいる(試聴している)行。フォーカスが外れても分かるように
-            # 縁を水色で描く(フォーカスのときは GlassCard がアクセント色で描く)。
-            p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.setPen(QPen(QColor(127, 227, 255, 200), 1.5))
+            p.fillRect(r, _c(CYAN, 0.20))
+        elif self._accent:
+            p.fillRect(r, _c(CYAN, 0.10))
+        elif self._hover and not self.missing:
+            p.fillRect(r, QColor(255, 255, 255, 10))
+        # 下の細い線(表の区切り)。
+        p.fillRect(QRectF(0, r.height() - 1, r.width(), 1), QColor(255, 255, 255, 18))
+        if self._accent or self._flash:
+            p.fillRect(QRectF(0, 0, 3, r.height()), CYAN)
+        if self.hasFocus() and not self._accent:
+            p.setPen(QPen(_c(COLORS["accent"], 0.9), 1))
             p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
-                              self._radius, self._radius)
-            p.end()
+            p.drawRect(QRectF(r).adjusted(0.5, 0.5, -1.5, -1.5))
+        p.end()
 
     def set_saved(self, on):
         self._saved = bool(on)
@@ -517,19 +702,7 @@ class SongRow(GlassCard):
         self._sync_star()
         self.save_toggled.emit(self.path, self._saved)
 
-    def _restyle(self):
-        for chip in self.chips:
-            chip.setStyleSheet(_chip_style(
-                COURSE_COLOR_KEY.get(chip.property("course"), "fg_dim")))
-        top = self.info["courses"][0][0] if self.info.get("courses") else None
-        if self.missing or top is None:
-            self.set_bar_color(_c(COLORS["fg_dim"], 0.5))
-        else:
-            self.set_bar_color(COLORS.get(COURSE_COLOR_KEY.get(top, "fg_dim"),
-                                          COLORS["fg_dim"]))
-
     def refresh_theme(self):
-        self._restyle()
         self.title.refresh()
         self.sub.refresh()
 
@@ -549,6 +722,127 @@ class SongRow(GlassCard):
         super().keyPressEvent(ev)
 
 
+class ListHeader(QWidget):
+    """表の見出しの行(一覧の上に固定)。押すとその列で並べ、もう一度で向きを
+    逆に(▴/▾)。並べられない一覧(プレイリスト)ではただの見出し。
+
+    今までの SortBar と同じ口(mode・reverse・set_state・_pick・changed)。"""
+
+    changed = Signal(str, bool)   # (mode, reverse)
+
+    #: 列 → 並べ方。BPM は表に出さない(利用者の指定 2026-11-16)ので、見出しの
+    #: 右端に静かな「BPM」だけ置く。
+    SORT_OF = {"title": "title", "folder": "name", "course": "level", "date": "recent"}
+
+    def __init__(self, cols, modes=(), parent=None):
+        super().__init__(parent)
+        self.setObjectName("listHeader")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(30)
+        self.cols = dict(cols)
+        self.modes = tuple(modes)
+        self.mode = self.modes[0] if self.modes else ""
+        self.reverse = False
+        self.buttons = {}
+        h = QHBoxLayout(self)
+        h.setContentsMargins(*ROW_MARGINS)
+        h.setSpacing(ROW_SPACING)
+
+        def head(key, text, width=None, align=Qt.AlignLeft):
+            mode = self.SORT_OF.get(key)
+            if mode in self.modes:
+                b = QPushButton(text)
+                b.setObjectName("colHead")
+                b.setCursor(Qt.PointingHandCursor)
+                b.clicked.connect(lambda _=False, m=mode: self._pick(m))
+                b.setProperty("align", "right" if align == Qt.AlignRight else "left")
+                self.buttons[mode] = (b, text)
+                w = b
+            else:
+                w = QLabel(text)
+                w.setObjectName("colLabel")
+                w.setAlignment(align | Qt.AlignVCenter)
+            if width:
+                w.setFixedWidth(width)
+            return w
+
+        if self.cols.get("num"):
+            h.addWidget(head("num", "#", COLW["num"], Qt.AlignRight))
+        spacer = QWidget()
+        spacer.setFixedWidth(COLW["thumb"])
+        h.addWidget(spacer)
+        h.addWidget(head("title", "曲名"), 1)
+        h.addWidget(head("folder", "フォルダ", COLW["folder"]))
+        h.addWidget(head("course", "難易度", COLW["course"]))
+        if self.cols.get("date"):
+            h.addWidget(head("date", "最近", COLW["date"], Qt.AlignRight))
+        if self.cols.get("action"):
+            sp = QWidget()
+            sp.setFixedWidth(COLW["action"])
+            h.addWidget(sp)
+        tail = COLW["star"] + ROW_SPACING + COLW["mark"]
+        if "bpm" in self.modes:
+            b = QPushButton("BPM")
+            b.setObjectName("colHead")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False: self._pick("bpm"))
+            b.setFixedWidth(tail)
+            self.buttons["bpm"] = (b, "BPM")
+            h.addWidget(b)
+        else:
+            sp = QWidget()
+            sp.setFixedWidth(tail)
+            h.addWidget(sp)
+        self.set_state(self.mode, False)
+
+    def follow(self, *lists):
+        """一覧(RowList)の縦の帯と右の余白ぶん、右を詰めて列をそろえる。"""
+        self._lists = [l for l in lists if l is not None]
+        for l in self._lists:
+            l.installEventFilter(self)
+            l.verticalScrollBar().rangeChanged.connect(lambda *_a: self._sync_margin())
+        self._sync_margin()
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if ev.type() in (QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+            self._sync_margin()
+        return False
+
+    def _sync_margin(self):
+        lists = [l for l in getattr(self, "_lists", []) if l.isVisible()] or             getattr(self, "_lists", [])
+        if not lists:
+            return
+        l = lists[0]
+        sb = l.verticalScrollBar()
+        extra = sb.sizeHint().width() if sb.isVisible() else 0
+        right = ROW_MARGINS[2] + l.widget().layout().contentsMargins().right() + extra
+        m = self.layout().contentsMargins()
+        if m.right() != right:
+            self.layout().setContentsMargins(ROW_MARGINS[0], 0, right, 0)
+
+    def set_state(self, mode, reverse):
+        if self.modes and mode not in self.modes:
+            mode = self.modes[0]
+        self.mode, self.reverse = mode, bool(reverse)
+        desc = song_lists.is_descending(mode, reverse)
+        for m, (b, text) in self.buttons.items():
+            on = m == mode
+            b.setText(("%s %s" % (text, "▾" if desc else "▴")) if on else text)
+            b.setProperty("on", on)
+            b.setToolTip(song_lists.SORT_LABELS.get(m, ""))
+            b.style().unpolish(b)
+            b.style().polish(b)
+
+    def _pick(self, mode):
+        """押した列で並べる。いま並べている列ならもう一度で向きを逆に。"""
+        if mode == self.mode:
+            self.set_state(mode, not self.reverse)
+        else:
+            self.set_state(mode, False)
+        self.changed.emit(self.mode, self.reverse)
+
+
 #: プレイリストの中の並べ替えで運ぶもの(何番目か)。
 PLAYLIST_MIME = "application/x-neotja-playlist-index"
 
@@ -563,21 +857,13 @@ class PlaylistSongRow(SongRow):
     item_clicked = Signal(int)
 
     def __init__(self, index, item, title, **kw):
-        super().__init__(item["path"], title, **kw)
         self.index = index
         self.course = item.get("course")
-        lay = self.layout()
-        self.num = QLabel(str(index + 1))
-        self.num.setObjectName("plIndex")
-        self.num.setFixedWidth(30)
-        self.num.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        lay.insertWidget(0, self.num)
-        lay.setContentsMargins(14, 8, 12, 8)
-        self.course_icon = CourseMarkIcon(self.course)
-        lay.insertWidget(lay.indexOf(self.mark), self.course_icon, 0, Qt.AlignVCenter)
-        b = getattr(self, "btn_relink", None)
-        if b is not None:
-            b.hide()
+        super().__init__(item["path"], title, cols=list_columns(num=True), **kw)
+        self.num.setText(str(index + 1))
+        #: 保存したコースのマーク(難易度の欄)。
+        self.course_icon = self.course_cell.icon
+        self._show_course()
         self._press = None
         # 見つからない曲も、外す・並べ替えはできるように押せる形にしておく。
         self.setCursor(Qt.PointingHandCursor)
@@ -610,6 +896,17 @@ class PlaylistSongRow(SongRow):
             ev.accept()
             return
         super().mouseReleaseEvent(ev)
+
+    def _show_course(self):
+        """難易度の欄はプレイリストに保存したコース(★はその譜面のレベル)。"""
+        if self.missing or getattr(self, "course_cell", None) is None:
+            return
+        levels = dict(self.info.get("courses") or [])
+        course = getattr(self, "course", None)
+        if course:
+            self.course_cell.set_course(course, levels.get(course))
+        else:
+            super()._show_course()
 
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and not self.missing:
@@ -941,7 +1238,7 @@ class _FolderIcon(QWidget):
 class RowList(QScrollArea):
     """行を縦に並べるスクロール領域。空なら「なし」だけ。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, spacing=0):
         super().__init__(parent)
         self.setFrameShape(QFrame.NoFrame)
         self.setWidgetResizable(True)
@@ -951,7 +1248,9 @@ class RowList(QScrollArea):
         inner.setObjectName("rowListInner")
         self._v = QVBoxLayout(inner)
         self._v.setContentsMargins(0, 0, 8, 0)
-        self._v.setSpacing(8)
+        # 曲の表は行どうしを詰める(区切りは行の下の細い線)。カードを並べる
+        # 一覧(プレイリスト)は間を空ける。
+        self._v.setSpacing(spacing)
         self.empty = QLabel("なし")
         self.empty.setObjectName("empty")
         self.empty.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
@@ -1225,48 +1524,88 @@ class _Sidebar(QWidget):
 # 右の各画面
 # ----------------------------------------------------------------------
 class _Page(QWidget):
-    """見出し(パンくず・大きな題)+ 道具の段 + 一覧。"""
+    """パンくず + [題・検索 …… 右端に静かな道具] + 表(見出しの行 + 一覧)。"""
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self.v = QVBoxLayout(self)
-        self.v.setContentsMargins(40, 26, 40, 28)
+        self.v.setContentsMargins(40, 18, 40, 20)
         self.v.setSpacing(0)
         self.crumbs = QHBoxLayout()
         self.crumbs.setSpacing(2)
         self.crumbs.addStretch(1)
         self.v.addLayout(self.crumbs)
-        self.lbl_title = QLabel(title)
-        self.lbl_title.setObjectName("pageTitle")
-        self.v.addWidget(self.lbl_title)
-        self.v.addSpacing(18)
+        self.v.addSpacing(4)
         self.tools = QHBoxLayout()
         self.tools.setContentsMargins(0, 0, 8, 0)
         self.tools.setSpacing(10)
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setObjectName("pageTitle")
+        self.tools.addWidget(self.lbl_title)
+        self.tools.addSpacing(18)
         self.v.addLayout(self.tools)
+        self.header = None
 
     def add_search(self):
         self.search = QLineEdit()
         self.search.setObjectName("search")
         self.search.setPlaceholderText("曲名で検索")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(420)
+        self.search.setFixedWidth(360)
         self.tools.addWidget(self.search)
         self.tools.addStretch(1)
         return self.search
 
-    def add_sort(self, modes):
-        self.sort = SortBar(modes)
-        self.tools.addWidget(self.sort)
+    def add_sort(self, modes, cols):
+        """並べ方は表の見出しの行で(押した列で並べる)。"""
+        self.sort = ListHeader(cols, modes)
+        self.header = self.sort
         return self.sort
 
-    def add_list(self):
-        self.v.addSpacing(16)
-        self.list = RowList()
-        self.v.addWidget(self.list, 1)
+    def add_table(self, body, cols=None):
+        """見出しの行(add_sort で作ったもの、無ければ並べない見出し)と body を、
+        幅の上限つきで題と左をそろえて置く。"""
+        if self.header is None and cols is not None:
+            self.header = ListHeader(cols)
+        self.v.addSpacing(14)
+        box = QWidget()
+        box.setObjectName("tableBox")
+        box.setMaximumWidth(TABLE_MAX_W)
+        box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(0)
+        if self.header is not None:
+            bv.addWidget(self.header)
+            if isinstance(body, QStackedWidget):
+                self.header.follow(*[body.widget(i) for i in range(body.count())])
+            else:
+                self.header.follow(body)
+        bv.addWidget(body, 1)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(box, 1)
+        row.addStretch(0)
+        self.v.addLayout(row, 1)
+        return body
+
+    def add_list(self, cols=None, spacing=0):
+        self.list = RowList(spacing=spacing)
+        if cols is None and self.header is None:
+            self.v.addSpacing(16)
+            self.v.addWidget(self.list, 1)
+        else:
+            self.add_table(self.list, cols)
         if hasattr(self, "search"):
             self.search.textChanged.connect(self.list.apply_filter)
         return self.list
+
+
+#: 一覧ごとの列。最近は日付と再指定、保存済みは外す、プレイリストは番号。
+RECENT_COLS = list_columns(date=True, action=True)
+SAVED_COLS = list_columns(action=True)
+FOLDER_COLS = list_columns()
+PLAYLIST_COLS = list_columns(num=True)
 
 
 # ----------------------------------------------------------------------
@@ -1425,11 +1764,12 @@ class LibraryView(QWidget):
 
         self.page_recent = _Page("最近開いた楽曲")
         self.page_recent.add_search()
-        self.page_recent.add_sort(song_lists.SORT_MODES)
+        self.page_recent.add_sort(song_lists.SORT_MODES, RECENT_COLS)
         self.page_recent.sort.changed.connect(
             lambda m, r: self._on_sort_changed(True, m, r))
-        self.page_recent.tools.addSpacing(6)
+        # 「履歴を消す」は右の端に小さく(並べ方の見出しから離して)。
         self.btn_clear_recent = QPushButton("履歴を消す")
+        self.btn_clear_recent.setObjectName("quiet")
         self.btn_clear_recent.clicked.connect(self._pi)
         self.btn_clear_recent.clicked.connect(self.ask_clear_recent)
         self.page_recent.tools.addWidget(self.btn_clear_recent)
@@ -1439,11 +1779,11 @@ class LibraryView(QWidget):
 
         self.page_saved = _Page("保存済み楽曲")
         self.page_saved.add_search()
-        self.page_saved.add_sort(song_lists.SORT_MODES[1:])
+        self.page_saved.add_sort(song_lists.SORT_MODES[1:], SAVED_COLS)
         self.page_saved.sort.changed.connect(
             lambda m, r: self._on_sort_changed(False, m, r))
-        self.page_saved.tools.addSpacing(6)
         self.btn_add_saved = QPushButton("楽曲を追加")
+        self.btn_add_saved.setObjectName("quiet")
         self.btn_add_saved.clicked.connect(self._pi)
         self.btn_add_saved.clicked.connect(self.add_saved_files)
         self.page_saved.tools.addWidget(self.btn_add_saved)
@@ -1468,7 +1808,7 @@ class LibraryView(QWidget):
         self.btn_new_playlist.clicked.connect(self.create_playlist)
         self.page_playlists.tools.addWidget(self.btn_new_playlist)
         self.page_playlists.tools.addStretch(1)
-        self.playlists_list = self.page_playlists.add_list()
+        self.playlists_list = self.page_playlists.add_list(spacing=8)
         self.pages.addWidget(self.page_playlists)
 
         self.page_playlist = _Page("")
@@ -1487,11 +1827,10 @@ class LibraryView(QWidget):
         #: 「連続再生」の板(押したときに作る)。
         self.play_panel = None
         self.page_playlist.tools.addWidget(self.btn_play_all)
-        self.page_playlist.v.addSpacing(16)
         self.playlist_song_list = PlaylistRowList()
         self.playlist_song_list.moved.connect(self.move_playlist_item)
         self.page_playlist.list = self.playlist_song_list
-        self.page_playlist.v.addWidget(self.playlist_song_list, 1)
+        self.page_playlist.add_table(self.playlist_song_list, PLAYLIST_COLS)
         self.page_playlist.search.textChanged.connect(self.playlist_song_list.apply_filter)
         self.pages.addWidget(self.page_playlist)
         #: 「曲を追加」のあいだの追加先(プレイリストの id)。空なら普段どおり。
@@ -1506,19 +1845,18 @@ class LibraryView(QWidget):
 
         self.page_folder = _Page("")
         self.page_folder.add_search()
-        self.page_folder.add_sort(song_lists.SORT_MODES[1:])
+        self.page_folder.add_sort(song_lists.SORT_MODES[1:], FOLDER_COLS)
         self.page_folder.sort.changed.connect(
             lambda m, r: self._on_sort_changed(False, m, r))
         # ふつうは一段ぶんの一覧。検索欄に何か入っているあいだは、下の
         # フォルダ全部から探した曲だけの一覧に差し替える。
-        self.page_folder.v.addSpacing(16)
         self.folder_stack = QStackedWidget()
         self.folder_list = RowList()
         self.search_list = RowList()
         self.folder_stack.addWidget(self.folder_list)
         self.folder_stack.addWidget(self.search_list)
         self.page_folder.list = self.folder_list
-        self.page_folder.v.addWidget(self.folder_stack, 1)
+        self.page_folder.add_table(self.folder_stack)
         self.page_folder.search.textChanged.connect(lambda _t: self._search_timer.start())
         self.pages.addWidget(self.page_folder)
         self._sync_sort_bars()
@@ -1808,7 +2146,8 @@ class LibraryView(QWidget):
             if rows is None:
                 # フォルダの中の曲(行はここで作る)
                 row = self._song_row(path, info["title"],
-                                     saved=song_lists.is_saved(self.cfg, path))
+                                     saved=song_lists.is_saved(self.cfg, path),
+                                     cols=FOLDER_COLS)
                 row.set_info(info)
                 self.folder_list.add(row)
                 continue
@@ -1872,7 +2211,8 @@ class LibraryView(QWidget):
         for e in song_lists.recent(self.cfg):
             row = self._song_row(e["path"], e.get("title") or os.path.basename(e["path"]),
                                  saved=song_lists.is_saved(self.cfg, e["path"]),
-                                 date_text=_when(e.get("opened")), show_path=True)
+                                 date_text=_when(e.get("opened")), show_path=True,
+                                 cols=RECENT_COLS)
             self.recent_list.add(row)
             if row.missing:
                 row.set_missing_chip()
@@ -1942,7 +2282,7 @@ class LibraryView(QWidget):
         paths = []
         for e in song_lists.saved(self.cfg):
             row = self._song_row(e["path"], e.get("title") or os.path.basename(e["path"]),
-                                 removable=True, show_path=True)
+                                 removable=True, show_path=True, cols=SAVED_COLS)
             self.saved_list.add(row)
             if row.missing:
                 row.set_missing_chip()
@@ -2770,7 +3110,7 @@ class LibraryView(QWidget):
             text = "  ›  ".join(name(d) for d in dirs)
             row = self._song_row(path, info["title"],
                                  saved=song_lists.is_saved(self.cfg, path),
-                                 path_text=text)
+                                 path_text=text, cols=FOLDER_COLS)
             row.set_info(info)
             self.search_list.add(row)
         m, r = song_lists.sort_state(self.cfg)
@@ -2828,7 +3168,22 @@ def library_qss():
                              border-radius: 9px; padding: 7px 14px 7px 30px; color: {SECONDARY}; font-size: 12px;
                              font-weight: 600; }}
     QPushButton#addFolder:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
-    QLabel#pageTitle {{ color: {p['fg_bright']}; {fam_css} font-size: 34px; font-weight: 600; letter-spacing: 1px; }}
+    QLabel#pageTitle {{ color: {p['fg_bright']}; {fam_css} font-size: 24px; font-weight: 600; letter-spacing: 1px; }}
+    QPushButton#quiet {{ background-color: transparent; border: 1px solid transparent; border-radius: 6px;
+                         padding: 5px 10px; font-size: 12px; font-weight: 600; color: {SECONDARY}; }}
+    QPushButton#quiet:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
+    QPushButton#quiet:focus {{ border: 1px solid {p['accent']}; }}
+    QWidget#listHeader {{ background-color: transparent; border-bottom: 1px solid {_rgba(g['border'])}; }}
+    QPushButton#colHead {{ background-color: transparent; border: none; padding: 0; text-align: left;
+                           font-size: 12px; font-weight: bold; color: {SECONDARY}; }}
+    QPushButton#colHead[align="right"] {{ text-align: right; }}
+    QPushButton#colHead:hover {{ color: {p['fg_bright']}; }}
+    QPushButton#colHead[on="true"] {{ color: #7fe3ff; }}
+    QLabel#colLabel {{ font-size: 12px; font-weight: bold; color: {SECONDARY}; }}
+    QLabel#rowNum {{ color: {SECONDARY}; font-size: 13px; font-weight: bold; }}
+    QLabel#rowDate {{ color: {SECONDARY}; font-size: 13px; }}
+    QLabel#courseText {{ color: {p['fg']}; font-size: 13px; font-weight: bold; }}
+    QLabel#courseText[missing="true"] {{ color: {SECONDARY}; font-weight: 600; }}
     QLabel#openGlyph {{ color: {p['accent']}; {fam_css} font-size: 44px; font-weight: 200; letter-spacing: 6px; }}
     QLabel#empty {{ color: {p['fg_dim']}; font-size: 14px; font-weight: 600; padding-top: 40px; }}
     QLabel#chevron {{ color: {p['fg_dim']}; font-size: 26px; padding-bottom: 3px; }}
