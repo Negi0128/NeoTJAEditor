@@ -1,3 +1,13 @@
+## 2026-11-19 ユーザーデータのフォルダ 第6段（Claude）
+
+既にあるファイルは移していない。今ある参照（曲別のジャケット・背景・覚えた保存先）はそのまま使える。
+
+- 録画の既定の保存先: `RecordDialog._resolve_out_dir` は「環境設定の record_output_dir → 前回の record_last_dir → **ユーザーデータ/録画**（前は譜面のフォルダ）→（作れなければ）呼び出し側の場所」。Editor・Player の録画とも。まとめて録画（`BatchPage._out_dir`）の最後の候補もホームから ユーザーデータ/録画 へ。プレイリストの録画は ユーザーデータ/録画/<題>（第5段）。
+- YouTube: 録画の背景の窓の「YouTube...」で落とす動画は ユーザーデータ/YouTube（`RecordBackgroundDialog.youtube_dir`。作れなければ前と同じ場所）。**新規作成の YouTube/SoundCloud（曲の音源）は今までどおり利用者が選んだ譜面のフォルダ**（WAVE: が譜面の隣を指すため。判断）。
+- ジャケット: 背景・ジャケットの窓（Editor の録画・Player の「背景・ジャケット」共通）で選んだ絵は `user_dirs.copy_into("jackets", 道)` で ユーザーデータ/ジャケット/<名前>_<中身の sha1 10桁>.<拡張子> に写し、その道を使う（同じ絵は1枚、フォルダの中の絵を選べばそのまま、写せなければ元の道）。歌詞ごとのジャケットの窓（lyric_jacket_dialog）は今回は触っていない。
+- exe: `user_dirs.app_base()` は凍結なら `os.path.abspath(sys.executable)` の親（settings.json と同じ決め方）。`resolve()` をやめた — 用意できていないドライブ（抜いた USB など）で WinError 21 になったため。NeoTJAEditor.spec は変更不要（データファイルなし、import は PyInstaller が拾う）。
+- 試験: `gui_support` を読む試験は `user_dirs.base_override` を一時フォルダへ（アプリの横に「ユーザーデータ」を作らない）。新規 `test_user_dirs_defaults`（凍結のときの場所・写し・録画の既定の順・まとめて録画・YouTube・ジャケットの写し）。`test_player_record` / `test_player_chart_art` / `test_player_jacket_hidden` / `test_record_bg_plain_png` / `test_ytdlp_video_quality` / `test_player_recent` / `test_player_playlists` / `test_player_playlist_record` / `test_chara_preload_lifetime` 通過。
+
 ## 2026-11-19 プレイリスト 第5段 録画（Claude）
 
 版上げ・ビルド・リリースはしていない。

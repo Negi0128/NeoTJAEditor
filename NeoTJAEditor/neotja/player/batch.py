@@ -379,7 +379,11 @@ class BatchPage(QWidget):
             d = self.cfg.get(key, "")
             if d and os.path.isdir(d):
                 return d
-        return os.path.expanduser("~")
+        from neotja import user_dirs
+        try:
+            return str(user_dirs.user_dir("recordings"))
+        except OSError:
+            return os.path.expanduser("~")
 
     def _short_dir(self, d):
         """保存先を1行に収める。長い絶対パスをそのまま出すと折り返して、

@@ -672,7 +672,14 @@ class RecordDialog(QDialog):
                      cfg.get("record_last_dir", "")):
             if cand and os.path.isdir(cand):
                 return cand
-        return default_dir
+        # まだどこも選んでいなければ、exe の横の ユーザーデータ/録画
+        # (2026-11-19。譜面のフォルダや Temp に書いて間違えて消す事故を防ぐ)。
+        # 作れなければ呼び出し側が渡した場所。
+        from neotja import user_dirs
+        try:
+            return str(user_dirs.user_dir("recordings"))
+        except OSError:
+            return default_dir
 
     def _title_text(self):
         """動画タイトル(前後の空白は落とす)。"""

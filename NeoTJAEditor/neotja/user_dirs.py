@@ -42,7 +42,9 @@ base_override = None
 def app_base():
     """exe(凍結した版)またはアプリのフォルダ。"""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        # resolve() は使わない: 抜いた USB など用意できていない場所では
+        # 例外になる(settings.json の置き場所と同じ決め方にする)。
+        return Path(os.path.abspath(sys.executable)).parent
     return Path(__file__).resolve().parent.parent
 
 
@@ -76,3 +78,31 @@ def user_dir(kind, create=True):
     path = _fallback_root() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def copy_into(kind, src):
+    """src を種類 kind のフォルダへ写し、写した先の道を返す。元を消しても
+    困らないようにするため。すでにそのフォルダの中なら何もしない。同じ絵
+    (同じ中身)を何度選んでも1枚だけ。写せなければ src のまま返す。"""
+    import hashlib
+    import shutil
+    if not src or not os.path.isfile(src):
+        return src
+    try:
+        folder = user_dir(kind)
+        src_abs = Path(src).resolve()
+        if src_abs.parent == folder.resolve():
+            return str(src_abs)
+        h = hashlib.sha1()
+        with open(src_abs, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        dst = folder / ("%s_%s%s" % (src_abs.stem, h.hexdigest()[:10],
+                                     src_abs.suffix.lower()))
+        if not dst.exists():
+            tmp = dst.with_name(dst.name + ".part")
+            shutil.copyfile(src_abs, tmp)
+            os.replace(tmp, dst)
+        return str(dst)
+    except OSError:
+        return src

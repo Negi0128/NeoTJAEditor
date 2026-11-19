@@ -733,7 +733,13 @@ class RecordBackgroundDialog(QDialog):
             self.ed_art.text().strip() or "",
             "画像 (*.png *.jpg *.jpeg *.bmp *.webp);;すべて (*.*)")
         if got:
-            self.ed_art.setText(got)
+            self.set_art_file(got)
+
+    def set_art_file(self, path):
+        """選んだジャケットを ユーザーデータ/ジャケット へ写して、その道を使う
+        (元の絵を消しても困らないように)。写せなければ元の道のまま。"""
+        from neotja import user_dirs
+        self.ed_art.setText(user_dirs.copy_into("jackets", path))
 
     @_guarded
     def _browse(self):
@@ -742,6 +748,15 @@ class RecordBackgroundDialog(QDialog):
             self.ed_path.text().strip() or "", FILE_FILTER)
         if got:
             self.ed_path.setText(got)
+
+    def youtube_dir(self):
+        """YouTube から落とした背景の動画の置き場所: ユーザーデータ/YouTube。
+        作れなければ今までどおり録画の書き出し先(無ければ背景の欄の場所)。"""
+        from neotja import user_dirs
+        try:
+            return str(user_dirs.user_dir("youtube"))
+        except OSError:
+            return self._out_dir or os.path.dirname(self.ed_path.text()) or "."
 
     @_guarded
     def _from_youtube(self):
@@ -758,7 +773,7 @@ class RecordBackgroundDialog(QDialog):
         url = (url or "").strip()
         if not okd or not url:
             return
-        out_dir = self._out_dir or os.path.dirname(self.ed_path.text()) or "."
+        out_dir = self.youtube_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError:

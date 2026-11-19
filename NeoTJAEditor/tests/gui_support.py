@@ -9,6 +9,12 @@ from functools import wraps
 from pathlib import Path
 
 from neotja import settings
+from neotja import user_dirs
+
+# 試験は exe(アプリ)の横の「ユーザーデータ」に書かない。差し替えていなければ
+# 一時フォルダへ(録画の既定の保存先・YouTube・ジャケットの写しがここへ来る)。
+if user_dirs.base_override is None:
+    user_dirs.base_override = tempfile.mkdtemp(prefix='neotja-userdata-test-')
 
 _app = None
 
