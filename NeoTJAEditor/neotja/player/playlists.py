@@ -215,3 +215,53 @@ class PlaylistStore:
         self.save()
         drop_jacket(pl.get("jacket"))
         return True
+
+    # --- 曲(同じ曲を何度入れてもよい。位置で指す) -------------------------
+    def add_item(self, pid, path, course):
+        pl = self.get(pid)
+        if pl is None or not path:
+            return False
+        pl["items"].append({"path": os.path.normpath(os.path.abspath(path)),
+                            "course": course or None})
+        self.save()
+        return True
+
+    def remove_item(self, pid, index):
+        pl = self.get(pid)
+        if pl is None or not 0 <= index < len(pl["items"]):
+            return False
+        del pl["items"][index]
+        self.save()
+        return True
+
+    def move_item(self, pid, src, dst):
+        """src 番目を、dst 番目(取り出したあとの並びでの位置)へ。"""
+        pl = self.get(pid)
+        if pl is None:
+            return False
+        items = pl["items"]
+        if not 0 <= src < len(items):
+            return False
+        dst = max(0, min(int(dst), len(items) - 1))
+        if dst == src:
+            return False
+        items.insert(dst, items.pop(src))
+        self.save()
+        return True
+
+    def set_item_course(self, pid, index, course):
+        pl = self.get(pid)
+        if pl is None or not 0 <= index < len(pl["items"]):
+            return False
+        pl["items"][index]["course"] = course or None
+        self.save()
+        return True
+
+
+def default_course(courses):
+    """追加するときに最初に選んでおくコース。おにがあればおに、無ければ
+    いちばん難しいもの。courses は song_info の (名前, レベル) の並び。"""
+    names = [c[0] for c in courses or ()]
+    if "Oni" in names:
+        return "Oni"
+    return names[0] if names else None

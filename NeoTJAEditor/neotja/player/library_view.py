@@ -23,7 +23,10 @@ from PySide6.QtWidgets import (
 )
 
 from neotja.player import playlists, song_lists, thumbs
-from neotja.player.playlist_view import PlaylistDialog, PlaylistRow, playlist_jacket_pixmap
+from neotja.player.playlist_view import (
+    AddModeBar, CourseMarkIcon, CoursePicker, PlaylistDialog, PlaylistRow,
+    playlist_jacket_pixmap,
+)
 from neotja.start_screen import (
     COURSE_COLOR_KEY, ElidedText, GlassCard, wordmark_family,
 )
@@ -322,6 +325,12 @@ class SongRow(GlassCard):
     save_toggled = Signal(str, bool)
     remove_requested = Signal(str)
     relink_requested = Signal(str)
+    #: 右クリック (曲, 画面の位置)。
+    menu_requested = Signal(str, object)
+
+    #: 追加したときに縁を光らせる長さ(ms)。
+    FLASH_MS = 650
+    _flash = False
 
     def __init__(self, path, title, *, saved=None, removable=False,
                  date_text="", show_path=False, path_text=None, parent=None):
@@ -450,8 +459,34 @@ class SongRow(GlassCard):
         self.mark.set_state(None if not on else ("playing" if playing else "paused"))
         self.update()
 
+    def flash(self):
+        """追加した合図に、縁をしばらく光らせる。"""
+        self._flash = True
+        self.update()
+
+        def off():
+            try:
+                self._flash = False
+                self.update()
+            except RuntimeError:
+                pass
+        QTimer.singleShot(self.FLASH_MS, off)
+
+    def contextMenuEvent(self, ev):
+        self.menu_requested.emit(self.path, ev.globalPos())
+        ev.accept()
+
     def paintEvent(self, ev):
         super().paintEvent(ev)
+        if self._flash:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QPen(QColor(COLORS["accent"]), 2.5))
+            p.setBrush(_c(COLORS["accent"], 0.14))
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(1.25, 1.25, -1.25, -1.25),
+                              self._radius, self._radius)
+            p.end()
+            return
         if self._accent and not self.hasFocus():
             # 選んでいる(試聴している)行。フォーカスが外れても分かるように
             # 縁を水色で描く(フォーカスのときは GlassCard がアクセント色で描く)。
@@ -512,6 +547,99 @@ class SongRow(GlassCard):
             ev.accept()
             return
         super().keyPressEvent(ev)
+
+
+#: プレイリストの中の並べ替えで運ぶもの(何番目か)。
+PLAYLIST_MIME = "application/x-neotja-playlist-index"
+
+
+class PlaylistSongRow(SongRow):
+    """プレイリストの中の曲の1行。左に何番目か、右に保存したコースのマーク。
+    押して離すと選ぶ(いつもの行と同じ)。押したまま動かすと並べ替え。"""
+
+    #: 右クリック (何番目か, 画面の位置)。
+    item_menu = Signal(int, object)
+    #: 押して離した(選ぶ)。何番目か。
+    item_clicked = Signal(int)
+
+    def __init__(self, index, item, title, **kw):
+        super().__init__(item["path"], title, **kw)
+        self.index = index
+        self.course = item.get("course")
+        lay = self.layout()
+        self.num = QLabel(str(index + 1))
+        self.num.setObjectName("plIndex")
+        self.num.setFixedWidth(30)
+        self.num.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lay.insertWidget(0, self.num)
+        lay.setContentsMargins(14, 8, 12, 8)
+        self.course_icon = CourseMarkIcon(self.course)
+        lay.insertWidget(lay.indexOf(self.mark), self.course_icon, 0, Qt.AlignVCenter)
+        b = getattr(self, "btn_relink", None)
+        if b is not None:
+            b.hide()
+        self._press = None
+        # 見つからない曲も、外す・並べ替えはできるように押せる形にしておく。
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._press = ev.position().toPoint()
+            if not self.missing:
+                self.setFocus()
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        from PySide6.QtWidgets import QApplication
+        if (self._press is not None and ev.buttons() & Qt.LeftButton
+                and (ev.position().toPoint() - self._press).manhattanLength()
+                >= QApplication.startDragDistance()):
+            self._press = None
+            self.start_drag()
+            ev.accept()
+            return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._press is not None:
+            self._press = None
+            if not self.missing:
+                self.item_clicked.emit(self.index)
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and not self.missing:
+            self.item_clicked.emit(self.index)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def contextMenuEvent(self, ev):
+        self.item_menu.emit(self.index, ev.globalPos())
+        ev.accept()
+
+    def start_drag(self):
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QDrag
+        mime = QMimeData()
+        mime.setData(PLAYLIST_MIME, str(self.index).encode("ascii"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pm = self.grab()
+        if not pm.isNull():
+            pm = pm.scaledToWidth(min(pm.width(), 560), Qt.SmoothTransformation)
+            drag.setPixmap(pm)
+            drag.setHotSpot(self._drag_hot(pm))
+        drag.exec(Qt.MoveAction)
+
+    @staticmethod
+    def _drag_hot(pm):
+        from PySide6.QtCore import QPoint
+        return QPoint(24, pm.height() // 2)
 
 
 class FolderRow(GlassCard):
@@ -875,6 +1003,81 @@ class RowList(QScrollArea):
         self.empty.setVisible(shown == 0)
 
 
+class PlaylistRowList(RowList):
+    """プレイリストの曲の一覧。行を引きずって落とすと並べ替え(moved)。"""
+
+    moved = Signal(int, int)   # (元の番目, 新しい番目)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self._line = QFrame(self.widget())
+        self._line.setObjectName("dropLine")
+        self._line.setFixedHeight(3)
+        self._line.hide()
+
+    def _target(self, pos):
+        """viewport の位置 → 落とす先(元の並びでの「この前」の番目)。"""
+        y = pos.y() + self.verticalScrollBar().value()
+        rows = [r for r in self._rows if r.isVisible()]
+        for r in rows:
+            g = r.geometry()
+            if y < g.center().y():
+                return r.index, g.top() - 5
+        if rows:
+            last = rows[-1]
+            return last.index + 1, last.geometry().bottom() + 3
+        return 0, 0
+
+    def _accepts(self, ev):
+        return ev.mimeData().hasFormat(PLAYLIST_MIME)
+
+    def dragEnterEvent(self, ev):
+        if self._accepts(ev):
+            ev.acceptProposedAction()
+            return
+        super().dragEnterEvent(ev)
+
+    def dragMoveEvent(self, ev):
+        if not self._accepts(ev):
+            super().dragMoveEvent(ev)
+            return
+        ev.acceptProposedAction()
+        _i, y = self._target(ev.position().toPoint())
+        inner = self.widget()
+        self._line.setGeometry(0, int(y), inner.width() - 8, 3)
+        self._line.show()
+        self._line.raise_()
+        # 縁に近ければ送る。
+        vp = self.viewport().height()
+        py = ev.position().y()
+        sb = self.verticalScrollBar()
+        if py < 30:
+            sb.setValue(sb.value() - 18)
+        elif py > vp - 30:
+            sb.setValue(sb.value() + 18)
+
+    def dragLeaveEvent(self, ev):
+        self._line.hide()
+        super().dragLeaveEvent(ev)
+
+    def dropEvent(self, ev):
+        self._line.hide()
+        if not self._accepts(ev):
+            super().dropEvent(ev)
+            return
+        try:
+            src = int(bytes(ev.mimeData().data(PLAYLIST_MIME)).decode("ascii"))
+        except ValueError:
+            return
+        before, _y = self._target(ev.position().toPoint())
+        dst = before - 1 if before > src else before
+        ev.acceptProposedAction()
+        if dst != src:
+            self.moved.emit(src, dst)
+
+
 class NavButton(QPushButton):
     """左の列の項目。選んでいるものは塗りと左の線で示す。"""
 
@@ -1162,8 +1365,19 @@ class LibraryView(QWidget):
         h.addWidget(side)
 
         # --- 右 ----------------------------------------------------------
+        right = QWidget()
+        right_v = QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(0)
+        #: 「曲を追加」のあいだだけ出す帯(追加先の題と「完了」)。
+        self.add_bar = AddModeBar()
+        self.add_bar.done.connect(self._pi)
+        self.add_bar.done.connect(self.end_add_mode)
+        self.add_bar.hide()
+        right_v.addWidget(self.add_bar)
         self.pages = QStackedWidget()
-        h.addWidget(self.pages, 1)
+        right_v.addWidget(self.pages, 1)
+        h.addWidget(right, 1)
 
         self.page_open = _Page("TJAを開く")
         card = _DropCard(radius=16, accent=True)
@@ -1241,8 +1455,28 @@ class LibraryView(QWidget):
 
         self.page_playlist = _Page("")
         self.page_playlist.add_search()
-        self.playlist_song_list = self.page_playlist.add_list()
+        self.btn_add_songs = QPushButton("＋  曲を追加")
+        self.btn_add_songs.setObjectName("flat")
+        self.btn_add_songs.setCursor(Qt.PointingHandCursor)
+        self.btn_add_songs.clicked.connect(self._pi)
+        self.btn_add_songs.clicked.connect(lambda _=False: self.begin_add_mode())
+        self.page_playlist.tools.addWidget(self.btn_add_songs)
+        self.page_playlist.v.addSpacing(16)
+        self.playlist_song_list = PlaylistRowList()
+        self.playlist_song_list.moved.connect(self.move_playlist_item)
+        self.page_playlist.list = self.playlist_song_list
+        self.page_playlist.v.addWidget(self.playlist_song_list, 1)
+        self.page_playlist.search.textChanged.connect(self.playlist_song_list.apply_filter)
         self.pages.addWidget(self.page_playlist)
+        #: 「曲を追加」のあいだの追加先(プレイリストの id)。空なら普段どおり。
+        self._add_target = ""
+        #: プレイリストの中で選んでいる行(何番目か)と、そのコース。
+        #: 同じ曲が2回入っていても、押した行だけを選ぶ。
+        self._chosen_index = -1
+        self._chosen_course = None
+        #: コース選びの差し替え口(試験は窓を出さない)。
+        #: course_picker(題, [(コース, レベル)], 今のコース) → コース / None。
+        self.course_picker = None
 
         self.page_folder = _Page("")
         self.page_folder.add_search()
@@ -1365,10 +1599,12 @@ class LibraryView(QWidget):
             self._fill_saved()
             self.pages.setCurrentWidget(self.page_saved)
         elif kind == "playlists":
+            self._leave_add_mode()
             self._check_nav(self.nav_playlists)
             self._fill_playlists()
             self.pages.setCurrentWidget(self.page_playlists)
         elif kind == "playlist" and folder:
+            self._leave_add_mode()
             self._check_nav(self.nav_playlists)
             self._open_playlist(folder)
         elif kind == "folder" and folder:
@@ -1396,8 +1632,15 @@ class LibraryView(QWidget):
         import time
         if not path or not os.path.isfile(path):
             return
+        if self._add_target:
+            # 「曲を追加」のあいだは、押した曲をプレイリストへ(試聴・難易度選択はしない)。
+            self.add_song_to_playlist(self._add_target, path)
+            return
         now = time.monotonic()
-        same = bool(self._chosen) and song_lists.path_key(path) == song_lists.path_key(self._chosen)
+        same = (bool(self._chosen) and self._chosen_index < 0
+                and song_lists.path_key(path) == song_lists.path_key(self._chosen))
+        self._chosen_index = -1
+        self._chosen_course = None
         if same:
             if now - self._last_select < self.SELECT_DEBOUNCE_SEC:
                 return
@@ -1445,13 +1688,21 @@ class LibraryView(QWidget):
         self._mark_chosen()
         self.song_chosen.emit(path)
 
+    def chosen_course(self):
+        """選んでいる行がプレイリストの曲なら、保存したコース(難易度選択で
+        最初に選んでおく)。それ以外は None。"""
+        return self._chosen_course if self._chosen_index >= 0 else None
+
     def _mark_chosen(self):
         key = song_lists.path_key(self._chosen) if self._chosen else None
         for lst in self._song_lists():
             for r in lst.rows():
-                if isinstance(r, SongRow):
-                    r.set_chosen(key is not None and song_lists.path_key(r.path) == key,
-                                 self._preview_playing)
+                if not isinstance(r, SongRow):
+                    continue
+                on = key is not None and song_lists.path_key(r.path) == key
+                if isinstance(r, PlaylistSongRow) and self._chosen_index >= 0:
+                    on = on and r.index == self._chosen_index
+                r.set_chosen(on, self._preview_playing)
 
     def note_played(self, path):
         """演奏・録画を始めた曲を「最近開いた楽曲」の先頭へ入れて保存する。"""
@@ -1478,7 +1729,9 @@ class LibraryView(QWidget):
         start = os.path.dirname(self._chosen) if self._chosen else ""
         path, _ = QFileDialog.getOpenFileName(
             self, "TJAを開く", start, "TJA (*.tja);;すべてのファイル (*.*)")
-        if path:
+        if path and self._add_target:
+            self.add_song_to_playlist(self._add_target, path)
+        elif path:
             self.file_opened.emit(path)
 
     def mark_chosen(self, path):
@@ -1499,6 +1752,7 @@ class LibraryView(QWidget):
         row.save_toggled.connect(self._on_save_toggled)
         row.remove_requested.connect(self.remove_saved)
         row.relink_requested.connect(self.relink_saved)
+        row.menu_requested.connect(self._song_menu)
         if self._chosen and song_lists.path_key(path) == song_lists.path_key(self._chosen):
             row.set_chosen(True, self._preview_playing)
         return row
@@ -1736,6 +1990,9 @@ class LibraryView(QWidget):
             self._fill_playlists()
             self.pages.setCurrentWidget(self.page_playlists)
             return
+        if pid != self._playlist_id:
+            self._chosen_index = -1
+            self._chosen_course = None
         self._playlist_id = pid
         page = self.page_playlist
         page.lbl_title.setText(pl["title"])
@@ -1743,22 +2000,225 @@ class LibraryView(QWidget):
         page.search.blockSignals(True)
         page.search.clear()
         page.search.blockSignals(False)
-        self.playlist_song_list.clear()
+        self._fill_playlist_songs(pl)
+        self.pages.setCurrentWidget(page)
+
+    def _fill_playlist_songs(self, pl):
+        """開いているプレイリストの曲の行を作り直す(並びはプレイリストの順)。"""
+        lst = self.playlist_song_list
+        keep = lst.verticalScrollBar().value()
+        lst.clear()
         self._pending_rows = {}
         paths = []
-        for item in pl["items"]:
+        for i, item in enumerate(pl["items"]):
             path = item["path"]
-            row = self._song_row(path, os.path.basename(path),
-                                 saved=song_lists.is_saved(self.cfg, path))
-            self.playlist_song_list.add(row)
+            row = PlaylistSongRow(i, item, os.path.splitext(os.path.basename(path))[0],
+                                  saved=song_lists.is_saved(self.cfg, path))
+            row.item_clicked.connect(self._pi)
+            row.item_clicked.connect(self.click_playlist_item)
+            row.item_menu.connect(self._playlist_item_menu)
+            row.mark_clicked.connect(self._pi)
+            row.mark_clicked.connect(self.toggle_preview)
+            row.save_toggled.connect(self._pi)
+            row.save_toggled.connect(self._on_save_toggled)
+            lst.add(row)
             if row.missing:
                 row.set_missing_chip()
             else:
-                self._pending_rows.setdefault(song_lists.path_key(path), []).append(row)
-                paths.append(path)
+                key = song_lists.path_key(path)
+                if key not in self._pending_rows:
+                    paths.append(path)       # 同じ曲は1回だけ読む
+                self._pending_rows.setdefault(key, []).append(row)
+        lst.apply_filter(self.page_playlist.search.text())
+        self._mark_chosen()
         if paths:
             self._start_worker(paths=paths)
-        self.pages.setCurrentWidget(page)
+        QTimer.singleShot(0, lambda: lst.verticalScrollBar().setValue(keep))
+
+    def _current_playlist(self):
+        return self.playlist_store().get(self._playlist_id) if self._playlist_id else None
+
+    def click_playlist_item(self, index):
+        """プレイリストの曲の行を押した。いつもの行と同じく、1回目は選んで
+        試聴、選んでいる行をもう一度押すと難易度選択(保存したコースを選んで)。"""
+        import time
+        pl = self._current_playlist()
+        if pl is None or not 0 <= index < len(pl["items"]):
+            return
+        item = pl["items"][index]
+        path = item["path"]
+        if not os.path.isfile(path):
+            return
+        now = time.monotonic()
+        same = (self._chosen_index == index and bool(self._chosen)
+                and song_lists.path_key(path) == song_lists.path_key(self._chosen))
+        self._chosen_course = item.get("course")
+        if same:
+            if now - self._last_select < self.SELECT_DEBOUNCE_SEC:
+                return
+            self.choose(path)
+            return
+        self._chosen = path
+        self._chosen_index = index
+        self._last_select = now
+        self._preview_playing = True
+        self._mark_chosen()
+        self.song_selected.emit(path)
+
+    # --- 曲を入れる・外す・並べ替える -----------------------------------
+    def _pick_course(self, title, courses, current=None):
+        """コースを選んでもらう。1つしか無ければ聞かない。やめたら None。"""
+        courses = list(courses or [])
+        if not courses:
+            return None
+        if len(courses) == 1:
+            return courses[0][0]
+        if self.course_picker is not None:
+            return self.course_picker(title, courses, current)
+        dlg = CoursePicker(title, courses, current, parent=self.window())
+        try:
+            return dlg.course if dlg.exec() == QDialog.Accepted else None
+        finally:
+            dlg.deleteLater()
+
+    def add_song_to_playlist(self, pid, path):
+        """曲をプレイリストの最後へ(コースを選んでから)。入れたら True。"""
+        if not path or not os.path.isfile(path):
+            return False
+        store = self.playlist_store()
+        if store.get(pid) is None:
+            return False
+        info = song_lists.song_info(path)
+        courses = info.get("courses") or []
+        course = self._pick_course(info.get("title", ""), courses,
+                                   playlists.default_course(courses))
+        if course is None and courses:
+            return False
+        try:
+            ok = store.add_item(pid, path, course)
+        except OSError:
+            return False
+        if ok:
+            page = self.pages.currentWidget()
+            lst = getattr(page, "list", None)
+            if page is self.page_folder:
+                lst = self.folder_stack.currentWidget()
+            if lst is not None:
+                key = song_lists.path_key(path)
+                for r in lst.rows():
+                    if isinstance(r, SongRow) and song_lists.path_key(r.path) == key:
+                        r.flash()
+            if page is self.page_playlist and self._playlist_id == pid:
+                self._fill_playlist_songs(store.get(pid))
+        return ok
+
+    def remove_playlist_item(self, index):
+        pid = self._playlist_id
+        if not pid or not self.playlist_store().remove_item(pid, index):
+            return False
+        if self._chosen_index == index:
+            self._chosen_index = -1
+            self._chosen_course = None
+        elif self._chosen_index > index:
+            self._chosen_index -= 1
+        self._fill_playlist_songs(self._current_playlist())
+        return True
+
+    def move_playlist_item(self, src, dst):
+        pid = self._playlist_id
+        if not pid or not self.playlist_store().move_item(pid, src, dst):
+            return False
+        c = self._chosen_index
+        if c >= 0:
+            if c == src:
+                c = dst
+            else:
+                if src < c:
+                    c -= 1
+                if dst <= c:
+                    c += 1
+            self._chosen_index = c
+        self._fill_playlist_songs(self._current_playlist())
+        return True
+
+    def change_playlist_item_course(self, index):
+        pl = self._current_playlist()
+        if pl is None or not 0 <= index < len(pl["items"]):
+            return False
+        item = pl["items"][index]
+        info = song_lists.song_info(item["path"])
+        courses = info.get("courses") or []
+        if not courses:
+            return False
+        course = self._pick_course(info.get("title", ""), courses, item.get("course"))
+        if course is None or course == item.get("course"):
+            return False
+        self.playlist_store().set_item_course(pl["id"], index, course)
+        if self._chosen_index == index:
+            self._chosen_course = course
+        self._fill_playlist_songs(pl)
+        return True
+
+    def _playlist_item_menu(self, index, global_pos):
+        menu = QMenu(self)
+        row = next((r for r in self.playlist_song_list.rows()
+                    if getattr(r, "index", -1) == index), None)
+        act_course = menu.addAction("難易度を変更")
+        act_course.setEnabled(row is not None and not row.missing)
+        act_remove = menu.addAction("外す")
+        act = self.exec_menu(menu, global_pos)
+        if act is act_course:
+            self.change_playlist_item_course(index)
+        elif act is act_remove:
+            self.remove_playlist_item(index)
+
+    def exec_menu(self, menu, global_pos):
+        """右クリックの一覧を出して、選んだ項目を返す(試験は差し替える)。"""
+        return menu.exec(global_pos)
+
+    def _song_menu(self, path, global_pos):
+        """いつもの曲の行の右クリック。「プレイリストに追加」の下に一覧。"""
+        if not os.path.isfile(path):
+            return
+        menu = QMenu(self)
+        sub = menu.addMenu("プレイリストに追加")
+        items = self.playlist_store().items
+        sub.setEnabled(bool(items))
+        acts = {}
+        for pl in items:
+            acts[sub.addAction(pl["title"])] = pl["id"]
+        act = self.exec_menu(menu, global_pos)
+        if act in acts:
+            self.add_song_to_playlist(acts[act], path)
+
+    # --- 「曲を追加」のあいだ ---------------------------------------------
+    def add_mode_target(self):
+        return self._add_target
+
+    def begin_add_mode(self, pid=None):
+        """「曲を追加」: いつもの一覧を見て回り、押した曲をプレイリストへ入れる。"""
+        pid = pid or self._playlist_id
+        pl = self.playlist_store().get(pid)
+        if pl is None:
+            return
+        self._add_target = pid
+        self.add_bar.set_title(pl["title"])
+        self.add_bar.show()
+        self.show_default()
+
+    def _leave_add_mode(self):
+        if self._add_target:
+            self._add_target = ""
+            self.add_bar.hide()
+
+    def end_add_mode(self):
+        """「完了」: 追加先のプレイリストへ戻る。"""
+        pid = self._add_target
+        self._leave_add_mode()
+        if pid and self.playlist_store().get(pid) is not None:
+            self.open_playlist(pid)
+        else:
+            self.show_section("playlists")
 
     def _build_playlist_crumbs(self, pl):
         lay = self.page_playlist.crumbs
@@ -1860,7 +2320,7 @@ class LibraryView(QWidget):
         menu = QMenu(self)
         act_edit = menu.addAction("編集")
         act_del = menu.addAction("削除")
-        act = menu.exec(global_pos)
+        act = self.exec_menu(menu, global_pos)
         if act is act_edit:
             self.playlist_action(pid, "edit")
         elif act is act_del:
@@ -2250,4 +2710,9 @@ def library_qss():
     QPushButton#flat:hover {{ background-color: rgba(35, 61, 84, 200); border-color: #8ad9ee; }}
     QPushButton#flat:pressed {{ background-color: rgba(16, 29, 44, 220); }}
     QPushButton#flat:focus {{ border-color: {p['accent']}; }}
+    QWidget#addModeBar {{ background-color: {_rgba(_c(p['accent'], 0.20))};
+                          border-bottom: 1px solid {_rgba(_c(p['accent'], 0.75))}; }}
+    QLabel#addModePlus {{ color: {p['accent']}; font-size: 20px; font-weight: bold; }}
+    QLabel#plIndex {{ color: {p['fg_dim']}; font-size: 14px; font-weight: bold; }}
+    QFrame#dropLine {{ background-color: {p['accent']}; border: none; border-radius: 1px; }}
     """

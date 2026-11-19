@@ -328,7 +328,8 @@ class PlayerHost(QWidget):
         self._select_path = str()
         self.current_song = path
         self.song_chosen.emit(path)
-        self.show_difficulty(path, restart=False)
+        # プレイリストの曲なら、保存したコースを選んだ状態で。
+        self.show_difficulty(path, course=self.library.chosen_course(), restart=False)
 
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""

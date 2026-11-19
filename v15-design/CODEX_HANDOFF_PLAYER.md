@@ -1,3 +1,16 @@
+## 2026-11-19 プレイリスト 第2段（Claude）
+
+曲を入れる・並べる・外す・選んで遊ぶ。連続再生・録画はまだ。版上げ・ビルド・リリースはしていない。
+
+- 保存（`playlists.PlaylistStore`）: `add_item` / `remove_item` / `move_item` / `set_item_course`（位置で指す。同じ曲の重複可。変えるたびに保存）。`default_course(courses)` = おにがあればおに、無ければいちばん難しいもの（裏だけなら裏）。道は normpath(abspath)。
+- 曲を追加: 開いたプレイリストの道具の段の右に「＋ 曲を追加」（#flat）。押すと `begin_add_mode` → 右の上に帯 `playlist_view.AddModeBar`（＋・追加先の題・「完了」だけ）を出して `show_default`。あいだは `click_song`（いつもの行・Enter・「TJAを開く」のファイル選択も）が `add_song_to_playlist` になり、試聴・難易度選択はしない。入れた行は縁を 0.65 秒光らせる（`SongRow.flash`）。「完了」でそのプレイリストへ戻る。左の列でプレイリスト（一覧・開く）へ行っても終わる。
+- 右クリック: いつもの曲の行 → 「プレイリストに追加」▸ プレイリストの題（無ければ押せない）。プレイリストの曲の行 → 「難易度を変更」/「外す」。メニューは `LibraryView.exec_menu(menu, pos)` を通す（試験で差し替え。PySide の QMenu.exec はクラスに差し替えても効かない）。
+- コース選び `playlist_view.CoursePicker`: 縁なしの小さな窓に、譜面にあるコースだけ難易度選択の `CourseCard` を 0.62 倍で並べる（Select_Marks のマーク・勘亭流の名前・★）。最初に選んでおくのは default_course（変更のときは今のコース）。押したら決まり／←→と Enter／キャンセル。**コースが1つしか無い曲は聞かない**（判断）。差し替え口 `LibraryView.course_picker(題, courses, 今)`。
+- プレイリストの曲の行 `PlaylistSongRow`（SongRow の子）: 左に何番目か、右（☆と試聴の印のあいだ）に保存したコースのマーク（`CourseMarkIcon` 34px）。見つからない曲は灰色・「ファイルなし」・押しても何もしない（再指定ボタンは出さない。外す・並べ替えはできる）。押して離すと選ぶ／押したまま動かすと QDrag（`PLAYLIST_MIME`）で並べ替え。`PlaylistRowList` が落とす位置に水色の線（`dropLine`）を出し、縁の近くでは送る。並びはプレイリストの順のまま（並べ替えの段なし）。
+- 選んで遊ぶ: `click_playlist_item(index)` — 1回目は選んで試聴（印は押した行だけ。同じ曲の別の行は選ばない）、同じ行をもう一度で難易度選択。`LibraryView.chosen_course()` を `PlayerHost._on_song_chosen` が `show_difficulty(course=…)` に渡し、保存したコースを選んだ状態で開く。いつもの行を押すと保存したコースは使わない。並べ替え・外すで選んでいる行の番目を追う。
+- 試験: `test_player_playlists` に足して 19 件（追加のあいだ・右クリック・番号/マーク/見つからない曲・2回押し・並べ替え（dropEvent も）・難易度を変更・外す・PlayerHost へコースを渡す）。`test_player_sidebar_genres` / `test_player_library_preview` / `test_player_library_thumbs` / `test_player_recent` / `test_player_difficulty` 通過。実設定は変更なし。
+- 画像（1920×1009・widget.grab）: scratchpad の `playlist2/` に pl2_add_mode（帯と、入れた2行が光っているところ）/ pl2_course_picker / pl2_right_click_menu・pl2_right_click_submenu / pl2_playlist_rows（4行目を試聴中・5行目が見つからない曲・2と6が同じ曲の別コース）/ pl2_drag_line。
+
 ## 2026-11-19 プレイリスト 第1段（Claude）
 
 仕様は `v15-design/PLAYLIST_SPEC.md`。第1段だけ（器・一覧・作成/編集/削除）。曲の追加・連続再生・録画はまだ。版上げ・ビルド・リリースはしていない。

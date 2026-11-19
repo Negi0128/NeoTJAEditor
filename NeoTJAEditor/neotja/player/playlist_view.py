@@ -159,6 +159,160 @@ class PlaylistRow(GlassCard):
         super().keyPressEvent(ev)
 
 
+class CourseMarkIcon(QWidget):
+    """プレイリストの曲の行の右に出す、保存したコースのマーク(小さく)。"""
+
+    def __init__(self, course, px=34, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(px, px)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.course = course
+        self.setToolTip(SLOT_LABEL.get(course, course or ""))
+
+    def set_course(self, course):
+        self.course = course
+        self.setToolTip(SLOT_LABEL.get(course, course or ""))
+        self.update()
+
+    def paintEvent(self, ev):
+        if not self.course:
+            return
+        from neotja.player.difficulty import FALLBACK_MARK, course_mark
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(self.rect())
+        pm = course_mark(self.course) if self.course in FALLBACK_MARK else None
+        if pm is not None:
+            p.drawPixmap(r, pm, QRectF(pm.rect()))
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(FALLBACK_MARK.get(self.course, "#888888")))
+            p.drawEllipse(r.adjusted(4, 4, -4, -4))
+        p.end()
+
+
+#: コースの呼び名(ツールチップ用。裏は「おに(裏)」)。
+SLOT_LABEL = {"Easy": "かんたん", "Normal": "ふつう", "Hard": "むずかしい",
+              "Oni": "おに", "Edit": "おに(裏)"}
+
+
+class CoursePicker(QDialog):
+    """追加する・変えるときのコース選び。譜面にあるコースだけを、難易度選択と
+    同じカード(CourseCard)を小さくして並べる。押したら決まり。"""
+
+    SCALE = 0.62
+
+    def __init__(self, title, courses, current=None, parent=None):
+        super().__init__(parent)
+        from neotja.player.difficulty import CourseCard
+        self.setObjectName("CoursePicker")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(True)
+        self.setStyleSheet(DIALOG_QSS.replace("PlaylistDialog", "CoursePicker"))
+        order = ("Easy", "Normal", "Hard", "Oni", "Edit")
+        levels = dict(courses or [])
+        self.keys = [k for k in order if k in levels]
+        self.course = current if current in levels else default_course_of(courses)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(26, 20, 26, 18)
+        v.setSpacing(0)
+        head = ElidedText(title or "", "fg_bright", 17, bold=True, elide=True)
+        head.setFixedWidth(max(260, int(236 * self.SCALE + 8) * len(self.keys) - 20))
+        v.addWidget(head)
+        v.addSpacing(10)
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        self.cards = {}
+        for k in self.keys:
+            c = CourseCard(k)
+            c.scale = self.SCALE
+            c.setFixedSize(int(236 * self.SCALE), int(232 * self.SCALE))
+            c.set_state(k, True, levels.get(k), k == self.course)
+            c.setToolTip(SLOT_LABEL.get(k, k))
+            c.clicked.connect(self.pick)
+            row.addWidget(c)
+            self.cards[k] = c
+        v.addLayout(row)
+        v.addSpacing(8)
+        bh = QHBoxLayout()
+        bh.addStretch(1)
+        self.btn_cancel = QPushButton("キャンセル")
+        self.btn_cancel.setCursor(Qt.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self.reject)
+        bh.addWidget(self.btn_cancel)
+        v.addLayout(bh)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def pick(self, key):
+        if key in self.cards:
+            self.course = key
+            self.accept()
+
+    def _move(self, d):
+        if not self.keys:
+            return
+        i = self.keys.index(self.course) if self.course in self.keys else 0
+        self.course = self.keys[max(0, min(len(self.keys) - 1, i + d))]
+        for k, c in self.cards.items():
+            c.selected = k == self.course
+            c.update()
+
+    def keyPressEvent(self, ev):
+        k = ev.key()
+        if k in (Qt.Key_Left, Qt.Key_Right):
+            self._move(-1 if k == Qt.Key_Left else 1)
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.course:
+            self.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(139, 217, 238, 150), 1))
+        p.setBrush(QColor("#101925"))
+        p.drawRoundedRect(r, 4, 4)
+        p.end()
+
+
+def default_course_of(courses):
+    return playlists.default_course(courses)
+
+
+class AddModeBar(QWidget):
+    """「曲を追加」のあいだ右の上に出す帯。追加先の題と「完了」だけ。"""
+
+    done = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("addModeBar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(52)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(40, 0, 40, 0)
+        h.setSpacing(14)
+        self.plus = QLabel("＋")
+        self.plus.setObjectName("addModePlus")
+        h.addWidget(self.plus)
+        self.title = ElidedText("", "fg_bright", 15, bold=True, elide=True)
+        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        h.addWidget(self.title, 1)
+        self.btn_done = QPushButton("完了")
+        self.btn_done.setObjectName("flat")
+        self.btn_done.setCursor(Qt.PointingHandCursor)
+        self.btn_done.clicked.connect(self.done)
+        h.addWidget(self.btn_done)
+
+    def set_title(self, text):
+        self.title._text = text
+        self.title.update()
+
+
 # ----------------------------------------------------------------------
 #: 作成/編集の窓の見た目(録画の背景の窓 RecordBackgroundDialog と同じ色・形)。
 DIALOG_QSS = """
