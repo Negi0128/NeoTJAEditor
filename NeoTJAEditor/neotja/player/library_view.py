@@ -1378,6 +1378,22 @@ class LibraryView(QWidget):
         self.add_bar.done.connect(self.end_add_mode)
         self.add_bar.hide()
         right_v.addWidget(self.add_bar)
+        #: プレイリストを録画しているあいだの帯。
+        from neotja.player.playlist_view import RecordBar
+        self.record_bar = RecordBar()
+        self.record_bar.cancel_requested.connect(self._pi)
+        self.record_bar.cancel_requested.connect(self.cancel_playlist_record)
+        self.record_bar.open_requested.connect(self._pi)
+        self.record_bar.open_requested.connect(self._open_record_folder)
+        self.record_bar.close_requested.connect(self._pi)
+        self.record_bar.close_requested.connect(self.record_bar.hide)
+        self.record_bar.hide()
+        right_v.addWidget(self.record_bar)
+        #: 録画の係(PlaylistRecorder)と、終わったときの結果。
+        self._plrec = None
+        self._plrec_result = None
+        #: 書き出したフォルダを開く口(試験はエクスプローラーを出さない)。
+        self.open_folder = None
         self.pages = QStackedWidget()
         right_v.addWidget(self.pages, 1)
         h.addWidget(right, 1)
@@ -2068,9 +2084,13 @@ class LibraryView(QWidget):
         panel = PlaylistPlayPanel(
             len(pl["items"]), auto=bool(self.cfg.get("player_playlist_auto", False)),
             wait=self.cfg.get("player_playlist_wait", self.PLAYLIST_WAIT_DEFAULT),
-            wait_range=self.PLAYLIST_WAIT_RANGE, parent=self)
+            wait_range=self.PLAYLIST_WAIT_RANGE, parent=self,
+            rec_mode=self.cfg.get("player_playlist_rec_mode", "both"),
+            rec_quality=self.cfg.get("player_playlist_rec_quality"))
+        panel.set_record_enabled(not self.playlist_recording())
         pid = pl["id"]
         panel.started.connect(lambda opts: self._on_play_panel_start(pid, opts))
+        panel.record_requested.connect(lambda opts: self.start_playlist_record(pid, opts))
         panel.closed.connect(self._pi)
         self.play_panel = panel
         panel.open_at(self.btn_play_all)
@@ -2082,6 +2102,83 @@ class LibraryView(QWidget):
         self.cfg["player_playlist_wait"] = int(opts.get("wait") or self.PLAYLIST_WAIT_DEFAULT)
         self._save()
         self.playlist_play_requested.emit(pid, dict(opts))
+
+    # --- 録画 ---------------------------------------------------------------
+    def playlist_recording(self):
+        return self._plrec is not None and self._plrec.is_running()
+
+    def start_playlist_record(self, pid, opts, out_dir=None, quality=None, card_sec=None):
+        """範囲の曲を録画する(まとめて / 曲ごと / 両方)。置き場所は
+        ユーザーデータ/録画/<プレイリストの題>。始めたら PlaylistRecorder。"""
+        from neotja.dialogs.record_dialog import QUALITY_PRESETS
+        from neotja.player import playlist_record
+        if self.playlist_recording():
+            return None
+        pl = self.playlist_store().get(pid)
+        if pl is None:
+            return None
+        start = max(0, int(opts.get("start", 0)))
+        end = opts.get("end")
+        stop = len(pl["items"]) if end is None else int(end) + 1
+        items = [dict(i) for i in pl["items"][start:stop]]
+        if not any(os.path.isfile(i["path"]) for i in items):
+            return None
+        mode = opts.get("mode", "both")
+        qi = opts.get("quality")
+        try:
+            qi = max(0, min(len(QUALITY_PRESETS) - 1, int(qi)))
+        except (TypeError, ValueError):
+            qi = None
+        self.cfg["player_playlist_rec_mode"] = mode
+        if qi is not None:
+            self.cfg["player_playlist_rec_quality"] = qi
+        self._save()
+        if quality is None and qi is not None:
+            quality = QUALITY_PRESETS[qi][1]
+        kw = {}
+        if card_sec is not None:
+            kw["card_sec"] = card_sec
+        rec = playlist_record.PlaylistRecorder(
+            self.cfg, items, out_dir or playlist_record.playlist_out_dir(pl["title"]),
+            mode=mode, quality=quality, title=pl["title"], parent=self, **kw)
+        rec.progress.connect(self.record_bar.set_progress)
+        rec.finished.connect(self._on_playlist_record_done)
+        self._plrec = rec
+        self._plrec_result = None
+        self.record_bar.set_running(pl["title"])
+        self.record_bar.show()
+        if self.play_panel is not None:
+            self.play_panel.set_record_enabled(False)
+        rec.start()
+        return rec
+
+    def cancel_playlist_record(self):
+        if self._plrec is not None:
+            self._plrec.cancel()
+
+    def _on_playlist_record_done(self, result):
+        self._plrec_result = result
+        ok = len(result.get("songs") or []) + (1 if result.get("combined") else 0)
+        self.record_bar.set_done(ok, len(result.get("failed") or []),
+                                 bool(result.get("cancelled")))
+        if self.play_panel is not None:
+            try:
+                self.play_panel.set_record_enabled(True)
+            except RuntimeError:
+                pass
+
+    def _open_record_folder(self):
+        res = self._plrec_result or {}
+        d = res.get("out_dir") or ""
+        if not d or not os.path.isdir(d):
+            return
+        if self.open_folder is not None:
+            self.open_folder(d)
+            return
+        try:
+            os.startfile(d)          # noqa: S606
+        except Exception:  # noqa: BLE001
+            pass
 
     def _current_playlist(self):
         return self.playlist_store().get(self._playlist_id) if self._playlist_id else None
@@ -2682,6 +2779,9 @@ class LibraryView(QWidget):
         self.update()
 
     def shutdown(self):
+        # 録画中に閉じたら、書きかけは捨てて止める(ffmpeg を残さない)。
+        if self.playlist_recording():
+            self._plrec.cancel()
         detach_worker(self._worker)
         self._worker = None
         self._search_timer.stop()
@@ -2762,5 +2862,12 @@ def library_qss():
                           border-bottom: 1px solid {_rgba(_c(p['accent'], 0.75))}; }}
     QLabel#addModePlus {{ color: {p['accent']}; font-size: 20px; font-weight: bold; }}
     QLabel#plIndex {{ color: {p['fg_dim']}; font-size: 14px; font-weight: bold; }}
+    QWidget#recordBar {{ background-color: rgba(120, 24, 32, 70);
+                         border-bottom: 1px solid rgba(236, 80, 80, 150); }}
+    QLabel#recDot {{ color: #ec3c3c; font-size: 18px; }}
+    QLabel#recDot[done="true"] {{ color: {p['accent']}; }}
+    QLabel#recCount {{ color: {p['fg']}; font-size: 14px; font-weight: bold; }}
+    QProgressBar#recProgress {{ background-color: rgba(255, 255, 255, 30); border: none; border-radius: 3px; }}
+    QProgressBar#recProgress::chunk {{ background-color: {p['accent']}; border-radius: 3px; }}
     QFrame#dropLine {{ background-color: {p['accent']}; border: none; border-radius: 1px; }}
     """

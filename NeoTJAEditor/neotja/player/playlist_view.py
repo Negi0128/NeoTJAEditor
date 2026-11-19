@@ -331,7 +331,94 @@ QFrame#playPanel { background-color: rgba(12, 22, 36, 240); border: 1px solid rg
 #playPanel QPushButton:checked { background-color: rgba(52, 120, 160, 200); border-color: #8ad9ee; color: #ffffff; }
 #playPanel QPushButton#ppStart { font-size: 16px; padding: 9px 16px; border-color: #8ad9ee;
                                  background-color: rgba(35, 65, 90, 220); }
+#playPanel QPushButton#ppRecord { font-size: 16px; padding: 9px 16px; }
+#playPanel QPushButton#ppRecord:disabled { color: #687789; border-color: #2b3b4d; }
+#playPanel QComboBox { background: #0c1521; border: 1px solid #3b536d; border-radius: 2px;
+                       padding: 5px 8px; min-height: 22px; }
+#playPanel QComboBox:focus { border-color: #8bcfe5; }
+#playPanel QComboBox QAbstractItemView { background: #152132; selection-background-color: #2b506b; }
 """
+
+
+class RecordBar(QWidget):
+    """プレイリストを録画しているあいだ右の上に出す帯。● 題 N / M・進み・中止。
+    終わったら ✓ と、フォルダを開く・閉じる。"""
+
+    cancel_requested = Signal()
+    open_requested = Signal()
+    close_requested = Signal()
+
+    def __init__(self, parent=None):
+        from PySide6.QtWidgets import QProgressBar
+        super().__init__(parent)
+        self.setObjectName("recordBar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(52)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(40, 0, 40, 0)
+        h.setSpacing(14)
+        self.dot = QLabel("●")
+        self.dot.setObjectName("recDot")
+        h.addWidget(self.dot)
+        self.title = ElidedText("", "fg_bright", 15, bold=True, elide=True)
+        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        h.addWidget(self.title, 1)
+        self.count = QLabel("")
+        self.count.setObjectName("recCount")
+        h.addWidget(self.count)
+        self.bar = QProgressBar()
+        self.bar.setObjectName("recProgress")
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedSize(220, 6)
+        h.addWidget(self.bar)
+        self.btn_cancel = QPushButton("中止")
+        self.btn_open = QPushButton("フォルダを開く")
+        self.btn_close = QPushButton("閉じる")
+        for b, sig in ((self.btn_cancel, self.cancel_requested),
+                       (self.btn_open, self.open_requested),
+                       (self.btn_close, self.close_requested)):
+            b.setObjectName("flat")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(sig)
+            h.addWidget(b)
+        self.set_running("")
+
+    def set_running(self, title):
+        self.title._text = title
+        self.title.update()
+        self.dot.setText("●")
+        self.dot.setProperty("done", False)
+        self._repolish(self.dot)
+        self.count.setText("")
+        self.bar.setValue(0)
+        self.bar.show()
+        self.btn_cancel.show()
+        self.btn_open.hide()
+        self.btn_close.hide()
+
+    def set_progress(self, i, n, frac):
+        self.count.setText("%d / %d" % (i, n))
+        self.bar.setValue(int(round(max(0.0, min(1.0, frac)) * 1000)))
+
+    def set_done(self, ok, failed, cancelled):
+        """終わった。ok 本数・失敗数。中止なら「中止」。"""
+        self.dot.setText("✓" if ok and not cancelled else "■")
+        self.dot.setProperty("done", True)
+        self._repolish(self.dot)
+        if cancelled:
+            self.count.setText("中止")
+        else:
+            self.count.setText("完了" + ("　失敗 %d" % failed if failed else ""))
+        self.bar.hide()
+        self.btn_cancel.hide()
+        self.btn_open.setVisible(bool(ok))
+        self.btn_close.show()
+
+    @staticmethod
+    def _repolish(w):
+        w.style().unpolish(w)
+        w.style().polish(w)
 
 
 class PlaylistPlayPanel(QWidget):
@@ -342,7 +429,11 @@ class PlaylistPlayPanel(QWidget):
     started = Signal(object)
     closed = Signal()
 
-    def __init__(self, count, auto=False, wait=10, wait_range=(3, 60), parent=None):
+    #: 録画 {"start", "end", "mode": "combined"/"each"/"both", "quality": 画質の番号}。
+    record_requested = Signal(object)
+
+    def __init__(self, count, auto=False, wait=10, wait_range=(3, 60), parent=None,
+                 rec_mode="both", rec_quality=None):
         from PySide6.QtWidgets import QFrame, QSpinBox
         super().__init__(parent)
         self.setObjectName("playPanelScrim")
@@ -407,15 +498,52 @@ class PlaylistPlayPanel(QWidget):
         mh.addStretch(1)
         v.addLayout(mh)
 
+        # 録画(まとめて / 曲ごと / 両方・画質)。
+        from PySide6.QtWidgets import QComboBox
+        from neotja.dialogs.record_dialog import DEFAULT_QUALITY, QUALITY_PRESETS
+        from neotja.player.playlist_record import MODE_LABELS, MODES
+        v.addWidget(self._field("録画"))
+        rm = QHBoxLayout()
+        rm.setSpacing(0)
+        self.rec_buttons = {}
+        for m in MODES:
+            b = QPushButton(MODE_LABELS[m])
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(78)
+            b.clicked.connect(lambda _=False, mode=m: self.set_rec_mode(mode))
+            rm.addWidget(b)
+            self.rec_buttons[m] = b
+        rm.addStretch(1)
+        v.addLayout(rm)
+        self.cb_quality = QComboBox()
+        for label, q in QUALITY_PRESETS:
+            self.cb_quality.addItem(label, q)
+        try:
+            qi = int(rec_quality if rec_quality is not None else DEFAULT_QUALITY)
+        except (TypeError, ValueError):
+            qi = DEFAULT_QUALITY
+        self.cb_quality.setCurrentIndex(max(0, min(len(QUALITY_PRESETS) - 1, qi)))
+        v.addWidget(self.cb_quality)
+
         v.addSpacing(6)
+        bh = QHBoxLayout()
+        bh.setSpacing(8)
         self.btn_start = QPushButton("▶  開始")
         self.btn_start.setObjectName("ppStart")
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.start)
-        v.addWidget(self.btn_start)
+        bh.addWidget(self.btn_start, 1)
+        self.btn_record = QPushButton("●  録画")
+        self.btn_record.setObjectName("ppRecord")
+        self.btn_record.setCursor(Qt.PointingHandCursor)
+        self.btn_record.clicked.connect(self.record)
+        bh.addWidget(self.btn_record, 1)
+        v.addLayout(bh)
         self.frame.setFixedWidth(330)
         self.frame.adjustSize()
         self.set_auto(auto)
+        self.set_rec_mode(rec_mode)
 
     @staticmethod
     def _field(text):
@@ -430,12 +558,32 @@ class PlaylistPlayPanel(QWidget):
         self.sp_wait.setEnabled(self.auto)
         self.lbl_sec.setEnabled(self.auto)
 
+    def set_rec_mode(self, mode):
+        from neotja.player.playlist_record import MODES
+        self.rec_mode = mode if mode in MODES else "both"
+        for m, b in self.rec_buttons.items():
+            b.setChecked(m == self.rec_mode)
+
+    def set_record_enabled(self, on):
+        """録画中は2本目を始めさせない。"""
+        self.btn_record.setEnabled(bool(on))
+
     def options(self):
         return {"start": self.sp_from.value() - 1, "end": self.sp_to.value() - 1,
                 "auto": self.auto, "wait": self.sp_wait.value()}
 
+    def record_options(self):
+        return {"start": self.sp_from.value() - 1, "end": self.sp_to.value() - 1,
+                "mode": self.rec_mode, "quality": self.cb_quality.currentIndex()}
+
     def start(self):
         self.started.emit(self.options())
+        self.close_panel()
+
+    def record(self):
+        if not self.btn_record.isEnabled():
+            return
+        self.record_requested.emit(self.record_options())
         self.close_panel()
 
     def open_at(self, anchor):

@@ -1,3 +1,15 @@
+## 2026-11-19 プレイリスト 第5段 録画（Claude）
+
+版上げ・ビルド・リリースはしていない。
+
+- 入口: 「▶ 連続再生」の板に「録画」の段 = [まとめて][曲ごと][両方]（既定 両方）・画質（録画の窓と同じ `QUALITY_PRESETS`、既定 60fps/1080p）・「● 録画」。範囲は板の N〜M。選び方は `player_playlist_rec_mode` / `player_playlist_rec_quality` に残す。録画中は「● 録画」を押せない（1本ずつ）。
+- 書き出し `neotja/player/playlist_record.PlaylistRecorder`（GUI なし・QObject）: 今の録画と同じ道（`prepare_recording` を裏で → `make_offline_widget` → `VideoRecording.step` を QTimer で少しずつ。実時間の再生は不要）。曲ごとの背景・ジャケットは Player の「背景・ジャケット」と同じ `record_background(cfg, path, bg_with_defaults(RecordBackground(), rec_bg_default))`、「表示しない」の曲はジャケットなし、歌詞ごとのジャケットの切り替えも同じ。コースは保存した値（無ければ default_course）。打音あり・音量は preview_volume / sfx_volume。見つからない・音源がない・書けなかった曲は飛ばして failed へ。
+- まとめて: 各曲の前に曲名表示（普段の `IntroPage` の絵＝ボタン・数え無し）を `CARD_SEC = 3` 秒（止め絵＋無音、曲と同じ H.264/yuv420p/AAC 48kHz/同じ fps）→ ffmpeg の concat demuxer で `-c copy`、失敗したら作り直してつなぐ。まとめてだけのときは曲ごとの動画を作業用フォルダに作り、つないだら消す。中止したら書きかけは捨て、まとめても作らない（曲ごとで書き終えた分は残る）。
+- 置き場所: `ユーザーデータ/録画/<プレイリストの題（使える名前に）>/`。曲ごとは `NN_題_コース.mp4`、まとめては `<題>.mp4`（同名があれば _2…）。
+- 進み: 右の上に帯 `RecordBar`（● 題・N / M・細い進み・中止）。終わると ✓ 完了（失敗 N）・フォルダを開く・閉じる（`LibraryView.open_folder` で差し替え）。選曲を出たら止める（`shutdown`）。
+- 試験（新規）: `test_player_playlist_record`（両方・まとめてだけ・曲ごとだけ・中止・置き場所・板と帯。720p/10fps/ultrafast・1秒の音で回す。まとめての動画は曲＋曲名表示の長さで、最後まで読めることを ffmpeg で確かめる）。
+- 画像: scratchpad の `playlist5/` に pl5_panel_record_options / pl5_recording_bar / pl5_recording_cancelled / pl5_combined_card（まとめての曲名表示の1枚）。
+
 ## 2026-11-19 プレイリスト 第4段（Claude）＋ 終了時の落ち（0xC0000409）
 
 版上げ・ビルド・リリースはしていない。録画（プレイリスト全体＋曲ごと）はまだ。
