@@ -189,4 +189,6 @@ class LyricJacketDialog(QDialog):
             self, "ジャケットの画像", start,
             IMAGE_FILTER + ";;すべて (*.*)")
         if got:
-            self.set_path(got)
+            # ユーザーデータ/ジャケット へ写して、その道を使う(元を消しても困らない)。
+            from neotja import user_dirs
+            self.set_path(user_dirs.copy_into("jackets", got))
