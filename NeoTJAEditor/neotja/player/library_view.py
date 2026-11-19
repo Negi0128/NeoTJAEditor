@@ -1292,6 +1292,8 @@ class LibraryView(QWidget):
     list_switched = Signal()
     #: 選んでいる行の右の印を押した (曲, 流すか)。
     preview_toggled = Signal(str, bool)
+    #: 開いているプレイリストの「連続再生」(プレイリストの id)。
+    playlist_play_requested = Signal(str)
 
     def __init__(self, config_data, save_cb, parent=None):
         super().__init__(parent)
@@ -1461,6 +1463,12 @@ class LibraryView(QWidget):
         self.btn_add_songs.clicked.connect(self._pi)
         self.btn_add_songs.clicked.connect(lambda _=False: self.begin_add_mode())
         self.page_playlist.tools.addWidget(self.btn_add_songs)
+        self.btn_play_all = QPushButton("▶  連続再生")
+        self.btn_play_all.setObjectName("flat")
+        self.btn_play_all.setCursor(Qt.PointingHandCursor)
+        self.btn_play_all.clicked.connect(
+            lambda _=False: self.playlist_play_requested.emit(self._playlist_id))
+        self.page_playlist.tools.addWidget(self.btn_play_all)
         self.page_playlist.v.addSpacing(16)
         self.playlist_song_list = PlaylistRowList()
         self.playlist_song_list.moved.connect(self.move_playlist_item)
@@ -2030,10 +2038,16 @@ class LibraryView(QWidget):
                     paths.append(path)       # 同じ曲は1回だけ読む
                 self._pending_rows.setdefault(key, []).append(row)
         lst.apply_filter(self.page_playlist.search.text())
+        self.btn_play_all.setEnabled(bool(paths))
         self._mark_chosen()
         if paths:
             self._start_worker(paths=paths)
-        QTimer.singleShot(0, lambda: lst.verticalScrollBar().setValue(keep))
+        def restore():
+            try:
+                lst.verticalScrollBar().setValue(keep)
+            except RuntimeError:
+                pass             # もう閉じた
+        QTimer.singleShot(0, restore)
 
     def _current_playlist(self):
         return self.playlist_store().get(self._playlist_id) if self._playlist_id else None

@@ -54,8 +54,12 @@ class IntroSequence(QObject):
     failed = Signal()
 
     def __init__(self, set_volume, base_volume, stop_demo, begin_load, is_ready,
-                 clock=time.monotonic, parent=None):
+                 clock=time.monotonic, parent=None, hold=HOLD_SEC, total=INTRO_SEC):
         super().__init__(parent)
+        #: そのままの音量の長さと、全体の長さ(秒)。プレイリストの「再生する」
+        #: のあとは短く(すぐ下げ始める)。
+        self._hold = float(hold)
+        self._total = float(total)
         self._set_volume = set_volume
         self._base = float(base_volume)
         self._stop_demo = stop_demo
@@ -83,8 +87,8 @@ class IntroSequence(QObject):
         if self.done or self.aborted or self._t0 is None:
             return
         t = self.elapsed()
-        if t < INTRO_SEC:
-            self._set_volume(intro_volume(t, self._base))
+        if t < self._total:
+            self._set_volume(intro_volume(t, self._base, self._hold, self._total))
             return
         if not self._demo_stopped:
             self._demo_stopped = True
@@ -114,8 +118,41 @@ class IntroSequence(QObject):
             self._stop_demo()
 
 
+#: プレイリストの連続再生の右の板(倍率 1 のときの寸法)。
+PL_PANEL_W = 520
+PL_MARGIN = 80
+PL_PAD = 32
+PL_COUNTER_H = 64
+PL_PLAY_H = 96
+PL_QUIT_H = 58
+PL_GAP = 26
+#: 平らなボタン(暗い半透明・細い薄シアンの縁・ほぼ四角・太い Yu Gothic UI)。
+PL_BUTTON_QSS = """
+QPushButton {
+    background-color: rgba(16, 28, 44, 190); color: #ffffff;
+    border: %(bw)dpx solid rgba(139, 217, 238, 170); border-radius: %(r)dpx;
+    font-family: "Yu Gothic UI"; font-weight: bold; font-size: %(px)dpx;
+    letter-spacing: %(ls)dpx;
+}
+QPushButton:hover { background-color: rgba(35, 61, 84, 215); border-color: #8ad9ee; }
+QPushButton:pressed { background-color: rgba(10, 20, 34, 230); }
+QPushButton:focus { border-color: #7fe3ff; }
+"""
+
+
 class IntroPage(QWidget):
-    """曲名表示の画面。キーもクリックも受け流す(飛ばせない)。"""
+    """曲名表示の画面。キーもクリックも受け流す(飛ばせない)。
+
+    プレイリストの連続再生(set_playlist)では、今の表示を左へ寄せて、右に
+    「N曲目 / M曲」・コースの小さなカード・「再生する」・「やめる」の板を出す。
+    このときは待つ(5 秒で進まない)。キーは Enter=再生する・Esc=やめる・
+    ←→=コース。"""
+
+    #: プレイリストの「再生する」/「やめる」/ コースを替えた / 操作音。
+    play_requested = Signal()
+    quit_requested = Signal()
+    course_changed = Signal(str)
+    sound_requested = Signal(str)
 
     def __init__(self, config_data, parent=None):
         super().__init__(parent)
@@ -129,6 +166,141 @@ class IntroPage(QWidget):
         self._video_bg = None
         self._bg_scaled = None
         self.setFocusPolicy(Qt.StrongFocus)
+        #: プレイリストの連続再生のときの (何曲目, 全部で何曲)。None なら普段の曲名表示。
+        self.playlist = None
+        #: 選べるコース [(名前, レベル)](難しい順でなく かんたん→裏)。
+        self.pl_courses = []
+        self._pl_cards = {}
+        self._pl_panel = QRectF()
+        self.btn_play = None
+        self.btn_quit = None
+
+    # ------------------------------------------------------------------
+    # プレイリスト
+    def set_playlist(self, index, total, courses):
+        """連続再生の曲名表示にする。index は 1 から。courses は song_info の並び。"""
+        from PySide6.QtWidgets import QPushButton
+        from neotja.player.difficulty import CourseCard
+        self.playlist = (int(index), int(total))
+        order = ("Easy", "Normal", "Hard", "Oni", "Edit")
+        levels = dict(courses or [])
+        self.pl_courses = [(k, levels[k]) for k in order if k in levels]
+        if self.btn_play is None:
+            self.btn_play = QPushButton("再生する", self)
+            self.btn_play.setCursor(Qt.PointingHandCursor)
+            self.btn_play.setFocusPolicy(Qt.NoFocus)
+            self.btn_play.clicked.connect(self.request_play)
+            self.btn_quit = QPushButton("やめる", self)
+            self.btn_quit.setCursor(Qt.PointingHandCursor)
+            self.btn_quit.setFocusPolicy(Qt.NoFocus)
+            self.btn_quit.clicked.connect(self.request_quit)
+        for c in self._pl_cards.values():
+            c.setParent(None)
+            c.deleteLater()
+        self._pl_cards = {}
+        for k, lv in self.pl_courses:
+            c = CourseCard(k, self)
+            c.set_state(k, True, lv, k == self.course)
+            c.setFocusPolicy(Qt.NoFocus)
+            c.clicked.connect(self.pick_course)
+            c.show()
+            self._pl_cards[k] = c
+        self.btn_play.show()
+        self.btn_quit.show()
+        self._layout_playlist()
+        self.update()
+
+    def clear_playlist(self):
+        """普段の曲名表示へ戻す(板を隠す)。"""
+        self.playlist = None
+        for c in self._pl_cards.values():
+            c.setParent(None)
+            c.deleteLater()
+        self._pl_cards = {}
+        self.pl_courses = []
+        if self.btn_play is not None:
+            self.btn_play.hide()
+            self.btn_quit.hide()
+        self.update()
+
+    def set_course(self, course, level):
+        self.course = course
+        self.level = level
+        for k, c in self._pl_cards.items():
+            c.selected = k == course
+            c.update()
+        self.update()
+
+    def pick_course(self, key):
+        levels = dict(self.pl_courses)
+        if key not in levels or key == self.course:
+            return
+        self.sound_requested.emit("pi")
+        self.set_course(key, levels[key])
+        self.course_changed.emit(key)
+
+    def _step_course(self, d):
+        keys = [k for k, _l in self.pl_courses]
+        if not keys:
+            return
+        i = keys.index(self.course) if self.course in keys else 0
+        j = max(0, min(len(keys) - 1, i + d))
+        if j != i:
+            self.pick_course(keys[j])
+
+    def request_play(self):
+        if self.playlist is None:
+            return
+        self.sound_requested.emit("don")
+        self.play_requested.emit()
+
+    def request_quit(self):
+        if self.playlist is None:
+            return
+        self.sound_requested.emit("pi")
+        self.quit_requested.emit()
+
+    def _left_width(self):
+        """曲名などを並べる幅(プレイリストのときは右の板を除いた左側)。"""
+        if self.playlist is None:
+            return float(self.width())
+        s = self._s()
+        return max(200.0, self.width() - (PL_PANEL_W + PL_MARGIN) * s)
+
+    def _cx(self):
+        return self._left_width() / 2.0
+
+    def _layout_playlist(self):
+        if self.playlist is None or self.btn_play is None:
+            return
+        s = self._s()
+        pw = PL_PANEL_W * s
+        inner = pw - 2 * PL_PAD * s
+        n = max(1, len(self._pl_cards))
+        cs = min(0.62 * s, inner / (n * 236.0))
+        cw, ch = 236 * cs, 232 * cs
+        ph = (PL_PAD * 2 + PL_COUNTER_H + PL_GAP * 3 + PL_PLAY_H + PL_QUIT_H) * s + ch
+        x = self.width() - PL_MARGIN * s * 0.6 - pw
+        y = (self.height() - ph) / 2.0
+        self._pl_panel = QRectF(x, y, pw, ph)
+        cy = y + (PL_PAD + PL_COUNTER_H + PL_GAP) * s
+        cx = x + (pw - cw * n) / 2.0
+        for k, _lv in self.pl_courses:
+            c = self._pl_cards[k]
+            c.scale = cs
+            c.setGeometry(int(cx), int(cy), int(cw), int(ch))
+            cx += cw
+        by = cy + ch + PL_GAP * s
+        bx, bw = x + PL_PAD * s, inner
+        self.btn_play.setGeometry(int(bx), int(by), int(bw), int(PL_PLAY_H * s))
+        self.btn_play.setStyleSheet(PL_BUTTON_QSS % {
+            "bw": max(1, round(1.5 * s)), "r": max(2, round(3 * s)),
+            "px": max(12, round(34 * s)), "ls": max(1, round(6 * s))})
+        by += (PL_PLAY_H + PL_GAP) * s
+        self.btn_quit.setGeometry(int(bx), int(by), int(bw), int(PL_QUIT_H * s))
+        self.btn_quit.setStyleSheet(PL_BUTTON_QSS % {
+            "bw": 1, "r": max(2, round(3 * s)),
+            "px": max(11, round(22 * s)), "ls": max(1, round(3 * s))})
 
     def set_video_frame(self, image):
         """背景動画の1コマ(PlayerHost の DemoVideo から)。静止画より優先する。"""
@@ -165,7 +337,16 @@ class IntroPage(QWidget):
         self.update()
 
     # 飛ばせない: 何を押されても受け流す(親へも渡さない)。
+    # プレイリストの曲名表示だけ、Enter / Esc / ←→ を使う。
     def keyPressEvent(self, ev):
+        if self.playlist is not None and not ev.isAutoRepeat():
+            k = ev.key()
+            if k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self.request_play()
+            elif k == Qt.Key_Escape:
+                self.request_quit()
+            elif k in (Qt.Key_Left, Qt.Key_Right):
+                self._step_course(-1 if k == Qt.Key_Left else 1)
         ev.accept()
 
     def keyReleaseEvent(self, ev):
@@ -190,11 +371,12 @@ class IntroPage(QWidget):
     def jacket_rect(self):
         s = self._s()
         side = 330 * s
-        return QRectF((self.width() - side) / 2, 118 * s, side, side)
+        return QRectF(self._cx() - side / 2, 118 * s, side, side)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._bg_scaled = None
+        self._layout_playlist()
 
     def _bg_pixmap(self):
         source = self._video_bg if self._video_bg is not None else self._bg
@@ -240,8 +422,9 @@ class IntroPage(QWidget):
             p.setPen(QColor(235, 240, 248))
             p.drawText(jr, Qt.AlignCenter, "No\nImage")
 
-        # 曲名・副題(中央そろえ)
-        avail = w - 120 * s
+        # 曲名・副題(中央そろえ。プレイリストのときは左側の真ん中)
+        lw = self._left_width()
+        avail = lw - 120 * s
         size = 70 * s
         f = title_font(size)
         while QFontMetricsF(f).horizontalAdvance(self.title) > avail and size > 32 * s:
@@ -249,18 +432,48 @@ class IntroPage(QWidget):
             f = title_font(size)
         text = QFontMetricsF(f).elidedText(self.title, Qt.ElideRight, avail)
         base = jr.bottom() + 118 * s
-        draw_outlined(p, text, f, (w - QFontMetricsF(f).horizontalAdvance(text)) / 2,
+        draw_outlined(p, text, f, (lw - QFontMetricsF(f).horizontalAdvance(text)) / 2,
                       base, 10 * s)
         if self.subtitle:
             sf = title_font(32 * s)
             sub = QFontMetricsF(sf).elidedText(self.subtitle, Qt.ElideRight, avail)
             base += 54 * s
-            draw_outlined(p, sub, sf, (w - QFontMetricsF(sf).horizontalAdvance(sub)) / 2,
+            draw_outlined(p, sub, sf, (lw - QFontMetricsF(sf).horizontalAdvance(sub)) / 2,
                           base, 6 * s)
 
         # マーク・難易度名・★・オート再生(1行、中央そろえ)
         self._draw_course_row(p, base + 66 * s, s)
+        if self.playlist is not None:
+            self._draw_playlist_panel(p, s)
         p.end()
+
+    def _draw_playlist_panel(self, p, s):
+        """右の板(難易度選択・途中メニューと同じ平らなガラス)と「N曲目 / M曲」。"""
+        from neotja.player.difficulty import BTN_RADIUS, TOP_EDGE, paint_glass
+        r = self._pl_panel
+        if r.isEmpty():
+            return
+        paint_glass(p, r, BTN_RADIUS * s, s, base_alpha=190, edge=TOP_EDGE)
+        n, m = self.playlist
+        head = QRectF(r.left() + PL_PAD * s, r.top() + PL_PAD * s,
+                      r.width() - 2 * PL_PAD * s, PL_COUNTER_H * s)
+        big = thin_font(46 * s, QFont.Bold)
+        small = thin_font(26 * s, QFont.DemiBold)
+        a, b = "%d曲目" % n, " / %d曲" % m
+        aw = QFontMetricsF(big).horizontalAdvance(a)
+        bw = QFontMetricsF(small).horizontalAdvance(b)
+        x = head.center().x() - (aw + bw) / 2
+        base = head.top() + head.height() * 0.5 + QFontMetricsF(big).ascent() * 0.36
+        p.setFont(big)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QPointF(x, base), a)
+        p.setFont(small)
+        p.setPen(QColor(200, 222, 236))
+        p.drawText(QPointF(x + aw, base), b)
+        # 見出しの下の細い線。
+        ly = head.bottom() + PL_GAP * s / 2
+        p.setPen(QPen(QColor(150, 215, 235, 90), 1.0 * max(1.0, s)))
+        p.drawLine(int(head.left()), int(ly), int(head.right()), int(ly))
 
     def _draw_course_row(self, p, cy, s):
         mark_d = 78 * s
@@ -276,7 +489,7 @@ class IntroPage(QWidget):
         badge_w = QFontMetricsF(bfnt).horizontalAdvance(badge) + 34 * s
         badge_h = 44 * s
         total = mark_d + gap + name_w + gap + star_w + gap + badge_w
-        x = (self.width() - total) / 2
+        x = self._cx() - total / 2
 
         # マーク(背景なしの絵があればそのまま。古いキャッシュではカードの絵を丸く)
         mr = QRectF(x, cy - mark_d / 2, mark_d, mark_d)

@@ -143,6 +143,14 @@ class PlayerHost(QWidget):
         # 曲名表示(5 秒・飛ばせない)と再生画面。
         self.intro = IntroPage(config_data)
         self.body.addWidget(self.intro)
+        # プレイリストの連続再生(曲名表示の右の板から)。
+        self.intro.sound_requested.connect(lambda kind: self.sounds.play(kind))
+        self.intro.play_requested.connect(self._playlist_play)
+        self.intro.quit_requested.connect(self.end_playlist)
+        self.intro.course_changed.connect(self._playlist_course_changed)
+        self.library.playlist_play_requested.connect(self.start_playlist)
+        #: 連続再生のいま(None なら普段)。{"pid", "items": [{path, course}], "index"}。
+        self._pl_session = None
         self.play_page = PlayPage()
         self.body.addWidget(self.play_page)
         self.play_page.esc_pressed.connect(self.open_pause_menu)
@@ -444,6 +452,10 @@ class PlayerHost(QWidget):
         self.library.shutdown()
         self._abort_sequence()
         self._end_play()
+        if self._pl_session is not None:
+            self._pl_session = None
+            self.play_page.menu.set_playlist_mode(False)
+            self.intro.clear_playlist()
         core, self._core = self._core, None
         if core is not None:
             try:
@@ -555,6 +567,7 @@ class PlayerHost(QWidget):
         できるまで)で再生画面へ。"""
         self._abort_sequence()
         core = self._ensure_core()
+        self.intro.clear_playlist()
         self.intro.set_song(path, course, self.difficulty.levels.get(course))
         # 背景動画は止めずに曲名表示へ引き継ぐ(難易度選択・結果画面で流して
         # いたもの)。流していなければ、ここから無音で流す。
@@ -732,6 +745,18 @@ class PlayerHost(QWidget):
             self.play_page.hide_menu()
             return
         path, course = ctx
+        if self._pl_session is not None and key in ("next", "restart", "library"):
+            # 連続再生: 次の曲へ / この曲の曲名表示から / プレイリストごとやめる。
+            self._end_play()
+            if self._core is not None:
+                self._core.stop_audio()
+            if key == "next":
+                self._playlist_advance()
+            elif key == "restart":
+                self._playlist_intro(self._pl_session["index"], fade="black")
+            else:
+                self.end_playlist()
+            return
         if key == "resume":
             self.play_page.hide_menu()
             if self.play_mode == "detail" and self._core is not None:
@@ -889,6 +914,14 @@ class PlayerHost(QWidget):
         if ctx is None:
             return
         path, course = ctx
+        if self._pl_session is not None:
+            # 連続再生では結果画面を出さず、次の曲の曲名表示へ(最後ならプレイリストへ)。
+            self._end_play()
+            if self._core is not None:
+                self._core.stop_audio()
+            self.play_finished.emit(path, course)
+            self._playlist_advance()
+            return
         values, gauge, judges = self._collect_results()
         self._end_play()
         if self._core is not None:
@@ -1012,9 +1045,157 @@ class PlayerHost(QWidget):
                     pass
 
     def _intro_failed(self, path):
-        """本編を読めなかった。難易度選択へ戻す。"""
+        """本編を読めなかった。難易度選択へ戻す(連続再生なら次の曲へ)。"""
         self._seq = None
+        if self._pl_session is not None:
+            self._playlist_advance()
+            return
         self.show_difficulty(path)
+
+    # ------------------------------------------------------------------
+    # プレイリストの連続再生(今は手動だけ: 毎曲、曲名表示で「再生する」を待つ)
+    #: 「再生する」を押してから試聴を 0 まで下げる長さ(秒)。
+    PLAYLIST_FADE_SEC = 1.0
+
+    def playlist_session(self):
+        return self._pl_session
+
+    def start_playlist(self, pid, start=0):
+        """プレイリストを start 番目から順に。見つからない曲は飛ばす。始めたら True。"""
+        store = self.library.playlist_store()
+        pl = store.get(pid)
+        if pl is None:
+            return False
+        items = [dict(i) for i in pl["items"][max(0, int(start)):]
+                 if os.path.isfile(i.get("path") or "")]
+        if not items:
+            return False
+        self._select_timer.stop()
+        self._select_path = str()
+        self._abort_sequence()
+        self._end_play()
+        self._pl_session = {"pid": pid, "items": items, "index": 0}
+        self.play_page.menu.set_playlist_mode(True)
+        self._playlist_intro(0, fade="cross")
+        return True
+
+    def _playlist_intro(self, index, fade="black"):
+        """index 番目の曲名表示(右に板)。押されるまで待つ。試聴は DEMOSTART から。"""
+        from neotja.player import core as core_mod
+        from neotja.player import playlists, song_lists
+        sess = self._pl_session
+        if sess is None:
+            return
+        items = sess["items"]
+        while index < len(items):
+            path = items[index]["path"]
+            info = song_lists.song_info(path) if os.path.isfile(path) else None
+            courses = (info or {}).get("courses") or []
+            if courses:
+                break
+            index += 1               # 消えた・読めない曲は飛ばす
+        if index >= len(items):
+            self.end_playlist()
+            return
+        self._abort_sequence()
+        levels = dict(courses)
+        course = items[index].get("course")
+        if course not in levels:
+            course = playlists.default_course(courses)
+        sess["index"] = index
+        sess["course"] = course
+        self.intro.set_song(path, course, levels.get(course))
+        self.intro.set_course(course, levels.get(course))
+        self.intro.set_playlist(index + 1, len(items), courses)
+        core = self._ensure_core()
+        self.apply_audio_settings()
+        try:
+            demo = core_mod.demo_start_seconds(core_mod.read_text(path))
+        except OSError:
+            demo = 0.0
+        active = getattr(core, "demo_active_for", None)
+        if not (active is not None and active(path)):
+            self._stop_demo_video()
+            core.stop_audio()
+            core.play_demo(path, demo)
+        self._set_demo_volume(float(self.cfg.get("preview_volume", 0.8) or 0.0))
+        video = self._bg_video_path(path)
+        if self._demo_video is None or getattr(self._demo_video, "path", "") != video:
+            self._stop_demo_video()
+            if video:
+                self._demo_video = self._make_video(self.intro.set_video_frame,
+                                                    self.intro.clear_video_frame)
+                self._demo_video.start(video)
+        else:
+            self._demo_video.set_targets(self.intro.set_video_frame,
+                                         self.intro.clear_video_frame)
+        try:
+            core.predecode(path)
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_page(self.intro, fade=fade,
+                       done=lambda: self.intro.setFocus(Qt.OtherFocusReason))
+        self.intro.setFocus()
+
+    def _playlist_course_changed(self, course):
+        if self._pl_session is not None and self._seq is None:
+            self._pl_session["course"] = course
+
+    def _playlist_play(self):
+        """曲名表示の「再生する」(Enter も)。試聴を短く下げてから本編へ。"""
+        sess = self._pl_session
+        if sess is None or self._seq is not None or self.body.currentWidget() is not self.intro:
+            return
+        path = sess["items"][sess["index"]]["path"]
+        course = sess.get("course")
+        self.library.note_played(path)
+        self.play_requested.emit(path, course)
+        core = self._ensure_core()
+        base = float(self.cfg.get("preview_volume", 0.8) or 0.0)
+        seq = IntroSequence(
+            set_volume=self._set_demo_volume, base_volume=base,
+            stop_demo=lambda: self._stop_demo_audio(core),
+            begin_load=lambda: self._begin_load(path, course),
+            is_ready=core.chart_ready, parent=self,
+            hold=0.0, total=self.PLAYLIST_FADE_SEC)
+        seq.finished.connect(lambda: self._enter_play(path, course))
+        seq.failed.connect(lambda: self._intro_failed(path))
+        self._seq = seq
+        seq.start()
+
+    def _playlist_advance(self):
+        sess = self._pl_session
+        if sess is None:
+            return
+        nxt = sess["index"] + 1
+        if nxt >= len(sess["items"]):
+            self.end_playlist()
+        else:
+            self._playlist_intro(nxt, fade="black")
+
+    def end_playlist(self):
+        """連続再生を終えて、そのプレイリストの画面へ戻る。"""
+        sess, self._pl_session = self._pl_session, None
+        self.play_page.menu.set_playlist_mode(False)
+        self._abort_sequence()
+        self._end_play()
+        self._stop_demo_video()
+        if self._core is not None:
+            self._core.stop_audio()
+        self.intro.clear_playlist()
+        if sess is None:
+            return
+        self.library.refresh_recent()
+        if self.library.playlist_store().get(sess["pid"]) is not None:
+            self.library.open_playlist(sess["pid"])
+        self.library.set_preview_playing(False)
+
+        def focus_library():
+            try:
+                self.library.pages.currentWidget().setFocus()
+            except Exception:  # noqa: BLE001
+                pass
+        self._set_page(self.library, fade="black", done=focus_library)
 
     def _abort_sequence(self):
         seq, self._seq = self._seq, None

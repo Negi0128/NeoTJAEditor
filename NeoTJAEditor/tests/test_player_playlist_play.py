@@ -1,0 +1,360 @@
+"""プレイリスト(第3段): 連続再生の曲名表示(左に寄せた表示＋右の板)・途中メニューの
+「次の曲へ」「やめる」・結果画面を出さずに次の曲へ・最後でプレイリストへ戻る。
+
+実行: アプリのフォルダで `PYTHONPATH=. .venv/Scripts/python.exe tests/test_player_playlist_play.py`
+実設定・exe の横のフォルダには触らない。窓は出さない。
+"""
+import json
+import os
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from neotja import settings  # noqa: E402
+
+_TMP = tempfile.mkdtemp(prefix='neotja-plplay-test-')
+_CFG = Path(_TMP) / 'settings.json'
+_CFG.write_text(json.dumps({'master_volume': 0.0}), encoding='utf-8')
+settings.settings_path = lambda: _CFG
+settings._primary_settings_path = lambda: _CFG
+settings._fallback_settings_path = lambda: _CFG
+
+from neotja import user_dirs  # noqa: E402
+
+user_dirs.base_override = str(Path(_TMP) / 'user')
+
+from gui_support import real_qt_test  # noqa: E402
+
+
+def _wait(ms):
+    from PySide6.QtCore import QEventLoop
+    from PySide6.QtWidgets import QApplication
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        QApplication.processEvents(QEventLoop.AllEvents, 10)
+        time.sleep(0.002)
+
+
+def _key(widget, key):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    QApplication.sendEvent(widget, QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+
+
+def _chart(folder, name, courses=(('Oni', 9), ('Edit', 10))):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'song.ogg').write_bytes(b'x')
+    lines = ['TITLE:%s' % name, 'BPM:120', 'WAVE:song.ogg', 'DEMOSTART:3', '']
+    for c, lv in courses:
+        lines += ['COURSE:%s' % c, 'LEVEL:%d' % lv, '#START', '1111,', '#END', '']
+    p = folder / (name + '.tja')
+    p.write_text('\n'.join(lines), encoding='cp932')
+    return str(p)
+
+
+def _fake_core_class():
+    from PySide6.QtWidgets import QWidget
+
+    class FakeGpw(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.locks = []
+            self.resize(640, 360)
+
+        def set_view_only(self, on):
+            pass
+
+        def set_controls_locked(self, on, key_cb=None):
+            self.locks.append(bool(on))
+
+        def fit_view_only(self, w, h):
+            pass
+
+    class FakeDock:
+        def __init__(self):
+            self.game_preview_window = FakeGpw()
+            self.game_screen = QWidget()
+            self.chart_preview = type('C', (), {'reset_to_start': lambda s: None})()
+            self.volumes = []
+
+        def set_volume(self, v):
+            self.volumes.append(v)
+
+        def set_master_volume(self, v):
+            pass
+
+        def cancel_predecode(self):
+            pass
+
+    class FakeCore:
+        instances = []
+
+        def __init__(self, cfg):
+            self.dock = FakeDock()
+            self.log = []
+            self.finished = False
+            FakeCore.instances.append(self)
+
+        def play_demo(self, path, demo):
+            self.log.append(('demo', os.path.basename(path)))
+
+        def stop_audio(self):
+            self.log.append('stop')
+
+        def shutdown(self):
+            pass
+
+        def predecode(self, path):
+            pass
+
+        def load(self, path, course_key=None, play_mode=None):
+            self.log.append(('load', os.path.basename(path), course_key))
+            return True
+
+        def use_normal_play_mode(self):
+            pass
+
+        def chart_ready(self):
+            return True
+
+        def play_chart(self, at=0.0):
+            self.log.append('play_chart')
+
+        def pause_chart(self):
+            self.log.append('pause_chart')
+
+        def resume_chart(self):
+            pass
+
+        def chart_finished(self):
+            return self.finished
+    return FakeCore
+
+
+class PauseMenuTests(unittest.TestCase):
+    @real_qt_test
+    def test_playlist_items(self):
+        from neotja.player.pause_menu import PauseMenu
+        m = PauseMenu()
+        m.resize(1600, 900)
+        normal = [it.text() for it in m.items]
+        self.assertEqual(normal, ['演奏を続ける', '初めからやり直す', '詳細モードに移行する',
+                                  '選曲画面にもどる'])
+        m.set_playlist_mode(True)
+        self.assertEqual([it.text() for it in m.items],
+                         ['演奏を続ける', '初めからやり直す', '次の曲へ',
+                          '詳細モードに移行する', 'やめる'])
+        self.assertEqual([it.number for it in m.items], [1, 2, 3, 4, 5])
+        got = []
+        m.chosen.connect(got.append)
+        m.open()
+        from PySide6.QtCore import Qt
+        _key(m, Qt.Key_3)
+        _key(m, Qt.Key_5)
+        self.assertEqual(got, ['next', 'library'])
+        m.set_playlist_mode(False)
+        self.assertEqual([it.text() for it in m.items], normal)
+        self.assertEqual([it.number for it in m.items], [1, 2, 3, 4])
+        self.assertFalse(m.item('next') is not None)
+        m.close_menu()
+        m.deleteLater()
+
+
+class IntroPanelTests(unittest.TestCase):
+    @real_qt_test
+    def test_normal_unchanged_and_playlist_panel(self):
+        from PySide6.QtCore import Qt
+        from neotja.player.intro import IntroPage
+        with tempfile.TemporaryDirectory() as d:
+            a = _chart(Path(d) / 'a', 'a', (('Hard', 6), ('Oni', 9), ('Edit', 10)))
+            page = IntroPage({'master_volume': 0.0})
+            page.resize(1600, 900)
+            page.show()
+            page.set_song(a, 'Oni', 9)
+            normal_jr = page.jacket_rect()
+            self.assertAlmostEqual(normal_jr.center().x(), 800.0, places=3)
+            self.assertIsNone(page.btn_play)
+            page.set_playlist(2, 5, [('Edit', 10), ('Oni', 9), ('Hard', 6)])
+            self.assertLess(page.jacket_rect().center().x(), 600)
+            self.assertTrue(page.btn_play.isVisible())
+            self.assertEqual(page.btn_play.text(), '再生する')
+            self.assertEqual(page.btn_quit.text(), 'やめる')
+            self.assertEqual(list(page._pl_cards), ['Hard', 'Oni', 'Edit'])
+            self.assertTrue(page._pl_cards['Oni'].selected)
+            self.assertGreater(page.btn_play.geometry().left(), page._left_width() - 1)
+            ev = []
+            page.play_requested.connect(lambda: ev.append('play'))
+            page.quit_requested.connect(lambda: ev.append('quit'))
+            page.course_changed.connect(lambda c: ev.append(c))
+            snd = []
+            page.sound_requested.connect(snd.append)
+            _key(page, Qt.Key_Right)
+            self.assertEqual(page.course, 'Edit')
+            self.assertEqual(page.level, 10)
+            page._pl_cards['Hard'].clicked.emit('Hard')
+            self.assertEqual(page.course, 'Hard')
+            _key(page, Qt.Key_Return)
+            page.btn_quit.click()
+            self.assertEqual(ev, ['Edit', 'Hard', 'play', 'quit'])
+            self.assertEqual(snd, ['pi', 'pi', 'don', 'pi'])
+            # 普段の曲名表示に戻すと、板は消えて真ん中に戻る。
+            page.clear_playlist()
+            self.assertFalse(page.btn_play.isVisible())
+            self.assertEqual(page.jacket_rect(), normal_jr)
+            ev.clear()
+            _key(page, Qt.Key_Return)
+            self.assertEqual(ev, [])
+            page.close()
+            page.deleteLater()
+
+
+class HostSessionTests(unittest.TestCase):
+    def setUp(self):
+        from neotja.player.host import PlayerHost
+        import shutil
+        shutil.rmtree(user_dirs.base_override, ignore_errors=True)
+        self.FakeCore = _fake_core_class()
+        self._orig = PlayerHost.core_factory
+        PlayerHost.core_factory = self.FakeCore
+
+    def tearDown(self):
+        from neotja.player.host import PlayerHost
+        PlayerHost.core_factory = self._orig
+
+    def _host(self, d):
+        from neotja.player.host import PlayerHost
+        self.a = _chart(Path(d) / 'a', 'a')
+        self.b = _chart(Path(d) / 'b', 'b', (('Hard', 5),))
+        host = PlayerHost({'master_volume': 0.0, 'preview_volume': 0.5}, lambda: None)
+        host.resize(1600, 900)
+        host.show()
+        host.on_shown()
+        self.sounds = []
+        host.sounds.play = lambda kind: self.sounds.append(kind)
+        host.sounds.pi = lambda: self.sounds.append('pi')
+        st = host.library.playlist_store()
+        pl = st.create('P')
+        st.add_item(pl['id'], self.a, 'Oni')
+        st.add_item(pl['id'], str(Path(d) / 'gone.tja'), 'Oni')   # 見つからない → 飛ばす
+        st.add_item(pl['id'], self.b, 'Oni')                      # 無いコース → ある中で
+        host.library.open_playlist(pl['id'])
+        self.pid = pl['id']
+        return host
+
+    def _press_play_and_enter(self, host):
+        host.intro.btn_play.click()
+        seq = host._seq
+        self.assertIsNotNone(seq)
+        seq._t0 -= 2.0
+        seq.tick()
+        _wait(800)
+        self.assertIs(host.body.currentWidget(), host.play_page)
+
+    @real_qt_test
+    def test_manual_flow_without_results(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            lib = host.library
+            self.assertTrue(lib.btn_play_all.isEnabled())
+            lib.btn_play_all.click()
+            core = self.FakeCore.instances[-1]
+            _wait(700)
+            self.assertIs(host.body.currentWidget(), host.intro)
+            self.assertEqual(host.intro.playlist, (1, 2))
+            self.assertEqual(host.intro.title, 'a')
+            self.assertIn(('demo', 'a.tja'), core.log)
+            self.assertTrue(host.play_page.menu.playlist_mode)
+            # 手動: 待っても進まない。
+            _wait(400)
+            self.assertIsNone(host._seq)
+            self.assertIs(host.body.currentWidget(), host.intro)
+            # この曲だけコースを替えて再生する(ドン)。
+            host.intro.pick_course('Edit')
+            self._press_play_and_enter(host)
+            self.assertIn('don', self.sounds)
+            self.assertIn(('load', 'a.tja', 'Edit'), core.log)
+            self.assertEqual(host.library.playlist_store().get(self.pid)['items'][0]['course'],
+                             'Oni')                              # 保存した値は変えない
+            # 終わったら結果を出さずに次の曲(消えた曲は飛ばす)。
+            done = []
+            host.play_finished.connect(lambda p, c: done.append(os.path.basename(p)))
+            core.finished = True
+            _wait(900)
+            core.finished = False
+            self.assertEqual(done, ['a.tja'])
+            self.assertIs(host.body.currentWidget(), host.intro)
+            self.assertEqual(host.intro.playlist, (2, 2))
+            self.assertEqual(host.intro.course, 'Hard')
+            self.assertNotEqual(host.body.currentWidget(), host.results)
+            # 途中メニュー: 次の曲へ(最後なので) → プレイリストの画面へ戻る。
+            self._press_play_and_enter(host)
+            self.assertIn(('load', 'b.tja', 'Hard'), core.log)
+            host.open_pause_menu()
+            menu = host.play_page.menu
+            self.assertIn('次の曲へ', [it.text() for it in menu.items])
+            menu.choose('next')
+            _wait(900)
+            self.assertIsNone(host.playlist_session())
+            self.assertIs(host.body.currentWidget(), host.library)
+            self.assertIs(lib.pages.currentWidget(), lib.page_playlist)
+            self.assertFalse(menu.playlist_mode)
+            self.assertIsNone(host.intro.playlist)
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
+    def test_quit_from_intro_and_menu(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            lib = host.library
+            self.assertTrue(host.start_playlist(self.pid))
+            _wait(700)
+            host.intro.btn_quit.click()
+            _wait(800)
+            self.assertIsNone(host.playlist_session())
+            self.assertIs(host.body.currentWidget(), host.library)
+            self.assertIs(lib.pages.currentWidget(), lib.page_playlist)
+            # 再生中の「やめる」もプレイリストごと終わる。「初めから」はこの曲の曲名表示へ。
+            host.start_playlist(self.pid)
+            _wait(700)
+            self._press_play_and_enter(host)
+            host.open_pause_menu()
+            host.play_page.menu.choose('restart')
+            _wait(800)
+            self.assertIs(host.body.currentWidget(), host.intro)
+            self.assertEqual(host.intro.playlist, (1, 2))
+            self._press_play_and_enter(host)
+            host.open_pause_menu()
+            host.play_page.menu.choose('library')
+            _wait(800)
+            self.assertIsNone(host.playlist_session())
+            self.assertIs(lib.pages.currentWidget(), lib.page_playlist)
+            # 普段の曲名表示は板なし。
+            host.start_intro(self.a, 'Oni')
+            self.assertIsNone(host.intro.playlist)
+            self.assertIsNotNone(host._seq)
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
+    def test_empty_playlist_does_not_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            st = host.library.playlist_store()
+            empty = st.create('E')
+            st.add_item(empty['id'], str(Path(d) / 'nope.tja'), 'Oni')
+            self.assertFalse(host.start_playlist(empty['id']))
+            self.assertIsNone(host.playlist_session())
+            host.library.open_playlist(empty['id'])
+            self.assertFalse(host.library.btn_play_all.isEnabled())
+            host.shutdown()
+            host.deleteLater()
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

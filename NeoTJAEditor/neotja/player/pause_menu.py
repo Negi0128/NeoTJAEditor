@@ -31,6 +31,10 @@ ITEMS = (
 )
 #: 詳細モードのあいだの3番目の表記(次の段で使う)。
 DETAIL_BACK_LABEL = "通常演奏に移行する"
+#: プレイリストの連続再生のあいだだけ、2番目のあとに足す項目。
+NEXT_ITEM = ("next", "次の曲へ")
+#: 連続再生のあいだの「選曲画面にもどる」の表記(プレイリストごとやめる)。
+PLAYLIST_QUIT_LABEL = "やめる"
 
 #: 倍率 1 のときの寸法(px)。
 PANEL_W = 600
@@ -113,6 +117,13 @@ class PauseMenu(QWidget):
             it.key = key
             it.clicked.connect(lambda _=False, k=key: self._click(k))
             self.items.append(it)
+        nxt = _MenuItem(3, NEXT_ITEM[1], self)
+        nxt.key = NEXT_ITEM[0]
+        nxt.clicked.connect(lambda _=False: self._click(NEXT_ITEM[0]))
+        nxt.hide()
+        #: 全部の項目(「次の曲へ」を含む)。self.items は出している項目だけ。
+        self._all_items = self.items[:2] + [nxt] + self.items[2:]
+        self.playlist_mode = False
         #: 音量(全体・曲・効果音)。マウスで動かす(キーは項目の選択に使う)。
         #: 動かしても止めたまま(続けるのは「演奏を続ける」だけ)。
         self.volume = VolumeRows(self, focusable=False, label_px=22)
@@ -122,6 +133,24 @@ class PauseMenu(QWidget):
     # ------------------------------------------------------------------
     def keys(self):
         return [it.key for it in self.items]
+
+    def set_playlist_mode(self, on):
+        """連続再生のあいだ: 2番目のあとに「次の曲へ」、最後は「やめる」。
+        数字キーは出している並びの順。"""
+        on = bool(on)
+        self.playlist_mode = on
+        self.items = [it for it in self._all_items if on or it.key != NEXT_ITEM[0]]
+        for i, it in enumerate(self.items):
+            it.number = i + 1
+        for it in self._all_items:
+            if it.key == NEXT_ITEM[0]:
+                it.setVisible(on)
+            elif it.key == "library":
+                it.setText(PLAYLIST_QUIT_LABEL if on else ITEMS[3][1])
+        if self.current >= len(self.items):
+            self.current = 0
+        self._layout()
+        self.update()
 
     def item(self, key):
         for it in self.items:

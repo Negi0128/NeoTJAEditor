@@ -1,3 +1,14 @@
+## 2026-11-19 プレイリスト 第3段（Claude）
+
+連続再生の曲名表示（手動だけ）。範囲指定・自動・録画はまだ（第4段）。版上げ・ビルド・リリースはしていない。
+
+- 入口: 開いたプレイリストの道具の段に「▶ 連続再生」（#flat。再生できる曲が無ければ押せない）→ `LibraryView.playlist_play_requested(pid)` → `PlayerHost.start_playlist(pid, start=0)`（第4段が範囲で呼ぶ口）。見つからない曲は始める時点で除き、M（全部で何曲）にも数えない。曲名表示の時点で読めない・コースが無い曲も飛ばす。
+- 曲名表示 `IntroPage.set_playlist(n, m, courses)` / `clear_playlist()`: 今の表示（ジャケット/No Image・曲名・副題・マーク・★・オート再生）はそのままの見た目で左側（窓の幅 − 右の板）の真ん中へ。右に板（`paint_glass`・薄シアンの縁）: 「N曲目 / M曲」、譜面にあるコースだけの `CourseCard`（小さく。押すとこの曲だけコースを替える＝保存した値は変えない）、「再生する」（平らなボタン・ドン）、「やめる」。キー: Enter/Space=再生する、Esc=やめる、←→=コース。普段の曲名表示（`start_intro`）は最初に `clear_playlist` するので今までどおり（中央・5秒・飛ばせない）。
+- 進み方（`PlayerHost._playlist_intro`）: 曲名表示へ入ると DEMOSTART から試聴（同じ曲が流れていれば続ける）、背景動画は曲名表示へ。**待つ**（5 秒で進まない）。「再生する」で `IntroSequence(hold=0, total=PLAYLIST_FADE_SEC=1.0)`（試聴を1秒で 0 へ→本編を読む→`_enter_play`）。`IntroSequence` に hold/total の引数を足した（既定は今までの 2/5 秒）。最近開いた楽曲・play_requested は「再生する」で。
+- 終わり: 譜面が終わったら結果画面を出さず（play_finished は出す）次の曲の曲名表示へ黒を挟んで。最後なら `end_playlist` → そのプレイリストの画面へ。途中メニュー `PauseMenu.set_playlist_mode(True)`: 1 続ける / 2 初めから（この曲の曲名表示へ戻って待つ＝判断）/ 3 次の曲へ / 4 詳細モード / 5 やめる（プレイリストごと終わり）。数字キーは出している並び。終われば元の4項目に戻す。読めなかった曲は次へ。
+- 試験（新規）: `test_player_playlist_play`（途中メニューの項目、板とキー・普段に戻す、手動で待つ→再生→結果なしで次→次の曲へで最後→プレイリストへ、やめる（曲名表示・途中メニュー）・初めから、再生できる曲が無いとき）。`test_player_playlists` / `test_player_intro` / `test_player_pause` / `test_player_pause_backdrop` / `test_player_transitions` 通過。`test_player_host` の `PlayerHostTests.test_enter_and_leave_player` は単独でも code 127 — プレイリスト前のコミット 37338c0 でも同じ（今回の変更とは無関係、未解決のまま）。実設定は変更なし。
+- 画像（1920×1009・widget.grab）: scratchpad の `playlist3/` に pl3_playlist_page（連続再生のボタン）/ pl3_intro_jacket（1曲目・ジャケット・コース1つ）/ pl3_esc_menu（次の曲へ・やめる）/ pl3_intro_noimage（2曲目・No Image・コース5つ）。
+
 ## 2026-11-19 プレイリスト 第2段（Claude）
 
 曲を入れる・並べる・外す・選んで遊ぶ。連続再生・録画はまだ。版上げ・ビルド・リリースはしていない。
