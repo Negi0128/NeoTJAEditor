@@ -92,6 +92,44 @@ class RightEdgeTests(unittest.TestCase):
         # 中心が右端から大音符の半径ぶん外にある音符の時刻まで入っている。
         self.assertGreaterEqual(fut, 10.0 + (1000 - 100 + W.NOTE_R_BIG) / 400.0)
 
+class LagOffsetTests(unittest.TestCase):
+    def test_values(self):
+        from neotja.player.core import input_lag_sec, player_offset_ms
+        self.assertEqual(input_lag_sec({}), 0.0)
+        self.assertAlmostEqual(input_lag_sec({'player_input_lag': 30}), 0.030)
+        self.assertEqual(player_offset_ms({'player_global_offset': -15}), -15.0)
+
+    @real_qt_test
+    def test_steppers_in_panel_and_saved(self):
+        from neotja.player.difficulty import DifficultyPage
+        cfg = {'master_volume': 0.0}
+        saves = []
+        page = DifficultyPage(cfg, lambda: saves.append(1))
+        page.settings.set_values(cfg)
+        st = page.settings.steppers
+        self.assertIn('player_input_lag', st)
+        self.assertIn('player_global_offset', st)
+        st['player_input_lag'].step(-1)
+        st['player_global_offset'].step(1)
+        page._flush_number_save() if hasattr(page, '_flush_number_save') else None
+        self.assertEqual(cfg['player_input_lag'], -1)
+        self.assertEqual(cfg['player_global_offset'], 1)
+        page.deleteLater()
+
+    def test_press_time_minus_lag(self):
+        from neotja.chart_preview_widget import ChartPreviewWidget as W
+
+        class Fake:
+            input_lag_sec = 0.05
+            _play_state = object()
+            _chord_timer = None
+            def _current_chart_time(self):
+                return 2.0
+        f = Fake()
+        f._pending_presses = [(0, 0, 0)]          # 2つ目なのでタイマーは起こさない
+        W._queue_press(f, 'don', 0)
+        self.assertAlmostEqual(f._pending_presses[-1][0], 1.95)
+
 
 if __name__ == '__main__':
     unittest.main()

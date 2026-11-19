@@ -684,6 +684,7 @@ class Stepper(_GlassButton):
         self.setFocus(Qt.MouseFocusReason)
         if side:
             self._press = side
+            self._held = 0
             self.step(side)
             self._repeat.start(380)
             self.update()
@@ -700,7 +701,9 @@ class Stepper(_GlassButton):
             self._repeat.stop()
             return
         self._repeat.setInterval(55)
-        self.step(self._press)
+        # 押し続けると速くなる(幅の広い ms の設定のため。1秒ほどで5ずつ)。
+        self._held = getattr(self, "_held", 0) + 1
+        self.step(self._press * (5 if self._held > 18 and self.hi - self.lo > 100 else 1))
 
     def keyPressEvent(self, ev):
         k = ev.key()
@@ -787,7 +790,11 @@ class SettingsPanel(QFrame):
 
     #: 数の設定 (キー, 名前, 下限, 上限, 既定, 単位)。連打秒速は Editor の
     #: 「連打秒速」(roll_speed)と同じ値を共有する。次に譜面を読むときに効く。
-    NUMBERS = (("roll_speed", "連打秒速", 1, 100, 45, "打/s"),)
+    NUMBERS = (("roll_speed", "連打秒速", 1, 100, 45, "打/s"),
+               # 自分で叩くときの入力の遅れ(叩いた時刻からこれだけ引いて判定)。
+               ("player_input_lag", "インプットラグ", -200, 200, 0, "ms"),
+               # 音に対する譜面の時刻のずれ(＋で音符が遅く来る)。オートにも効く。
+               ("player_global_offset", "全体OFFSET", -200, 200, 0, "ms"))
 
     ROWS = (("player_auto", "オート演奏"),
             ("player_show_jacket", "ジャケット"),

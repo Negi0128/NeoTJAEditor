@@ -202,7 +202,8 @@ class PlayerCore:
         except Exception:  # noqa: BLE001
             pass
         try:
-            d.set_output_offset_ms(output_offset_ms(cfg))
+            # 全体OFFSET(Player の難易度設定。＋で音符が遅く来る)も同じ口で。
+            d.set_output_offset_ms(output_offset_ms(cfg) + player_offset_ms(cfg))
         except Exception:  # noqa: BLE001
             pass
         self._apply_output_device()
@@ -817,6 +818,22 @@ def audio_friendly_gil(on):
     elif _saved_switch_interval is not None:
         sys.setswitchinterval(_saved_switch_interval)
         _saved_switch_interval = None
+
+
+def player_offset_ms(cfg):
+    """Player の「全体OFFSET」(ms)。"""
+    try:
+        return float(cfg.get("player_global_offset", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def input_lag_sec(cfg):
+    """Player の「インプットラグ」(秒)。叩いた時刻からこれだけ引いて判定する。"""
+    try:
+        return float(cfg.get("player_input_lag", 0) or 0) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def output_offset_ms(cfg):

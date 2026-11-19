@@ -2837,6 +2837,9 @@ class ChartPreviewWidget(QWidget):
     def play_state(self):
         return self._play_state
 
+    #: 叩いた時刻から引く秒(Player の「インプットラグ」)。
+    input_lag_sec = 0.0
+
     def _queue_press(self, kind, side):
         """打面が押された。すぐには判定せず、1フレームだけ同時押しを待つ。
 
@@ -2844,7 +2847,9 @@ class ChartPreviewWidget(QWidget):
         ずれることはない(遅れるのは打音と光だけ)。"""
         if self._play_state is None:
             return
-        self._pending_presses.append((self._current_chart_time(), kind, side))
+        # インプットラグ(Player の難易度設定)ぶん早い時刻に叩いたことにする。
+        self._pending_presses.append((self._current_chart_time() - self.input_lag_sec,
+                                      kind, side))
         if len(self._pending_presses) == 1:
             if self._chord_timer is None:
                 self._chord_timer = QTimer(self)

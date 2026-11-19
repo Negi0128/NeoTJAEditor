@@ -711,6 +711,9 @@ class PlayerHost(QWidget):
                               screen_fn=lambda: getattr(dock, "game_screen", None))
         # 自分で叩くときは D F J K を打面へ(縁・面・面・縁)。
         cp = getattr(dock, "chart_preview", None)
+        if cp is not None:
+            from neotja.player.core import input_lag_sec
+            cp.input_lag_sec = input_lag_sec(self.cfg)
         self.play_page.pad_cb = (getattr(cp, "_queue_press", None)
                                  if getattr(cp, "play_state", lambda: None)() is not None
                                  else None)
