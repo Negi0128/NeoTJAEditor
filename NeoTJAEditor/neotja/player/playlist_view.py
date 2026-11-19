@@ -644,7 +644,7 @@ class PlaylistPlayPanel(QWidget):
         for b in (self.btn_manual, self.btn_auto):
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumWidth(78)
+            b.setMinimumWidth(64)
             mh.addWidget(b)
         self.btn_manual.clicked.connect(lambda: self.set_auto(False))
         self.btn_auto.clicked.connect(lambda: self.set_auto(True))
@@ -659,6 +659,7 @@ class PlaylistPlayPanel(QWidget):
         self.sp_wait.setFixedWidth(66)
         self.sp_wait.setAlignment(Qt.AlignCenter)
         self._wait_box = self._stepper(self.sp_wait)
+        self.sp_wait.setMinimumWidth(66)      # 横が詰まっても数字を潰さない
         mh.addWidget(self._wait_box)
         self.lbl_sec = QLabel("秒")
         mh.addSpacing(6)
@@ -678,7 +679,7 @@ class PlaylistPlayPanel(QWidget):
             b = QPushButton(MODE_LABELS[m])
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumWidth(78)
+            b.setMinimumWidth(64)
             b.clicked.connect(lambda _=False, mode=m: self.set_rec_mode(mode))
             rm.addWidget(b)
             self.rec_buttons[m] = b
