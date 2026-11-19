@@ -119,6 +119,49 @@ class CrownTests(unittest.TestCase):
             self.assertIsNone(results.crown_pixmap(None, sheet))
 
 
+class LayoutTests(unittest.TestCase):
+    @real_qt_test
+    def test_buttons_under_card_and_failed_label(self):
+        from PySide6.QtCore import QRectF
+        from neotja.player import results
+        with tempfile.TemporaryDirectory() as d:
+            path = _chart(Path(d) / 'f', 'f')
+            page = results.ResultsPage({'master_volume': 0.0})
+            page.resize(1920, 1009)
+            page.show()
+            vals = {'score': 5000, 'good': 4, 'ok': 0, 'bad': 6, 'rolls': 0, 'max_combo': 2,
+                    'note_count': 10, 'gauge_ratio': 0.3, 'cleared': False}
+            drawn = []
+            orig = results.draw_crown_outline
+            results.draw_crown_outline = lambda p, r, s=1.0: drawn.append(r)
+            try:
+                page.set_result(path, 'Oni', 9, vals)
+                page.grab()
+            finally:
+                results.draw_crown_outline = orig
+            self.assertIsNone(page.crown)
+            self.assertEqual(len(drawn), 1)            # 失敗: 灰色の王冠の枠
+            pr = page.panel_rect()
+            a = QRectF(page.btn_retry.geometry()).adjusted(*(v * page._s() for v in (10, 10, -10, -10)))
+            b = QRectF(page.btn_back.geometry()).adjusted(*(v * page._s() for v in (10, 10, -10, -10)))
+            # カードの真下に横並び、2つ合わせてカードと同じ幅。
+            self.assertGreater(a.top(), pr.bottom())
+            self.assertAlmostEqual(a.top(), b.top(), delta=1)
+            self.assertAlmostEqual(a.left(), pr.left(), delta=2)
+            self.assertAlmostEqual(b.right(), pr.right(), delta=2)
+            self.assertLessEqual(a.bottom(), page.height())
+            # クリアしたときは枠を描かない。
+            drawn.clear()
+            results.draw_crown_outline = lambda p, r, s=1.0: drawn.append(r)
+            try:
+                page.set_result(path, 'Oni', 9, dict(vals, cleared=True))
+                page.grab()
+            finally:
+                results.draw_crown_outline = orig
+            self.assertEqual(drawn, [])
+            page.deleteLater()
+
+
 # ----------------------------------------------------------------------
 # PlayerHost: 譜面の終わり → 結果画面 → もう一度 / 選曲へ(偽の PlayerCore)
 # ----------------------------------------------------------------------

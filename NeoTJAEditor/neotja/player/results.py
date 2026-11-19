@@ -32,6 +32,11 @@ CROWN_FILE = "Result_Crown.png"
 CROWN_RECTS = {"silver": (0, 0, 101, 92), "gold": (0, 92, 101, 92),
                "rainbow": (0, 184, 101, 92)}
 CROWN_LABELS = {"silver": "クリア", "gold": "フルコンボ", "rainbow": "ドンだフルコンボ"}
+#: クリアできなかったときの札(王冠の場所に灰色の枠と一緒に)。
+FAILED_LABEL = "失敗"
+#: 小さな字の色・細い区切り線(選曲の表と同じ)。
+SMALL_TEXT = QColor("#93a3bf")
+HAIRLINE = QColor(255, 255, 255, 26)
 
 _crown_cache = {}
 
@@ -75,6 +80,29 @@ def crown_pixmap(kind, sheet=None):
     return pm
 
 
+def draw_crown_outline(p, rect, s=1.0):
+    """クリアできなかったとき: 王冠の形の灰色の線だけ。"""
+    r = QRectF(rect)
+    w, h = r.width() * 0.82, r.height() * 0.72
+    x0, y0 = r.center().x() - w / 2, r.center().y() - h / 2
+    path = QPainterPath()
+    path.moveTo(x0, y0 + h * 0.18)
+    path.lineTo(x0 + w * 0.28, y0 + h * 0.48)
+    path.lineTo(x0 + w * 0.5, y0)
+    path.lineTo(x0 + w * 0.72, y0 + h * 0.48)
+    path.lineTo(x0 + w, y0 + h * 0.18)
+    path.lineTo(x0 + w * 0.9, y0 + h * 0.78)
+    path.lineTo(x0 + w * 0.1, y0 + h * 0.78)
+    path.closeSubpath()
+    path.addRect(QRectF(x0 + w * 0.1, y0 + h * 0.86, w * 0.8, h * 0.14))
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(QPen(SMALL_TEXT, 2.4 * s, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(path)
+    p.restore()
+
+
 def draw_crown_fallback(p, rect, kind):
     """素材が無いときの王冠の代わり: 銀・金・虹色の丸。"""
     r = QRectF(rect)
@@ -105,7 +133,8 @@ def _fmt(n):
 
 
 class ResultButton(_GlassButton):
-    """右下の2つ。文字だけの平らな板(主ボタンは Play と同じシアンの縁)。"""
+    """カードの真下の2つ。文字だけの平らな板(主ボタンは Play と同じ薄いシアンの塗り、
+    フォーカスは 2px の縁)。"""
 
     def __init__(self, text, primary=False, parent=None):
         super().__init__(parent)
@@ -120,8 +149,8 @@ class ResultButton(_GlassButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = paint_glass(p, self.inner(), BTN_RADIUS * s, s, lit=self._hover or self.hasFocus(),
-                        down=self.isDown(), focus=self.hasFocus() and not self.primary,
-                        primary=self.primary, base_alpha=175,
+                        down=self.isDown(), focus=self.hasFocus(),
+                        primary=self.primary, base_alpha=235,
                         edge=QColor(220, 228, 238, 150))
         f = thin_font(27 * s, QFont.Bold if self.primary else QFont.DemiBold)
         f.setLetterSpacing(QFont.AbsoluteSpacing, 4 * s)
@@ -254,22 +283,26 @@ class ResultsPage(QWidget):
 
     def jacket_rect(self):
         s = self._s()
-        return QRectF(62 * s, 62 * s, 190 * s, 190 * s)
+        return QRectF(62 * s, 48 * s, 190 * s, 190 * s)
 
     def panel_rect(self):
         s = self._s()
-        return QRectF(48 * s, 296 * s, 720 * s, 494 * s)
+        return QRectF(48 * s, 276 * s, 720 * s, 494 * s)
+
+    #: カードの下のボタン(倍率 1 のとき): 高さ・カードとの間・2つの間。
+    BTN_H, BTN_TOP_GAP, BTN_GAP = 72, 18, 16
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._bg_scaled = None
         s = self._s()
-        bw, bh = 430 * s, 82 * s
+        # カードの真下に横並び。2つ合わせてカードと同じ幅(目と手の移動を短く)。
+        pr = self.panel_rect()
+        bh, gap = self.BTN_H * s, self.BTN_GAP * s
+        bw = (pr.width() - gap) / 2
+        y = pr.bottom() + self.BTN_TOP_GAP * s
         g = GLOW * s
-        x = self.width() - 56 * s - bw
-        y2 = self.height() - 64 * s - bh
-        y1 = y2 - 20 * s - bh
-        for b, y in ((self.btn_retry, y1), (self.btn_back, y2)):
+        for b, x in ((self.btn_retry, pr.left()), (self.btn_back, pr.left() + bw + gap)):
             b.scale = s
             b.setGeometry(int(x - g), int(y - g), int(bw + 2 * g), int(bh + 2 * g))
 
@@ -339,7 +372,7 @@ class ResultsPage(QWidget):
 
     def _paint_panel(self, p, s):
         r = self.panel_rect()
-        paint_glass(p, r, BTN_RADIUS * s, s, base_alpha=190, edge=TOP_EDGE)
+        paint_glass(p, r, BTN_RADIUS * s, s, base_alpha=255, edge=TOP_EDGE)
         pad = 40 * s
         x0, x1 = r.left() + pad, r.right() - pad
         v = self.values
@@ -371,15 +404,18 @@ class ResultsPage(QWidget):
         sw = QFontMetricsF(sfnt).horizontalAdvance(star)
         p.drawText(QRectF(x, cy - 28 * s, sw + 4, 56 * s), Qt.AlignLeft | Qt.AlignVCenter, star)
         x += sw + 24 * s
-        bfnt = thin_font(20 * s, QFont.Bold)
+        # 「オート再生」は難易度選択と同じ細枠の札。
+        bfnt = thin_font(16 * s, QFont.Bold)
         badge = "オート再生"
-        bw = QFontMetricsF(bfnt).horizontalAdvance(badge) + 30 * s
-        br = QRectF(x, cy - 20 * s, bw, 40 * s)
-        p.setPen(QPen(QColor(255, 255, 255, 110), 1.2 * s))
-        p.setBrush(QColor(108, 116, 128, 225))
-        p.drawRoundedRect(br, 4 * s, 4 * s)
+        bw = QFontMetricsF(bfnt).horizontalAdvance(badge) + 26 * s
+        br = QRectF(x, cy - 16 * s, bw, 32 * s)
+        edge = QColor(SMALL_TEXT)
+        edge.setAlpha(130)
+        p.setPen(QPen(edge, 1.0))
+        p.setBrush(QColor(12, 24, 44, 200))
+        p.drawRoundedRect(br, 3 * s, 3 * s)
         p.setFont(bfnt)
-        p.setPen(QColor(255, 255, 255))
+        p.setPen(SMALL_TEXT)
         p.drawText(br, Qt.AlignCenter, badge)
 
         # 2行目: 魂ゲージ
@@ -388,8 +424,8 @@ class ResultsPage(QWidget):
 
         # 3行目: スコアと王冠
         sy = gy + 80 * s
-        p.setFont(thin_font(20 * s, QFont.DemiBold))
-        p.setPen(QColor(205, 222, 236))
+        p.setFont(thin_font(20 * s, QFont.Bold))
+        p.setPen(SMALL_TEXT)
         p.drawText(QRectF(x0, sy, 200 * s, 26 * s), Qt.AlignLeft | Qt.AlignVCenter, "スコア")
         big = thin_font(66 * s, QFont.Bold)
         p.setFont(big)
@@ -399,8 +435,16 @@ class ResultsPage(QWidget):
         p.drawText(QRectF(x0, sy + 22 * s, score_w + 10 * s, 84 * s),
                    Qt.AlignLeft | Qt.AlignVCenter, score_txt)
         div_x = max(x0 + 360 * s, x0 + score_w + 34 * s)
-        p.setPen(QPen(QColor(255, 255, 255, 60), 1.2 * s))
+        p.setPen(QPen(HAIRLINE, 1.0))
         p.drawLine(QPointF(div_x, sy + 26 * s), QPointF(div_x, sy + 100 * s))
+        if not self.crown and self.values and not self.values.get("cleared"):
+            # クリアできなかった: 王冠の場所に灰色の枠と「失敗」(クリアの札と同じ書き方)。
+            cr = QRectF(div_x + 26 * s, sy + 18 * s, 101 * s * 0.9, 92 * s * 0.9)
+            draw_crown_outline(p, cr, s)
+            p.setFont(thin_font(26 * s, QFont.Bold))
+            p.setPen(SMALL_TEXT)
+            p.drawText(QRectF(cr.right() + 14 * s, cr.top(), x1 - cr.right(), cr.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, FAILED_LABEL)
         if self.crown:
             cr = QRectF(div_x + 26 * s, sy + 18 * s, 101 * s * 0.9, 92 * s * 0.9)
             cpm = self.crown_pixmap()
@@ -416,7 +460,7 @@ class ResultsPage(QWidget):
         # 4・5行目: 良 / 可 / 不可、連打数 / 最大コンボ数
         ry = sy + 130 * s
         row_h = 66 * s
-        line = QPen(QColor(255, 255, 255, 50), 1.0 * s)
+        line = QPen(HAIRLINE, 1.0)
         for i in range(3):
             p.setPen(line)
             p.drawLine(QPointF(x0, ry + i * row_h), QPointF(x1, ry + i * row_h))
@@ -442,7 +486,7 @@ class ResultsPage(QWidget):
             cx = x0 + i * half
             cell = QRectF(cx + 16 * s, ry2, half - 32 * s, row_h)
             p.setFont(lf2)
-            p.setPen(QColor(205, 222, 236))
+            p.setPen(SMALL_TEXT)
             p.drawText(cell, Qt.AlignLeft | Qt.AlignVCenter, text)
             p.setFont(num_f)
             p.setPen(QColor(255, 255, 255))
