@@ -1,3 +1,9 @@
+## 2026-11-19 GL を温める・歌詞ジャケットの写し・起動の札（Claude）
+
+- 8867870: ゲーム画面の最初の描画(grabFramebuffer)も選曲の入口で。選曲の入口 0.63 秒(付け替え前)→約 2.1 秒、本編開始は曲名表示5秒目から約 0.4 秒、再生へ入る黒の中の 410/230ms の止まりは無し(30ms 超えなし)。
+- 101cb66: 歌詞ごとのジャケットの窓で選んだ絵を ユーザーデータ/ジャケット へ写す(user_dirs.copy_into)。試験 test_lyric_jacket_copy。
+- 起動の札: exe は onefile(111MB)で、5秒の大半は起動ごとの展開と見ている(ソースの import は PySide6 0.27 秒＋main_window 0.46 秒)。spec に Splash(splash.png、make_splash.py で Segoe/Yu Gothic UI で作る)、__main__ で win.show() のあと pyi_splash.close()。ビルドはしていないので、次のビルドで札が出るか・Tcl/Tk が集まるかを確かめること。
+
 ## 2026-11-19 再生へ入る移り目を軽く（Claude）
 
 - 369f95d: 再生ウィンドウの初回の付け替え(setParent 約 0.7 秒)と、GL 部品が窓に入った直後の最初の撮影(約 90ms)を、選曲の入口(PlayerHost._warm_core → PlayPage.adopt + library.grab)で済ませる。attach は付け替えを省く。連続再生も同じ(付け替えはセッションで1回)。
