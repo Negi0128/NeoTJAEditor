@@ -165,15 +165,15 @@ def _make_countdown_button(text, parent):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             h = self.height()
-            d = h * 0.62
-            r = QRectF(self.width() - h * 0.19 - d, (h - d) / 2, d, d)
+            d = h * 0.74
+            r = QRectF(self.width() - h * 0.14 - d, (h - d) / 2, d, d)
             pen_w = max(2.0, d * 0.08)
             p.setPen(QPen(QColor(255, 255, 255, 50), pen_w))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(r)
             p.setPen(QPen(QColor(127, 227, 255), pen_w, Qt.SolidLine, Qt.RoundCap))
             p.drawArc(r, 90 * 16, int(360 * 16 * max(0.0, min(1.0, self.ratio))))
-            p.setFont(thin_font(d * 0.44, QFont.Bold))
+            p.setFont(thin_font(d * 0.46, QFont.Bold))
             p.setPen(QColor(255, 255, 255))
             p.drawText(r, Qt.AlignCenter, str(int(self.secs)))
             p.end()
@@ -251,7 +251,9 @@ class IntroPage(QWidget):
         self._pl_cards = {}
         for k, lv in self.pl_courses:
             c = CourseCard(k, self)
-            c.LEVEL_PX = 30          # 小さく並べるので★を大きめに
+            c.LEVEL_PX = 48          # 1列に小さく並べるので★を大きめに(20px 以上)
+            if k == "Edit":
+                c.name_override = "おに(裏)"   # 表のおにと見分ける
             c.set_state(k, True, lv, k == self.course)
             c.setFocusPolicy(Qt.NoFocus)
             c.clicked.connect(self.pick_course)
@@ -367,9 +369,9 @@ class IntroPage(QWidget):
         pw = PL_PANEL_W * s
         inner = pw - 2 * PL_PAD * s
         n = len(self._pl_cards)
-        # 4枚以上は2段に(1段に並べると★が読めないほど小さくなる)。
-        per_row = n if n <= 3 else (n + 1) // 2
-        rows = 0 if n == 0 else (1 if n <= 3 else 2)
+        # 1列に並べる(2段だと下の段の寄せがずれて見えた 2026-11-19)。
+        per_row = n
+        rows = 0 if n == 0 else 1
         cs = min(PL_CARD_SCALE * s, inner / (max(1, per_row) * 236.0))
         cw, ch = 236 * cs, 232 * cs
         cards_h = rows * ch + (PL_GAP * s if rows else 0)
@@ -579,13 +581,13 @@ class IntroPage(QWidget):
         nf = title_font(40 * s)
         star = "★%d" % self.level if self.level is not None else "★—"
         sfnt = thin_font(38 * s, QFont.Bold)
-        bfnt = thin_font(22 * s, QFont.Bold)
+        bfnt = thin_font(19 * s, QFont.Bold)
         badge = "オート演奏"
         gap = 26 * s
         name_w = QFontMetricsF(nf).horizontalAdvance(name)
         star_w = QFontMetricsF(sfnt).horizontalAdvance(star)
-        badge_w = QFontMetricsF(bfnt).horizontalAdvance(badge) + 34 * s
-        badge_h = 44 * s
+        badge_w = QFontMetricsF(bfnt).horizontalAdvance(badge) + 30 * s
+        badge_h = 38 * s
         total = mark_d + gap + name_w + gap + star_w + gap + badge_w
         x = self._cx() - total / 2
 
@@ -616,9 +618,10 @@ class IntroPage(QWidget):
         p.drawText(QRectF(x, cy - 30 * s, star_w + 4, 60 * s), Qt.AlignLeft | Qt.AlignVCenter, star)
         x += star_w + gap
         br = QRectF(x, cy - badge_h / 2, badge_w, badge_h)
-        p.setPen(QPen(QColor(255, 255, 255, 110), 1.2 * s))
-        p.setBrush(QColor(108, 116, 128, 225))
-        p.drawRoundedRect(br, 4 * s, 4 * s)
+        # 難易度選択・結果と同じ細枠の札(#93a3bf)。
+        p.setPen(QPen(QColor(147, 163, 191, 130), max(1.0, 1.0 * s)))
+        p.setBrush(QColor(12, 24, 44, 200))
+        p.drawRoundedRect(br, 3 * s, 3 * s)
         p.setFont(bfnt)
-        p.setPen(QColor(255, 255, 255))
+        p.setPen(QColor("#93a3bf"))
         p.drawText(br, Qt.AlignCenter, badge)

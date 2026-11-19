@@ -63,9 +63,9 @@ QWidget { font-family: "Yu Gothic UI"; color: #ffffff; }
 QLabel { background: transparent; }
 QLabel#ovDesc { color: #c6d6e6; font-size: 16px; }
 QLabel#ovCount { color: #b9d9ed; font-size: 18px; font-weight: bold; }
-QWidget#ovRow { background-color: rgba(12, 22, 36, 170); border: 1px solid rgba(139, 217, 238, 70);
-                border-radius: 3px; }
-QWidget#ovRow[missing="true"] { background-color: rgba(12, 22, 36, 90); border-color: rgba(255, 255, 255, 30); }
+QWidget#ovRow { background-color: transparent; border: none;
+                border-bottom: 1px solid rgba(255, 255, 255, 26); border-radius: 0; }
+QWidget#ovRow[missing="true"] { background-color: transparent; }
 QLabel#ovNum { color: #8fa3c0; font-size: 16px; font-weight: bold; }
 QLabel#ovTitle { font-size: 19px; font-weight: bold; }
 QLabel#ovStar { font-size: 19px; font-weight: bold; }
@@ -128,7 +128,7 @@ class PlaylistOverviewPage(QWidget):
         inner.setObjectName("ovListInner")
         self._list = QVBoxLayout(inner)
         self._list.setContentsMargins(0, 0, 10, 0)
-        self._list.setSpacing(8)
+        self._list.setSpacing(0)          # 選曲の表と同じ細線の行
         self._list.addStretch(1)
         self.scroll.setWidget(inner)
         right.addWidget(self.scroll, 1)

@@ -268,7 +268,7 @@ class CourseCard(QWidget):
 
         # 名前(勘亭流・白抜き)
         f = title_font(30 * s)
-        name = SLOT_NAMES.get(self.key, self.key)
+        name = getattr(self, "name_override", None) or SLOT_NAMES.get(self.key, self.key)
         fm = QFontMetricsF(f)
         x = r.center().x() - fm.horizontalAdvance(name) / 2
         base = mr.bottom() + 36 * s

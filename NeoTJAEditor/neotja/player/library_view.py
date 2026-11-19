@@ -322,7 +322,7 @@ class PlayMark(QWidget):
 
 
 #: 曲の表の列の幅(px)。曲名だけが伸びる。行と見出しで同じ数字を使う。
-COLW = {"num": 34, "thumb": 32, "folder": 300, "course": 156, "date": 84,
+COLW = {"num": 34, "thumb": 32, "folder": 300, "course": 180, "date": 84,
         "action": 64, "star": 30, "mark": 30}
 #: 行の左右の余白と列のあいだ。
 ROW_MARGINS = (10, 0, 6, 0)
@@ -543,6 +543,14 @@ class SongRow(QWidget):
             h.addWidget(self.num)
         self.thumb = SongThumb(size=COLW["thumb"], tint=genre_color(path))
         h.addWidget(self.thumb, 0, Qt.AlignVCenter)
+        if self.missing:
+            # 見つからない行は、番号・ジャケットの枠も曲名と一緒に沈める。
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            for w in (getattr(self, "num", None), self.thumb):
+                if w is not None:
+                    fx = QGraphicsOpacityEffect(w)
+                    fx.setOpacity(0.45)
+                    w.setGraphicsEffect(fx)
         self.title = _TextCell(title, 15, bold=True,
                                color=(lambda: COLORS["fg_dim"]) if self.missing
                                else (lambda: COLORS["fg_bright"]))
@@ -1846,6 +1854,11 @@ class LibraryView(QWidget):
         #: 「連続再生」の板(押したときに作る)。
         self.play_panel = None
         self.page_playlist.tools.addWidget(self.btn_play_all)
+        # 題・検索・ボタンを同じ高さの1行にそろえる。
+        for w in (self.page_playlist.search, self.btn_add_songs, self.btn_play_all):
+            w.setFixedHeight(36)
+        for b in (self.btn_add_songs, self.btn_play_all):
+            b.setStyleSheet("padding-top: 0; padding-bottom: 0;")
         self.playlist_song_list = PlaylistRowList()
         self.playlist_song_list.moved.connect(self.move_playlist_item)
         self.page_playlist.list = self.playlist_song_list
@@ -3260,7 +3273,7 @@ def library_qss():
     QLabel#recDot {{ color: #ec3c3c; font-size: 18px; }}
     QLabel#recDot[done="true"] {{ color: {p['accent']}; }}
     QLabel#recCount {{ color: {p['fg']}; font-size: 14px; font-weight: bold; }}
-    QProgressBar#recProgress {{ background-color: rgba(255, 255, 255, 30); border: none; border-radius: 3px; }}
-    QProgressBar#recProgress::chunk {{ background-color: {p['accent']}; border-radius: 3px; }}
+    QProgressBar#recProgress {{ background-color: #3a1f26; border: none; border-radius: 2px; }}
+    QProgressBar#recProgress::chunk {{ background-color: #ff6a5a; border-radius: 2px; }}
     QFrame#dropLine {{ background-color: {p['accent']}; border: none; border-radius: 1px; }}
     """

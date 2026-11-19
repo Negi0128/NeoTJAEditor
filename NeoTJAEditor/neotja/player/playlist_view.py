@@ -321,6 +321,8 @@ class CoursePicker(QDialog):
             c = CourseCard(k)
             c.scale = self.SCALE
             c.setFixedSize(int(236 * self.SCALE), int(232 * self.SCALE))
+            if k == "Edit":
+                c.name_override = "おに(裏)"   # 表のおにと見分ける
             c.set_state(k, True, levels.get(k), k == self.course)
             c.setToolTip(SLOT_LABEL.get(k, k))
             c.clicked.connect(self.pick)
@@ -407,7 +409,7 @@ class AddModeBar(QWidget):
 
 #: 「連続再生」の板の見た目(平ら・暗い半透明・細い薄シアンの縁・ほぼ四角・太い Yu Gothic UI)。
 PLAY_PANEL_QSS = """
-QFrame#playPanel { background-color: rgba(12, 22, 36, 240); border: 1px solid rgba(139, 217, 238, 170);
+QFrame#playPanel { background-color: #0c182c; border: 1px solid rgba(139, 217, 238, 170);
                    border-radius: 3px; }
 #playPanel QWidget { color: #e5edf7; font-family: "Yu Gothic UI"; font-size: 14px; font-weight: bold;
                      background: transparent; }
@@ -415,6 +417,8 @@ QFrame#playPanel { background-color: rgba(12, 22, 36, 240); border: 1px solid rg
 #playPanel QLabel#ppField { color: #b9d9ed; font-size: 13px; }
 #playPanel QSpinBox { background: #0c1521; border: 1px solid #3b536d; border-radius: 2px;
                       padding: 4px 6px; min-height: 22px; font-size: 15px; }
+#playPanel QPushButton#ppStep { padding: 0; min-width: 30px; max-width: 30px; min-height: 30px;
+                                max-height: 30px; font-size: 16px; }
 #playPanel QSpinBox:focus { border-color: #8bcfe5; }
 #playPanel QSpinBox:disabled { color: #687789; border-color: #29394b; }
 #playPanel QPushButton { background-color: rgba(16, 28, 44, 190); border: 1px solid rgba(139, 217, 238, 120);
@@ -449,8 +453,9 @@ class Toast(QLabel):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(
-            "QLabel#toast { background-color: rgba(12, 22, 36, 235); color: #ffffff;"
-            " border: 1px solid rgba(139, 217, 238, 190); border-radius: 3px;"
+            # 追加中の帯と同じ青(地 #1e3a5c、縁はアクセント)。
+            "QLabel#toast { background-color: rgba(30, 58, 92, 235); color: #ffffff;"
+            " border: 1px solid rgba(79, 156, 249, 220); border-radius: 3px;"
             " padding: 12px 26px; font-family: 'Yu Gothic UI'; font-size: 15px;"
             " font-weight: bold; }")
         self._fx = QGraphicsOpacityEffect(self)
@@ -527,7 +532,7 @@ class RecordBar(QWidget):
         self.bar.setObjectName("recProgress")
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
-        self.bar.setFixedSize(220, 6)
+        self.bar.setFixedSize(220, 8)
         h.addWidget(self.bar)
         self.btn_cancel = QPushButton("中止")
         self.btn_open = QPushButton("フォルダを開く")
@@ -614,15 +619,15 @@ class PlaylistPlayPanel(QWidget):
         self.sp_to = QSpinBox()
         for sp in (self.sp_from, self.sp_to):
             sp.setRange(1, n)
-            sp.setFixedWidth(84)
-            sp.setAlignment(Qt.AlignRight)
+            sp.setFixedWidth(56)
+            sp.setAlignment(Qt.AlignCenter)
         self.sp_from.setValue(1)
         self.sp_to.setValue(n)
         self.sp_from.valueChanged.connect(lambda x: self.sp_to.setValue(max(x, self.sp_to.value())))
         self.sp_to.valueChanged.connect(lambda x: self.sp_from.setValue(min(x, self.sp_from.value())))
-        rh.addWidget(self.sp_from)
+        rh.addWidget(self._stepper(self.sp_from))
         rh.addWidget(QLabel("〜"))
-        rh.addWidget(self.sp_to)
+        rh.addWidget(self._stepper(self.sp_to))
         rh.addStretch(1)
         v.addLayout(rh)
 
@@ -646,9 +651,10 @@ class PlaylistPlayPanel(QWidget):
             self.sp_wait.setValue(int(wait))
         except (TypeError, ValueError):
             self.sp_wait.setValue(10)
-        self.sp_wait.setFixedWidth(72)
-        self.sp_wait.setAlignment(Qt.AlignRight)
-        mh.addWidget(self.sp_wait)
+        self.sp_wait.setFixedWidth(58)
+        self.sp_wait.setAlignment(Qt.AlignCenter)
+        self._wait_box = self._stepper(self.sp_wait)
+        mh.addWidget(self._wait_box)
         self.lbl_sec = QLabel("秒")
         mh.addSpacing(6)
         mh.addWidget(self.lbl_sec)
@@ -703,6 +709,29 @@ class PlaylistPlayPanel(QWidget):
         self.set_rec_mode(rec_mode)
 
     @staticmethod
+    def _stepper(sp):
+        """[−][数][＋]。QSpinBox の矢印は数字に重なって読めなかったので
+        (2026-11-19)、矢印を消して難易度選択の Stepper と同じ形の −/＋ を並べる。"""
+        from PySide6.QtWidgets import QAbstractSpinBox
+        sp.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        for text, d in (("−", -1), (None, 0), ("＋", 1)):
+            if text is None:
+                h.addWidget(sp)
+                continue
+            b = QPushButton(text)
+            b.setObjectName("ppStep")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setAutoRepeat(True)
+            b.clicked.connect(lambda _=False, d=d: sp.stepBy(d))
+            h.addWidget(b)
+        return box
+
+    @staticmethod
     def _field(text):
         lbl = QLabel(text)
         lbl.setObjectName("ppField")
@@ -712,7 +741,7 @@ class PlaylistPlayPanel(QWidget):
         self.auto = bool(on)
         self.btn_manual.setChecked(not self.auto)
         self.btn_auto.setChecked(self.auto)
-        self.sp_wait.setEnabled(self.auto)
+        self._wait_box.setEnabled(self.auto)
         self.lbl_sec.setEnabled(self.auto)
 
     def set_rec_mode(self, mode):
