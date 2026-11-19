@@ -4165,7 +4165,10 @@ class ChartPreviewWidget(QWidget):
         # enough for the slowest note; faster notes just get a few harmless
         # extra candidates bisected in (all clipped to the box anyway).
         speed = self._min_vis_speed
-        return now - judge_x / speed, now + (w - judge_x) / speed
+        # 右端は音符の半径ぶん(大音符の2つぶん)先まで拾う。中心が右端に
+        # 来てから拾っていたので、半分欠けた音符が急に現れて見えた。
+        pad = 2.0 * self.NOTE_R_BIG
+        return now - (judge_x + pad) / speed, now + (w - judge_x + pad) / speed
 
     def _draw_balloon_sprite(self, painter, judge_x, mid_y, frame):
         """風船を1コマ描く。結び目(セル内 (20,141.5))を判定円に合わせる。"""

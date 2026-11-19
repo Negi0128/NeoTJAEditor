@@ -80,6 +80,18 @@ class MissNoPopupTests(unittest.TestCase):
         self.assertEqual(st.bad, 1)
         self.assertIsNone(st.last_judge)                    # 見送りでは「不可」を出さない
 
+class RightEdgeTests(unittest.TestCase):
+    def test_window_reaches_past_right_edge_by_note_radius(self):
+        """右端から半分だけ見えている音符も拾う(急に現れない)。"""
+        from neotja.chart_preview_widget import ChartPreviewWidget as W
+
+        class Fake:
+            NOTE_R_BIG = W.NOTE_R_BIG
+            _min_vis_speed = 400.0
+        _, fut = W._visible_window(Fake(), 10.0, 1000, 100)
+        # 中心が右端から大音符の半径ぶん外にある音符の時刻まで入っている。
+        self.assertGreaterEqual(fut, 10.0 + (1000 - 100 + W.NOTE_R_BIG) / 400.0)
+
 
 if __name__ == '__main__':
     unittest.main()
