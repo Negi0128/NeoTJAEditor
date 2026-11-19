@@ -2962,11 +2962,14 @@ class _GameScreenBase:
         # 軽量でも出す。スコアの見え方はモードで変わらないほうがよい、という
         # 要望。左パネルの中だけで完結する演出なので、下の背景や魂ゲージを
         # 落とすのとは事情が違う。
-        if self.show_score_gain and self._score_timeline is not None:
+        _play = self.chart_preview.play_state()
+        if self.show_score_gain and (_play is not None or self._score_timeline is not None):
             # **重なるぶんは重ねる。** 古い順に描くので、新しいものほど手前。
             # ふつうの密度の譜面は音符が 0.1 秒おきに来るし、連打を叩いて
             # いる間はもっと詰まるので、1枚しか出さないと点滅して見える。
-            for et, gain in self._score_timeline.events_in(
+            # 自分で叩くときは実際に入った点だけ(不可・空打ちは出さない)。
+            _src = _play.gains_in if _play is not None else self._score_timeline.events_in
+            for et, gain in _src(
                     now - SCORE_GAIN_DELAY - SCORE_GAIN_SEC,
                     now - SCORE_GAIN_DELAY):
                 el = now - et - SCORE_GAIN_DELAY

@@ -168,6 +168,8 @@ class PlayState:
         #: 直近の入力 (譜面時刻, 種類)。太鼓を光らせるのに使う。
         self.last_press = None
         self._presses = []
+        #: 点が入った (譜面時刻, 点)。加算の表示に使う(0 点は入れない)。
+        self._gains = []
         #: 魂ゲージの走っている値(良を1とした「叩いた数」)。式で出し直さず
         #: 打つたびに足し引きする — **毎打ごとに0で止める**ので、一度崩れた
         #: あとでも叩けば戻る。式のままだと引き算が残って戻らなかった。
@@ -239,6 +241,7 @@ class PlayState:
             if span.hit(now):
                 self.roll_hits += 1
                 self.score += ROLL_HIT_SCORE
+                self._gain(now, ROLL_HIT_SCORE)
             return ("roll", j)
 
         # --- いちばん近い「その面の」未判定の音符 ---
@@ -271,12 +274,23 @@ class PlayState:
             self.combo += 1
             self.max_combo = max(self.max_combo, self.combo)
             self.score += gain
+            self._gain(now, gain)
             self._add_gauge(self.GAUGE_GOOD if res == JUDGE_GOOD
                             else self.GAUGE_OK)
         self.last_judge = (now, res, c, self.combo)
         return ("note", i, res)
 
     # ------------------------------------------------------------------
+    def _gain(self, now, pts):
+        if pts > 0:
+            self._gains.append((float(now), int(pts)))
+            if len(self._gains) > 256:
+                del self._gains[:-128]
+
+    def gains_in(self, t0, t1):
+        """t0〜t1 に入った点 [(時刻, 点)]。不可(0 点)は入っていない。"""
+        return [g for g in self._gains if t0 <= g[0] <= t1]
+
     def _nearest(self, now, want_don):
         """不可の窓に入っている未判定の音符のうち、いちばん近いもの。
 

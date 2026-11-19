@@ -130,6 +130,18 @@ class LagOffsetTests(unittest.TestCase):
         W._queue_press(f, 'don', 0)
         self.assertAlmostEqual(f._pending_presses[-1][0], 1.95)
 
+class ScoreTests(unittest.TestCase):
+    def test_good_ok_bad_points_and_gain_events(self):
+        from neotja.player.play_state import PlayState
+        st = PlayState({'notes': [(1.0, '1'), (2.0, '1'), (3.0, '1')]})
+        per = st._per_note
+        st.press(1.0, 'don')                 # 良
+        st.press(2.05, 'don')                # 可
+        st.press(3.1, 'don')                 # 不可
+        self.assertEqual((st.good, st.ok, st.bad), (1, 1, 1))
+        self.assertEqual(st.score, per + per // 2 // 10 * 10)
+        self.assertEqual([g for _t, g in st.gains_in(0, 9)], [per, per // 2 // 10 * 10])
+
 
 if __name__ == '__main__':
     unittest.main()
