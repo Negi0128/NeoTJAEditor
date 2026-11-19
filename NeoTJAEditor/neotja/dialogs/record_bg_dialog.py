@@ -444,6 +444,13 @@ class RecordBackgroundDialog(QDialog):
         #: Player から開いたときだけ: 道は残したまま、ジャケットを出さない。
         self.chk_art_hidden = QCheckBox("表示しない")
         self.chk_art_hidden.setChecked(bool(jacket_hidden))
+        # 暗い地でも読めるように(環境設定のチェックと同じ見た目)。
+        self.chk_art_hidden.setStyleSheet(
+            "QCheckBox { color: #e6edf7; font-size: 13px; spacing: 8px; background: transparent; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;"
+            " background-color: #152233; border: 1px solid #93a3bf; }"
+            "QCheckBox::indicator:hover { border: 1px solid #4f9cf9; }"
+            "QCheckBox::indicator:checked { background-color: #4f9cf9; border: 1px solid #4f9cf9; }")
         self.chk_art_hidden.toggled.connect(self._schedule)
         art_row.addSpacing(10)
         art_row.addWidget(self.chk_art_hidden)

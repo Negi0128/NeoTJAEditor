@@ -6,6 +6,7 @@ Player の「背景・ジャケットを指定」の「表示しない」で決�
 実行: アプリのフォルダで `PYTHONPATH=. .venv/Scripts/python.exe tests/test_player_jacket_hidden.py`
 """
 import copy
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,6 +92,10 @@ class DialogHiddenTests(unittest.TestCase):
             dlg.show()
             _wait(80)
             self.assertTrue(dlg.chk_art_hidden.isVisible())
+            if os.environ.get('NEOTJA_SHOT'):
+                c = dlg.chk_art_hidden
+                c.setChecked(True); _wait(30); c.parentWidget().grab().save(os.environ['NEOTJA_SHOT'] + '_on.png')
+                c.setChecked(False); _wait(30); c.parentWidget().grab().save(os.environ['NEOTJA_SHOT'] + '_off.png')
             self.assertFalse(dlg.chk_art_hidden.isChecked())
             dlg.chk_art_hidden.setChecked(True)
             self.assertTrue(dlg.jacket_hidden())
