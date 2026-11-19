@@ -251,7 +251,7 @@ class IntroPage(QWidget):
         self._pl_cards = {}
         for k, lv in self.pl_courses:
             c = CourseCard(k, self)
-            c.LEVEL_PX = 48          # 1列に小さく並べるので★を大きめに(20px 以上)
+            c.LEVEL_PX = 30          # 小さく並べるので★を大きめに(1920x1009 で約24px)
             if k == "Edit":
                 c.name_override = "おに(裏)"   # 表のおにと見分ける
             c.set_state(k, True, lv, k == self.course)
@@ -369,9 +369,10 @@ class IntroPage(QWidget):
         pw = PL_PANEL_W * s
         inner = pw - 2 * PL_PAD * s
         n = len(self._pl_cards)
-        # 1列に並べる(2段だと下の段の寄せがずれて見えた 2026-11-19)。
-        per_row = n
-        rows = 0 if n == 0 else 1
+        # 4枚以上は2段に(1段に並べると★が読めないほど小さくなる)。下の段は
+        # 上の段の真ん中にそろえる(各段をパネルの中央へ)。
+        per_row = n if n <= 3 else (n + 1) // 2
+        rows = 0 if n == 0 else (1 if n <= 3 else 2)
         cs = min(PL_CARD_SCALE * s, inner / (max(1, per_row) * 236.0))
         cw, ch = 236 * cs, 232 * cs
         cards_h = rows * ch + (PL_GAP * s if rows else 0)

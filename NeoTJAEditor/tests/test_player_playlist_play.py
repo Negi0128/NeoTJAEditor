@@ -574,7 +574,14 @@ class CardRowsTests(unittest.TestCase):
             page.set_playlist(1, 3, five)
             cards = [page._pl_cards[k] for k in ('Easy', 'Normal', 'Hard', 'Oni', 'Edit')]
             tops = sorted({c.geometry().top() for c in cards})
-            self.assertEqual(len(tops), 1)                         # 1列(2026-11-19)
+            self.assertEqual(len(tops), 2)                         # 2段
+            self.assertEqual([c.geometry().top() for c in cards[:3]], [tops[0]] * 3)
+            # 下の段は上の段と同じ中心に。
+            up = [c.geometry() for c in cards[:3]]
+            lo = [c.geometry() for c in cards[3:]]
+            mid_up = (up[0].left() + up[-1].right()) / 2.0
+            mid_lo = (lo[0].left() + lo[-1].right()) / 2.0
+            self.assertLessEqual(abs(mid_up - mid_lo), 1.5)
             # ★の字が 20px 以上(1段に5枚だった前は約 8px)。
             self.assertGreaterEqual(cards[0].LEVEL_PX * cards[0].scale, 20.0)
             # 板は窓に収まり、ボタンはカードの下。
