@@ -17,6 +17,15 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 
+def _ui_family():
+    """字は FOT-Seurat Pro(利用者の System から。無ければ Yu Gothic UI)。"""
+    try:
+        from neotja.player.difficulty import ui_family
+        return ui_family() or "Yu Gothic UI"
+    except Exception:  # noqa: BLE001
+        return "Yu Gothic UI"
+
+
 def _num(v, digits):
     try:
         v = float(v)
@@ -55,7 +64,7 @@ class ValueReadout(QWidget):
     GAP = 6             # 枠どうしの間
     TITLE_PX = 12
     #: 字のファミリー(Player は FOT-Seurat Pro に差し替える)。
-    FAMILY = "Yu Gothic UI"
+    FAMILY = None
     VALUE_PX = 14
     BASE_H = PAD_TOP + TITLE_H + TITLE_GAP + FIELD_H + PAD_BOTTOM
     #: 上の寸法(命令パネルと同じ原寸)に掛ける倍率。枠・欄・字・余白・間を
@@ -97,10 +106,11 @@ class ValueReadout(QWidget):
     # ------------------------------------------------------------------
     # 大きさ
     def _fonts(self, s=1.0):
-        title = QFont(self.FAMILY)
+        fam = self.FAMILY or _ui_family()
+        title = QFont(fam)
         title.setPixelSize(max(1, round(self.TITLE_PX * s)))
         title.setWeight(QFont.Normal)
-        value = QFont(self.FAMILY)
+        value = QFont(fam)
         value.setPixelSize(max(1, round(self.VALUE_PX * s)))
         value.setWeight(QFont.Normal)
         return title, value

@@ -305,9 +305,18 @@ class CommandPanel(QFrame):
         qss = self._QSS
         if s < 0.999:
             qss += self._QSS_ARROW
-        return qss % {"h": px(24), "sp": px(14), "bt": px(13),
-                      "ar": px(16), "mk": px(20),
-                      "uh": px(self.UNDO_H - 2), "ub": px(12)}
+        qss = qss % {"h": px(24), "sp": px(14), "bt": px(13),
+                     "ar": px(16), "mk": px(20),
+                     "uh": px(self.UNDO_H - 2), "ub": px(12)}
+        # 字は FOT-Seurat Pro(利用者の System から。無ければ今まで)。
+        try:
+            from neotja.player.difficulty import ui_family
+            fam = ui_family()
+        except Exception:  # noqa: BLE001
+            fam = ""
+        if fam:
+            qss = 'QWidget { font-family: "%s"; }\n' % fam + qss
+        return qss
 
     def _capture_base(self):
         """原寸の寸法・余白・文字の大きさを覚える(ui_scale.UiScaler に任せる)。"""

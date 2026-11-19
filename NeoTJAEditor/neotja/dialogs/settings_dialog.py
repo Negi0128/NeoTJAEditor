@@ -447,6 +447,12 @@ class SettingsDialog(QDialog):
         c = theme_mod.COLORS
         small = _small_text()
         accent = c.get("accent", "#4f9cf9")
+        # 字は FOT-Seurat Pro(利用者の System から。無ければ Yu Gothic UI)。
+        try:
+            from neotja.player.difficulty import ui_css_family
+            ui_fam = ui_css_family()
+        except Exception:  # noqa: BLE001
+            ui_fam = "Yu Gothic UI"
         if dark:
             bg, fg, line = "#0f1a2c", "#e5edf7", "rgba(255,255,255,26)"
             field, edge = "rgba(16,28,44,200)", "rgba(139,217,238,110)"
@@ -459,7 +465,7 @@ class SettingsDialog(QDialog):
             sel = "rgba(13,110,253,30)"
         return f"""
         QDialog#settingsDialog {{ background-color: {bg}; }}
-        QDialog#settingsDialog QWidget {{ font-family: "Yu Gothic UI"; background: transparent; }}
+        QDialog#settingsDialog QWidget {{ font-family: "{ui_fam}"; background: transparent; }}
         QDialog#settingsDialog QComboBox QAbstractItemView {{ background-color: {bg}; color: {fg};
                      border: 1px solid {edge}; selection-background-color: {sel}; }}
         QScrollArea#settingsPageArea, QWidget#settingsPageView, QWidget#settingsPage

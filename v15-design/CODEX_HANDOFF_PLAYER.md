@@ -1,3 +1,9 @@
+## 2026-11-19 作譜モード・環境設定も FOT-Seurat Pro に(Claude)
+
+- 読み方は Player と同じ `neotja.player.difficulty.ui_family()`(System から実行時に読む・無ければ今まで・同梱しない)。
+- 作譜モードのページ(preview_dock._build_edit_page の page に setFont、Editor と Player の両方)、命令パネル(CommandPanel._style_for の頭に font-family)、数値の枠(ValueReadout.FAMILY 既定 None → ui_family)。環境設定は _qss の font-family を ui_css_family() に。
+- 環境設定の最小幅は中身から決めているので Seurat で 761→850 に広がる(横にはみ出さない)。Editor の他の部分(上のツールバー・下の情報パネル・TJA 欄の等幅)は変えていない。
+
 ## 2026-11-19 Player の字を FOT-Seurat Pro に(Claude)
 
 - 勘亭流でない Player の字は FOT-Seurat Pro(太字のみ)。`difficulty.ui_family()` が素材キャッシュ → System の TNDE-R/Graphics/FOT-Seurat_Pro_B.otf の順に探して addApplicationFont する。**書体は同梱・コミットしない**(Fontworks の市販品)。無ければ Yu Gothic UI。試験では `difficulty.seurat_file` を差し替える。

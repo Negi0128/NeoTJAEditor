@@ -2943,6 +2943,16 @@ class PreviewDock(QDockWidget):
             # いま何倍かをレーンに出す、も含めて)。
             step_speed_cb=lambda d: self.chart_preview.step_speed_key(d))
         self._wire_waveform(self.chart_edit, sync_stereo=False)
+        # 作譜モードの字は FOT-Seurat Pro(利用者の System から。無ければ今まで)。
+        try:
+            from neotja.player.difficulty import ui_family as _ui_family
+            fam = _ui_family()
+            if fam:
+                f = page.font()
+                f.setFamily(fam)
+                page.setFont(f)
+        except Exception:  # noqa: BLE001
+            pass
         self.chart_edit.set_stereo_view(False)
         self.chart_edit.set_follow_window(self._waveform_window())
         # 作譜ペインで Alt+ホイールした幅も、音声波形と同じく次回の既定にする。
