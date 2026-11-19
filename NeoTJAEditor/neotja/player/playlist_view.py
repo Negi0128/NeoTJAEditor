@@ -17,8 +17,8 @@ from neotja.player import playlists, song_lists, thumbs
 from neotja.start_screen import ElidedText, GlassCard
 
 #: 一覧の1行の高さと、その中のジャケットの大きさ。
-ROW_HEIGHT = 112
-JACKET_PX = 88
+ROW_HEIGHT = 56
+JACKET_PX = 44
 #: 作成/編集の窓のジャケットの見本の大きさ。
 DIALOG_JACKET_PX = 132
 
@@ -87,44 +87,136 @@ class PlaylistJacket(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 150), 1.2))
             p.setBrush(QColor(10, 18, 32, 150))
             p.drawRect(r)
-            p.setFont(_ui_font(max(9, self.width() * 0.17)))
-            p.setPen(QColor(235, 240, 248))
-            p.drawText(r, Qt.AlignCenter, "No\nImage")
+            if self.width() >= 60:          # 小さな枠(一覧の行)は字を入れず枠だけ
+                p.setFont(_ui_font(max(9, self.width() * 0.17)))
+                p.setPen(QColor(235, 240, 248))
+                p.drawText(r, Qt.AlignCenter, "No\nImage")
         p.end()
 
 
-class PlaylistRow(GlassCard):
+#: 表の行の地・線・選んだ印の色(選曲の曲の表と同じ)。
+_CYAN = QColor(127, 227, 255)
+
+
+def _secondary():
+    from neotja.player.library_view import secondary_color
+    return secondary_color()
+
+
+class InlineText(QWidget):
+    """1行の字(長ければ末尾を省略)。後ろに淡い字を同じ行に続けられる。"""
+
+    def __init__(self, text, px=15, bold=True, sub="", sub_px=13, parent=None):
+        super().__init__(parent)
+        self._text, self.sub, self.px, self.bold, self.sub_px = text, sub, px, bold, sub_px
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def text(self):
+        return self._text
+
+    def refresh(self):
+        self.update()
+
+    def paintEvent(self, ev):
+        from PySide6.QtGui import QFontMetrics
+        from neotja.theme import COLORS
+        p = QPainter(self)
+        r = self.rect()
+        f = QFont(self.font())
+        f.setPixelSize(self.px)
+        f.setBold(self.bold)
+        fm = QFontMetrics(f)
+        text = fm.elidedText(self._text, Qt.ElideRight, max(10, r.width()))
+        p.setFont(f)
+        p.setPen(QColor(COLORS["fg_bright"]))
+        p.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, text)
+        if self.sub and text == self._text:
+            used = fm.horizontalAdvance(text) + 14
+            if r.width() - used > 30:
+                sf = QFont(self.font())
+                sf.setPixelSize(self.sub_px)
+                p.setFont(sf)
+                p.setPen(QColor(_secondary()))
+                p.drawText(r.adjusted(used, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter,
+                           QFontMetrics(sf).elidedText(" ".join(self.sub.split()),
+                                                       Qt.ElideRight, r.width() - used))
+        p.end()
+
+
+class TableRow(QWidget):
+    """曲の表と同じ見た目の行(角・隙間なし、下に細い線、乗せると少し明るく、
+    キーで選ぶとシアンを薄く塗って左 3px がシアン)。"""
+
+    def __init__(self, height=40, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(height)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self._hover = False
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def focusInEvent(self, ev):
+        self.update()
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev):
+        self.update()
+        super().focusOutEvent(ev)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        r = self.rect()
+        if self.hasFocus():
+            c = QColor(_CYAN)
+            c.setAlphaF(0.10)
+            p.fillRect(r, c)
+        elif self._hover:
+            p.fillRect(r, QColor(255, 255, 255, 10))
+        p.fillRect(QRectF(0, r.height() - 1, r.width(), 1), QColor(255, 255, 255, 18))
+        if self.hasFocus():
+            p.fillRect(QRectF(0, 0, 3, r.height()), _CYAN)
+        p.end()
+
+
+def table_row_layout(row, margins=(10, 0, 6, 0), spacing=14):
+    """曲の表と同じ余白・間(列の左がそろう)。"""
+    h = QHBoxLayout(row)
+    h.setContentsMargins(*margins)
+    h.setSpacing(spacing)
+    return h
+
+
+class PlaylistRow(TableRow):
     """プレイリストの1行。押すと開く、右クリックで 編集 / 削除。"""
 
     opened = Signal(str)
     menu_requested = Signal(str, object)   # (id, 画面の位置)
 
     def __init__(self, pl, parent=None):
-        super().__init__(radius=10, hoverable=True, parent=parent)
+        super().__init__(height=ROW_HEIGHT, parent=parent)
         self.pid = pl["id"]
         self.pl = pl
         self.setObjectName("playlistRow")
-        self.setFixedHeight(ROW_HEIGHT)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.PointingHandCursor)
-        h = QHBoxLayout(self)
-        h.setContentsMargins(14, 12, 18, 12)
-        h.setSpacing(18)
+        h = table_row_layout(self)
         self.jacket = PlaylistJacket(JACKET_PX)
         h.addWidget(self.jacket, 0, Qt.AlignVCenter)
-        texts = QVBoxLayout()
-        texts.setSpacing(6)
-        texts.addStretch(1)
-        self.title = ElidedText(pl.get("title") or "", "fg_bright", 19, bold=True, elide=True)
-        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        texts.addWidget(self.title)
-        self.desc = ElidedText(pl.get("description") or "", "fg_dim", 13, elide=True)
-        self.desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.desc.setVisible(bool(self.desc.text()))
-        texts.addWidget(self.desc)
-        texts.addStretch(1)
-        h.addLayout(texts, 1)
+        # 題と説明は1行(説明は淡く、長ければ省略)。
+        self.title = InlineText(pl.get("title") or "", 16, True,
+                                sub=pl.get("description") or "")
+        self.desc = self.title
+        h.addWidget(self.title, 1)
         arrow = QLabel("›")
         arrow.setObjectName("chevron")
         h.addWidget(arrow)

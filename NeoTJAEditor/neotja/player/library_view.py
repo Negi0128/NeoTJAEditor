@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from neotja.player import playlists, song_lists, thumbs
 from neotja.player.playlist_view import (
+    InlineText, TableRow, table_row_layout,
     AddModeBar, CourseMarkIcon, CoursePicker, PlaylistDialog, PlaylistRow,
     playlist_jacket_pixmap,
 )
@@ -939,26 +940,46 @@ class PlaylistSongRow(SongRow):
         return QPoint(24, pm.height() // 2)
 
 
-class FolderRow(GlassCard):
-    """サブフォルダの1行。"""
+class _GenreSwatch(QWidget):
+    """ジャンルの色(box.def)の小さな四角。曲の表のジャケットの列に置く。"""
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(COLW["thumb"], COLW["thumb"])
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.color = QColor(color)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        side = 14.0
+        r = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.color)
+        p.drawRoundedRect(r, 3, 3)
+        p.end()
+
+
+class FolderRow(TableRow):
+    """サブフォルダの1行(曲の表と同じ見た目)。"""
 
     opened = Signal(str)
 
     def __init__(self, path, parent=None):
-        super().__init__(radius=10, hoverable=True, parent=parent)
+        super().__init__(height=ROW_HEIGHT, parent=parent)
         self.path = path
         self.name = os.path.basename(os.path.normpath(path)) or path
         self.setObjectName("folderRow")
-        self.setFixedHeight(54)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(path)
-        h = QHBoxLayout(self)
-        h.setContentsMargins(18, 6, 18, 6)
-        h.setSpacing(14)
-        h.addWidget(_FolderIcon())
-        self.title = ElidedText(self.name, "fg_bright", 15)
-        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        h = table_row_layout(self, ROW_MARGINS, ROW_SPACING)
+        icon = _FolderIcon()
+        slot = QWidget()
+        slot.setFixedWidth(COLW["thumb"])
+        sl = QHBoxLayout(slot)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.addWidget(icon, 0, Qt.AlignCenter)
+        h.addWidget(slot)
+        self.title = InlineText(self.name, 15, True)
         h.addWidget(self.title, 1)
         arrow = QLabel("›")
         arrow.setObjectName("chevron")
@@ -986,61 +1007,32 @@ class FolderRow(GlassCard):
         super().keyPressEvent(ev)
 
 
-class GenreRow(GlassCard):
-    """ジャンル(box.def のあるフォルダ)の1行。box.def の色を左の帯と
-    うっすらした地の色に使う。"""
+class GenreRow(TableRow):
+    """ジャンル(box.def のあるフォルダ)の1行。色は小さな四角、題、ジャンル名
+    (題と違うときだけ、同じ行に淡く)、右に ›。"""
 
     opened = Signal(str)
 
     def __init__(self, path, box, parent=None):
-        super().__init__(radius=10, hoverable=True, parent=parent)
+        super().__init__(height=ROW_HEIGHT, parent=parent)
         self.path = path
         self.box = box
         self.name = box["title"]
         self.setObjectName("genreRow")
-        self.setFixedHeight(62)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(path)
-        h = QHBoxLayout(self)
-        h.setContentsMargins(24, 6, 18, 6)
-        h.setSpacing(12)
-        texts = QVBoxLayout()
-        texts.setSpacing(1)
-        self.title = ElidedText(self.name, "fg_bright", 17, bold=True)
-        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        texts.addWidget(self.title)
+        h = table_row_layout(self, ROW_MARGINS, ROW_SPACING)
+        self.swatch = _GenreSwatch(self.color())
+        h.addWidget(self.swatch)
         genre = box.get("genre", "")
-        if genre and genre != self.name:
-            self.sub = ElidedText(genre, "fg_dim", 12)
-            texts.addWidget(self.sub)
-        h.addLayout(texts, 1)
+        self.title = InlineText(self.name, 15, True,
+                                sub=genre if genre and genre != self.name else "")
+        h.addWidget(self.title, 1)
         arrow = QLabel("›")
         arrow.setObjectName("chevron")
         h.addWidget(arrow)
-        self._restyle()
 
     def color(self):
         return QColor(self.box.get("color") or COLORS["accent"])
-
-    def _restyle(self):
-        self.set_bar_color(self.color())
-
-    def paintEvent(self, ev):
-        super().paintEvent(ev)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, 10, 10)
-        p.setClipPath(clip)
-        grad = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        col = self.color()
-        grad.setColorAt(0, _c(col, 0.22))
-        grad.setColorAt(0.55, _c(col, 0.04))
-        grad.setColorAt(1, _c(col, 0))
-        p.fillRect(rect, QBrush(grad))
-        p.end()
 
     def matches(self, q):
         q = song_lists.normalize(q).strip()
@@ -1048,7 +1040,8 @@ class GenreRow(GlassCard):
                 or q in song_lists.normalize(self.box.get("genre", "")))
 
     def refresh_theme(self):
-        self._restyle()
+        self.swatch.color = self.color()
+        self.swatch.update()
         self.title.refresh()
 
     def mousePressEvent(self, ev):
@@ -1527,8 +1520,23 @@ def _placeholder_color(edit):
     """検索欄の置き字(「曲名で検索」)を読める色に(既定の灰色は地に対して薄い)。"""
     from PySide6.QtGui import QPalette
     pal = edit.palette()
-    pal.setColor(QPalette.PlaceholderText, QColor(secondary_color()))
-    edit.setPalette(pal)
+    want = QColor(secondary_color())
+    if pal.color(QPalette.PlaceholderText) != want:
+        pal.setColor(QPalette.PlaceholderText, want)
+        edit.setPalette(pal)
+
+
+class SearchEdit(QLineEdit):
+    """検索欄。親の QSS が付くたびに色板が作り直されて置き字の色が戻るので、
+    磨き直しのあとに置き字の色を当て直す。"""
+
+    def event(self, ev):
+        from PySide6.QtCore import QEvent
+        r = super().event(ev)
+        if ev.type() in (QEvent.Polish, QEvent.StyleChange, QEvent.PaletteChange,
+                         QEvent.Show):
+            _placeholder_color(self)
+        return r
 
 
 class _Page(QWidget):
@@ -1555,7 +1563,7 @@ class _Page(QWidget):
         self.header = None
 
     def add_search(self):
-        self.search = QLineEdit()
+        self.search = SearchEdit()
         self.search.setObjectName("search")
         self.search.setPlaceholderText("曲名で検索")
         self.search.setClearButtonEnabled(True)
@@ -1811,13 +1819,15 @@ class LibraryView(QWidget):
         self.playlist_confirm = None
         self.page_playlists = _Page("プレイリスト")
         self.btn_new_playlist = QPushButton("＋  プレイリストを作成")
-        self.btn_new_playlist.setObjectName("flat")
+        self.btn_new_playlist.setObjectName("quiet")
         self.btn_new_playlist.setCursor(Qt.PointingHandCursor)
         self.btn_new_playlist.clicked.connect(self._pi)
         self.btn_new_playlist.clicked.connect(self.create_playlist)
-        self.page_playlists.tools.addWidget(self.btn_new_playlist)
         self.page_playlists.tools.addStretch(1)
-        self.playlists_list = self.page_playlists.add_list(spacing=8)
+        self.page_playlists.tools.addWidget(self.btn_new_playlist)
+        self.playlists_list = RowList()
+        self.page_playlists.list = self.playlists_list
+        self.page_playlists.add_table(self.playlists_list)
         self.pages.addWidget(self.page_playlists)
 
         self.page_playlist = _Page("")

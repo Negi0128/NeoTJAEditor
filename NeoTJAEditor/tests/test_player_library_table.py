@@ -72,6 +72,24 @@ class TableTests(unittest.TestCase):
             self.assertGreaterEqual(_contrast(secondary_color(), '#1b2030'), 4.5)
 
     @real_qt_test
+    def test_genre_folder_rows_and_placeholder(self):
+        from PySide6.QtGui import QPalette
+        from neotja.player.library_view import (
+            ROW_HEIGHT, FolderRow, GenreRow, LibraryView, secondary_color)
+        g = GenreRow('C:/x', {'title': 'ポップス', 'genre': 'J-POP', 'color': '#43a5ff'})
+        f = FolderRow('C:/y/アルバム')
+        self.assertEqual((g.height(), f.height()), (ROW_HEIGHT, ROW_HEIGHT))
+        self.assertEqual(g.title.sub, 'J-POP')
+        self.assertEqual(g.swatch.color.name(), '#43a5ff')
+        lib = LibraryView({'master_volume': 0.0}, lambda: None)
+        lib.setStyleSheet('QLineEdit { color: white; }')   # 親の QSS が付いても
+        lib.show()
+        _wait(50)
+        pal = lib.page_recent.search.palette()
+        self.assertEqual(pal.color(QPalette.PlaceholderText).name(), secondary_color())
+        lib.close()
+
+    @real_qt_test
     def test_header_sorts_and_columns_line_up(self):
         from neotja.player.library_view import ROW_HEIGHT, LibraryView, SongRow
         with tempfile.TemporaryDirectory() as d:

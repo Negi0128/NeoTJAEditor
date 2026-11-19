@@ -1,3 +1,12 @@
+## 2026-11-19 選曲の作り直し その2（ジャンル/フォルダの行・プレイリストの一覧・検索の置き字）（Claude）
+
+- `playlist_view.TableRow`（曲の表と同じ: 角・隙間なし・下に細い線・乗せると少し明るく・キーで選ぶとシアンを薄く＋左 3px）と `InlineText`（主の字＋同じ行に淡い字）、`table_row_layout`。
+- `GenreRow` / `FolderRow` は TableRow（40px）。ジャンルは box.def の色の 14px の四角（`_GenreSwatch`、ジャケットの列）、題、ジャンル名（題と違うときだけ淡く）、右に ›。フォルダは同じ列にフォルダの形。曲の表と左・幅がそろう（同じ表の箱の中）。曲数は前から出していないので足していない。
+- プレイリストの一覧: `PlaylistRow` も TableRow（56px、ジャケット 44px: 自分 → 1曲目 → 小さな枠は字なしの No Image）。題と説明を1行（説明は淡く省略）、›。右クリックの 編集/削除 はそのまま。表と同じ幅の上限・左。「＋ プレイリストを作成」は右上に小さく（#quiet）。
+- 検索欄の置き字: 親の QSS で色板が作り直されて戻っていたので、`SearchEdit`（QLineEdit）が Polish/StyleChange/PaletteChange/Show のたびに PlaceholderText を #93a3bf に当て直す。画面から撮った絵の置き字のいちばん明るい画素が #93a3bf になることを確かめた。
+- 試験: `test_player_library_table` に1件（行の高さ・四角の色・親の QSS のあとの置き字の色）。
+- 画像: scratchpad の `redesign2/` に r2_genre_list / r2_folder_page / r2_playlist_list / r2_search_box。
+
 ## 2026-11-19 選曲の作り直し（左の列・曲の表・読める色）（Claude）
 
 コミット 63007a9（左の列）/ f5008d1（曲の表）/ 次（色）。機能は全部残した（1回目で試聴・2回目で難易度選択、印で止める/流す、☆、右クリック、曲を追加、プレイリストの番号・マーク・ドラッグ・ファイルなし、再指定、検索、並べ方と向き、履歴を消す、ジャケット/No Image、ドラッグの光り、Enter）。
