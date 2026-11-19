@@ -81,7 +81,7 @@ class VolumeSlider(QWidget):
     def _track(self):
         r = self.inner()
         s = self.scale
-        num_w = 46 * s
+        num_w = 58 * s
         return QRectF(r.left() + 12 * s, r.center().y() - 4 * s,
                       max(10.0, r.width() - num_w - 24 * s), 8 * s)
 
@@ -158,7 +158,7 @@ class VolumeSlider(QWidget):
         kx = fill.right() - knob_w / 2
         p.setBrush(QColor(255, 255, 255))
         p.drawRect(QRectF(kx, t.center().y() - knob_h / 2, knob_w, knob_h))
-        p.setFont(thin_font(16 * s, QFont.Bold))
+        p.setFont(thin_font(21 * s, QFont.Bold))
         p.setPen(QColor(255, 255, 255, 235))
         p.drawText(QRectF(t.right() + 6 * s, r.top(), r.right() - t.right() - 10 * s, r.height()),
                    Qt.AlignRight | Qt.AlignVCenter, str(self._value))

@@ -218,6 +218,20 @@ class DifficultyKeysTests(unittest.TestCase):
             self.assertFalse(page.btn_record.isVisible())
             QTest.keyClick(page, Qt.Key_Return)
             self.assertEqual(got, ['Oni'])
+            # 設定の中: ↑↓ で行を移り、←→ でスイッチを切る/入れる(表裏は変えない)。
+            panel = page.settings
+            rows = panel.rows()
+            rows[0].setFocus()
+            QTest.keyClick(rows[0], Qt.Key_Down)
+            self.assertTrue(rows[1].hasFocus())
+            self.assertEqual(page.current_course(), 'Oni')
+            sw = panel.switches['player_show_bg']
+            self.assertTrue(sw.isChecked())
+            QTest.keyClick(sw, Qt.Key_Left)
+            self.assertFalse(sw.isChecked())
+            QTest.keyClick(sw, Qt.Key_Right)
+            self.assertTrue(sw.isChecked())
+            self.assertEqual(panel.lbl_auto.text(), 'オート演奏')
             page.deleteLater()
 
 

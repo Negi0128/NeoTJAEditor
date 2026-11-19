@@ -21,7 +21,7 @@ FOT-大江戸勘亭流 Std E(System の Kanteiryu.otf)。★・ボタンは細�
 
 import os
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QPropertyAnimation,
+from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation,
                             QRect, QRectF, QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QLinearGradient, QPainter, QPainterPath, QPen,
@@ -717,8 +717,8 @@ class SettingsAction(_GlassButton):
             p.setOpacity(0.4)
         paint_glass(p, self.inner(), BTN_RADIUS * self.scale, self.scale,
                     lit=self.lit() and self.isEnabled(), down=self.isDown(),
-                    focus=self.hasFocus(), base_alpha=175, edge=TOP_EDGE)
-        p.setFont(thin_font(21 * self.scale, QFont.DemiBold))
+                    focus=self.hasFocus(), base_alpha=175, edge=QColor(150, 215, 235, 235))
+        p.setFont(thin_font(20 * self.scale, QFont.Bold))
         p.setPen(QColor(235, 242, 250))
         p.drawText(self.inner(), Qt.AlignCenter, self.text())
         p.end()
@@ -756,28 +756,26 @@ class SettingsPanel(QFrame):
         self.lbl_head = QLabel("設定")
         self.lbl_head.setObjectName("setHead")
         head.addWidget(self.lbl_head)
+        # オート演奏は変えられないので、行ではなく見出しの横の札にする。
+        self.lbl_auto = QLabel("オート演奏")
+        self.lbl_auto.setObjectName("panelBadge")
+        self.lbl_auto.setAlignment(Qt.AlignCenter)
+        head.addSpacing(14)
+        head.addWidget(self.lbl_auto, 0, Qt.AlignVCenter)
         head.addStretch(1)
         self.btn_close = GlassCircle("close")
         self.btn_close.setToolTip("閉じる")
         self.btn_close.clicked.connect(self.closed)
         head.addWidget(self.btn_close)
         v.addLayout(head)
+        # 表示 / 演奏 / 音量 の3つのかたまり。見出しは足さず、間を空けて
+        # 少し強い線で分ける(行の間は薄い線)。
         self.grid = QGridLayout()
         v.addLayout(self.grid)
-        self.btn_art = SettingsAction("背景・ジャケットを指定")
-        self.btn_art.clicked.connect(self.art_requested)
-        v.addWidget(self.btn_art)
         v.addStretch(1)
         self.labels = []
-        lbl = QLabel("オート演奏")
-        lbl.setObjectName("setLabel")
-        val = QLabel("ON（固定）")
-        val.setObjectName("setValue")
-        self.grid.addWidget(lbl, 0, 0)
-        self.grid.addWidget(val, 0, 1, Qt.AlignRight | Qt.AlignVCenter)
-        self.labels += [lbl, val]
         self.switches = {}
-        for i, (key, text) in enumerate(self.ROWS, start=1):
+        for i, (key, text) in enumerate(self.ROWS):
             lbl = QLabel(text)
             lbl.setObjectName("setLabel")
             sw = ToggleSwitch()
@@ -786,9 +784,15 @@ class SettingsPanel(QFrame):
             self.grid.addWidget(sw, i, 1, Qt.AlignRight | Qt.AlignVCenter)
             self.labels.append(lbl)
             self.switches[key] = sw
+        # 表示のかたまりの終わり: 曲別の背景・ジャケット(少し強い縁)。
+        self.btn_art = SettingsAction("背景・ジャケットを指定")
+        self.btn_art.clicked.connect(self.art_requested)
+        self._art_row = len(self.ROWS)
+        self.grid.addWidget(self.btn_art, self._art_row, 0, 1, 2)
+        self._gap_rows = [self._art_row + 1]
         self.steppers = {}
         self._number_defaults = {}
-        row = len(self.ROWS) + 1
+        row = self._art_row + 2
         for i, (key, text, lo, hi, default, unit) in enumerate(self.NUMBERS, start=row):
             lbl = QLabel(text)
             lbl.setObjectName("setLabel")
@@ -802,7 +806,8 @@ class SettingsPanel(QFrame):
         # 音量(全体・曲・効果音)。Editor と同じ設定キー。
         from neotja.player.volume import VOLUME_KEYS, VolumeSlider
         self.volume_sliders = {}
-        row = len(self.ROWS) + len(self.NUMBERS) + 1
+        self._gap_rows.append(row + len(self.NUMBERS))
+        row = row + len(self.NUMBERS) + 1
         for i, (key, text, _d) in enumerate(VOLUME_KEYS, start=row):
             lbl = QLabel(text)
             lbl.setObjectName("setLabel")
@@ -812,6 +817,36 @@ class SettingsPanel(QFrame):
             self.grid.addWidget(sl, i, 1, Qt.AlignRight | Qt.AlignVCenter)
             self.labels.append(lbl)
             self.volume_sliders[key] = sl
+        for w in self.rows():
+            w.installEventFilter(self)
+
+    def rows(self):
+        """↑↓ で移る順(上から)。"""
+        return (list(self.switches.values()) + [self.btn_art]
+                + list(self.steppers.values()) + list(self.volume_sliders.values()))
+
+    def focus_first(self):
+        self.rows()[0].setFocus(Qt.TabFocusReason)
+
+    def eventFilter(self, obj, ev):
+        """↑↓ で行を移る、←→ で値を変える(スイッチは ←=OFF / →=ON)。"""
+        if ev.type() == QEvent.KeyPress and obj in self.rows():
+            k = ev.key()
+            if k in (Qt.Key_Up, Qt.Key_Down):
+                rows = self.rows()
+                i = rows.index(obj) + (1 if k == Qt.Key_Down else -1)
+                if 0 <= i < len(rows):
+                    rows[i].setFocus(Qt.TabFocusReason)
+                return True
+            if obj in self.switches.values() and k in (Qt.Key_Left, Qt.Key_Right):
+                on = k == Qt.Key_Right
+                if obj.isChecked() != on:
+                    obj.click()
+                return True
+            if obj is self.btn_art and k in (Qt.Key_Return, Qt.Key_Enter):
+                obj.click()
+                return True
+        return super().eventFilter(obj, ev)
 
     def set_volume_values(self, cfg):
         from neotja.player.volume import level_of
@@ -831,17 +866,20 @@ class SettingsPanel(QFrame):
     def apply_scale(self, s):
         self.scale = s
         self._v.setContentsMargins(int(38 * s), int(30 * s), int(30 * s), int(30 * s))
-        self._v.setSpacing(int(18 * s))
+        self._v.setSpacing(int(22 * s))
         self.grid.setVerticalSpacing(int(10 * s))
         self.grid.setColumnStretch(0, 1)
-        f = thin_font(30 * s, QFont.DemiBold)
+        for r in self._gap_rows:
+            self.grid.setRowMinimumHeight(r, int(22 * s))
+        f = thin_font(30 * s, QFont.Bold)
         self.lbl_head.setFont(f)
+        self.lbl_auto.setFixedSize(int(104 * s), int(30 * s))
         for lbl in self.labels:
-            lbl.setFont(thin_font(25 * s, QFont.DemiBold))
+            lbl.setFont(thin_font(20 * s, QFont.DemiBold))
         self.btn_close.scale = s
         self.btn_close.setFixedSize(int(48 * s + 2 * GLOW * s), int(48 * s + 2 * GLOW * s))
         self.btn_art.scale = s
-        self.btn_art.setFixedHeight(int(64 * s))
+        self.btn_art.setFixedHeight(int(60 * s))
         self.btn_art.update()
         for sw in (list(self.switches.values()) + list(self.steppers.values())
                    + list(self.volume_sliders.values())):
@@ -855,12 +893,27 @@ class SettingsPanel(QFrame):
         p.fillRect(self.rect(), QColor(12, 24, 44))
         p.setPen(QPen(TOP_EDGE, 1.3))
         p.drawLine(0, 0, 0, self.height())
-        # 項目の区切り(ラベルの行のあいだ)
-        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
-        rows = [lbl for lbl in self.labels if lbl.objectName() == "setLabel"]
+        # 行の区切りは薄く、かたまりの区切り(空けた行の真ん中)は少し強く。
+        # 指定ボタンは自分の縁があるので、その上下には引かない。
         m = int(38 * self.scale)
+        thin = QPen(QColor(255, 255, 255, 26), 1)
+        strong = QPen(QColor(147, 163, 191, 110), 1)
+        g = int(GLOW * self.scale)
+        rows = [lbl for lbl in self.labels if lbl.objectName() == "setLabel"]
+        rows.insert(len(self.ROWS), self.btn_art)
+        gaps = set(self._gap_rows)
         for a, b in zip(rows, rows[1:]):
-            y = (a.geometry().bottom() + b.geometry().top()) // 2
+            ra = self.grid.getItemPosition(self.grid.indexOf(a))[0]
+            rb = self.grid.getItemPosition(self.grid.indexOf(b))[0]
+            ga = a.geometry().adjusted(0, g, 0, -g) if a is self.btn_art else a.geometry()
+            gb = b.geometry().adjusted(0, g, 0, -g) if b is self.btn_art else b.geometry()
+            y = (ga.bottom() + gb.top()) // 2
+            if any(ra < x < rb for x in gaps):
+                p.setPen(strong)
+            elif a is self.btn_art or b is self.btn_art:
+                continue
+            else:
+                p.setPen(thin)
             p.drawLine(m, y, self.width() - m, y)
         p.end()
 
@@ -1099,6 +1152,7 @@ class DifficultyPage(QWidget):
         self._anim.setStartValue(QPoint(self.width(), 0))
         self._anim.setEndValue(r.topLeft())
         self._anim.start()
+        self.settings.focus_first()
 
     def close_settings(self):
         if not self.settings.isVisible():
@@ -1116,6 +1170,7 @@ class DifficultyPage(QWidget):
             self.btn_settings.show()
             self.btn_play.show()
             self.btn_record.show()
+            self.setFocus(Qt.OtherFocusReason)
 
     def _on_setting(self, key, value):
         self.cfg[key] = bool(value)
@@ -1335,5 +1390,8 @@ class DifficultyPage(QWidget):
         QFrame#diffSettings QLabel {{ color: #ffffff; background: transparent; {fam}
                                      font-size: {px(24)}px; font-weight: 600; }}
         QLabel#setHead {{ font-size: {px(30)}px; letter-spacing: 2px; }}
-        QLabel#setValue {{ color: rgba(255,255,255,190); }}
+        QFrame#diffSettings QLabel#setLabel {{ font-size: {px(20)}px; }}
+        QFrame#diffSettings QLabel#panelBadge {{ background-color: rgba(12,24,44,200); color: #93a3bf;
+                           border: 1px solid rgba(147,163,191,130); border-radius: {px(3)}px;
+                           font-size: {px(15)}px; font-weight: bold; }}
         """
