@@ -30,10 +30,10 @@ class EditorEntryPointTests(unittest.TestCase):
                 self.assertFalse(hasattr(win, name), name)
 
     @real_qt_test
-    def test_f1_only_toggles_hit_sounds(self):
+    def test_f1_only_toggles_auto(self):
         from unittest.mock import patch
         with editor_session() as (win, _root):
-            with patch.object(win.preview_dock, 'toggle_hit_sounds') as toggle, \
+            with patch.object(win.preview_dock, 'toggle_editor_auto') as toggle, \
                  patch.object(win.preview_dock, 'set_game_preview_visible') as show:
                 win._on_f1()
                 toggle.assert_called_once_with()

@@ -2757,7 +2757,8 @@ class ChartPreviewWidget(QWidget):
                 return          # キーを押しっぱなしの連射は打とみなさない
             pad = self._KEY_PADS.get(key)
             if pad is not None:
-                self._queue_press(*pad)
+                if self.pads_enabled:
+                    self._queue_press(*pad)
                 return
             if key == Qt.Key_Space:
                 self.pause()    # 中断だけは残す(Enter は叩く手の近くで誤爆するので外した)
@@ -2836,6 +2837,9 @@ class ChartPreviewWidget(QWidget):
 
     def play_state(self):
         return self._play_state
+
+    #: 打面を受けるか(Editor の作譜モードでは False: オート OFF でも叩けない)。
+    pads_enabled = True
 
     #: 叩いた時刻から引く秒(Player の「インプットラグ」)。
     input_lag_sec = 0.0

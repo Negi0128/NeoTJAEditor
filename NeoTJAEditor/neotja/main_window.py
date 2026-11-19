@@ -2190,14 +2190,16 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_f1(self):
-        """F1: 打音の ON/OFF。
+        """F1: オート演奏の ON/OFF(以前は打音の ON/OFF)。
 
         以前は「プレビューが閉じていれば開く、開いていれば打音切替」だった。
         v15 では再生画面が右ペインに埋め込みで常にあるので、開く側の分岐は
         通らない。打音切替だけにする。"""
         if self.is_player_visible():
             return
-        self.preview_dock.toggle_hit_sounds()
+        # 2026-11-20: F1 はオート ON/OFF(OFF で自分で叩く)。打音だけ消したいときは
+        # 右下の〔打音〕で切り替える。
+        self.preview_dock.toggle_editor_auto()
 
     def _build_menu(self):
         mb = self.menuBar()

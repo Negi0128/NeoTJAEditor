@@ -3446,7 +3446,7 @@ class PreviewDock(QDockWidget):
 
     #: 統合画面でモード切替ボタンに出す名前。内部の名前(_mode_names)は
     #: 設定の保存にも使うので変えず、見せる字だけ替える。
-    MODE_DISPLAY = {"通常再生": "通常モード", "軽量": "軽量モード",
+    MODE_DISPLAY = {"通常再生": "演奏モード", "軽量": "軽量モード",
                     "同時再生": "同時再生モード", "作譜": "作譜モード"}
 
     def _mode_display_name(self, name):
@@ -4104,6 +4104,10 @@ class PreviewDock(QDockWidget):
                     and idx == self.MODE_EDIT)
 
     def set_bottom_mode(self, idx: int):
+        self._set_bottom_mode(idx)
+        self._sync_editor_pads()   # 作譜モードでは打面を受けない
+
+    def _set_bottom_mode(self, idx: int):
         """下部パネルのモードを切り替える。
 
         通常再生は録画と同じ 1280x720(どんちゃん・下の背景・フッターまで出る)。
@@ -4362,6 +4366,9 @@ class PreviewDock(QDockWidget):
             self.chart_edit.set_default_measure_len(240.0 / float(headers["bpm"]))
 
         if preview_data is not None:
+            self._last_preview_data = preview_data
+            if not self.editor_auto:
+                self._rebuild_editor_play()
             self._editor_notes = hit_notes_from_preview(preview_data)
             self._preview_notes = list(preview_data.get("notes", []))
             self._preview_spans = (list(preview_data.get("rolls", [])),
@@ -5007,6 +5014,17 @@ class PreviewDock(QDockWidget):
             pass
 
     def _on_playing_changed(self, playing):
+        if playing and not self.editor_auto:
+            # 叩いた所より前から流し直したら、叩いた記録は初めから。
+            st = self.chart_preview.play_state()
+            try:
+                now = self.chart_preview._current_chart_time()
+                last = st._times[st._cursor - 1] if st is not None and st._cursor else None
+                if st is not None and (last is not None and now < last
+                                       or st.last_press is not None and now < st.last_press[0]):
+                    self._rebuild_editor_play()
+            except Exception:  # noqa: BLE001
+                pass
         if self._embedded:
             self.btn_play.setText("❚❚" if playing else "▶")
             # 再生中だけ主役の色(アクセント色のグラデーション)。
@@ -5239,6 +5257,38 @@ class PreviewDock(QDockWidget):
         self.btn_hit_sounds.setObjectName("accentButton" if checked else "")
         self.btn_hit_sounds.style().unpolish(self.btn_hit_sounds)
         self.btn_hit_sounds.style().polish(self.btn_hit_sounds)
+
+    # ------------------------------------------------------------------
+    # Editor のオート ON/OFF(F1)。OFF なら自分で叩く(演奏モードの画面は
+    # D F J K で判定、作譜モードは叩けず、音符は不可で流れる)。
+    #: オートか。Player の PreviewDock は使わない(いつも True のまま)。
+    editor_auto = True
+    _last_preview_data = None
+
+    def _rebuild_editor_play(self):
+        from neotja.player.play_state import PlayState
+        data = self._last_preview_data
+        try:
+            roll = float((self.config_data or {}).get("roll_speed", 45))
+        except Exception:  # noqa: BLE001
+            roll = 45.0
+        self.set_play_state(PlayState(data, roll) if data else None)
+        self._sync_editor_pads()
+
+    def _sync_editor_pads(self):
+        """作譜モードでは打面を受けない(オート OFF でも叩けない)。"""
+        in_edit = (self.MODE_EDIT is not None
+                   and self.bottom_stack.currentIndex() == self.MODE_EDIT)
+        self.chart_preview.pads_enabled = not in_edit
+
+    def toggle_editor_auto(self):
+        """F1: オート ON/OFF。"""
+        self.editor_auto = not self.editor_auto
+        if self.editor_auto:
+            self.set_play_state(None)
+        else:
+            self._rebuild_editor_play()
+        self.chart_preview.show_toast("オート : %s" % ("ON" if self.editor_auto else "OFF"))
 
     def toggle_hit_sounds(self):
         """Flips the 打音(hit sounds) button; routed through toggled so the

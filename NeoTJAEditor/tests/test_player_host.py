@@ -320,7 +320,7 @@ class PlayerHostTests(unittest.TestCase):
             self.assertTrue(win.is_player_visible())
             calls = []
             win.save_file = lambda: calls.append('save')
-            win.preview_dock.toggle_hit_sounds = lambda: calls.append('f1')
+            win.preview_dock.toggle_editor_auto = lambda: calls.append('f1')
             orig_warning = QMessageBox.warning
             QMessageBox.warning = staticmethod(lambda *a, **k: calls.append('warn'))
             try:
