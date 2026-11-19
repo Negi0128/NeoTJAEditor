@@ -142,7 +142,7 @@ class VolumeSlider(QWidget):
         r = self.inner()
         lit = self._hover or self.hasFocus() or self._drag
         p.setPen(QPen(QColor(SELECT_COLOR) if self.hasFocus()
-                      else QColor(255, 255, 255, 140 if lit else 100), 1.3 * s))
+                      else QColor(255, 255, 255, 90 if lit else 55), 1.0 * s))
         p.setBrush(QColor(10, 20, 36, 150))
         p.drawRoundedRect(r, BTN_RADIUS * s, BTN_RADIUS * s)
         t = self._track()
@@ -159,7 +159,7 @@ class VolumeSlider(QWidget):
         p.setBrush(QColor(255, 255, 255))
         p.drawRect(QRectF(kx, t.center().y() - knob_h / 2, knob_w, knob_h))
         p.setFont(thin_font(21 * s, QFont.Bold))
-        p.setPen(QColor(255, 255, 255, 235))
+        p.setPen(QColor(255, 255, 255))
         p.drawText(QRectF(t.right() + 6 * s, r.top(), r.right() - t.right() - 10 * s, r.height()),
                    Qt.AlignRight | Qt.AlignVCenter, str(self._value))
         p.end()
@@ -201,7 +201,7 @@ class VolumeRows(QWidget):
         # 文字の大きさは自分の styleSheet で決める(親の QSS の QLabel の指定に
         # setFont が負けるため)。
         fam = ui_family()
-        qss = ("color: #ffffff; background: transparent; font-size: %dpx; font-weight: 700;%s"
+        qss = ("color: #ffffff; background: transparent; font-size: %dpx; font-weight: 700; letter-spacing: 2px;%s"
                % (max(8, int(round(self._label_px * s))),
                   (' font-family: "%s";' % fam) if fam else ""))
         for lbl in self.labels:

@@ -44,7 +44,7 @@ PAD = 34
 HEAD_H = 44
 #: 項目の下の音量の段(1段の高さ・上の余白)。
 VOL_ROW_H = 56
-VOL_GAP = 26
+VOL_GAP = 40
 
 
 class _MenuItem(QAbstractButton):
@@ -87,7 +87,7 @@ class _MenuItem(QAbstractButton):
         p.setPen(QColor(255, 255, 255))
         p.drawText(QRectF(bx, by, box, box), Qt.AlignCenter, str(self.number))
         f = thin_font(27 * s, QFont.Bold if cur else QFont.DemiBold)
-        f.setLetterSpacing(QFont.AbsoluteSpacing, 3 * s)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 2 * s)
         p.setFont(f)
         p.drawText(QRectF(bx + box + 26 * s, r.top(), r.width(), r.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, self.text())
@@ -287,10 +287,11 @@ class PauseMenu(QWidget):
             r = self.backdrop_rect or QRectF(self.rect())
             p.drawImage(QRectF(r), self.backdrop)
         # 後ろ(止まった再生画面)を暗く沈める。
-        p.fillRect(self.rect(), QColor(0, 0, 0, 150))
-        paint_glass(p, self._panel, BTN_RADIUS * s, s, base_alpha=205, edge=TOP_EDGE)
-        f = thin_font(24 * s, QFont.DemiBold)
-        f.setLetterSpacing(QFont.AbsoluteSpacing, 6 * s)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 175))
+        # 板は不透明な紺(後ろの絵が透けて輪郭が溶けないように)。
+        paint_glass(p, self._panel, BTN_RADIUS * s, s, base_alpha=250, edge=TOP_EDGE)
+        f = thin_font(30 * s, QFont.Bold)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 2 * s)
         p.setFont(f)
         p.setPen(QColor(230, 244, 250))
         head = QRectF(self._panel.left() + PAD * s, self._panel.top() + PAD * s,
@@ -303,6 +304,6 @@ class PauseMenu(QWidget):
         # 項目と音量のあいだの線。
         vy = getattr(self, "_vol_line", None)
         if vy is not None:
-            p.setPen(QPen(QColor(255, 255, 255, 40), 1.0 * max(1.0, s)))
+            p.setPen(QPen(QColor(147, 163, 191, 115), 1.0 * max(1.0, s)))
             p.drawLine(int(head.left()), int(vy), int(head.right()), int(vy))
         p.end()
