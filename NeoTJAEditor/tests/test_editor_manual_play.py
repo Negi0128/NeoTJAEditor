@@ -31,6 +31,35 @@ class EditorAutoTests(unittest.TestCase):
             self.assertTrue(dock.editor_auto)
             self.assertIsNone(dock.chart_preview.play_state())
 
+class KeyTests(unittest.TestCase):
+    @real_qt_test
+    def test_keys_stopped_vs_playing(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        with editor_session() as (win, _root):
+            dock = win.preview_dock
+            cp = dock.chart_preview
+            dock.set_bottom_mode(dock.MODE_TITLE)   # 演奏モード
+            dock._last_preview_data = {'notes': [(1.0, '1')]}
+            win._on_f1()
+            calls = []
+            cp._queue_press = lambda *a: calls.append(('pad',) + a)
+            cp.play_from_current_measure = lambda **k: calls.append('play')
+            cp._measure_key = lambda d: calls.append(('measure', d))
+            cp.pause = lambda: calls.append('pause')
+            cp._feedback = lambda *a: None
+            cp._state = 'stopped'
+            for k in (Qt.Key_F, Qt.Key_D, Qt.Key_K):
+                QTest.keyClick(cp, k)
+            self.assertEqual(calls, ['play', ('measure', -1), ('measure', 1)])
+            calls.clear()
+            cp._state = 'playing'
+            for k in (Qt.Key_D, Qt.Key_F, Qt.Key_J, Qt.Key_K, Qt.Key_Space):
+                QTest.keyClick(cp, k)
+            self.assertEqual([c[0] if isinstance(c, tuple) else c for c in calls],
+                             ['pad', 'pad', 'pad', 'pad', 'pause'])
+            cp._state = 'stopped'
+
 
 if __name__ == '__main__':
     unittest.main()

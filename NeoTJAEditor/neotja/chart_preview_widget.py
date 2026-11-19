@@ -2752,7 +2752,9 @@ class ChartPreviewWidget(QWidget):
         # --- 演奏モード ---------------------------------------------
         # ここを先に見る。**演奏中は打面がすべてを持っていく。** 再生・
         # シーク・速度変更は通さない(叩いた記録と巻き戻しは両立しない)。
-        if self._play_state is not None:
+        # 止めているあいだは、演奏モードでもふだんのキー(F/J で流す・D/K で
+        # 小節移動・Space)。流し始めた F は打に数えない。
+        if self._play_state is not None and self._state == "playing":
             if event.isAutoRepeat():
                 return          # キーを押しっぱなしの連射は打とみなさない
             pad = self._KEY_PADS.get(key)
