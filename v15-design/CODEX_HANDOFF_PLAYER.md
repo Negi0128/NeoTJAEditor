@@ -1,3 +1,9 @@
+## 2026-11-19 再生へ入る移り目を軽く（Claude）
+
+- 369f95d: 再生ウィンドウの初回の付け替え(setParent 約 0.7 秒)と、GL 部品が窓に入った直後の最初の撮影(約 90ms)を、選曲の入口(PlayerHost._warm_core → PlayPage.adopt + library.grab)で済ませる。attach は付け替えを省く。連続再生も同じ(付け替えはセッションで1回)。
+- 測った値(1920×1009・SHEESH・QEventLoop で待つ): _enter_play 650〜980ms → 10ms、曲名表示5秒目→本編開始 約1.9秒 → 約0.9秒、再生開始後のコールバックの遅れ 90〜110ms → 20ms 超えなし、フェード中の最大 12.6ms。
+- 残り: 最初の paintGL 約 410ms と黒フェード中の 230ms の止まり(試聴を止めたあとの無音なので聞こえない)。曲名表示中に GL を温めると試聴に重なるのでしていない。
+
 ## 2026-11-19 作譜モード・環境設定も FOT-Seurat Pro に(Claude)
 
 - 読み方は Player と同じ `neotja.player.difficulty.ui_family()`(System から実行時に読む・無ければ今まで・同梱しない)。
