@@ -172,9 +172,21 @@ a.datas = _slim(a.datas)
 
 pyz = PYZ(a.pure)
 
+# 起動の札。onefile は展開に数秒かかり、そのあいだ何も出なかった。
+# 札はブートローダーが Python より先に出す(閉じるのは neotja/__main__ で窓を出したとき)。
+# 絵は make_splash.py で作る。
+splash = Splash(
+    os.path.join(SPECPATH, 'splash.png'),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=None,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries,
     a.datas,
     [],

@@ -242,6 +242,19 @@ def _schedule_old_player_cleanup():
         pass
 
 
+def _close_boot_splash():
+    """exe の起動の札(PyInstaller の Splash)を閉じる。ソースから動かした
+    ときは札が無いので何もしない。"""
+    try:
+        import pyi_splash  # noqa: F401  exe の中だけにある
+    except ImportError:
+        return
+    try:
+        pyi_splash.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     # GPU 描画の面の作り方は **QApplication より先**に決める。
     # あとから setDefaultFormat しても、できあがった面には効かない。
@@ -261,6 +274,7 @@ def main():
     _prepare_skin(cfg)
     win = MainWindow(app)
     win.show()
+    _close_boot_splash()
     win.start_discord_presence()
     _schedule_old_player_cleanup()
     if os.environ.get("NEOTJA_CRASH_SELFTEST") == "1":
