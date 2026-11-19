@@ -203,14 +203,11 @@ class CourseCard(QWidget):
         self.selected = False
         self._hover = False
         self.scale = 1.0
-        #: おにの枠で、裏(または表)の★を角に小さく出す文字。無ければ "".
-        self.alt_text = ""
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_Hover, True)
 
-    def set_state(self, key, available, level, selected, alt_text=""):
+    def set_state(self, key, available, level, selected):
         self.key, self.available, self.level, self.selected = key, available, level, selected
-        self.alt_text = alt_text
         self.setCursor(Qt.PointingHandCursor if available else Qt.ArrowCursor)
         self.update()
 
@@ -283,13 +280,6 @@ class CourseCard(QWidget):
         p.setPen(QColor(235, 242, 250))
         p.drawText(QRectF(r.left(), base + 5 * s, r.width(), max(28, self.LEVEL_PX * 1.4) * s),
                    Qt.AlignHCenter | Qt.AlignTop, self.level_text())
-        if self.alt_text:
-            # もう片方(裏/表)の★。右下の角に小さく。
-            p.setOpacity(1.0)
-            p.setFont(thin_font(15 * s, QFont.DemiBold))
-            p.setPen(SMALL_TEXT)
-            p.drawText(r.adjusted(0, 0, -10 * s, -8 * s), Qt.AlignRight | Qt.AlignBottom,
-                       self.alt_text)
         p.end()
 
 
@@ -779,7 +769,7 @@ class SettingsPanel(QFrame):
         v.addWidget(self.btn_art)
         v.addStretch(1)
         self.labels = []
-        lbl = QLabel("オート再生")
+        lbl = QLabel("オート演奏")
         lbl.setObjectName("setLabel")
         val = QLabel("ON（固定）")
         val.setObjectName("setValue")
@@ -929,7 +919,7 @@ class DifficultyPage(QWidget):
         self.btn_record.clicked.connect(lambda: self.sound_requested.emit("pi"))
         self.btn_record.clicked.connect(
             lambda: self.current_course() and self.record_requested.emit(self.path, self.current_course()))
-        self.lbl_auto = QLabel("オート再生", self)
+        self.lbl_auto = QLabel("オート演奏", self)
         self.lbl_auto.setObjectName("autoBadge")
         self.lbl_auto.setAlignment(Qt.AlignCenter)
 
@@ -1043,13 +1033,8 @@ class DifficultyPage(QWidget):
     def _sync(self):
         for slot, card in self.cards.items():
             key = self.slot_key(slot)
-            alt = ""
-            if slot == "Oni" and self.has_ura_toggle():
-                other = "Oni" if self.oni_side == "Edit" else "Edit"
-                lv = self.levels.get(other)
-                alt = ("表" if other == "Oni" else "裏") + ("★%d" % lv if lv is not None else "")
             card.set_state(key, key in self.levels, self.levels.get(key),
-                           slot == self.selected, alt)
+                           slot == self.selected)
         self.btn_swap.setVisible(self.has_ura_toggle())
         ok = self.current_course() is not None
         self.btn_play.setEnabled(ok)
@@ -1241,7 +1226,7 @@ class DifficultyPage(QWidget):
                           (self.btn_record, by + h_play + gap2, h_rec)):
             b.scale = s
             b.setGeometry(int(bx - g), int(yy - g), int(bw + 2 * g), int(hh + 2 * g))
-        # 「オート再生」は曲名・副題の下(ジャケットの右、副題と同じ左端)。
+        # 「オート演奏」は曲名・副題の下(ジャケットの右、副題と同じ左端)。
         jr = self.jacket_rect()
         self.lbl_auto.setFont(thin_font(17 * s, QFont.DemiBold))
         self.lbl_auto.setGeometry(int(jr.right() + 36 * s), int(jr.top() + 160 * s),

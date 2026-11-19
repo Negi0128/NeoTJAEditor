@@ -2,7 +2,7 @@
 v15-design/player-approved/song-intro-final.png)。
 
 大きなジャケットを真ん中に、十分に空けて下へ曲名・副題、その下に
-難易度のマーク・名前・★・「オート再生」を1行。背景は難易度選択と同じ
+難易度のマーク・名前・★・「オート演奏」を1行。背景は難易度選択と同じ
 (背景なし・OFF は濃紺、ジャケットなし・OFF は No Image の枠)。
 
 表示はちょうど 5 秒で、飛ばせない(キーもクリックも受け流す)。試聴は最初の
@@ -539,7 +539,7 @@ class IntroPage(QWidget):
             draw_outlined(p, sub, sf, (lw - QFontMetricsF(sf).horizontalAdvance(sub)) / 2,
                           base, 6 * s)
 
-        # マーク・難易度名・★・オート再生(1行、中央そろえ)
+        # マーク・難易度名・★・オート演奏(1行、中央そろえ)
         self._draw_course_row(p, base + 66 * s, s)
         if self.playlist is not None:
             self._draw_playlist_panel(p, s)
@@ -580,7 +580,7 @@ class IntroPage(QWidget):
         star = "★%d" % self.level if self.level is not None else "★—"
         sfnt = thin_font(38 * s, QFont.Bold)
         bfnt = thin_font(22 * s, QFont.Bold)
-        badge = "オート再生"
+        badge = "オート演奏"
         gap = 26 * s
         name_w = QFontMetricsF(nf).horizontalAdvance(name)
         star_w = QFontMetricsF(sfnt).horizontalAdvance(star)

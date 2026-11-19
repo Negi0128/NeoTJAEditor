@@ -14,6 +14,7 @@ TNDE の 6_Result/Crown.png(skin キャッシュの Result_Crown.png)の一番�
 """
 
 import os
+from types import SimpleNamespace
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QFont, QFontMetricsF,
@@ -31,7 +32,7 @@ from neotja.player.difficulty import (BASE_H, BASE_W, BTN_RADIUS, FALLBACK_MARK,
 CROWN_FILE = "Result_Crown.png"
 CROWN_RECTS = {"silver": (0, 0, 101, 92), "gold": (0, 92, 101, 92),
                "rainbow": (0, 184, 101, 92)}
-CROWN_LABELS = {"silver": "クリア", "gold": "フルコンボ", "rainbow": "ドンだフルコンボ"}
+CROWN_LABELS = {"silver": "クリア", "gold": "フルコンボ", "rainbow": "全良"}
 #: クリアできなかったときの札(王冠の場所に灰色の枠と一緒に)。
 FAILED_LABEL = "失敗"
 #: 小さな字の色・細い区切り線(選曲の表と同じ)。
@@ -80,6 +81,48 @@ def crown_pixmap(kind, sheet=None):
     return pm
 
 
+def skin_gauge_strip(ratio):
+    """魂ゲージの絵を、再生画面と同じ素材(Gauge.png / Gauge_Base.png / GaugeRainbow)と
+    同じ描き方(_GameScreenBase._draw_gauge)で作る。素材が無ければ None(平らな帯で描く)。
+    再生画面から絵をもらえなかったときに使う。"""
+    try:
+        from neotja.game_screen import GAUGE_BAR_H, GAUGE_POS
+        from neotja.game_screen import _GameScreenBase as GameScreen
+        base_dir = str(settings_mod.skin_dir())
+        key = base_dir
+        if _gauge_cache.get("key") != key:
+            skin = {}
+            for name, fn in (("gauge", "Gauge.png"), ("gauge_base", "Gauge_Base.png")):
+                pth = os.path.join(base_dir, fn)
+                pm = QPixmap(pth) if os.path.exists(pth) else QPixmap()
+                skin[name] = None if pm.isNull() else pm
+            _gauge_cache.clear()
+            _gauge_cache.update(key=key, skin=skin,
+                                rainbow=GameScreen._load_gauge_rainbow(None))
+        skin = _gauge_cache["skin"]
+        base = skin.get("gauge_base")
+        if base is None:
+            return None
+        shim = SimpleNamespace(_skin=skin, _gauge_pulse=None, _dpr=1.0,
+                               _gauge_rainbow=_gauge_cache.get("rainbow"))
+        pm = QPixmap(base.width(), GAUGE_BAR_H)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gx, gy = GAUGE_POS
+        p.translate(-gx, -gy)
+        try:
+            GameScreen._draw_gauge(shim, p, float(ratio or 0.0), 0.0)
+        finally:
+            p.end()
+        return pm
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_gauge_cache = {}
+
+
 def draw_crown_outline(p, rect, s=1.0):
     """クリアできなかったとき: 王冠の形の灰色の線だけ。"""
     r = QRectF(rect)
@@ -126,6 +169,22 @@ def draw_crown_fallback(p, rect, kind):
     p.setBrush(brush)
     p.drawEllipse(c)
     p.restore()
+
+
+def draw_kantei(p, text, px, rect, align, s, fill="#ffffff"):
+    """勘亭流(曲名と同じ)の白抜き文字を rect の中へ。align は左/右/中の Qt.Align*。"""
+    f = title_font(px)
+    fm = QFontMetricsF(f)
+    w = fm.horizontalAdvance(text)
+    if align & Qt.AlignRight:
+        x = rect.right() - w
+    elif align & Qt.AlignHCenter:
+        x = rect.center().x() - w / 2
+    else:
+        x = rect.left()
+    base = rect.center().y() + (fm.ascent() - fm.descent()) / 2
+    draw_outlined(p, text, f, x, base, max(3.0, px * 0.14), fill=fill)
+    return w
 
 
 def _fmt(n):
@@ -208,6 +267,9 @@ class ResultsPage(QWidget):
         self.level = level
         self.values = dict(values or {})
         self.crown = crown_kind(self.values)
+        if gauge is None or gauge.isNull():
+            # 再生画面から絵が来なかった: 同じ素材・同じ描き方で作る。
+            gauge = skin_gauge_strip(self.values.get("gauge_ratio"))
         self.gauge_pm = gauge if (gauge is not None and not gauge.isNull()) else None
         self.judges = {k: v for k, v in (judges or {}).items()
                        if v is not None and not v.isNull()}
@@ -377,7 +439,7 @@ class ResultsPage(QWidget):
         x0, x1 = r.left() + pad, r.right() - pad
         v = self.values
 
-        # 1行目: マーク・難易度名・★・オート再生
+        # 1行目: マーク・難易度名・★・オート演奏
         cy = r.top() + 62 * s
         mark_d = 70 * s
         mr = QRectF(x0, cy - mark_d / 2, mark_d, mark_d)
@@ -404,9 +466,9 @@ class ResultsPage(QWidget):
         sw = QFontMetricsF(sfnt).horizontalAdvance(star)
         p.drawText(QRectF(x, cy - 28 * s, sw + 4, 56 * s), Qt.AlignLeft | Qt.AlignVCenter, star)
         x += sw + 24 * s
-        # 「オート再生」は難易度選択と同じ細枠の札。
+        # 「オート演奏」は難易度選択と同じ細枠の札。
         bfnt = thin_font(16 * s, QFont.Bold)
-        badge = "オート再生"
+        badge = "オート演奏"
         bw = QFontMetricsF(bfnt).horizontalAdvance(badge) + 26 * s
         br = QRectF(x, cy - 16 * s, bw, 32 * s)
         edge = QColor(SMALL_TEXT)
@@ -427,13 +489,9 @@ class ResultsPage(QWidget):
         p.setFont(thin_font(20 * s, QFont.Bold))
         p.setPen(SMALL_TEXT)
         p.drawText(QRectF(x0, sy, 200 * s, 26 * s), Qt.AlignLeft | Qt.AlignVCenter, "スコア")
-        big = thin_font(66 * s, QFont.Bold)
-        p.setFont(big)
-        p.setPen(QColor(255, 255, 255))
         score_txt = _fmt(v.get("score"))
-        score_w = QFontMetricsF(big).horizontalAdvance(score_txt)
-        p.drawText(QRectF(x0, sy + 22 * s, score_w + 10 * s, 84 * s),
-                   Qt.AlignLeft | Qt.AlignVCenter, score_txt)
+        score_w = draw_kantei(p, score_txt, 64 * s, QRectF(x0, sy + 22 * s, 400 * s, 84 * s),
+                              Qt.AlignLeft, s)
         div_x = max(x0 + 360 * s, x0 + score_w + 34 * s)
         p.setPen(QPen(HAIRLINE, 1.0))
         p.drawLine(QPointF(div_x, sy + 26 * s), QPointF(div_x, sy + 100 * s))
@@ -441,10 +499,9 @@ class ResultsPage(QWidget):
             # クリアできなかった: 王冠の場所に灰色の枠と「失敗」(クリアの札と同じ書き方)。
             cr = QRectF(div_x + 26 * s, sy + 18 * s, 101 * s * 0.9, 92 * s * 0.9)
             draw_crown_outline(p, cr, s)
-            p.setFont(thin_font(26 * s, QFont.Bold))
-            p.setPen(SMALL_TEXT)
-            p.drawText(QRectF(cr.right() + 14 * s, cr.top(), x1 - cr.right(), cr.height()),
-                       Qt.AlignLeft | Qt.AlignVCenter, FAILED_LABEL)
+            draw_kantei(p, FAILED_LABEL, 30 * s,
+                        QRectF(cr.right() + 14 * s, cr.top(), x1 - cr.right(), cr.height()),
+                        Qt.AlignLeft, s, fill=SMALL_TEXT.name())
         if self.crown:
             cr = QRectF(div_x + 26 * s, sy + 18 * s, 101 * s * 0.9, 92 * s * 0.9)
             cpm = self.crown_pixmap()
@@ -452,10 +509,10 @@ class ResultsPage(QWidget):
                 p.drawPixmap(cr, cpm, QRectF(cpm.rect()))
             else:
                 draw_crown_fallback(p, cr, self.crown)
-            p.setFont(thin_font(26 * s, QFont.Bold))
-            p.setPen(QColor(255, 226, 140) if self.crown != "silver" else QColor(225, 232, 240))
-            p.drawText(QRectF(cr.right() + 14 * s, cr.top(), x1 - cr.right(), cr.height()),
-                       Qt.AlignLeft | Qt.AlignVCenter, CROWN_LABELS[self.crown])
+            col = "#ffe28c" if self.crown != "silver" else "#e1e8f0"
+            draw_kantei(p, CROWN_LABELS[self.crown], 30 * s,
+                        QRectF(cr.right() + 14 * s, cr.top(), x1 - cr.right(), cr.height()),
+                        Qt.AlignLeft, s, fill=col)
 
         # 4・5行目: 良 / 可 / 不可、連打数 / 最大コンボ数
         ry = sy + 130 * s
@@ -467,14 +524,11 @@ class ResultsPage(QWidget):
         third = (x1 - x0) / 3.0
         cells = (("good", "良", v.get("good")), ("ok", "可", v.get("ok")),
                  ("bad", "不可", v.get("bad")))
-        num_f = thin_font(36 * s, QFont.Bold)
         for i, (key, text, num) in enumerate(cells):
             cx = x0 + i * third
             cell = QRectF(cx + 16 * s, ry, third - 32 * s, row_h)
             self._paint_judge_label(p, key, text, QRectF(cell.left(), ry, 80 * s, row_h), s)
-            p.setFont(num_f)
-            p.setPen(QColor(255, 255, 255))
-            p.drawText(cell, Qt.AlignRight | Qt.AlignVCenter, _fmt(num))
+            draw_kantei(p, _fmt(num), 36 * s, cell, Qt.AlignRight, s)
             if i:
                 p.setPen(line)
                 p.drawLine(QPointF(cx, ry + 14 * s), QPointF(cx, ry + row_h - 14 * s))
@@ -488,9 +542,7 @@ class ResultsPage(QWidget):
             p.setFont(lf2)
             p.setPen(SMALL_TEXT)
             p.drawText(cell, Qt.AlignLeft | Qt.AlignVCenter, text)
-            p.setFont(num_f)
-            p.setPen(QColor(255, 255, 255))
-            p.drawText(cell, Qt.AlignRight | Qt.AlignVCenter, _fmt(num))
+            draw_kantei(p, _fmt(num), 36 * s, cell, Qt.AlignRight, s)
             if i:
                 p.setPen(line)
                 p.drawLine(QPointF(cx, ry2 + 14 * s), QPointF(cx, ry2 + row_h - 14 * s))

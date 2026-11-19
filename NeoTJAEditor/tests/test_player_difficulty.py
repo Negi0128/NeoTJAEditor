@@ -194,7 +194,7 @@ class DifficultyKeysTests(unittest.TestCase):
     _page = DifficultyPageTests._page
 
     @real_qt_test
-    def test_up_down_toggle_ura_enter_plays_and_alt_level_shown(self):
+    def test_up_down_toggle_ura_and_enter_plays(self):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest
         with tempfile.TemporaryDirectory() as d:
@@ -202,10 +202,9 @@ class DifficultyKeysTests(unittest.TestCase):
             page, _cfg, _ = self._page()
             page.set_song(path)
             page.setFocus()
-            self.assertEqual(page.cards['Oni'].alt_text, '裏★10')
             QTest.keyClick(page, Qt.Key_Down)
             self.assertEqual(page.current_course(), 'Edit')
-            self.assertEqual(page.cards['Oni'].alt_text, '表★9')
+            self.assertEqual(page.cards['Oni'].level_text(), '★10')
             QTest.keyClick(page, Qt.Key_Up)
             self.assertEqual(page.current_course(), 'Oni')
             got = []

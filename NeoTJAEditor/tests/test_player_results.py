@@ -120,6 +120,23 @@ class CrownTests(unittest.TestCase):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_labels(self):
+        from neotja.player.results import CROWN_LABELS
+        self.assertEqual(CROWN_LABELS['rainbow'], '全良')
+
+    @real_qt_test
+    def test_skin_gauge_strip_missing_skin_is_none(self):
+        from neotja.player import results
+        with tempfile.TemporaryDirectory() as d:
+            orig = results.settings_mod.skin_dir
+            results.settings_mod.skin_dir = lambda: Path(d)
+            results._gauge_cache.clear()
+            try:
+                self.assertIsNone(results.skin_gauge_strip(0.5))   # 素材が無ければ平らな帯へ
+            finally:
+                results.settings_mod.skin_dir = orig
+                results._gauge_cache.clear()
+
     @real_qt_test
     def test_buttons_under_card_and_failed_label(self):
         from PySide6.QtCore import QRectF
