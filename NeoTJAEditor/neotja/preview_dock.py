@@ -875,11 +875,11 @@ class GamePreviewWindow(QWidget):
         Esc を食うと置いた側のメニューが開かなくなるため。"""
         self._view_only = bool(on)
         self._view_bottom = bool(on and with_bottom)
-        # Player の再生画面では曲名を少し大きく(利用者の指定 2026-11-19
-        # 「タイトルも1.1倍くらい大きく」)。外したら元へ。
+        # Player の詳細モード(下に作譜ペイン)だけ曲名を少し大きく(利用者の
+        # 指定 2026-11-19、2026-11-20 に詳細モードだけと確認)。通常プレイは 1 倍。
         fn = getattr(self.scaled_host.content(), "set_title_scale", None)
         if fn is not None:
-            fn(self.VIEW_TITLE_SCALE if on else 1.0)
+            fn(self.VIEW_TITLE_SCALE if self._view_bottom else 1.0)
         if on:
             self.set_overlay_visible(False)
             self._bottom_widget.setVisible(self._view_bottom)

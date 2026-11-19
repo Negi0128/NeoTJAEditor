@@ -158,6 +158,8 @@ class DockReadoutTests(unittest.TestCase):
                 self.assertGreater(rd.flash_level(1), 0.0)
                 self.assertGreater(rd.flash_level(), 0.0)
                 dock.set_value_readout(False)
+                gpw.set_view_only(True)          # 通常プレイ(下のペイン無し)は 1 倍
+                self.assertEqual(screen._title_scale, 1.0)
                 gpw.set_view_only(False)
                 self.assertEqual(screen._title_scale, 1.0)
                 self.assertFalse(rd.isVisible())
