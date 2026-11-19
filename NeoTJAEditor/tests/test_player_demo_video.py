@@ -133,6 +133,8 @@ class FreeRunTests(unittest.TestCase):
         img.fill(0xff0000)
         v._frame(v._generation, type('F', (), {'isValid': lambda s: True,
                                                 'toImage': lambda s: img})())
+        from PySide6.QtTest import QTest
+        QTest.qWait(20)          # 絵にするのは次のイベントの回り(いちばん新しいコマだけ)
         self.assertEqual(len(got_a), 1)
         # 引き継ぎ: 最後の絵をすぐ新しい先へ。
         v.set_targets(got_b.append, lambda: cleared.append('b'))

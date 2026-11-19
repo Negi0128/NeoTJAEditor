@@ -175,6 +175,22 @@ class DemoVideo(QObject):
         if generation != self._generation or not frame.isValid():
             return
         self._measure(frame)
+        # 絵にする(toImage は 1080p で 1コマ約 10ms)のは、描けるときに
+        # いちばん新しいコマだけ。届くたびに直すと GUI がそれで埋まり、
+        # 画面を描けるのが毎秒 4〜7 コマに落ちていた。
+        self._pending_frame = frame
+        if not self._convert_queued:
+            self._convert_queued = True
+            QTimer.singleShot(0, lambda g=generation: self._convert(g))
+
+    _pending_frame = None
+    _convert_queued = False
+
+    def _convert(self, generation):
+        self._convert_queued = False
+        frame, self._pending_frame = self._pending_frame, None
+        if frame is None or generation != self._generation:
+            return
         image = frame.toImage()
         if not image.isNull():
             self.last_image = image

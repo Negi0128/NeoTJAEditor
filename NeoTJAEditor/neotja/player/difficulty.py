@@ -1092,7 +1092,10 @@ class DifficultyPage(QWidget):
         """
         if image is None or image.isNull():
             return
-        self._video_bg = QPixmap.fromImage(image)
+        # 動画のコマは QPixmap に直さず・縮めた写しも作らず、描くときに
+        # QImage のまま1回で敷く(毎コマの直し・なめらかな拡大で、描けるのが
+        # 毎秒 4〜7 コマに落ちていた)。
+        self._video_bg = image
         self._bg_scaled = None
         if self.show_bg():
             self.update()
@@ -1372,8 +1375,17 @@ class DifficultyPage(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         w, h = self.width(), self.height()
-        bg = self._bg_pixmap() if self.show_bg() else None
-        if bg is not None:
+        vid = self._video_bg if self.show_bg() else None
+        bg = None if vid is not None else (self._bg_pixmap() if self.show_bg() else None)
+        if vid is not None:
+            iw, ih = vid.width(), vid.height()
+            k = max(w / float(iw), h / float(ih))
+            sw, sh = w / k, h / k
+            p.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            p.drawImage(QRectF(0, 0, w, h), vid, QRectF((iw - sw) / 2, (ih - sh) / 2, sw, sh))
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            bg = vid
+        elif bg is not None:
             p.drawPixmap(0, 0, bg)
         else:
             grad = QLinearGradient(0, 0, 0, h)
