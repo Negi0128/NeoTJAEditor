@@ -863,8 +863,8 @@ class PlayerHost(QWidget):
 
     def switch_to_normal(self):
         """通常プレイへ戻る(詳細モードのメニューの3番目「通常演奏に移行する」)。
-        位置はそのまま、止まったまま。メニューの「続ける」で流れ、操作は
-        また締める。
+        位置はそのまま、そこから流し直す(通常プレイは止める・流す操作を
+        締めているので、止めたままだと続けられなかった。2026-11-20)。
 
         詳細でシークしたあと通常で終わりまで流したときの結果も、同じ計算の
         「譜面の終わり」の値(on_play_finished)。"""
@@ -888,6 +888,9 @@ class PlayerHost(QWidget):
         self._apply_fps_overlay()
         self._set_value_readout(False)
         self.play_page.setFocus(Qt.OtherFocusReason)
+        if core is not None:
+            core.resume_chart()
+            self._finish_timer.start()
 
     def _set_value_readout(self, on):
         """詳細モードの右上の数字(BPM・HS・見た目BPM)。"""

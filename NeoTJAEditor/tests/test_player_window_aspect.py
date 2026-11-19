@@ -227,6 +227,9 @@ class HostLockTests(unittest.TestCase):
             def pause_chart(self):
                 pass
 
+            def resume_chart(self):
+                pass
+
             def drop_hold(self):
                 pass
 

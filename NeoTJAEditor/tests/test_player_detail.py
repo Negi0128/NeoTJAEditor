@@ -396,12 +396,13 @@ class HostDetailTests(unittest.TestCase):
             self.assertIs(host.body.currentWidget(), host.play_page)
             self.assertTrue(host.in_play())
             core.finished = False
-            # 通常へ戻る: 位置はそのまま・止まったまま・また締める。
+            # 通常へ戻る: 位置はそのまま・そこから流し直す・また締める
+            # (止めたままだと通常プレイでは続けられなかった 2026-11-20)。
             QTest.keyClick(host.play_page, Qt.Key_Escape)
             core.log.clear()
             QTest.keyClick(menu, Qt.Key_3)
             self.assertEqual(host.play_mode, 'normal')
-            self.assertEqual(core.log, ['pause_chart', 'normal_mode'])
+            self.assertEqual(core.log, ['pause_chart', 'normal_mode', 'resume_chart'])
             self.assertEqual(gpw.locks[-1], True)
             self.assertEqual(gpw.views[-1], (True, False))
             self.assertEqual(core.dock.speed_row[-1], False)
