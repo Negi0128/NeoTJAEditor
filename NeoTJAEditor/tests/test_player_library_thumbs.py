@@ -82,7 +82,8 @@ class ThumbUnitTests(unittest.TestCase):
             self.assertFalse(img.isNull())
             self.assertEqual(thumbs.thumb_for_song(cfg, tja, known={key}), (key, None))
             set_jacket_hidden(cfg, tja, True)
-            self.assertEqual(thumbs.thumb_for_song(cfg, tja), (None, None))
+            # 「表示しない」は再生画面だけ。選曲の行には出す。
+            self.assertEqual(thumbs.thumb_for_song(cfg, tja)[0], key)
 
 
 class LibraryRowThumbTests(unittest.TestCase):
@@ -114,11 +115,11 @@ class LibraryRowThumbTests(unittest.TestCase):
             rows = {r.path: r for r in lib.recent_list.rows()}
             self.assertIsNotNone(rows[a].thumb.pixmap)
             self.assertIsNone(rows[b].thumb.pixmap)        # 無い → 空の枠
-            self.assertIsNone(rows[c].thumb.pixmap)        # 表示しない → 空の枠
+            self.assertIsNotNone(rows[c].thumb.pixmap)     # 表示しない でも選曲の行には出す
             # 枠はどの行も同じ所(題名の左端がそろう)。
             xs = {r.title.mapTo(r, r.title.rect().topLeft()).x() for r in rows.values()}
             self.assertEqual(len(xs), 1)
-            self.assertEqual(len(thumbs.CACHE), 1)
+            self.assertEqual(len(thumbs.CACHE), 2)
             # 表示しないを外したら、その曲だけ出し直せる。
             set_jacket_hidden(cfg, c, False)
             lib.refresh_thumb(c)

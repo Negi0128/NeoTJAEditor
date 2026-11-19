@@ -86,9 +86,13 @@ def set_jacket_hidden(cfg, path, hidden):
     cfg["player_chart_art"] = raw
 
 
-def existing_art(cfg, path, kind, respect_hidden=True):
-    """表示に使う絵の道(ファイルが無ければ "")。ジャケットを「表示しない」に
-    している曲では、ジャケットは "" を返す(respect_hidden=False で道そのもの)。"""
+def existing_art(cfg, path, kind, respect_hidden=False):
+    """表示に使う絵の道(ファイルが無ければ "")。
+
+    曲別の「表示しない」(jacket_hidden)は再生画面(と録画)のジャケットだけに
+    効く(利用者の指定 2026-11-20)。選曲の行・難易度選択・曲名表示・結果・
+    プレイリストではいつも出すので、既定では見ない。再生画面の絵を作る所
+    だけ respect_hidden=True で呼ぶ("" が返る)。"""
     if kind == "jacket" and respect_hidden and jacket_hidden(cfg, path):
         return ""
     value = chart_art(cfg, path).get(kind, "")

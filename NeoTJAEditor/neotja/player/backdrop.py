@@ -694,6 +694,6 @@ def player_background(cfg, path):
     bg = record_background(cfg, path, recorder.bg_with_defaults(
         recorder.RecordBackground(), cfg.get("rec_bg_default")))
     bg.path = existing_art(cfg, path, "background")
-    bg.art = existing_art(cfg, path, "jacket")
+    bg.art = existing_art(cfg, path, "jacket", respect_hidden=True)   # 再生画面だけ「表示しない」を守る
     bg.art_track = []
     return bg

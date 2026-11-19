@@ -29,9 +29,9 @@ class ChartArtHiddenTests(unittest.TestCase):
             self.assertEqual(existing_art(cfg, str(tja), 'jacket'), jk)
             set_jacket_hidden(cfg, str(tja), True)
             self.assertTrue(jacket_hidden(cfg, str(tja)))
-            # 表示には出さないが、道は残っている。
-            self.assertEqual(existing_art(cfg, str(tja), 'jacket'), '')
-            self.assertEqual(existing_art(cfg, str(tja), 'jacket', respect_hidden=False), jk)
+            # 再生画面(respect_hidden=True)だけ出さない。ほかはいつも出す。
+            self.assertEqual(existing_art(cfg, str(tja), 'jacket', respect_hidden=True), '')
+            self.assertEqual(existing_art(cfg, str(tja), 'jacket'), jk)
             self.assertEqual(chart_art(cfg, str(tja))['jacket'], jk)
             self.assertEqual(record_background(cfg, str(tja)).art, jk)
             # 背景は関係ない。
@@ -111,7 +111,7 @@ class DialogHiddenTests(unittest.TestCase):
             host._on_art_closed(dlg, path, QDialog.Accepted)
             self.assertTrue(jacket_hidden(host.cfg, path))
             self.assertEqual(chart_art(host.cfg, path)['jacket'], jk)
-            self.assertIsNone(host.difficulty._jacket)
+            self.assertIsNotNone(host.difficulty._jacket)   # 難易度選択には出す
             # 開き直すと印が付いている。外して OK で戻る。
             dlg = build_art_dialog(core, path, host.cfg, host)
             self.assertTrue(dlg.chk_art_hidden.isChecked())
@@ -133,17 +133,19 @@ class DialogHiddenTests(unittest.TestCase):
             host.deleteLater()
 
     @real_qt_test
-    def test_player_screens_show_no_jacket_when_hidden(self):
+    def test_hidden_only_affects_play_screen(self):
         from neotja.chart_art import set_jacket_hidden
         with tempfile.TemporaryDirectory() as folder:
             host, path, core = self._host(folder)
             set_jacket_hidden(host.cfg, path, True)
             host.intro.set_song(path, 'Oni', 9)
-            self.assertIsNone(host.intro._jacket)
+            self.assertIsNotNone(host.intro._jacket)
             host.results.set_result(path, 'Oni', 9, {}, None, {})
-            self.assertIsNone(host.results._jacket)
+            self.assertIsNotNone(host.results._jacket)
             host.difficulty.set_song(path)
-            self.assertIsNone(host.difficulty._jacket)
+            self.assertIsNotNone(host.difficulty._jacket)
+            from neotja.player.backdrop import player_background
+            self.assertEqual(player_background(host.cfg, path).art, '')   # 再生画面だけ出さない
             self.assertIsNotNone(host.difficulty._bg)      # 背景は出す
             host.shutdown()
             host.close()
