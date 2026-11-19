@@ -96,10 +96,60 @@ def kantei_family():
     return fam
 
 
+#: Player の字(勘亭流でないもの)。TNDE の素材の FOT-Seurat Pro B(太字だけ)。
+#: Fontworks の市販の書体なので**同梱しない**。利用者の System
+#: (TNDE-R/Graphics/FOT-Seurat_Pro_B.otf)から起動中に読むだけ。
+SEURAT_FAMILY = "FOT-Seurat Pro"
+SEURAT_FILE = "FOT-Seurat_Pro_B.otf"
+
+
+def _seurat_file():
+    """FOT-Seurat_Pro_B.otf の場所。無ければ ""。素材キャッシュ → System の順。"""
+    try:
+        f = os.path.join(str(settings_mod.skin_dir()), SEURAT_FILE)
+        if os.path.exists(f):
+            return f
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from neotja import skin_cache
+        sysdir, _s, _u = skin_cache.find_system_dir(settings_mod.load_settings())
+        if sysdir:
+            f = os.path.join(str(sysdir), "TNDE-R", "Graphics", SEURAT_FILE)
+            if os.path.exists(f):
+                return f
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+#: 試験で差し替える(書体が無い環境を作る / 決まった場所から読む)。
+seurat_file = _seurat_file
+
+
 def ui_family():
+    """Player の字のファミリー名。Seurat が読めればそれ、無ければ Yu Gothic UI。"""
     if "ui" not in _font_cache:
-        _font_cache["ui"] = _available(UI_FAMILIES) or ""
+        fam = _available((SEURAT_FAMILY,))
+        if fam is None:
+            path = ""
+            try:
+                path = seurat_file() or ""
+            except Exception:  # noqa: BLE001
+                path = ""
+            if path:
+                try:
+                    QFontDatabase.addApplicationFont(path)
+                except Exception:  # noqa: BLE001
+                    pass
+                fam = _available((SEURAT_FAMILY,))
+        _font_cache["ui"] = fam or _available(UI_FAMILIES) or ""
     return _font_cache["ui"]
+
+
+def ui_css_family():
+    """QSS の font-family に書く名前(空にしない)。"""
+    return ui_family() or "Yu Gothic UI"
 
 
 def title_font(px):

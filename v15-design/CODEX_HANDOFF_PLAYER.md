@@ -1,3 +1,9 @@
+## 2026-11-19 Player の字を FOT-Seurat Pro に(Claude)
+
+- 勘亭流でない Player の字は FOT-Seurat Pro(太字のみ)。`difficulty.ui_family()` が素材キャッシュ → System の TNDE-R/Graphics/FOT-Seurat_Pro_B.otf の順に探して addApplicationFont する。**書体は同梱・コミットしない**(Fontworks の市販品)。無ければ Yu Gothic UI。試験では `difficulty.seurat_file` を差し替える。
+- QSS に直書きだった "Yu Gothic UI" は `%UIFAM%` にして使う所で `ui_css_family()` に置き換え(連続再生の板・作成/編集の窓・コース選び・通知・開始前の一覧・曲名表示のボタン)。library_qss の頭に `QWidget { font-family }`(Player の窓だけに効く)。fps の字(dock.VIEW_FPS_FAMILY)と詳細モードの数値の枠(ValueReadout.FAMILY)も Player の中だけ差し替え。Editor・ランチャー・環境設定は変えていない。
+- Seurat は幅が広いので、待ち秒の欄 58→66、難易度の列 180→200。
+
 ## 2026-11-19 プレイリストの画面の見た目(案A)(Claude)
 
 - 連続再生の板: 地を不透明 #0c182c(後ろの★が透けていた)。範囲・待ち秒の QSpinBox は矢印が数字に重なって読めなかったので、矢印を消して [−][数][＋](`PlaylistPlayPanel._stepper`、値は QSpinBox のまま)。

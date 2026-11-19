@@ -23,6 +23,11 @@ JACKET_PX = 44
 DIALOG_JACKET_PX = 132
 
 
+def ui_css_family():
+    from neotja.player.difficulty import ui_css_family as _f
+    return _f()
+
+
 def _ui_font(px, weight=QFont.DemiBold):
     from neotja.player.difficulty import thin_font
     return thin_font(px, weight)
@@ -302,7 +307,7 @@ class CoursePicker(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
-        self.setStyleSheet(DIALOG_QSS.replace("PlaylistDialog", "CoursePicker"))
+        self.setStyleSheet(DIALOG_QSS.replace("PlaylistDialog", "CoursePicker").replace("%UIFAM%", ui_css_family()))
         order = ("Easy", "Normal", "Hard", "Oni", "Edit")
         levels = dict(courses or [])
         self.keys = [k for k in order if k in levels]
@@ -411,7 +416,7 @@ class AddModeBar(QWidget):
 PLAY_PANEL_QSS = """
 QFrame#playPanel { background-color: #0c182c; border: 1px solid rgba(139, 217, 238, 170);
                    border-radius: 3px; }
-#playPanel QWidget { color: #e5edf7; font-family: "Yu Gothic UI"; font-size: 14px; font-weight: bold;
+#playPanel QWidget { color: #e5edf7; font-family: "%UIFAM%"; font-size: 14px; font-weight: bold;
                      background: transparent; }
 #playPanel QLabel#ppHead { font-size: 17px; color: #ffffff; }
 #playPanel QLabel#ppField { color: #b9d9ed; font-size: 13px; }
@@ -456,8 +461,8 @@ class Toast(QLabel):
             # 追加中の帯と同じ青(地 #1e3a5c、縁はアクセント)。
             "QLabel#toast { background-color: rgba(30, 58, 92, 235); color: #ffffff;"
             " border: 1px solid rgba(79, 156, 249, 220); border-radius: 3px;"
-            " padding: 12px 26px; font-family: 'Yu Gothic UI'; font-size: 15px;"
-            " font-weight: bold; }")
+            " padding: 12px 26px; font-family: '%UIFAM%'; font-size: 15px;"
+            " font-weight: bold; }".replace("%UIFAM%", ui_css_family()))
         self._fx = QGraphicsOpacityEffect(self)
         self._fx.setOpacity(1.0)
         self.setGraphicsEffect(self._fx)
@@ -603,7 +608,7 @@ class PlaylistPlayPanel(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, False)
         self.frame = QFrame(self)
         self.frame.setObjectName("playPanel")
-        self.frame.setStyleSheet(PLAY_PANEL_QSS)
+        self.frame.setStyleSheet(PLAY_PANEL_QSS.replace("%UIFAM%", ui_css_family()))
         v = QVBoxLayout(self.frame)
         v.setContentsMargins(22, 18, 22, 18)
         v.setSpacing(10)
@@ -651,7 +656,7 @@ class PlaylistPlayPanel(QWidget):
             self.sp_wait.setValue(int(wait))
         except (TypeError, ValueError):
             self.sp_wait.setValue(10)
-        self.sp_wait.setFixedWidth(58)
+        self.sp_wait.setFixedWidth(66)
         self.sp_wait.setAlignment(Qt.AlignCenter)
         self._wait_box = self._stepper(self.sp_wait)
         mh.addWidget(self._wait_box)
@@ -810,7 +815,7 @@ class PlaylistPlayPanel(QWidget):
 #: 作成/編集の窓の見た目(録画の背景の窓 RecordBackgroundDialog と同じ色・形)。
 DIALOG_QSS = """
 QDialog#PlaylistDialog { background: #101925; color: #e5edf7; }
-#PlaylistDialog QWidget { color: #e5edf7; font-family: "Yu Gothic UI"; font-size: 13px; }
+#PlaylistDialog QWidget { color: #e5edf7; font-family: "%UIFAM%"; font-size: 13px; }
 #PlaylistDialog QLabel { background: transparent; border: none; }
 #PlaylistDialog QLabel#plHead { font-size: 19px; font-weight: bold; color: #ffffff; }
 #PlaylistDialog QLabel#plField { color: #b9d9ed; font-weight: 600; }
@@ -842,7 +847,7 @@ class PlaylistDialog(QDialog):
         editing = pl is not None
         self.setWindowTitle("プレイリストを編集" if editing else "プレイリストを作成")
         self.setModal(True)
-        self.setStyleSheet(DIALOG_QSS)
+        self.setStyleSheet(DIALOG_QSS.replace("%UIFAM%", ui_css_family()))
         self.resize(620, 470)
         self._pl = pl
         self._cfg = cfg or {}

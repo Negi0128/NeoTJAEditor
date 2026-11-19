@@ -235,6 +235,23 @@ class DifficultyKeysTests(unittest.TestCase):
             page.deleteLater()
 
 
+class UiFontTests(unittest.TestCase):
+    @real_qt_test
+    def test_ui_font_falls_back_without_seurat(self):
+        from neotja.player import difficulty as d
+        orig = d.seurat_file
+        d._font_cache.pop("ui", None)
+        d.seurat_file = lambda: ""            # 書体が無い環境
+        try:
+            fam = d.ui_family()
+            if fam != d.SEURAT_FAMILY:          # この機械に入っていなければ
+                self.assertIn(fam, d.UI_FAMILIES + ("",))
+            self.assertTrue(d.ui_css_family())
+        finally:
+            d.seurat_file = orig
+            d._font_cache.pop("ui", None)
+
+
 class HostFlowTests(unittest.TestCase):
     @real_qt_test
     def test_song_choice_opens_difficulty_and_back_keeps_library(self):

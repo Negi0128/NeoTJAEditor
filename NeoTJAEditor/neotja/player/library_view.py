@@ -322,7 +322,7 @@ class PlayMark(QWidget):
 
 
 #: 曲の表の列の幅(px)。曲名だけが伸びる。行と見出しで同じ数字を使う。
-COLW = {"num": 34, "thumb": 32, "folder": 300, "course": 180, "date": 84,
+COLW = {"num": 34, "thumb": 32, "folder": 300, "course": 200, "date": 84,
         "action": 64, "star": 30, "mark": 30}
 #: 行の左右の余白と列のあいだ。
 ROW_MARGINS = (10, 0, 6, 0)
@@ -3184,7 +3184,10 @@ def library_qss():
     g = glass_colors()
     fam = wordmark_family()
     fam_css = ('font-family: "%s";' % fam) if fam else ""
-    return f"""
+    from neotja.player.difficulty import ui_css_family
+    ui = ui_css_family()
+    return (f"""
+    QWidget {{ font-family: "{ui}"; }}
     QLabel#section {{ color: {SECONDARY}; {fam_css} font-size: 12px; font-weight: bold;
                       letter-spacing: 2px; padding: 0 12px; }}
     QPushButton {{ font-weight: 600; }}
@@ -3259,7 +3262,7 @@ def library_qss():
                                font-weight: bold; }}
     QPushButton#sortDir {{ padding: 0; border-radius: 8px; font-size: 15px; font-weight: bold; color: {p['fg']}; }}
     QPushButton#flat {{ background-color: rgba(16, 28, 44, 170); border: 1px solid rgba(139, 217, 238, 150);
-                        border-radius: 3px; padding: 8px 18px; font-family: "Yu Gothic UI"; font-size: 13px;
+                        border-radius: 3px; padding: 8px 18px; font-family: "%UIFAM%"; font-size: 13px;
                         font-weight: bold; color: #e5edf7; }}
     QPushButton#flat:hover {{ background-color: rgba(35, 61, 84, 200); border-color: #8ad9ee; }}
     QPushButton#flat:pressed {{ background-color: rgba(16, 29, 44, 220); }}
@@ -3276,4 +3279,4 @@ def library_qss():
     QProgressBar#recProgress {{ background-color: #3a1f26; border: none; border-radius: 2px; }}
     QProgressBar#recProgress::chunk {{ background-color: #ff6a5a; border-radius: 2px; }}
     QFrame#dropLine {{ background-color: {p['accent']}; border: none; border-radius: 1px; }}
-    """
+    """).replace("%UIFAM%", ui)

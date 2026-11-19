@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from neotja.player.difficulty import BASE_H, BASE_W, NAVY, title_font
+from neotja.player.difficulty import BASE_H, BASE_W, NAVY, title_font, ui_css_family
 from neotja.player.intro import PL_BUTTON_QSS
 from neotja.player.playlist_view import CourseMarkIcon, PlaylistJacket
 
@@ -59,7 +59,7 @@ class _SongLine(QWidget):
 
 
 OV_QSS = """
-QWidget { font-family: "Yu Gothic UI"; color: #ffffff; }
+QWidget { font-family: "%UIFAM%"; color: #ffffff; }
 QLabel { background: transparent; }
 QLabel#ovDesc { color: #c6d6e6; font-size: 16px; }
 QLabel#ovCount { color: #b9d9ed; font-size: 18px; font-weight: bold; }
@@ -90,7 +90,7 @@ class PlaylistOverviewPage(QWidget):
         super().__init__(parent)
         self.cfg = cfg
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setStyleSheet(OV_QSS)
+        self.setStyleSheet(OV_QSS.replace("%UIFAM%", ui_css_family()))
         outer = QHBoxLayout(self)
         self._outer = outer
         outer.setContentsMargins(90, 70, 90, 60)
@@ -212,10 +212,10 @@ class PlaylistOverviewPage(QWidget):
         self.btn_quit.setFixedHeight(int(96 * s))
         self.btn_play.setStyleSheet(PL_BUTTON_QSS % {
             "bw": max(1, round(1.5 * s)), "r": max(2, round(3 * s)),
-            "px": max(12, round(34 * s)), "ls": max(1, round(6 * s))})
+            "px": max(12, round(34 * s)), "ls": max(1, round(6 * s)), "fam": ui_css_family()})
         self.btn_quit.setStyleSheet(PL_BUTTON_QSS % {
             "bw": 1, "r": max(2, round(3 * s)),
-            "px": max(11, round(24 * s)), "ls": max(1, round(3 * s))})
+            "px": max(11, round(24 * s)), "ls": max(1, round(3 * s)), "fam": ui_css_family()})
         for r in self.rows:
             r.setFixedHeight(int(ROW_H * s))
 

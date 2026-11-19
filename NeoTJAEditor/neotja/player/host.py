@@ -889,6 +889,9 @@ class PlayerHost(QWidget):
             from PySide6.QtGui import QColor
             rd.TITLE_COLOR = QColor("#93a3bf")
             rd.TITLE_PX = 9
+            from neotja.player.difficulty import ui_css_family
+            rd.FAMILY = ui_css_family()
+            rd._relayout()
             rd._player_look = True
             rd.update()
 
@@ -900,6 +903,11 @@ class PlayerHost(QWidget):
         if fn is None:
             return
         on = self.play_mode == "detail" or bool(self.cfg.get("player_show_fps", False))
+        try:
+            from neotja.player.difficulty import ui_css_family
+            core.dock.VIEW_FPS_FAMILY = ui_css_family()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             fn(on)
         except Exception:  # noqa: BLE001

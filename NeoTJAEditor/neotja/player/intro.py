@@ -18,7 +18,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient
 from PySide6.QtWidgets import QWidget
 
 from neotja.player import song_lists
-from neotja.player.difficulty import (BASE_H, BASE_W, NAVY, SLOT_NAMES,
+from neotja.player.difficulty import (ui_css_family, BASE_H, BASE_W, NAVY, SLOT_NAMES,
                                       course_mark, draw_outlined, thin_font,
                                       title_font)
 
@@ -133,7 +133,7 @@ PL_BUTTON_QSS = """
 QPushButton {
     background-color: rgba(16, 28, 44, 190); color: #ffffff;
     border: %(bw)dpx solid rgba(139, 217, 238, 170); border-radius: %(r)dpx;
-    font-family: "Yu Gothic UI"; font-weight: bold; font-size: %(px)dpx;
+    font-family: "%(fam)s"; font-weight: bold; font-size: %(px)dpx;
     letter-spacing: %(ls)dpx;
 }
 QPushButton:hover { background-color: rgba(35, 61, 84, 215); border-color: #8ad9ee; }
@@ -396,12 +396,12 @@ class IntroPage(QWidget):
         self.btn_play.setGeometry(int(bx), int(by), int(bw), int(PL_PLAY_H * s))
         self.btn_play.setStyleSheet(PL_BUTTON_QSS % {
             "bw": max(1, round(1.5 * s)), "r": max(2, round(3 * s)),
-            "px": max(12, round(34 * s)), "ls": max(1, round(6 * s))})
+            "px": max(12, round(34 * s)), "ls": max(1, round(6 * s)), "fam": ui_css_family()})
         by += (PL_PLAY_H + PL_GAP) * s
         self.btn_quit.setGeometry(int(bx), int(by), int(bw), int(PL_QUIT_H * s))
         self.btn_quit.setStyleSheet(PL_BUTTON_QSS % {
             "bw": 1, "r": max(2, round(3 * s)),
-            "px": max(11, round(22 * s)), "ls": max(1, round(3 * s))})
+            "px": max(11, round(22 * s)), "ls": max(1, round(3 * s)), "fam": ui_css_family()})
 
     def set_video_frame(self, image):
         """背景動画の1コマ(PlayerHost の DemoVideo から)。静止画より優先する。"""

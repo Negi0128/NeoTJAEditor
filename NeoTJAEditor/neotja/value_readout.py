@@ -54,6 +54,8 @@ class ValueReadout(QWidget):
     SLASH_W = 12        # 拍子の「/」
     GAP = 6             # 枠どうしの間
     TITLE_PX = 12
+    #: 字のファミリー(Player は FOT-Seurat Pro に差し替える)。
+    FAMILY = "Yu Gothic UI"
     VALUE_PX = 14
     BASE_H = PAD_TOP + TITLE_H + TITLE_GAP + FIELD_H + PAD_BOTTOM
     #: 上の寸法(命令パネルと同じ原寸)に掛ける倍率。枠・欄・字・余白・間を
@@ -95,10 +97,10 @@ class ValueReadout(QWidget):
     # ------------------------------------------------------------------
     # 大きさ
     def _fonts(self, s=1.0):
-        title = QFont("Yu Gothic UI")
+        title = QFont(self.FAMILY)
         title.setPixelSize(max(1, round(self.TITLE_PX * s)))
         title.setWeight(QFont.Normal)
-        value = QFont("Yu Gothic UI")
+        value = QFont(self.FAMILY)
         value.setPixelSize(max(1, round(self.VALUE_PX * s)))
         value.setWeight(QFont.Normal)
         return title, value
