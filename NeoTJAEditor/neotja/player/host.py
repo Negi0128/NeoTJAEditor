@@ -217,7 +217,17 @@ class PlayerHost(QWidget):
         if self._shutting_down or not self.isVisible() or self._core is not None:
             return
         try:
-            self._ensure_core()
+            core = self._ensure_core()
+            # 再生ウィンドウをいまのうちに再生画面の子にしておく(初回の付け替えは
+            # 約 0.7 秒 GUI と GIL をふさぐ。曲名表示の後では試聴・本編の音に
+            # 重なるので、まだ何も鳴っていない選曲の入口で済ませる)。
+            adopt = getattr(self.play_page, "adopt", None)
+            gpw = getattr(getattr(core, "dock", None), "game_preview_window", None)
+            if adopt is not None and gpw is not None:
+                adopt(gpw)
+                # GL の部品が窓に入ったあとの最初の撮影(フェード)は 90ms ほど
+                # 重い。その1回目もここで済ませる。
+                self.library.grab()
         except Exception:  # noqa: BLE001
             pass
 

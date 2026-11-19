@@ -59,6 +59,15 @@ class PlayPage(QWidget):
         if s is not None:
             s.set_fade_dim(v)
 
+    def adopt(self, gpw):
+        """再生ウィンドウを先に子にしておく(見せない)。attach は付け替えを省く。"""
+        if self.gpw is gpw or gpw is None:
+            return
+        gpw.setParent(self, Qt.Widget)
+        gpw.installEventFilter(self)
+        gpw.hide()
+        self.gpw = gpw
+
     def attach(self, gpw, native=False, key_cb=None, screen_fn=None):
         """再生ウィンドウをこの画面の子にする(1回だけ)。操作は締める。
         screen_fn はゲーム画面を返す呼び出し(フェードの黒に使う)。"""
