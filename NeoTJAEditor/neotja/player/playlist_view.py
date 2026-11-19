@@ -421,7 +421,7 @@ QFrame#playPanel { background-color: #0c182c; border: 1px solid rgba(139, 217, 2
 #playPanel QLabel#ppHead { font-size: 17px; color: #ffffff; }
 #playPanel QLabel#ppField { color: #b9d9ed; font-size: 13px; }
 #playPanel QSpinBox { background: #0c1521; border: 1px solid #3b536d; border-radius: 2px;
-                      padding: 4px 6px; min-height: 22px; font-size: 15px; }
+                      padding: 4px 0; min-height: 22px; font-size: 15px; }
 #playPanel QPushButton#ppStep { padding: 0; min-width: 30px; max-width: 30px; min-height: 30px;
                                 max-height: 30px; font-size: 16px; }
 #playPanel QSpinBox:focus { border-color: #8bcfe5; }
@@ -709,7 +709,7 @@ class PlaylistPlayPanel(QWidget):
         self.btn_record.clicked.connect(self.record)
         bh.addWidget(self.btn_record, 1)
         v.addLayout(bh)
-        self.frame.setFixedWidth(330)
+        self.frame.setFixedWidth(360)   # −・数・＋ が重ならない幅
         self.frame.adjustSize()
         self.set_auto(auto)
         self.set_rec_mode(rec_mode)
@@ -723,7 +723,7 @@ class PlaylistPlayPanel(QWidget):
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(4)
+        h.setSpacing(8)                  # −・数・＋ の間を同じに
         for text, d in (("−", -1), (None, 0), ("＋", 1)):
             if text is None:
                 h.addWidget(sp)
