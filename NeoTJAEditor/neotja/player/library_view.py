@@ -1523,6 +1523,14 @@ class _Sidebar(QWidget):
 # ----------------------------------------------------------------------
 # 右の各画面
 # ----------------------------------------------------------------------
+def _placeholder_color(edit):
+    """検索欄の置き字(「曲名で検索」)を読める色に(既定の灰色は地に対して薄い)。"""
+    from PySide6.QtGui import QPalette
+    pal = edit.palette()
+    pal.setColor(QPalette.PlaceholderText, QColor(secondary_color()))
+    edit.setPalette(pal)
+
+
 class _Page(QWidget):
     """パンくず + [題・検索 …… 右端に静かな道具] + 表(見出しの行 + 一覧)。"""
 
@@ -1552,6 +1560,7 @@ class _Page(QWidget):
         self.search.setPlaceholderText("曲名で検索")
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(360)
+        _placeholder_color(self.search)
         self.tools.addWidget(self.search)
         self.tools.addStretch(1)
         return self.search
@@ -3153,7 +3162,7 @@ def library_qss():
     fam = wordmark_family()
     fam_css = ('font-family: "%s";' % fam) if fam else ""
     return f"""
-    QLabel#section {{ color: {p['fg_dim']}; {fam_css} font-size: 12px; font-weight: bold;
+    QLabel#section {{ color: {SECONDARY}; {fam_css} font-size: 12px; font-weight: bold;
                       letter-spacing: 2px; padding: 0 12px; }}
     QPushButton {{ font-weight: 600; }}
     QPushButton#nav {{ text-align: left; background-color: transparent; border: 1px solid transparent;
@@ -3185,11 +3194,11 @@ def library_qss():
     QLabel#courseText {{ color: {p['fg']}; font-size: 13px; font-weight: bold; }}
     QLabel#courseText[missing="true"] {{ color: {SECONDARY}; font-weight: 600; }}
     QLabel#openGlyph {{ color: {p['accent']}; {fam_css} font-size: 44px; font-weight: 200; letter-spacing: 6px; }}
-    QLabel#empty {{ color: {p['fg_dim']}; font-size: 14px; font-weight: 600; padding-top: 40px; }}
-    QLabel#chevron {{ color: {p['fg_dim']}; font-size: 26px; padding-bottom: 3px; }}
-    QLabel#crumbSep {{ color: {p['fg_dim']}; font-size: 13px; }}
+    QLabel#empty {{ color: {SECONDARY}; font-size: 14px; font-weight: 600; padding-top: 40px; }}
+    QLabel#chevron {{ color: {SECONDARY}; font-size: 26px; padding-bottom: 3px; }}
+    QLabel#crumbSep {{ color: {SECONDARY}; font-size: 13px; }}
     QPushButton#crumb, QPushButton#crumbCur {{ background-color: transparent; border: 1px solid transparent;
-                       padding: 2px 6px; border-radius: 6px; font-size: 13px; color: {p['fg_dim']}; }}
+                       padding: 2px 6px; border-radius: 6px; font-size: 13px; color: {SECONDARY}; }}
     QPushButton#crumb:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
     QPushButton#crumbCur {{ color: {p['fg']}; }}
     QLineEdit#search {{ background-color: {_rgba(g['field_fill'])}; border: 1px solid {_rgba(g['field_border'])};
@@ -3197,7 +3206,7 @@ def library_qss():
     QLineEdit#search:focus {{ border: 1px solid {p['accent']}; }}
     QPushButton#small {{ padding: 5px 14px; border-radius: 7px; font-size: 12px; }}
     QPushButton#star {{ background-color: transparent; border: 1px solid transparent; padding: 0;
-                        font-size: 18px; color: {p['fg_dim']}; }}
+                        font-size: 18px; color: {SECONDARY}; }}
     QPushButton#star:hover {{ background-color: {_rgba(g['btn_fill'])}; color: {p['fg']}; }}
     QPushButton#star[on="true"] {{ color: {p['kusudama']}; }}
     QWidget#rowListInner, QWidget#sideInner {{ background: transparent; }}
@@ -3216,7 +3225,7 @@ def library_qss():
     QFrame#sideRule {{ background-color: {_rgba(g['border'])}; border: none; margin: 0 6px; }}
     QPushButton#nav[sub="true"] {{ padding-left: 30px; font-size: 13px; }}
     QPushButton#nav[dot="true"] {{ padding-left: 46px; }}
-    QLabel#bpm {{ color: {p['fg_dim']}; font-size: 12px; }}
+    QLabel#bpm {{ color: {SECONDARY}; font-size: 12px; }}
     QPushButton#seg {{ background-color: {_rgba(g['btn_fill'])}; border: 1px solid {_rgba(g['btn_border'])};
                        border-radius: 0; padding: 6px 14px; font-size: 12px; color: {p['fg_dim']}; }}
     QPushButton#seg[pos="first"] {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; }}
@@ -3235,7 +3244,7 @@ def library_qss():
     QWidget#addModeBar {{ background-color: {_rgba(_c(p['accent'], 0.20))};
                           border-bottom: 1px solid {_rgba(_c(p['accent'], 0.75))}; }}
     QLabel#addModePlus {{ color: {p['accent']}; font-size: 20px; font-weight: bold; }}
-    QLabel#plIndex {{ color: {p['fg_dim']}; font-size: 14px; font-weight: bold; }}
+    QLabel#plIndex {{ color: {SECONDARY}; font-size: 14px; font-weight: bold; }}
     QWidget#recordBar {{ background-color: rgba(120, 24, 32, 70);
                          border-bottom: 1px solid rgba(236, 80, 80, 150); }}
     QLabel#recDot {{ color: #ec3c3c; font-size: 18px; }}
