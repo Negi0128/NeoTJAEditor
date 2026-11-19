@@ -60,6 +60,10 @@ UI_FAMILIES = ("Yu Gothic UI", "Segoe UI", "Meiryo")
 NAVY = QColor("#13223d")
 #: 選んでいるカードの縁の色。
 SELECT_COLOR = QColor("#7fe3ff")
+#: 小さな字の色(選曲の表と同じ)。
+SMALL_TEXT = QColor("#93a3bf")
+#: 細い区切り線。
+HAIRLINE = QColor(255, 255, 255, 26)
 
 #: 設計の基準の大きさ。窓がこれより小さければ全体を縮める。
 BASE_W, BASE_H = 1600, 900
@@ -199,11 +203,14 @@ class CourseCard(QWidget):
         self.selected = False
         self._hover = False
         self.scale = 1.0
+        #: おにの枠で、裏(または表)の★を角に小さく出す文字。無ければ "".
+        self.alt_text = ""
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_Hover, True)
 
-    def set_state(self, key, available, level, selected):
+    def set_state(self, key, available, level, selected, alt_text=""):
         self.key, self.available, self.level, self.selected = key, available, level, selected
+        self.alt_text = alt_text
         self.setCursor(Qt.PointingHandCursor if available else Qt.ArrowCursor)
         self.update()
 
@@ -232,7 +239,7 @@ class CourseCard(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # 選んでいる枠の光が外へ出るぶん、内側に描く。
+        # 外側の余白(⇔ の丸がはみ出す場所)。
         pad = 8 * s
         r = QRectF(self.rect()).adjusted(pad, pad, -pad, -pad)
         rad = RADIUS * s
@@ -276,6 +283,13 @@ class CourseCard(QWidget):
         p.setPen(QColor(235, 242, 250))
         p.drawText(QRectF(r.left(), base + 5 * s, r.width(), max(28, self.LEVEL_PX * 1.4) * s),
                    Qt.AlignHCenter | Qt.AlignTop, self.level_text())
+        if self.alt_text:
+            # もう片方(裏/表)の★。右下の角に小さく。
+            p.setOpacity(1.0)
+            p.setFont(thin_font(15 * s, QFont.DemiBold))
+            p.setPen(SMALL_TEXT)
+            p.drawText(r.adjusted(0, 0, -10 * s, -8 * s), Qt.AlignRight | Qt.AlignBottom,
+                       self.alt_text)
         p.end()
 
 
@@ -283,7 +297,7 @@ class CourseCard(QWidget):
 # ガラスの描き方(この画面のボタン・カード・切り替えを1つの見た目にそろえる)
 # ----------------------------------------------------------------------
 #: カード・プレイ/録画の角の丸み(倍率 1 のとき)。
-RADIUS = 12
+RADIUS = 4
 #: ボタン(戻る・設定・プレイ・録画)の角。見本どおり、ほぼ四角。
 BTN_RADIUS = 3
 #: 戻る・設定の縁(薄いシアン)。
@@ -304,19 +318,12 @@ def paint_glass(p, r, rad, s, *, lit=False, down=False, focus=False,
     暗い半透明の塗りと細い縁だけ。つや・グラデーション・重い影は使わない。
     乗せたとき: 縁が少し明るく、塗りがわずかに持ち上がる。
     フォーカス: シアンの縁。押しているあいだ: 塗りが少し暗くなる。
-    主ボタン(primary): 塗りはほかと同じ暗さで、縁を明るいシアンにする。
-    選んだカード(selected): シアンの縁にうっすら光。"""
+    主ボタン(primary): うっすらシアンの塗りと細いシアンの縁。
+    フォーカス・選んだカード(selected): 2px のシアンの縁(光は付けない)。
+    主ボタンの塗りとフォーカスの縁は別の手段なので、両方が重なっても見分けられる。"""
     r = QRectF(r)
     p.save()
     p.setRenderHint(QPainter.Antialiasing)
-    if selected:
-        glow = QColor(SELECT_COLOR)
-        for i, a in ((6, 0.06), (3, 0.14)):
-            glow.setAlphaF(a)
-            p.setPen(QPen(glow, i * s))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(r.adjusted(-i * s / 2, -i * s / 2, i * s / 2, i * s / 2),
-                              rad + i * s / 2, rad + i * s / 2)
     fill = QColor(10, 20, 36, base_alpha)
     if down:
         fill = QColor(4, 10, 20, min(255, base_alpha + 30))
@@ -325,16 +332,22 @@ def paint_glass(p, r, rad, s, *, lit=False, down=False, focus=False,
     p.setPen(Qt.NoPen)
     p.setBrush(fill)
     p.drawRoundedRect(r, rad, rad)
+    if primary and not down:
+        tint = QColor(SELECT_COLOR)
+        tint.setAlpha(58 if lit else 40)
+        p.setBrush(tint)
+        p.drawRoundedRect(r, rad, rad)
     if focus or selected:
-        col, width = QColor(SELECT_COLOR), (2.0 if selected else 1.6) * s
+        col, width = QColor(SELECT_COLOR), 2.0 * s
     elif primary:
-        col = QColor(SELECT_COLOR).lighter(112 if lit else 100)
-        width = 1.8 * s
+        col = QColor(SELECT_COLOR)
+        col.setAlpha(200 if lit else 150)
+        width = 1.2 * s
     else:
         col = QColor(edge) if edge is not None else QColor(255, 255, 255, 120)
         if lit:
             col.setAlpha(min(255, col.alpha() + 80))
-        width = 1.3 * s
+        width = 1.2 * s
     p.setPen(QPen(col, width))
     p.setBrush(Qt.NoBrush)
     half = width / 2
@@ -504,7 +517,7 @@ class ActionButton(_GlassButton):
         if not self.isEnabled():
             p.setOpacity(0.4)
         r = paint_glass(p, self.inner(), BTN_RADIUS * s, s, lit=self._hover and self.isEnabled(),
-                        down=self.isDown(), focus=self.hasFocus() and not self.primary,
+                        down=self.isDown(), focus=self.hasFocus(),
                         primary=self.primary, base_alpha=175,
                         edge=QColor(220, 228, 238, 150))
         px = (28 if self.primary else 25) * s
@@ -846,10 +859,10 @@ class SettingsPanel(QFrame):
             sw.setFixedSize(sw.sizeHint())
 
     def paintEvent(self, ev):
-        """すりガラス風の板。上から下へ少し濃く、左の縁に細い光。
+        """不透明な紺の板(後ろの背景・Play が透けない)。左の縁に細い線。
         項目のあいだに薄い区切り線。"""
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(12, 24, 44, 222))
+        p.fillRect(self.rect(), QColor(12, 24, 44))
         p.setPen(QPen(TOP_EDGE, 1.3))
         p.drawLine(0, 0, 0, self.height())
         # 項目の区切り(ラベルの行のあいだ)
@@ -961,6 +974,7 @@ class DifficultyPage(QWidget):
         self._load_art()
         self.settings.set_values(self.cfg)
         self._sync()
+        self._layout()
         self.update()
 
     def _load_art(self):
@@ -972,6 +986,8 @@ class DifficultyPage(QWidget):
             return None if pm.isNull() else pm
         self._jacket = load("jacket")
         self._bg = load("background")
+        # 背景(絵でも動画でも)が決まっているか。動画のコマが届く前から配置を決める。
+        self._has_bg_art = bool(song_lists.existing_art(self.cfg, self.path, "background"))
         self._video_bg = None
         self._bg_scaled = None
 
@@ -1027,8 +1043,13 @@ class DifficultyPage(QWidget):
     def _sync(self):
         for slot, card in self.cards.items():
             key = self.slot_key(slot)
+            alt = ""
+            if slot == "Oni" and self.has_ura_toggle():
+                other = "Oni" if self.oni_side == "Edit" else "Edit"
+                lv = self.levels.get(other)
+                alt = ("表" if other == "Oni" else "裏") + ("★%d" % lv if lv is not None else "")
             card.set_state(key, key in self.levels, self.levels.get(key),
-                           slot == self.selected)
+                           slot == self.selected, alt)
         self.btn_swap.setVisible(self.has_ura_toggle())
         ok = self.current_course() is not None
         self.btn_play.setEnabled(ok)
@@ -1048,6 +1069,22 @@ class DifficultyPage(QWidget):
                 i = have.index(self.selected) if self.selected in have else 0
                 i = max(0, min(len(have) - 1, i + (1 if k == Qt.Key_Right else -1)))
                 self.select_slot(have[i])
+            return
+        if k in (Qt.Key_Up, Qt.Key_Down):
+            # ⇔ と同じ(表/裏の切り替え)。
+            if self.has_ura_toggle():
+                self.sound_requested.emit("pi")
+                self.toggle_ura()
+            return
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            if self.settings_open():
+                return
+            fw = self.focusWidget()
+            if (isinstance(fw, QAbstractButton) and fw is not self and fw.isVisible()
+                    and fw.isEnabled() and fw.window() is self.window()):
+                fw.click()          # フォーカスのあるボタン(録画・戻る…)
+            elif self.btn_play.isEnabled():
+                self.btn_play.click()
             return
         super().keyPressEvent(ev)
 
@@ -1069,8 +1106,10 @@ class DifficultyPage(QWidget):
         self.settings.setGeometry(r)
         self.settings.show()
         self.settings.raise_()
-        # 半透明の板の後ろに「設定」が透けないように。
+        # 板の後ろに「設定」・Play・録画が透けないように(押せもしない)。
         self.btn_settings.hide()
+        self.btn_play.hide()
+        self.btn_record.hide()
         self._anim.stop()
         self._anim.setStartValue(QPoint(self.width(), 0))
         self._anim.setEndValue(r.topLeft())
@@ -1090,6 +1129,8 @@ class DifficultyPage(QWidget):
             self.settings.hide()
             self._closing = False
             self.btn_settings.show()
+            self.btn_play.show()
+            self.btn_record.show()
 
     def _on_setting(self, key, value):
         self.cfg[key] = bool(value)
@@ -1097,6 +1138,8 @@ class DifficultyPage(QWidget):
             self._save_cb()
         except Exception:  # noqa: BLE001
             pass
+        if key == "player_show_bg":
+            self._layout()
         self.update()
 
     def _on_number_setting(self, key, value):
@@ -1122,12 +1165,35 @@ class DifficultyPage(QWidget):
     def _s(self):
         return max(0.55, min(self.width() / BASE_W, self.height() / BASE_H))
 
+    #: 下の帯の高さ(倍率 1 のとき)。
+    BAND_H = 278
+
+    def has_backdrop(self):
+        return bool(getattr(self, "_has_bg_art", False)) and self.show_bg()
+
+    def _header_top(self):
+        """ジャケットの上端。背景が見えるときは上に置き、真ん中は背景に空ける。
+        背景が無いときは 曲名〜帯 をひとかたまりにして、上のボタンより下の
+        真ん中へ寄せる(真ん中に何も無い所を作らない)。"""
+        s = self._s()
+        if self.has_backdrop():
+            return 112 * s
+        nav = 92 * s
+        group = (190 + 64 + self.BAND_H) * s
+        return nav + max(20 * s, (self.height() - nav - group) / 2)
+
     def panel_top(self):
-        return self.height() - 278 * self._s()
+        s = self._s()
+        if self.has_backdrop():
+            return self.height() - self.BAND_H * s
+        return self._header_top() + (190 + 64) * s
+
+    def panel_bottom(self):
+        return self.panel_top() + self.BAND_H * self._s()
 
     def jacket_rect(self):
         s = self._s()
-        return QRectF(80 * s, 112 * s, 190 * s, 190 * s)
+        return QRectF(80 * s, self._header_top(), 190 * s, 190 * s)
 
     def _settings_rect(self):
         s = self._s()
@@ -1136,11 +1202,14 @@ class DifficultyPage(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        self._layout()
+
+    def _layout(self):
         s = self._s()
         self.scale = s
         w, h = self.width(), self.height()
         top = self.panel_top()
-        ph = h - top
+        ph = self.BAND_H * s
         cw, ch = 236 * s, 232 * s
         gap = 18 * s
         x = 84 * s
@@ -1172,8 +1241,11 @@ class DifficultyPage(QWidget):
                           (self.btn_record, by + h_play + gap2, h_rec)):
             b.scale = s
             b.setGeometry(int(bx - g), int(yy - g), int(bw + 2 * g), int(hh + 2 * g))
-        self.lbl_auto.setGeometry(int(32 * s), int(top - 46 * s), int(108 * s), int(34 * s))
+        # 「オート再生」は曲名・副題の下(ジャケットの右、副題と同じ左端)。
+        jr = self.jacket_rect()
         self.lbl_auto.setFont(thin_font(17 * s, QFont.DemiBold))
+        self.lbl_auto.setGeometry(int(jr.right() + 36 * s), int(jr.top() + 160 * s),
+                                  int(108 * s), int(30 * s))
         gl = GLOW * s
         for b, align in ((self.btn_back, "left"), (self.btn_settings, "right")):
             b.scale = s
@@ -1222,13 +1294,13 @@ class DifficultyPage(QWidget):
         p.fillRect(QRectF(0, 0, w, 360 * s), QBrush(top))
 
         # 下の帯
-        pt = self.panel_top()
-        band = QLinearGradient(0, pt, 0, h)
-        band.setColorAt(0, QColor(16, 30, 54, 225))
-        band.setColorAt(1, QColor(10, 20, 38, 240))
-        p.fillRect(QRectF(0, pt, w, h - pt), QBrush(band))
-        p.setPen(QPen(QColor(255, 255, 255, 60), 1))
-        p.drawLine(QPointF(0, pt), QPointF(w, pt))
+        pt, pb = self.panel_top(), self.panel_bottom()
+        p.fillRect(QRectF(0, pt, w, pb - pt), QColor(12, 24, 44, 240))
+        # 細い区切り線(選曲の表と同じ)。帯が下端まで届かないときは下にも。
+        p.setPen(QPen(HAIRLINE, 1))
+        p.drawLine(QPointF(0, pt + 0.5), QPointF(w, pt + 0.5))
+        if pb < h - 1:
+            p.drawLine(QPointF(0, pb - 0.5), QPointF(w, pb - 0.5))
 
         # ジャケット
         jr = self.jacket_rect()
@@ -1272,9 +1344,9 @@ class DifficultyPage(QWidget):
         px = lambda v: max(8, int(round(v * s)))
         fam = ('font-family: "%s";' % ui) if ui else ""
         return f"""
-        QLabel#autoBadge {{ background-color: rgba(108,116,128,225); color: #ffffff;
-                           border: 1px solid rgba(255,255,255,95); border-radius: {px(4)}px; {fam}
-                           font-size: {px(16)}px; font-weight: 600; letter-spacing: 1px; }}
+        QLabel#autoBadge {{ background-color: rgba(12,24,44,200); color: #93a3bf;
+                           border: 1px solid rgba(147,163,191,130); border-radius: {px(3)}px; {fam}
+                           font-size: {px(15)}px; font-weight: bold; }}
         QFrame#diffSettings QLabel {{ color: #ffffff; background: transparent; {fam}
                                      font-size: {px(24)}px; font-weight: 600; }}
         QLabel#setHead {{ font-size: {px(30)}px; letter-spacing: 2px; }}

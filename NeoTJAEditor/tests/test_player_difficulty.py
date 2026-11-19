@@ -177,11 +177,48 @@ class DifficultyPageTests(unittest.TestCase):
             c2 = img2.pixelColor(800, 420)
             self.assertNotEqual(c1.name(), c2.name())
             self.assertLess(abs(c2.red() - 0x13) + abs(c2.green() - 0x22) + abs(c2.blue() - 0x3d), 40)
+            # 背景が無いときは 曲名〜帯 を寄せる(真ん中を空けない)。
+            page._layout()
+            self.assertGreater(page.jacket_rect().top(), jr.top())
+            self.assertLess(page.panel_bottom(), page.height())
+            cfg['player_show_bg'] = True
             # 題の位置はジャケットの有無で変わらない。
             sl.set_chart_art(cfg, path, jacket=_png(Path(d) / 'j.png', '#ff0000'))
             page.set_song(path)
             self.assertIsNotNone(page._jacket)
             self.assertEqual(page.jacket_rect(), jr)
+            page.deleteLater()
+
+
+class DifficultyKeysTests(unittest.TestCase):
+    _page = DifficultyPageTests._page
+
+    @real_qt_test
+    def test_up_down_toggle_ura_enter_plays_and_alt_level_shown(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        with tempfile.TemporaryDirectory() as d:
+            path = _chart(Path(d) / 'u.tja', [('Edit', 10), ('Oni', 9), ('Hard', 7)])
+            page, _cfg, _ = self._page()
+            page.set_song(path)
+            page.setFocus()
+            self.assertEqual(page.cards['Oni'].alt_text, '裏★10')
+            QTest.keyClick(page, Qt.Key_Down)
+            self.assertEqual(page.current_course(), 'Edit')
+            self.assertEqual(page.cards['Oni'].alt_text, '表★9')
+            QTest.keyClick(page, Qt.Key_Up)
+            self.assertEqual(page.current_course(), 'Oni')
+            got = []
+            page.play_requested.connect(lambda p, c: got.append(c))
+            page.setFocus()
+            QTest.keyClick(page, Qt.Key_Return)
+            self.assertEqual(got, ['Oni'])
+            # 設定を開いているあいだは Play・録画を隠し、Enter でも始めない。
+            page.open_settings()
+            self.assertFalse(page.btn_play.isVisible())
+            self.assertFalse(page.btn_record.isVisible())
+            QTest.keyClick(page, Qt.Key_Return)
+            self.assertEqual(got, ['Oni'])
             page.deleteLater()
 
 
