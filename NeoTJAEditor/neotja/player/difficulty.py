@@ -792,7 +792,7 @@ class SettingsPanel(QFrame):
     #: 「連打秒速」(roll_speed)と同じ値を共有する。次に譜面を読むときに効く。
     NUMBERS = (("roll_speed", "連打秒速", 1, 100, 45, "打/s"),
                # 自分で叩くときの入力の遅れ(叩いた時刻からこれだけ引いて判定)。
-               ("player_input_lag", "インプットラグ", -200, 200, 0, "ms"),
+               ("player_input_lag", "インプットラグフレーム", -200, 200, 0, "ms"),
                # 音に対する譜面の時刻のずれ(＋で音符が遅く来る)。オートにも効く。
                ("player_global_offset", "全体OFFSET", -200, 200, 0, "ms"))
 
