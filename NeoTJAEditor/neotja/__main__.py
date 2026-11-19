@@ -2,6 +2,8 @@ import os
 import sys
 import threading
 
+from neotja import std_handles               # noqa: E402
+std_handles.fix()   # 窓だけの起動で子プロセスが WinError 6 で落ちないように
 from neotja import crashlog                   # noqa: E402
 from neotja import prewarm                    # noqa: E402
 prewarm.start()

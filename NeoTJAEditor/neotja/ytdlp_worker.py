@@ -138,6 +138,8 @@ class YtDlpDownloadWorker(QThread):
         return [None]
 
     def run(self):
+        from neotja import std_handles
+        std_handles.fix()   # 標準の口が壊れていると ffmpeg を起こせない(WinError 6)
         _strip_pyinstaller_env()
 
         import imageio_ffmpeg
@@ -362,6 +364,8 @@ class ThumbnailFetchWorker(QThread):
         self.url = url
 
     def run(self):
+        from neotja import std_handles
+        std_handles.fix()   # 標準の口が壊れていると ffmpeg を起こせない(WinError 6)
         try:
             import urllib.request
             req = urllib.request.Request(self.url, headers={"User-Agent": "Mozilla/5.0"})
