@@ -49,6 +49,29 @@ class CopyTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(dlg._path))
         dlg.deleteLater()
 
+class SquareTests(unittest.TestCase):
+    @real_qt_test
+    def test_non_square_is_center_cropped_original_untouched(self):
+        from PySide6.QtGui import QColor, QImage
+        from neotja import user_dirs
+        from neotja.player import playlists
+        src = os.path.join(_TMP, 'wide.png')
+        img = QImage(30, 10, QImage.Format_ARGB32)
+        img.fill(QColor(0, 0, 255))
+        for y in range(10):
+            img.setPixelColor(15, y, QColor(255, 0, 0))
+        img.save(src)
+        got = QImage(user_dirs.copy_into('jackets', src))
+        self.assertEqual((got.width(), got.height()), (10, 10))
+        self.assertEqual(got.pixelColor(5, 5), QColor(255, 0, 0))   # 真ん中
+        self.assertEqual(QImage(src).width(), 30)                    # 元はそのまま
+        sq = os.path.join(_TMP, 'sq.png')
+        img.copy(0, 0, 10, 10).save(sq)
+        self.assertEqual(QImage(user_dirs.copy_into('jackets', sq)).width(), 10)
+        name = playlists.import_jacket(src, 'p1')
+        got = QImage(str(playlists.jacket_dir() / name))
+        self.assertEqual((got.width(), got.height()), (10, 10))
+
 
 if __name__ == '__main__':
     unittest.main()

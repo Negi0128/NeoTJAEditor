@@ -80,6 +80,38 @@ def user_dir(kind, create=True):
     return path
 
 
+def square_image(src):
+    """src の絵が正方形でなければ、真ん中を正方形に切った QImage を返す。
+    正方形・読めない絵なら None(そのまま写せばよい)。"""
+    try:
+        from PySide6.QtGui import QImage
+    except Exception:  # noqa: BLE001
+        return None
+    img = QImage(str(src))
+    if img.isNull() or img.width() == img.height():
+        return None
+    side = min(img.width(), img.height())
+    return img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+
+
+def copy_square(src, dst):
+    """src を dst へ写す。正方形でない絵は真ん中を切って PNG で書く。
+    書いた道(拡張子が .png に変わることがある)を返す。元の絵には触らない。"""
+    import shutil
+    sq = square_image(src)
+    dst = Path(dst)
+    if sq is None:
+        shutil.copyfile(src, dst)
+        return dst
+    dst = dst.with_suffix(".png")
+    tmp = dst.with_name(dst.name + ".part.png")
+    if not sq.save(str(tmp), "PNG"):
+        shutil.copyfile(src, dst)
+        return dst
+    os.replace(tmp, dst)
+    return dst
+
+
 def copy_into(kind, src):
     """src を種類 kind のフォルダへ写し、写した先の道を返す。元を消しても
     困らないようにするため。すでにそのフォルダの中なら何もしない。同じ絵
@@ -99,6 +131,12 @@ def copy_into(kind, src):
                 h.update(chunk)
         dst = folder / ("%s_%s%s" % (src_abs.stem, h.hexdigest()[:10],
                                      src_abs.suffix.lower()))
+        if kind == "jackets":
+            # ジャケットは正方形で持つ(正方形でなければ真ん中を切る)。
+            sq = dst.with_suffix(".png") if square_image(src_abs) is not None else dst
+            if not sq.exists():
+                sq = copy_square(src_abs, dst)
+            return str(sq)
         if not dst.exists():
             tmp = dst.with_name(dst.name + ".part")
             shutil.copyfile(src_abs, tmp)

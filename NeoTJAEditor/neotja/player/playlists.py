@@ -153,8 +153,9 @@ def import_jacket(src, pid):
     while dst.exists():
         dst = jacket_dir() / ("%s_%s-%d%s" % (pid, time.strftime("%Y%m%d%H%M%S"), n, ext))
         n += 1
-    shutil.copyfile(src, dst)
-    return dst.name
+    from neotja.user_dirs import copy_square
+    # 正方形でない絵は真ん中を正方形に切って持つ(元の絵には触らない)。
+    return copy_square(src, dst).name
 
 
 def drop_jacket(value):
