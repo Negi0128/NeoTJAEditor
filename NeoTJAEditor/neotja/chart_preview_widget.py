@@ -5056,9 +5056,12 @@ class ChartPreviewWidget(QWidget):
             # 毎回計算しないよう1回だけ求める。
             _sh = footer_h * self.SE_SPRITE_SCALE
             se_y = band_bottom + (footer_h - _sh) / 2.0
+            _st = self._play_state
             for i in range(hi - 1, lo - 1, -1):
                 t = self._note_times[i]
-                if t <= now:
+                if t <= now and (_st is None or _st.hit_time(i) is not None):
+                    # 叩いた(オートも)音符の文字は判定で消す。演奏モードで
+                    # 叩かずに流れていく音符は、音符といっしょに文字も流す。
                     continue
                 if reveal_t is not None and t < reveal_t:
                     continue   # リード再生中は開始位置より前の SE 表記も隠す
