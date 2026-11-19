@@ -1245,7 +1245,10 @@ class DifficultyPage(QWidget):
             pass
 
     def show_jacket(self):
-        return bool(self.cfg.get("player_show_jacket", True))
+        """難易度選択のジャケットはいつも出す。「ジャケット」OFF
+        (player_show_jacket)は再生画面の下のジャケットだけに効く
+        (利用者の指定 2026-11-20)。曲別の「表示しない」は別。"""
+        return True
 
     def show_bg(self):
         return bool(self.cfg.get("player_show_bg", True))

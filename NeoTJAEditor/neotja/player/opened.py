@@ -149,7 +149,8 @@ class OpenedPage(QWidget):
                 return None
             pm = QPixmap(p)
             return None if pm.isNull() else pm
-        self._jacket = load("jacket") if self.cfg.get("player_show_jacket", True) else None
+        # 「ジャケット」OFF は再生画面の下のジャケットだけ(利用者の指定 2026-11-20)。
+        self._jacket = load("jacket")
         self._bg = load("background") if self.cfg.get("player_show_bg", True) else None
         self._bg_scaled = None
         self.set_added(song_lists.is_saved(self.cfg, path))

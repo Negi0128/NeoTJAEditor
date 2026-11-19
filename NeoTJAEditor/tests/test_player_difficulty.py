@@ -148,6 +148,7 @@ class DifficultyPageTests(unittest.TestCase):
             page.settings.switches['player_show_jacket'].click()
             page.settings.switches['player_show_lyric'].click()
             self.assertIs(cfg['player_show_jacket'], False)
+            self.assertTrue(page.show_jacket())   # OFF は再生画面の下のジャケットだけ
             self.assertIs(cfg['player_show_lyric'], False)
             self.assertEqual(len(saves), 2)
             page.settings.btn_close.click()

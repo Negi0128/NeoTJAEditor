@@ -510,7 +510,8 @@ class IntroPage(QWidget):
 
         # ジャケット(OFF・無しは No Image の枠。位置と大きさは同じ)
         jr = self.jacket_rect()
-        if self._jacket is not None and self.cfg.get("player_show_jacket", True):
+        # 「ジャケット」OFF は再生画面の下のジャケットだけ(利用者の指定 2026-11-20)。
+        if self._jacket is not None:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 80))
             p.drawRect(jr.translated(0, 8 * s))
