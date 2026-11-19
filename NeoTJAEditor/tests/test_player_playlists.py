@@ -166,7 +166,7 @@ class LibraryTests(unittest.TestCase):
         idx = [lay.indexOf(b) for b in (lib.nav_saved, lib.nav_playlists)]
         self.assertEqual(idx[1], idx[0] + 1)
         self.assertEqual(lib.nav_playlists.text(), 'プレイリスト')
-        self.assertTrue(lib.nav_playlists.property('sub'))
+        self.assertTrue(lib.nav_playlists.property('top'))  # 上のまとまり(見出しなし)
         switched = []
         lib.list_switched.connect(lambda: switched.append(1))
         lib.nav_playlists.click()

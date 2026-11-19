@@ -1106,13 +1106,7 @@ class NavButton(QPushButton):
             p.setBrush(self.dot_color)
             p.drawEllipse(QPointF(34.0, self.height() / 2.0), 4.0, 4.0)
             p.end()
-        if self.isChecked():
-            p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.setPen(QPen(QColor(COLORS["accent"]), 3, Qt.SolidLine, Qt.RoundCap))
-            x = 18 if self.property("sub") else 4
-            p.drawLine(x, 12, x, self.height() - 12)
-            p.end()
+        # 選んでいるものは塗りだけで示す(横の線は描かない)。
 
 
 class SortBar(QWidget):
@@ -1331,20 +1325,25 @@ class LibraryView(QWidget):
         side_inner.setObjectName("sideInner")
         side_scroll.setWidget(side_inner)
         sv = QVBoxLayout(side_inner)
-        sv.setContentsMargins(16, 22, 16, 22)
-        sv.setSpacing(4)
-        sv.addWidget(self._category_head("NeoTJAPlayer"))
-        sv.addSpacing(6)
+        sv.setContentsMargins(14, 20, 14, 22)
+        sv.setSpacing(2)
+        # 上の4つは見出しなしの1つのまとまり(選んだものは塗り)。その下に細い線、
+        # 続いてシミュレーターごとの小さな見出しと登録フォルダ。
         self.nav_open = NavButton("TJAを開く", "open")
         self.nav_recent = NavButton("最近開いた楽曲", "recent")
         self.nav_saved = NavButton("保存済み楽曲", "saved")
         self.nav_playlists = NavButton("プレイリスト", "playlists")
         for b in (self.nav_open, self.nav_recent, self.nav_saved, self.nav_playlists):
-            b.setProperty("sub", True)
+            b.setProperty("top", True)
             b.clicked.connect(lambda _=False, k=b.kind: self.show_section(k))
             b.clicked.connect(self._pi)
             sv.addWidget(b)
-        sv.addSpacing(24)
+        sv.addSpacing(16)
+        self.side_rule = QFrame()
+        self.side_rule.setObjectName("sideRule")
+        self.side_rule.setFixedHeight(1)
+        sv.addWidget(self.side_rule)
+        sv.addSpacing(14)
         # シミュレーター(カテゴリ)ごとに見出しを立て、その下に登録フォルダ。
         self.folder_box = QVBoxLayout()
         self.folder_box.setSpacing(4)
@@ -1357,7 +1356,7 @@ class LibraryView(QWidget):
         #: ジャンルを左の列に出している登録フォルダを「その他」で開いたとき、
         #: その一段ではジャンルの行を出さない(左に並んでいるので)。
         self._hide_genres_in = ""
-        sv.addSpacing(10)
+        sv.addSpacing(6)
         self.btn_add_folder = QPushButton("＋  フォルダを追加")
         self.btn_add_folder.setObjectName("addFolder")
         self.btn_add_folder.setCursor(Qt.PointingHandCursor)
@@ -2502,7 +2501,7 @@ class LibraryView(QWidget):
         self.category_labels = []
         for i, sim in enumerate(song_lists.simulators(self.cfg)):
             if i:
-                self.folder_box.addSpacing(20)
+                self.folder_box.addSpacing(14)
             head = CategoryHead(sim, collapsed=sim in self._collapsed())
             head.toggled.connect(self._on_category_toggled)
             head.toggled.connect(self._pi)
@@ -2510,7 +2509,7 @@ class LibraryView(QWidget):
             head.customContextMenuRequested.connect(
                 lambda pos, lbl=head, name=sim: self._category_menu(lbl, name, pos))
             self.folder_box.addWidget(head)
-            self.folder_box.addSpacing(6)
+            self.folder_box.addSpacing(2)
             self.category_labels.append(head)
             for root in song_lists.folders_of(self.cfg, sim):
                 for kind, path, name, color in self._sidebar_entries(root):
@@ -2799,9 +2798,17 @@ class LibraryView(QWidget):
         self._search_worker = None
 
 
+def secondary_color():
+    """小さな字(副題・置き場所・日付・見出し)の色。地の紺に対して 4.5:1 を
+    十分に超える、前景の青みを残した色(暗いテーマで約 7.4:1)。"""
+    from neotja.theme import is_dark_theme
+    return "#93a3bf" if is_dark_theme(COLORS) else "#4a5568"
+
+
 def library_qss():
     """選曲の画面だけの QSS(ランチャーの QSS に足す)。"""
     p = COLORS
+    SECONDARY = secondary_color()
     g = glass_colors()
     fam = wordmark_family()
     fam_css = ('font-family: "%s";' % fam) if fam else ""
@@ -2817,8 +2824,9 @@ def library_qss():
                                border: 1px solid {_rgba(g['accent_border'])}; color: {p['fg_bright']}; font-weight: bold; }}
     QPushButton#nav:focus {{ border: 1px solid {p['accent']}; }}
     QPushButton#nav[missing="true"] {{ color: {p['fg_dim']}; }}
-    QPushButton#addFolder {{ text-align: left; background-color: transparent; border: 1px dashed {_rgba(g['btn_border'])};
-                             border-radius: 9px; padding: 9px 14px; color: {p['fg_dim']}; font-size: 13px; }}
+    QPushButton#addFolder {{ text-align: left; background-color: transparent; border: 1px solid transparent;
+                             border-radius: 9px; padding: 7px 14px 7px 30px; color: {SECONDARY}; font-size: 12px;
+                             font-weight: 600; }}
     QPushButton#addFolder:hover {{ color: {p['fg']}; background-color: {_rgba(g['btn_fill'])}; }}
     QLabel#pageTitle {{ color: {p['fg_bright']}; {fam_css} font-size: 34px; font-weight: 600; letter-spacing: 1px; }}
     QLabel#openGlyph {{ color: {p['accent']}; {fam_css} font-size: 44px; font-weight: 200; letter-spacing: 6px; }}
@@ -2847,9 +2855,10 @@ def library_qss():
     QComboBox#category QAbstractItemView {{ background-color: {p['bg']}; color: {p['fg']};
                           border: 1px solid {_rgba(g['btn_border'])}; selection-background-color: {_rgba(g['btn_fill_hover'])}; }}
     QPushButton:disabled {{ color: {p['fg_dim']}; }}
-    QLabel#category {{ color: {p['fg_bright']}; {fam_css} font-size: 15px; font-weight: bold;
-                       letter-spacing: 1px; padding: 1px 0 1px 10px; margin-left: 2px;
-                       border-left: 3px solid {p['accent']}; }}
+    QLabel#category {{ color: {SECONDARY}; {fam_css} font-size: 12px; font-weight: bold;
+                       letter-spacing: 1px; padding: 6px 0 4px 14px; }}
+    QPushButton#nav[top="true"] {{ padding-left: 14px; font-size: 14px; }}
+    QFrame#sideRule {{ background-color: {_rgba(g['border'])}; border: none; margin: 0 6px; }}
     QPushButton#nav[sub="true"] {{ padding-left: 30px; font-size: 13px; }}
     QPushButton#nav[dot="true"] {{ padding-left: 46px; }}
     QLabel#bpm {{ color: {p['fg_dim']}; font-size: 12px; }}
