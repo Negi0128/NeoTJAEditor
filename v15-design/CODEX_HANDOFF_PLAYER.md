@@ -1,3 +1,12 @@
+## 2026-11-20 自分で叩く演奏の続き（Claude）
+
+- 連打・風船は元の演奏モードでもう動いていた(連打は面・縁どちらも数えて音符が魂ゲージへ飛ぶ、風船は面だけ・残り打数・割れたら虹・終わりまで割れなければ消える)。確かめた画像は scratchpad の manual/。
+- a57061c: 叩かずに流れる音符の打音表記を音符といっしょに流す(叩いた音符・オートは判定で消すまま)。
+- 29853e2: _visible_window の右端を大音符の半径2つぶん先まで(音符が半分欠けて急に出ない。GL/CPU 共通)。
+- 8cdf4a0: 難易度設定に インプットラグ / 全体OFFSET(ms、−200〜+200、押し続けると5ずつ)。ラグは chart_preview.input_lag_sec(叩いた時刻から引く)、全体OFFSET は set_output_offset_ms へ足す(＋で音符が遅い。オートにも効く・Player の PreviewDock だけ)。
+- c2077ea: スコアの加算表示は PlayState の実際に入った点(gains_in)。不可・空打ちは出さない。可は良の半分を10点単位で切り捨て(元のまま)。
+- 4013573: Editor の F1 = オート ON/OFF(PreviewDock.editor_auto)。OFF で PlayState を差し込み、演奏モード(旧 通常モード)で D F J K、作譜モードは pads_enabled=False で叩けない(音符は不可で流れる・打音は鳴らない)。叩いた所より前から流し直すと記録を作り直す。打音だけ消すのは右下の〔打音〕。環境設定の「演奏モード（実験的）」は旧 Player 用で、今は使われていない(残してある)。
+
 ## 2026-11-20 YouTube の WinError 6・正方形ジャケット・ジャケット OFF・背景動画のコマ（Claude）
 
 - 2d2b398: 標準入出力の口が壊れている起動(窓だけの exe 等)で子プロセスを起こすと WinError 6。neotja/std_handles.fix() で NUL へつなぎ直す(__main__ の頭・yt-dlp の係の run の頭)。試験 test_std_handles(口を壊した子 Python で ERR 6 → 直すと OK)。
