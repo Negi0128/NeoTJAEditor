@@ -228,6 +228,12 @@ class PlayerHost(QWidget):
                 # GL の部品が窓に入ったあとの最初の撮影(フェード)は 90ms ほど
                 # 重い。その1回目もここで済ませる。
                 self.library.grab()
+                # ゲーム画面の最初の描画(GL の初期化・絵の読み込み 約 0.4 秒)も、
+                # 見せずに1枚描いて済ませる(再生へ入る黒の中で止まらない)。
+                gs = getattr(core.dock, "game_screen", None)
+                warm = getattr(gs, "grabFramebuffer", None)
+                if warm is not None:
+                    warm()
         except Exception:  # noqa: BLE001
             pass
 
