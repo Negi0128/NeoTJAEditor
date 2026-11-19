@@ -666,13 +666,20 @@ class PlayerHost(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    def manual_play(self):
+        """自分で叩くか。難易度設定の「オート演奏」(player_auto、既定 ON)が
+        OFF のとき。プレイリストはいつもオート(利用者の指定)。"""
+        return (self._pl_session is None
+                and not bool(self.cfg.get("player_auto", True)))
+
     def _begin_load(self, path, course):
-        from neotja.constants import PLAY_MODE_WATCH
+        from neotja.constants import PLAY_MODE_PLAY, PLAY_MODE_WATCH
         core = self._core
         if core is None:
             return False
+        mode = PLAY_MODE_PLAY if self.manual_play() else PLAY_MODE_WATCH
         try:
-            return bool(core.load(path, course_key=course, play_mode=PLAY_MODE_WATCH))
+            return bool(core.load(path, course_key=course, play_mode=mode))
         except Exception:  # noqa: BLE001
             return False
 
@@ -702,6 +709,11 @@ class PlayerHost(QWidget):
         self.play_page.hide_menu()
         self.play_page.attach(dock.game_preview_window, native,
                               screen_fn=lambda: getattr(dock, "game_screen", None))
+        # 自分で叩くときは D F J K を打面へ(縁・面・面・縁)。
+        cp = getattr(dock, "chart_preview", None)
+        self.play_page.pad_cb = (getattr(cp, "_queue_press", None)
+                                 if getattr(cp, "play_state", lambda: None)() is not None
+                                 else None)
         self._play_ctx = (path, course)
         self._apply_fps_overlay()
         # 曲の背景・ジャケットを録画と同じ見え方で画面の下へ敷く(フェードの
@@ -972,6 +984,7 @@ class PlayerHost(QWidget):
             self._core.stop_audio()
         self.play_finished.emit(path, course)
         self._result_ctx = (path, course)
+        self.results.auto = self.play_page.pad_cb is None
         self.results.set_result(path, course, self.difficulty.levels.get(course),
                                 values, gauge, judges)
         # 背景が動画なら、結果画面でも無音・ループで流す(離れるときに止める)。

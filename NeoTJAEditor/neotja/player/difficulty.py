@@ -789,7 +789,8 @@ class SettingsPanel(QFrame):
     #: 「連打秒速」(roll_speed)と同じ値を共有する。次に譜面を読むときに効く。
     NUMBERS = (("roll_speed", "連打秒速", 1, 100, 45, "打/s"),)
 
-    ROWS = (("player_show_jacket", "ジャケット"),
+    ROWS = (("player_auto", "オート演奏"),
+            ("player_show_jacket", "ジャケット"),
             ("player_show_bg", "背景"),
             ("player_show_lyric", "LYRIC"),
             ("player_show_fps", "FPS表示"))
@@ -806,12 +807,13 @@ class SettingsPanel(QFrame):
         self.lbl_head = QLabel("設定")
         self.lbl_head.setObjectName("setHead")
         head.addWidget(self.lbl_head)
-        # オート演奏は変えられないので、行ではなく見出しの横の札にする。
+        # オート演奏は行(切り替え)にしたので、見出しの横の札は出さない。
         self.lbl_auto = QLabel("オート演奏")
         self.lbl_auto.setObjectName("panelBadge")
         self.lbl_auto.setAlignment(Qt.AlignCenter)
         head.addSpacing(14)
         head.addWidget(self.lbl_auto, 0, Qt.AlignVCenter)
+        self.lbl_auto.hide()
         head.addStretch(1)
         self.btn_close = GlassCircle("close")
         self.btn_close.setToolTip("閉じる")
@@ -1051,6 +1053,10 @@ class DifficultyPage(QWidget):
     # ------------------------------------------------------------------
     # 曲
     def set_song(self, path):
+        self._sync_auto_badge()
+        self._set_song(path)
+
+    def _set_song(self, path):
         self.path = path
         info = song_lists.song_info(path)
         self.title = info.get("title", "")
@@ -1233,7 +1239,12 @@ class DifficultyPage(QWidget):
             pass
         if key == "player_show_bg":
             self._layout()
+        self._sync_auto_badge()
         self.update()
+
+    def _sync_auto_badge(self):
+        """「オート演奏」の札はオートのときだけ。"""
+        self.lbl_auto.setVisible(bool(self.cfg.get("player_auto", True)))
 
     def _on_number_setting(self, key, value):
         """数の設定(連打秒速)。保存だけして、効くのは次に譜面を読むとき。

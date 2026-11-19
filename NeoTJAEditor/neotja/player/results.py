@@ -255,6 +255,9 @@ class ResultsPage(QWidget):
             b.installEventFilter(self)
 
     # ------------------------------------------------------------------
+    #: オートの結果か(「オート演奏」の札)。自分で叩いたら PlayerHost が False に。
+    auto = True
+
     def set_result(self, path, course, level, values, gauge=None, judges=None):
         """結果を流し込む。values は game_screen.result_values() の形。
         gauge は魂ゲージの絵(game_screen.gauge_strip)、judges は 良/可/不可 の
@@ -470,16 +473,19 @@ class ResultsPage(QWidget):
         # 「オート演奏」は難易度選択と同じ細枠の札。
         bfnt = thin_font(16 * s, QFont.Bold)
         badge = "オート演奏"
+        if not self.auto:          # 自分で叩いた結果には札を出さない
+            badge = ""
         bw = QFontMetricsF(bfnt).horizontalAdvance(badge) + 26 * s
         br = QRectF(x, cy - 16 * s, bw, 32 * s)
-        edge = QColor(SMALL_TEXT)
-        edge.setAlpha(130)
-        p.setPen(QPen(edge, 1.0))
-        p.setBrush(QColor(12, 24, 44, 200))
-        p.drawRoundedRect(br, 3 * s, 3 * s)
-        p.setFont(bfnt)
-        p.setPen(SMALL_TEXT)
-        p.drawText(br, Qt.AlignCenter, badge)
+        if badge:
+            edge = QColor(SMALL_TEXT)
+            edge.setAlpha(130)
+            p.setPen(QPen(edge, 1.0))
+            p.setBrush(QColor(12, 24, 44, 200))
+            p.drawRoundedRect(br, 3 * s, 3 * s)
+            p.setFont(bfnt)
+            p.setPen(SMALL_TEXT)
+            p.drawText(br, Qt.AlignCenter, badge)
 
         # 2行目: 魂ゲージ
         gy = cy + 58 * s

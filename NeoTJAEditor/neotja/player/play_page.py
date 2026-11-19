@@ -161,11 +161,25 @@ class PlayPage(QWidget):
     def menu_open(self):
         return self.menu.is_open()
 
+    #: 自分で叩くときの打面の口 (kind, side)。オートなら None。
+    pad_cb = None
+
     def handle_key(self, ev):
-        """締めているレーン・この画面に届いたキー。Esc だけが意味を持つ。"""
+        """締めているレーン・この画面に届いたキー。Esc と、自分で叩くときの
+        D F J K(左の縁・左の面・右の面・右の縁)。"""
         if self.menu.is_open():
             self.menu.keyPressEvent(ev)
             return
+        cb = self.pad_cb
+        if cb is not None and not self.detail:
+            from neotja.constants import KIND_DON, KIND_KA
+            pad = {Qt.Key_D: (KIND_KA, 0), Qt.Key_F: (KIND_DON, 0),
+                   Qt.Key_J: (KIND_DON, 1), Qt.Key_K: (KIND_KA, 1)}.get(ev.key())
+            if pad is not None:
+                if not ev.isAutoRepeat():
+                    cb(*pad)
+                ev.accept()
+                return
         if ev.key() == Qt.Key_Escape and not ev.isAutoRepeat():
             self.esc_pressed.emit()
         ev.accept()

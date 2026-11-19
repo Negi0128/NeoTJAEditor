@@ -584,11 +584,13 @@ class IntroPage(QWidget):
         star = "★%d" % self.level if self.level is not None else "★—"
         sfnt = thin_font(38 * s, QFont.Bold)
         bfnt = thin_font(19 * s, QFont.Bold)
-        badge = "オート演奏"
+        # 自分で叩くとき(難易度設定のオート演奏 OFF。プレイリストはいつもオート)は札を出さない。
+        auto = self.playlist is not None or bool(self.cfg.get("player_auto", True))
+        badge = "オート演奏" if auto else ""
         gap = 26 * s
         name_w = QFontMetricsF(nf).horizontalAdvance(name)
         star_w = QFontMetricsF(sfnt).horizontalAdvance(star)
-        badge_w = QFontMetricsF(bfnt).horizontalAdvance(badge) + 30 * s
+        badge_w = (QFontMetricsF(bfnt).horizontalAdvance(badge) + 30 * s) if badge else -gap
         badge_h = 38 * s
         total = mark_d + gap + name_w + gap + star_w + gap + badge_w
         x = self._cx() - total / 2
@@ -619,6 +621,8 @@ class IntroPage(QWidget):
         p.setPen(QColor(255, 255, 255))
         p.drawText(QRectF(x, cy - 30 * s, star_w + 4, 60 * s), Qt.AlignLeft | Qt.AlignVCenter, star)
         x += star_w + gap
+        if not badge:
+            return
         br = QRectF(x, cy - badge_h / 2, badge_w, badge_h)
         # 難易度選択・結果と同じ細枠の札(#93a3bf)。
         p.setPen(QPen(QColor(147, 163, 191, 130), max(1.0, 1.0 * s)))
