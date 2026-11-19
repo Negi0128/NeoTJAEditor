@@ -340,6 +340,71 @@ QFrame#playPanel { background-color: rgba(12, 22, 36, 240); border: 1px solid rg
 """
 
 
+class Toast(QLabel):
+    """短い知らせ(「○○ を △△ に入れました」)。親の下のほうの真ん中に出し、
+    HOLD_MS 見せてから FADE_MS で消える。続けて出したら前のを置き換える
+    (知らせは1つだけ)。押しても後ろへ通す。"""
+
+    HOLD_MS = 2000
+    FADE_MS = 450
+    MAX_W = 760
+
+    def __init__(self, parent):
+        from PySide6.QtCore import QPropertyAnimation
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        super().__init__(parent)
+        self.setObjectName("toast")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            "QLabel#toast { background-color: rgba(12, 22, 36, 235); color: #ffffff;"
+            " border: 1px solid rgba(139, 217, 238, 190); border-radius: 3px;"
+            " padding: 12px 26px; font-family: 'Yu Gothic UI'; font-size: 15px;"
+            " font-weight: bold; }")
+        self._fx = QGraphicsOpacityEffect(self)
+        self._fx.setOpacity(1.0)
+        self.setGraphicsEffect(self._fx)
+        self._anim = QPropertyAnimation(self._fx, b"opacity", self)
+        self._anim.setDuration(self.FADE_MS)
+        self._anim.setStartValue(1.0)
+        self._anim.setEndValue(0.0)
+        self._anim.finished.connect(self.hide)
+        from PySide6.QtCore import QTimer
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.setInterval(self.HOLD_MS)
+        self._hold.timeout.connect(self._anim.start)
+        self.hide()
+
+    def show_message(self, text):
+        self._anim.stop()
+        self._hold.stop()
+        self.ensurePolished()
+        fm = self.fontMetrics()
+        self.setText(fm.elidedText(text, Qt.ElideMiddle, self.MAX_W - 60))
+        self.adjustSize()
+        self._fx.setOpacity(1.0)
+        self._place()
+        self.show()
+        self.raise_()
+        self._hold.start()
+
+    def _place(self):
+        par = self.parentWidget()
+        if par is None:
+            return
+        w = min(self.sizeHint().width(), self.MAX_W)
+        h = self.sizeHint().height()
+        self.setGeometry(int((par.width() - w) / 2), int(par.height() - h - 48), w, h)
+
+
+def added_message(song_title, playlist_title):
+    """「曲名 を プレイリスト名 に入れました」。"""
+    if playlist_title:
+        return "「%s」を「%s」に入れました" % (song_title, playlist_title)
+    return "「%s」をプレイリストに入れました" % song_title
+
+
 class RecordBar(QWidget):
     """プレイリストを録画しているあいだ右の上に出す帯。● 題 N / M・進み・中止。
     終わったら ✓ と、フォルダを開く・閉じる。"""

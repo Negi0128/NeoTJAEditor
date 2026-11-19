@@ -413,6 +413,32 @@ class AddAndPlayTests(unittest.TestCase):
         lib.close()
 
     @real_qt_test
+    def test_toast_after_each_add(self):
+        lib = self._lib()
+        pl = lib.playlist_store().create('練習')
+        self.assertIsNone(lib.toast)
+        lib.add_song_to_playlist(pl['id'], self.b)
+        self.assertTrue(lib.toast.isVisible())
+        self.assertEqual(lib.toast.text(), '「Bの曲」を「練習」に入れました')
+        # 続けて入れたら置き換える(1つだけ)。重複も入る(止めない)。
+        lib.add_song_to_playlist(pl['id'], self.b)
+        self.assertEqual(len([c for c in lib.children() if type(c).__name__ == 'Toast']), 1)
+        self.assertEqual(len(lib.playlist_store().get(pl['id'])['items']), 2)
+        # やめたら出さない。
+        self.answer = None
+        lib.toast.hide()
+        lib.add_song_to_playlist(pl['id'], self.a)
+        self.assertFalse(lib.toast.isVisible())
+        # しばらくすると消える。
+        self.answer = 'Oni'
+        lib.add_song_to_playlist(pl['id'], self.a)
+        self.assertEqual(lib.toast.text(), '「Aの曲」を「練習」に入れました')
+        _wait(lib.toast.HOLD_MS + lib.toast.FADE_MS + 400)
+        self.assertFalse(lib.toast.isVisible())
+        lib.shutdown()
+        lib.close()
+
+    @real_qt_test
     def test_right_click_add(self):
         from PySide6.QtCore import QPoint
         lib = self._lib()

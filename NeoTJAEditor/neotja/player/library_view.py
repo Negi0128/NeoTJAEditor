@@ -2255,7 +2255,17 @@ class LibraryView(QWidget):
                         r.flash()
             if page is self.page_playlist and self._playlist_id == pid:
                 self._fill_playlist_songs(store.get(pid))
+            # 入ったことが分かるように知らせる(連打して何度も入れてしまう、
+            # という利用者の報告 2026-11-19)。続けて入れたら置き換える。
+            from neotja.player.playlist_view import Toast, added_message
+            if self.toast is None:
+                self.toast = Toast(self)
+            title = info.get("title") or os.path.splitext(os.path.basename(path))[0]
+            self.toast.show_message(added_message(title, store.get(pid)["title"]))
         return ok
+
+    #: 「入れました」の知らせ(初めて入れたときに作る)。
+    toast = None
 
     def remove_playlist_item(self, index):
         pid = self._playlist_id
