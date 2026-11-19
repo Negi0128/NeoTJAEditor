@@ -871,6 +871,7 @@ class MainWindow(QMainWindow):
         self.start_screen.settings_requested.connect(self.open_settings)
         self.start_screen.file_dropped.connect(self._open_dropped)
         self.start_screen.player_requested.connect(self._show_player)
+        self.start_screen.set_player_locked(not self.player_unlocked())
         # 同居 Player(neotja/player/host.py)。初めて「Player を起動」を
         # 押したときに作って central_stack へ足す。
         self.player_page = None
@@ -919,12 +920,18 @@ class MainWindow(QMainWindow):
         return (host is not None and stack is not None
                 and stack.currentWidget() is host)
 
+    def player_unlocked(self):
+        """Player の鍵が開いているか(環境設定「Player（実験的）」)。"""
+        return bool(self.config_data.get("player_unlocked", False))
+
     def _show_player(self):
         """ランチャーから Player へ。同じ窓の中央を差し替える。
 
         メニューと上のツールバーは Editor のものなので隠す。窓全体に張った
         キー(Ctrl+S・Ctrl+Z・F1〜F3 など)は各ハンドラの頭で
         is_player_visible() を見て何もしない。"""
+        if not self.player_unlocked():
+            return          # 鍵が掛かっている(環境設定「Player（実験的）」で開ける)
         host = self.player_page
         if host is None:
             from neotja.player.host import PlayerHost
@@ -5834,6 +5841,7 @@ class MainWindow(QMainWindow):
                 *settings_mod.effective_hit_sound_paths(self.config_data))
             self.preview_dock.refresh_theme()
             self.start_screen.refresh_theme()
+            self.start_screen.set_player_locked(not self.player_unlocked())
             self.preview_dock.refresh_nameplate()
             self._sync_discord_presence()
             self.preview_dock.set_se_text_enabled(self.config_data.get("se_text_enabled", True))

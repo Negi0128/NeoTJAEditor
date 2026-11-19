@@ -25,6 +25,8 @@ _SETTINGS_KEYS = (
     "player_select_bgm", "player_select_bgm_volume",
     # NeoTJAPlayer の演奏モード(実験的機能)。default_settings() と両方に要る。
     "player_play_mode",
+    # Player の鍵(v15.5.0 では閉じて配る。環境設定「Player（実験的）」で開ける)。
+    "player_unlocked",
     # 更新で NeoTJAPlayer だけ入れ替えられなかったときの印。**次の起動で
     # 読み戻せないと意味が無い** — Editor 側は最新なので「更新の確認」は
     # 「最新です」と答えるだけで、Player を取りに行く道が無くなる。
@@ -192,6 +194,7 @@ def default_settings() -> dict:
         # 実験的機能: NeoTJAPlayer の演奏モード(自分で叩いて判定する)。
         # オンにするとコース選択のあとに「再生／演奏」を選ぶ画面が出る。
         "player_play_mode": False,
+        "player_unlocked": False,
         "theme": "dark",
         "font_family": "Consolas",
         "font_size": 12,

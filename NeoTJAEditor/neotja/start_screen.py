@@ -644,8 +644,10 @@ class StartScreen(QWidget):
         self.btn_player.setMinimumHeight(64)
         self.btn_player.setCursor(Qt.PointingHandCursor)
         self.btn_player.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.btn_player.clicked.connect(self.player_requested)
+        self.btn_player.clicked.connect(self._on_player_clicked)
         pv.addWidget(self.btn_player)
+        #: 鍵が掛かっているか(v15.5.0 は掛けて配る。環境設定で開ける)。
+        self.player_locked = False
         right.addWidget(holder, 1)
         body.addLayout(right, 2)
 
@@ -787,6 +789,45 @@ class StartScreen(QWidget):
     def rows(self):
         return list(self._rows)
 
+
+    # ------------------------------------------------------------------
+    # Player の鍵
+    def _on_player_clicked(self):
+        if not self.player_locked:
+            self.player_requested.emit()
+
+    def set_player_locked(self, locked):
+        """鍵を掛ける・外す。掛かっているあいだは錠前の印を出し、押しても何もしない。"""
+        from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+        self.player_locked = bool(locked)
+        b = self.btn_player
+        b.setProperty("locked", self.player_locked)
+        b.setCursor(Qt.ArrowCursor if self.player_locked else Qt.PointingHandCursor)
+        if self.player_locked:
+            pm = QPixmap(48, 48)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            col = QColor("#93a3bf")
+            p.setPen(QPen(col, 4))
+            p.setBrush(Qt.NoBrush)
+            arc = QPainterPath()
+            arc.moveTo(15, 22)
+            arc.lineTo(15, 15)
+            arc.arcTo(15, 5, 18, 20, 180, -180)
+            arc.lineTo(33, 22)
+            p.drawPath(arc)
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawRoundedRect(10, 21, 28, 22, 4, 4)
+            p.end()
+            b.setIcon(QIcon(pm))
+            b.setIconSize(QSize(24, 24))
+        else:
+            b.setIcon(QIcon())
+        b.style().unpolish(b)
+        b.style().polish(b)
+
     def refresh_theme(self):
         """テーマ替え。COLORS は中身が差し替わるので、読み直して当て直す。"""
         self.setStyleSheet(self._qss())
@@ -833,6 +874,9 @@ class StartScreen(QWidget):
                                    font-size: 20px; font-weight: bold; letter-spacing: 2px; }}
         QPushButton#playerLaunch:hover {{ background-color: {grad_hover}; }}
         QPushButton#playerLaunch:focus {{ border: 1px solid {p['fg_bright']}; }}
+        QPushButton#playerLaunch[locked="true"] {{ background-color: {_rgba(g['btn_fill'])};
+                                   color: {p['fg_dim']}; border: 1px solid {_rgba(g['btn_border'])}; }}
+        QPushButton#playerLaunch[locked="true"]:hover {{ background-color: {_rgba(g['btn_fill'])}; }}
         QLabel#tagline {{ color: {p['fg_dim']}; font-size: 13px; letter-spacing: 1px; }}
         QLabel#h1 {{ color: {p['fg_bright']}; font-size: 19px; font-weight: bold; }}
         QLabel#h2 {{ color: {p['fg']}; font-size: 15px; font-weight: bold; }}

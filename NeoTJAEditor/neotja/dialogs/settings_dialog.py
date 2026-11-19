@@ -186,7 +186,7 @@ class SettingsDialog(QDialog):
         "record_output_dir",
         "hit_sound_don_path", "hit_sound_ka_path", "hit_sound_use_custom",
         "audio_output_device", "wireless_offset_enabled", "wireless_offset_ms",
-        "player_select_bgm", "player_select_bgm_volume", "player_play_mode",
+        "player_select_bgm", "player_select_bgm_volume", "player_play_mode", "player_unlocked",
         "preview_modes_legacy", "gpu_render", "gpu_vsync",
         "preview_max_fps",
         "nameplate_name", "nameplate_title", "nameplate_title_type",
@@ -1374,9 +1374,11 @@ class SettingsDialog(QDialog):
         w, outer = self._tab_body()
         cfg = self.main_window.config_data
         form = self._group(outer, "演奏")
-        self.player_play_mode_check = QCheckBox("演奏モード（実験的）")
-        self.player_play_mode_check.setChecked(bool(cfg.get("player_play_mode", False)))
-        form.addRow(self.player_play_mode_check)
+        # 旧 Player の「演奏モード（実験的）」の代わり。ON で起動画面の
+        # 「Player を起動」の鍵が開く(v15.5.0 は閉じて配る)。
+        self.player_unlock_check = QCheckBox("Player（実験的）")
+        self.player_unlock_check.setChecked(bool(cfg.get("player_unlocked", False)))
+        form.addRow(self.player_unlock_check)
         form.addRow(self._hint(
             "コースを選んだあとに「再生／演奏」を選ぶ画面を出します。演奏を選ぶと、"
             "D F J K（左縁・左面・右面・右縁）で自分で叩いて判定・スコア・魂ゲージが"
@@ -1646,7 +1648,7 @@ class SettingsDialog(QDialog):
         cfg["preview_modes_legacy"] = self.legacy_modes_check.isChecked()
         cfg["command_panel_follow"] = self.command_panel_follow_check.isChecked()
         cfg["chart_edit_tail_measure"] = self.tail_measure_check.isChecked()
-        cfg["player_play_mode"] = self.player_play_mode_check.isChecked()
+        cfg["player_unlocked"] = self.player_unlock_check.isChecked()
         cfg["gpu_render"] = self.gpu_render_check.isChecked()
         cfg["gpu_vsync"] = self.gpu_vsync_check.isChecked()
         cfg["preview_max_fps"] = int(self.max_fps_spin.value())

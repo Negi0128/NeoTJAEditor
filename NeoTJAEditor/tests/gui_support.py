@@ -75,7 +75,8 @@ def editor_session():
         target = root / 'settings.json'
         cfg = settings.default_settings()
         cfg.update(master_volume=0.0, check_updates_on_startup=False,
-                   auto_save_enabled=False, gpu_render=False)
+                   auto_save_enabled=False, gpu_render=False,
+                   player_unlocked=True)   # Player の試験が多いので鍵は開けておく
         target.write_text(json.dumps(cfg), encoding='utf-8')
         settings.settings_path = lambda: target
         settings._fallback_settings_path = lambda: target

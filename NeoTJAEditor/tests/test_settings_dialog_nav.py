@@ -29,7 +29,7 @@ class SettingsDialogNavTests(unittest.TestCase):
                 self.assertEqual(dlg.nav.count(), len(names))
                 # 演奏モードは Player のページに。
                 player = dict((n, w) for n, _a, w in dlg.pages)["Player"]
-                self.assertTrue(player.isAncestorOf(dlg.player_play_mode_check))
+                self.assertTrue(player.isAncestorOf(dlg.player_unlock_check))
                 # 説明は画面に出さず、ⓘ のツールチップへ(状態の知らせだけは残す)。
                 for h in dlg.findChildren(_Hint):
                     if not h.live:
