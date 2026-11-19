@@ -882,6 +882,15 @@ class PlayerHost(QWidget):
             fn(on)
         except Exception:  # noqa: BLE001
             pass
+        # 見出し(BPM・拍子…)は小さく #93a3bf にして、値を目立たせる。
+        # 枠の形は Editor と同じまま(この見た目は Player だけ)。
+        rd = getattr(getattr(self._core, "dock", None), "value_readout", lambda: None)()
+        if on and rd is not None and not getattr(rd, "_player_look", False):
+            from PySide6.QtGui import QColor
+            rd.TITLE_COLOR = QColor("#93a3bf")
+            rd.TITLE_PX = 9
+            rd._player_look = True
+            rd.update()
 
     def _apply_fps_overlay(self):
         """実測 fps の表示。詳細モードでは常に、通常プレイでは設定

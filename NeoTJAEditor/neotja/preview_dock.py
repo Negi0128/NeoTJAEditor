@@ -3548,9 +3548,10 @@ class PreviewDock(QDockWidget):
             f.setBold(True)
             lbl.setFont(f)
             self._view_fps_css = (
-                "color: #7ddc7d; background: %s; border: none; border-radius: 3px;"
+                # Player の小さな字と同じ #93a3bf、下地は濃紺(緑はやめた 2026-11-19)。
+                "color: #93a3bf; background: rgba(12,24,44,200); border: none; border-radius: 3px;"
                 " font-family: \"%s\"; font-weight: bold;"
-                % (theme.THEMES["dark"]["toolbar_btn"], self.VIEW_FPS_FAMILY))
+                % (self.VIEW_FPS_FAMILY,))
             self._view_fps_pt = None
             lbl.setStyleSheet(self._view_fps_css)
         elif not on and self._view_fps:
