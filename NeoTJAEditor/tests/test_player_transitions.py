@@ -79,8 +79,9 @@ class FadeStackSizeTests(unittest.TestCase):
                 self.assertEqual(size, stack.contentsRect().size())
                 self.assertEqual(retry, page.btn_retry.geometry())
                 self.assertEqual(back, page.btn_back.geometry())
-                # 右下に置かれている(既定の 640x480 の位置ではない)。
-                self.assertGreater(retry.right(), 1400)
+                # 下に置かれている(既定の 640x480 の位置ではない。結果画面の
+                # ボタンは左下へ移った)。
+                self.assertGreater(retry.bottom(), 700)
                 stack.close()
                 stack.deleteLater()
 

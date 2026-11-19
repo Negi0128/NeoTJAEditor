@@ -37,10 +37,10 @@ class VersionChangeTests(unittest.TestCase):
                 self.assertEqual(dialog.selected_release['tag_name'], 'v14.7.0')
                 self.assertFalse(dialog.change.isEnabled())
                 self.assertTrue(dialog.versions.item(0).isHidden())
-                # 旧 Player を配っていない版(15.4 以降)は Editor だけで選べる。
-                dialog._loaded([release('v15.4.0', player=False),
+                # 旧 Player を配っていない版(15.4 以降)は Editor だけで選べる(いまの版以外)。
+                dialog._loaded([release('v16.1.0', player=False),
                                 release('v16.0.0', player=False)], False)
-                for tag in ('15.4', '16.0'):
+                for tag in ('16.1', '16.0'):   # いまの版(VERSION)は選べないので避ける
                     dialog.search.setText(tag)
                     self.assertEqual(dialog.selected_release['tag_name'], 'v' + tag + '.0')
                     self.assertTrue(dialog.change.isEnabled(), tag)
