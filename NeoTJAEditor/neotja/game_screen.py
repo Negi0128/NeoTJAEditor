@@ -2897,12 +2897,18 @@ class _GameScreenBase:
 
         **倍率は刻む。** 数字の絵は倍率ごとに切り出してキャッシュしている
         ので、毎コマ違う倍率を渡すとキャッシュが際限なく増える。"""
-        if self._score_timeline is None:
+        play = self.chart_preview.play_state()
+        if play is not None:
+            # 自分で叩くときは実際に点が入ったときだけ伸ばす(不可・見送りは 0 点)。
+            got = play.gains_in(now - SCORE_POP_SEC, now)
+            ev = got[-1] if got else None
+        elif self._score_timeline is None:
             return 1.0
-        try:
-            ev = self._score_timeline.last_event(now)
-        except Exception:  # noqa: BLE001
-            return 1.0
+        else:
+            try:
+                ev = self._score_timeline.last_event(now)
+            except Exception:  # noqa: BLE001
+                return 1.0
         if ev is None:
             return 1.0
         el = now - ev[0]
