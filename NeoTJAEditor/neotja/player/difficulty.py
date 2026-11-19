@@ -716,10 +716,9 @@ class Stepper(_GlassButton):
         ev.accept()
 
     def wheelEvent(self, ev):
-        d = ev.angleDelta().y()
-        if d:
-            self.step(1 if d > 0 else -1)
-        ev.accept()
+        # ホイールでは値を変えない(パネルを回したつもりで変わってしまう。
+        # 利用者の指定 2026-11-20)。親へ回す。
+        ev.ignore()
 
     def paintEvent(self, ev):
         s = self.scale

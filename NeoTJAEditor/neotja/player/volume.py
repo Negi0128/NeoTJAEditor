@@ -110,10 +110,8 @@ class VolumeSlider(QWidget):
         ev.accept()
 
     def wheelEvent(self, ev):
-        d = ev.angleDelta().y()
-        if d:
-            self.setValue(self._value + (5 if d > 0 else -5), emit=True)
-        ev.accept()
+        # ホイールでは値を変えない(利用者の指定 2026-11-20)。親へ回す。
+        ev.ignore()
 
     def keyPressEvent(self, ev):
         k = ev.key()

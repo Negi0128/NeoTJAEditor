@@ -142,6 +142,25 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(st.score, per + per // 2 // 10 * 10)
         self.assertEqual([g for _t, g in st.gains_in(0, 9)], [per, per // 2 // 10 * 10])
 
+class WheelTests(unittest.TestCase):
+    @real_qt_test
+    def test_wheel_does_not_change_settings(self):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QApplication
+        from neotja.player.difficulty import DifficultyPage
+        cfg = {'master_volume': 0.5}
+        page = DifficultyPage(cfg, lambda: None)
+        page.settings.set_values(cfg)
+        widgets = list(page.settings.steppers.values()) + list(page.settings.volume_sliders.values())             if hasattr(page.settings, 'volume_sliders') else list(page.settings.steppers.values())
+        for w in widgets:
+            before = w.value()
+            ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120),
+                             Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+            QApplication.sendEvent(w, ev)
+            self.assertEqual(w.value(), before)
+        page.deleteLater()
+
 
 if __name__ == '__main__':
     unittest.main()
