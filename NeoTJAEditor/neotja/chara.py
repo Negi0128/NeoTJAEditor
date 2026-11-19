@@ -32,6 +32,7 @@ Game_Chara_Motion_* / Game_Chara_Beat_* を読むが、TNDE-R のスキンには
 状態ごとに違うので、置き場所は状態ごとに絵の中身から測って合わせる。
 """
 
+import atexit
 import os
 
 import time
@@ -116,6 +117,41 @@ def _content_box_of(img):
     if right < 0:
         return None
     return (left, top, right, bottom)
+
+
+#: 走っている先読みのワーカー。終わるまでここで持つ。
+#:
+#: **持ち主(CharaSprites)より長生きさせるため。** スキンを読み直すと
+#: CharaAnimator ごと作り直され、古い CharaSprites が抱えていたワーカーは
+#: 誰からも指されなくなる。走っている QThread が GC されると
+#: "QThread: Destroyed while thread is still running" でプロセスごと落ちる
+#: (Windows では 0xC0000409。起動してすぐ閉じたとき・試験で再現)。
+#: プロセスの終わりにも走っていれば、atexit で止めて待つ(_stop_all)。
+_RUNNING = set()
+
+
+def _forget(worker):
+    """終わったワーカーを手放す(GUI スレッドで)。finished は run() を抜けた
+    直後に出るので、本当に止まるまで少しだけ待ってから参照を外す。"""
+    try:
+        worker.wait(200)
+    except RuntimeError:
+        pass
+    _RUNNING.discard(worker)
+
+
+def _stop_all():
+    """終了処理の前に、走っている先読みを止めて合流させる。"""
+    for w in list(_RUNNING):
+        try:
+            w.cancel()
+            w.wait(3000)
+        except RuntimeError:
+            pass
+    _RUNNING.clear()
+
+
+atexit.register(_stop_all)
 
 
 class _PreloadWorker(QThread):
@@ -211,7 +247,9 @@ class CharaSprites:
             return
         w = _PreloadWorker(jobs)
         self._preloader = w
+        _RUNNING.add(w)
         w.finished.connect(lambda: self._absorb(on_done))
+        w.finished.connect(lambda: _forget(w))
         w.start()
 
     #: 1回に QPixmap へ直す時間の上限(秒)。300枚あまりを一度に直すと

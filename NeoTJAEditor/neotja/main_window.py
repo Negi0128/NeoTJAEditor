@@ -3532,6 +3532,11 @@ class MainWindow(QMainWindow):
     def _warm_preview_skin(self):
         # 起動直後に1回だけ。以降は PreviewDock 側が「もう読んだ」を見て
         # 素通りするので、取りこぼしても二重読みにはならない。
+        if not self.isVisible():
+            # 予約したあとに窓が閉じられた(起動してすぐ閉じた)。閉じた窓で
+            # 素材を読み、どんちゃんの先読みスレッドを始めると、誰も止めない
+            # まま終了処理に入って落ちていた(0xC0000409)。
+            return
         try:
             self.preview_dock.warm_skin()
         except Exception:  # noqa: BLE001
