@@ -152,6 +152,13 @@ class PlayerHost(QWidget):
             lambda pid, opts: self.start_playlist(pid, **(opts or {})))
         #: 連続再生のいま(None なら普段)。{"pid", "items": [{path, course}], "index"}。
         self._pl_session = None
+        # 連続再生の最初のプレイリストの照会画面。
+        from neotja.player.playlist_overview import PlaylistOverviewPage
+        self.playlist_overview = PlaylistOverviewPage(config_data)
+        self.playlist_overview.sound_requested.connect(lambda kind: self.sounds.play(kind))
+        self.playlist_overview.play_requested.connect(self._playlist_overview_play)
+        self.playlist_overview.quit_requested.connect(self.end_playlist)
+        self.body.addWidget(self.playlist_overview)
         self.play_page = PlayPage()
         self.body.addWidget(self.play_page)
         self.play_page.esc_pressed.connect(self.open_pause_menu)
@@ -343,7 +350,7 @@ class PlayerHost(QWidget):
     def _set_page(self, page, fade=None, done=None):
         """画面を替える。fade は None(すぐ)/ "cross" / "black"。"""
         full = page in (self.difficulty, self.intro, self.play_page, self.results,
-                        self.opened)
+                        self.opened, getattr(self, "playlist_overview", None))
         if full:
             self.volume_popover.close_popover()
         self.top_bar.setVisible(not full)
@@ -1092,8 +1099,41 @@ class PlayerHost(QWidget):
         self._pl_session = {"pid": pid, "items": items, "index": 0,
                             "auto": bool(auto), "wait": wait}
         self.play_page.menu.set_playlist_mode(True)
-        self._playlist_intro(0, fade="cross")
+        # 最初にプレイリストの照会画面(自動でも自分では進まない。利用者の指定)。
+        self._stop_demo_video()
+        if self._core is not None:
+            self._core.stop_audio()
+        self.library.set_preview_playing(False)
+        self._show_playlist_overview(pl, max(0, int(start)), stop)
         return True
+
+    def _show_playlist_overview(self, pl, start, stop):
+        from neotja.player import playlists, song_lists
+        from neotja.player.playlist_view import playlist_jacket_pixmap
+        entries = []
+        for n, item in enumerate(pl["items"][start:stop], start=start + 1):
+            path = item.get("path") or ""
+            if os.path.isfile(path):
+                info = song_lists.song_info(path)
+                levels = dict(info.get("courses") or [])
+                course = item.get("course")
+                if course not in levels:
+                    course = playlists.default_course(info.get("courses") or [])
+                entries.append((n, info.get("title") or os.path.basename(path), course,
+                                levels.get(course), not levels))
+            else:
+                entries.append((n, os.path.splitext(os.path.basename(path))[0], None, None, True))
+        self.playlist_overview.set_playlist(pl, entries,
+                                            playlist_jacket_pixmap(pl, self.cfg, px=360))
+        self._set_page(self.playlist_overview, fade="cross",
+                       done=lambda: self.playlist_overview.setFocus(Qt.OtherFocusReason))
+        self.playlist_overview.setFocus()
+
+    def _playlist_overview_play(self):
+        """照会画面の「再生する」: 1曲目の曲名表示へ(そこからは手動/自動のとおり)。"""
+        if self._pl_session is None or self.body.currentWidget() is not self.playlist_overview:
+            return
+        self._playlist_intro(0, fade="cross")
 
     def _playlist_intro(self, index, fade="black"):
         """index 番目の曲名表示(右に板)。押されるまで待つ。試聴は DEMOSTART から。"""

@@ -46,6 +46,16 @@ def _key(widget, key):
     QApplication.sendEvent(widget, QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
 
 
+
+def _through_overview(host):
+    """連続再生の最初の照会画面(自分では進まない)で「再生する」を押す。"""
+    _wait(700)
+    assert host.body.currentWidget() is host.playlist_overview
+    _wait(300)
+    assert host.body.currentWidget() is host.playlist_overview   # 待っても進まない
+    host.playlist_overview.btn_play.click()
+    _wait(700)
+
 def _chart(folder, name, courses=(('Oni', 9), ('Edit', 10))):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / 'song.ogg').write_bytes(b'x')
@@ -268,8 +278,8 @@ class HostSessionTests(unittest.TestCase):
             self.assertEqual(panel.options(), {'start': 0, 'end': 2, 'auto': False, 'wait': 10})
             panel.btn_start.click()
             self.assertFalse(panel.isVisible())
+            _through_overview(host)
             core = self.FakeCore.instances[-1]
-            _wait(700)
             self.assertIs(host.body.currentWidget(), host.intro)
             self.assertEqual(host.intro.playlist, (1, 2))
             self.assertEqual(host.intro.title, 'a')
@@ -319,7 +329,7 @@ class HostSessionTests(unittest.TestCase):
             host = self._host(d)
             lib = host.library
             self.assertTrue(host.start_playlist(self.pid))
-            _wait(700)
+            _through_overview(host)
             host.intro.btn_quit.click()
             _wait(800)
             self.assertIsNone(host.playlist_session())
@@ -327,7 +337,7 @@ class HostSessionTests(unittest.TestCase):
             self.assertIs(lib.pages.currentWidget(), lib.page_playlist)
             # 再生中の「やめる」もプレイリストごと終わる。「初めから」はこの曲の曲名表示へ。
             host.start_playlist(self.pid)
-            _wait(700)
+            _through_overview(host)
             self._press_play_and_enter(host)
             host.open_pause_menu()
             host.play_page.menu.choose('restart')
@@ -408,7 +418,7 @@ class Step4Tests(unittest.TestCase):
             host = self._host(d)
             # 3番目だけ(2番目は見つからない曲)。
             self.assertTrue(host.start_playlist(self.pid, start=2, end=2))
-            _wait(700)
+            _through_overview(host)
             self.assertEqual(host.intro.playlist, (1, 1))
             self.assertEqual(host.intro.title, 'b')
             host.end_playlist()
@@ -426,8 +436,8 @@ class Step4Tests(unittest.TestCase):
             now = [1000.0]
             host.intro.clock = lambda: now[0]
             self.assertTrue(host.start_playlist(self.pid, auto=True, wait=10))
+            _through_overview(host)
             core = self.FakeCore.instances[-1]
-            _wait(700)
             intro = host.intro
             self.assertEqual(intro.playlist, (1, 2))
             self.assertEqual(intro._pl_cards, {})                 # 自動ではコースを変えない
@@ -465,7 +475,7 @@ class Step4Tests(unittest.TestCase):
             # やめるで待ちも止まる。
             core.finished = False
             host.start_playlist(self.pid, auto=True, wait=3)
-            _wait(700)
+            _through_overview(host)
             self.assertIsNotNone(intro.countdown_left())
             intro.btn_quit.click()
             self.assertIsNone(intro.countdown_left())
@@ -474,6 +484,78 @@ class Step4Tests(unittest.TestCase):
             self.assertIsNone(host._seq)
             _wait(700)
             self.assertIsNone(host.playlist_session())
+            host.shutdown()
+            host.deleteLater()
+
+
+class OverviewTests(unittest.TestCase):
+    """連続再生の最初のプレイリストの照会画面。"""
+
+    setUp = HostSessionTests.setUp
+    tearDown = HostSessionTests.tearDown
+    _host = HostSessionTests._host
+
+    @real_qt_test
+    def test_overview_lists_range_and_waits_even_in_auto(self):
+        from PySide6.QtCore import Qt
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            now = [0.0]
+            host.intro.clock = lambda: now[0]
+            self.assertTrue(host.start_playlist(self.pid, auto=True, wait=3))
+            _wait(700)
+            ov = host.playlist_overview
+            self.assertIs(host.body.currentWidget(), ov)
+            self.assertFalse(host.top_bar.isVisible())
+            self.assertEqual(ov.lbl_title.text(), 'P')
+            rows = [(r.num.text(), r.title.text(), r.missing,
+                     r.mark.course if r.mark else None, r.star.text()) for r in ov.rows]
+            self.assertEqual(rows, [('1', 'a', False, 'Oni', '★9'),
+                                    ('2', 'gone', True, None, 'ファイルなし'),
+                                    ('3', 'b', False, 'Hard', '★5')])
+            self.assertEqual(ov.lbl_count.text(), '2曲')
+            self.assertIsNone(ov.jacket.pixmap)                 # No Image
+            # 自動でも進まない(時計を進めても、待っても)。
+            now[0] += 100
+            _wait(400)
+            self.assertIs(host.body.currentWidget(), ov)
+            self.assertIsNone(host.intro.countdown_left())
+            # Enter で「再生する」(ドン) → 1曲目の曲名表示、そこから自動の数え。
+            _key(ov, Qt.Key_Return)
+            _wait(700)
+            self.assertIn('don', self.sounds)
+            self.assertIs(host.body.currentWidget(), host.intro)
+            self.assertEqual(host.intro.playlist, (1, 2))
+            self.assertIsNotNone(host.intro.countdown_left())
+            host.end_playlist()
+            _wait(700)
+            # 範囲の分だけ・やめる(Esc)でプレイリストへ。
+            host.start_playlist(self.pid, start=2, end=2)
+            _wait(700)
+            self.assertEqual([r.num.text() for r in ov.rows], ['3'])
+            self.assertEqual(ov.lbl_count.text(), '1曲')
+            _key(ov, Qt.Key_Escape)
+            _wait(700)
+            self.assertIsNone(host.playlist_session())
+            self.assertIs(host.body.currentWidget(), host.library)
+            self.assertIs(host.library.pages.currentWidget(), host.library.page_playlist)
+            host.shutdown()
+            host.deleteLater()
+
+    @real_qt_test
+    def test_long_list_scrolls(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = self._host(d)
+            st = host.library.playlist_store()
+            for _ in range(30):
+                st.add_item(self.pid, self.a, 'Oni')
+            host.start_playlist(self.pid)
+            _wait(700)
+            ov = host.playlist_overview
+            self.assertEqual(len(ov.rows), 33)
+            self.assertGreater(ov.scroll.verticalScrollBar().maximum(), 0)
+            self.assertLessEqual(ov.btn_play.geometry().bottom(), ov.height())
+            host.end_playlist()
             host.shutdown()
             host.deleteLater()
 
