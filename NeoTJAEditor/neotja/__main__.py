@@ -257,12 +257,36 @@ def _close_boot_splash():
         pass
 
 
+class _SplashCloser:
+    """起動の札は、窓(案内の窓・確認の窓を含む)が1つでも出たらすぐ閉じる。
+    札は最前面に出るので、閉じないと「素材が見つかりません」などの案内を
+    隠して先へ進めなくなる(v15.5.0 の試し版で起きた)。"""
+
+    def __init__(self, app):
+        from PySide6.QtCore import QObject, QEvent
+
+        class _F(QObject):
+            def eventFilter(self, obj, ev):
+                try:
+                    if (ev.type() == QEvent.Show and getattr(obj, "isWindow", None)
+                            and obj.isWindow()):
+                        _close_boot_splash()
+                        app.removeEventFilter(self)
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
+        self._f = _F()
+        app.installEventFilter(self._f)
+
+
 def main():
     # GPU 描画の面の作り方は **QApplication より先**に決める。
     # あとから setDefaultFormat しても、できあがった面には効かない。
     from neotja import game_screen as _gs_fmt
     _gs_fmt.apply_gl_surface_format(settings_mod.load_settings())
     app = QApplication(sys.argv)
+    # どの窓が先に出ても(起動時の案内でも)、その時点で札を閉じる。
+    _splash_closer = _SplashCloser(app)  # noqa: F841
     # Alt+Space で窓のシステムメニューが開くのを止める(win_keys の説明)。
     from neotja import win_keys
     win_keys.install(app)
