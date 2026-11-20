@@ -14,7 +14,7 @@ from gui_support import editor_session, real_qt_test  # noqa: E402
 class SettingsDialogNavTests(unittest.TestCase):
     @real_qt_test
     def test_pages_search_tips_and_save(self):
-        from PySide6.QtWidgets import QGroupBox
+        from PySide6.QtWidgets import QApplication, QGroupBox
         from neotja.dialogs.settings_dialog import SettingsDialog, _Hint, _InfoDot
         with editor_session() as (win, root):
             win.config_data["master_volume"] = 0.0
@@ -27,9 +27,14 @@ class SettingsDialogNavTests(unittest.TestCase):
                           "開発・実験的機能"):
                     self.assertIn(n, names)
                 self.assertEqual(dlg.nav.count(), len(names))
-                # 演奏モードは Player のページに。
-                player = dict((n, w) for n, _a, w in dlg.pages)["Player"]
-                self.assertTrue(player.isAncestorOf(dlg.player_unlock_check))
+                # NeoTJAPlayer の鍵は 開発・実験的機能 のページに、注意書きつきで。
+                dev = dict((n, w) for n, _a, w in dlg.pages)["開発・実験的機能"]
+                self.assertTrue(dev.isAncestorOf(dlg.player_unlock_check))
+                self.assertEqual(dlg.player_unlock_check.text(), "NeoTJAPlayerを有効にする")
+                self.assertIn("自己責任", dlg.player_unlock_note.text())
+                if os.environ.get('NEOTJA_SHOT'):
+                    dlg.show_page('開発・実験的機能') if hasattr(dlg, 'show_page') else dlg.nav.setCurrentRow([n for n, _a, _w in dlg.pages].index('開発・実験的機能'))
+                    dlg.show(); QApplication.processEvents(); dlg.grab().save(os.environ['NEOTJA_SHOT'])
                 # 説明は画面に出さず、ⓘ のツールチップへ(状態の知らせだけは残す)。
                 for h in dlg.findChildren(_Hint):
                     if not h.live:

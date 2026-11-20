@@ -1373,16 +1373,6 @@ class SettingsDialog(QDialog):
         """Player(選曲〜結果の画面)だけに効く項目を1か所に。"""
         w, outer = self._tab_body()
         cfg = self.main_window.config_data
-        form = self._group(outer, "演奏")
-        # 旧 Player の「演奏モード（実験的）」の代わり。ON で起動画面の
-        # 「Player を起動」の鍵が開く(v15.5.0 は閉じて配る)。
-        self.player_unlock_check = QCheckBox("Player（実験的）")
-        self.player_unlock_check.setChecked(bool(cfg.get("player_unlocked", False)))
-        form.addRow(self.player_unlock_check)
-        form.addRow(self._hint(
-            "コースを選んだあとに「再生／演奏」を選ぶ画面を出します。演奏を選ぶと、"
-            "D F J K（左縁・左面・右面・右縁）で自分で叩いて判定・スコア・魂ゲージが"
-            "動きます。曲の終わりの演出やリザルトはまだありません。"))
         form = self._group(outer, "選曲画面のBGM")
         self.select_bgm_check = QCheckBox("譜面を開いていないあいだ BGM を流す")
         self.select_bgm_check.setChecked(bool(cfg.get("player_select_bgm", True)))
@@ -1507,6 +1497,20 @@ class SettingsDialog(QDialog):
         説明文で個別に断る)。"""
         w, outer = self._tab_body()
         cfg = self.main_window.config_data
+
+        form = self._group(outer, "NeoTJAPlayer")
+        # ON で起動画面の「Player を起動」の鍵が開く(v15.5.0 は閉じて配る)。
+        self.player_unlock_check = QCheckBox("NeoTJAPlayerを有効にする")
+        self.player_unlock_check.setChecked(bool(cfg.get("player_unlocked", False)))
+        form.addRow(self.player_unlock_check)
+        # 注意書きは ⓘ にしまわず、画面にそのまま出す(利用者の指定の文)。
+        note = QLabel("この機能は実装途中のモードであるため、TJA等のデータが意図せず"
+                      "壊れる恐れがあります。自己責任で使用してください。")
+        note.setObjectName("playerUnlockNote")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #93a3bf; font-size: 12px; background: transparent;")
+        form.addRow(note)
+        self.player_unlock_note = note
 
         form = self._group(outer, "譜面プレビュー")
         self.legacy_modes_check = QCheckBox("以前のモードに戻す")
